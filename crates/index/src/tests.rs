@@ -163,6 +163,37 @@ fn compiler_headers_rebind_streamed_bodies_to_stable_symbols() {
 }
 
 #[test]
+fn streamed_assignment_owners_rebind_to_stable_symbols() {
+    let file = FileId::new(24);
+    let local_owner = SymbolId::new(7);
+    let global_owner = SymbolId::new(41);
+    let span = Span::new(file, 10, 24);
+    let mut index = DeclIndex {
+        file,
+        assignment_values: vec![bonsai_lang_api::AssignmentValueFact {
+            assignment_span: span,
+            target: Some("this.client".to_string()),
+            target_is_immutable: true,
+            target_owner: Some(local_owner),
+            target_span: Some(Span::new(file, 10, 21)),
+            value_span: Span::new(file, 24, 30),
+            call_sites: Vec::new(),
+            value_flow: bonsai_lang_api::ExpressionFlow::default(),
+            exact_callable_return: None,
+            exact_static_call_args: None,
+            direct_call_name: None,
+            direct_call_receiver: None,
+        }],
+        ..DeclIndex::default()
+    };
+    let local_to_global = AHashMap::from([(local_owner, global_owner)]);
+
+    remap_decl_index_symbols(&mut index, &local_to_global);
+
+    assert_eq!(index.assignment_values[0].target_owner, Some(global_owner));
+}
+
+#[test]
 fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
     let file = FileId::new(22);
     let call_span = Span::new(file, 20, 35);

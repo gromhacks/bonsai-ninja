@@ -2,13 +2,10 @@
 use bonsai_common::FileId;
 use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
-    kit::{
-        collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of,
-        with_fn_kinds_and_implicit_receivers,
-    },
+    kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
     AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite, FlowEvent,
     GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    ModifierVocabulary, TypeAliasBinding, TypeAliasVocabulary, Visibility,
+    ModifierVocabulary, TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
 };
 use tree_sitter::Node;
 
@@ -37,19 +34,47 @@ const TYPESCRIPT_VOCAB: ModifierVocabulary = ModifierVocabulary {
 };
 use bonsai_lang_javascript::{
     apply_javascript_getter_property_sources, apply_js_ts_commonjs_named_export_aliases,
-    apply_js_ts_default_export_aliases, js_ts_imports, js_ts_module_segments, js_ts_require_calls,
-    populate_ecmascript_compiler_facts, JS_TS_MODULE_RESOLUTION_EXTENSIONS,
+    apply_js_ts_default_export_aliases, extract_ecmascript_pseudo_call, js_ts_imports, js_ts_module_segments,
+    js_ts_require_calls, populate_ecmascript_compiler_facts, JS_TS_MODULE_RESOLUTION_EXTENSIONS,
 };
 use tree_sitter::{Language, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("typescript");
 const PACK_NAME: &str = "typescript";
+const TSX_PACK_NAME: &str = "tsx";
+
+fn grammar_pack_for_file(file: FileId, ctx: &AdapterContext<'_>) -> &'static str {
+    ctx.vfs
+        .path(file)
+        .ok()
+        .as_deref()
+        .and_then(|path| path.extension())
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|extension| extension.eq_ignore_ascii_case("tsx"))
+        .map_or(PACK_NAME, |_| TSX_PACK_NAME)
+}
 const HANDLER: GrammarHandler = GrammarHandler {
-    call_kinds: &["new_expression"],
+    fn_kinds: &[
+        "function_declaration",
+        "method_definition",
+        "method_signature",
+        "generator_function_declaration",
+        "generator_function",
+    ],
+    call_kinds: &["call_expression", "new_expression"],
+    pseudo_call_extractor: Some(extract_ecmascript_pseudo_call),
+    syntax_event_extractor: None,
+    argument_passing_mode_extractor: None,
+    call_ref_kinds: &["call_expression", "new_expression"],
+    member_expression_kinds: &["member_expression", "property_access_expression"],
+    subscript_expression_kinds: &["subscript_expression"],
     constructor_names: &["constructor"],
+    runtime_type_guard_operators: &["instanceof"],
+    runtime_typeof_operators: &["typeof"],
+    runtime_type_equality_operators: &["==", "==="],
+    value_free_unary_operators: &["typeof"],
     // TypeScript exposes `abstract class Foo` under
-    // `abstract_class_declaration` — the GENERIC_HANDLER default
-    // only covers `class_declaration`, so without this override
+    // `abstract_class_declaration`; without the exact adapter entry,
     // abstract base classes are missed at decl-emission time, and
     // every subclass ends up with `decl.parent = None`. That
     // breaks Phase 3c/3d field-flow stitching: the inheritance
@@ -66,18 +91,36 @@ const HANDLER: GrammarHandler = GrammarHandler {
         ("interface_declaration", DeclKind::Interface),
         ("enum_declaration", DeclKind::Enum),
     ],
-    ..with_fn_kinds_and_implicit_receivers(
-        &[
-            "function_declaration",
-            "method_definition",
-            "method_signature",
-            // Generator forms.
-            "generator_function_declaration",
-            "generator_function",
-        ],
-        &["this"],
-        &[],
-    )
+    method_kinds: &["method_definition", "method_signature"],
+    method_context_kinds: &[
+        "class_declaration",
+        "abstract_class_declaration",
+        "interface_declaration",
+    ],
+    if_kinds: &["if_statement", "switch_statement"],
+    for_kinds: &["for_statement"],
+    foreach_kinds: &["for_in_statement"],
+    while_kinds: &["while_statement"],
+    do_kinds: &["do_statement"],
+    assignment_kinds: &[
+        "assignment_expression",
+        "augmented_assignment_expression",
+        "variable_declarator",
+        "variable_declaration",
+    ],
+    return_kinds: &["return_statement"],
+    throw_kinds: &["throw_statement"],
+    lambda_kinds: &["arrow_function", "function_expression"],
+    try_kinds: &["try_statement"],
+    catch_kinds: &["catch_clause"],
+    finally_kinds: &["finally_clause"],
+    break_kinds: &["break_statement"],
+    continue_kinds: &["continue_statement"],
+    yield_kinds: &["yield_expression"],
+    await_kinds: &["await_expression"],
+    using_kinds: &["with_statement"],
+    implicit_receiver_names: &["this"],
+    ..EMPTY_HANDLER
 };
 
 #[derive(Debug, Default, Copy, Clone)]
@@ -99,10 +142,16 @@ impl LanguageAdapter for TypeScriptAdapter {
         "TypeScript"
     }
     fn file_extensions(&self) -> &'static [&'static str] {
-        &["ts", "tsx"]
+        &["ts", "tsx", "mts", "cts"]
     }
     fn tree_sitter_language(&self) -> Result<Language, AdapterError> {
         language_from_pack(PACK_NAME)
+    }
+    fn grammar_name_for_path(&self, path: &std::path::Path) -> &'static str {
+        path.extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .filter(|extension| extension.eq_ignore_ascii_case("tsx"))
+            .map_or(PACK_NAME, |_| TSX_PACK_NAME)
     }
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
@@ -114,13 +163,18 @@ impl LanguageAdapter for TypeScriptAdapter {
             constructor_method_names: &["constructor"],
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["this"],
+            receiver_type_syntax: bonsai_lang_api::ReceiverTypeSyntax {
+                wrapper_calls: &[],
+                class_object_suffixes: &[".constructor"],
+            },
             module_resolution_extensions: JS_TS_MODULE_RESOLUTION_EXTENSIONS,
             ..LanguageCapabilities::partial_baseline()
         }
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
-        let mut decl_index = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+        let grammar = grammar_pack_for_file(file, ctx);
+        let mut decl_index = decl_index_with_handler(grammar, file, ctx, &HANDLER);
+        if let Some((snapshot, tree)) = parse_with(grammar, file, ctx) {
             let src = snapshot.text.as_bytes();
             populate_ecmascript_compiler_facts(&mut decl_index, &tree, file, src);
             populate_typescript_readonly_instance_literals(&mut decl_index, &tree, file, src);
@@ -137,7 +191,7 @@ impl LanguageAdapter for TypeScriptAdapter {
             // Fall back to the file stem when the workspace root is unknown.
             bonsai_lang_api::apply_file_stem_semantic_identity(&mut decl_index, ctx);
         }
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+        if let Some((snapshot, tree)) = parse_with(grammar, file, ctx) {
             let src = snapshot.text.as_bytes();
             apply_js_ts_default_export_aliases(&mut decl_index, &tree, src, file);
             // Phase-6 return-type extraction: `function f(): T {}` / `(): T => ...`
@@ -251,10 +305,11 @@ impl LanguageAdapter for TypeScriptAdapter {
         // rationale. TypeScript shares the JS naming convention.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut decl_index);
         bonsai_lang_api::apply_class_field_type_aliases(&mut decl_index);
+        bonsai_lang_api::apply_call_receiver_types(&mut decl_index);
         decl_index
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
-        extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+        extract_imports_via(grammar_pack_for_file(file, ctx), file, ctx, parse_imports)
     }
 }
 

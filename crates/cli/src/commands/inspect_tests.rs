@@ -1,5 +1,6 @@
 use super::{
-    build_filter_marker, dedup_structural_flows, import_hit_text, render_inspect_report_text,
+    build_filter_marker, calculate_inspect_taint_flow_json_upper_bound, dedup_structural_flows,
+    import_hit_text, inspect_eager_window, inspect_taint_flow_json_upper_bound, render_inspect_report_text,
     retrieval_prefilter_for_inspect_with_limit, taint_flow_contains_needle, taint_flow_matches_query,
     walk_flow_hits, FlowHitWalkContext, HitOut, InspectFilters, InspectFlowRendered, InspectJsonPageUnit,
     InspectOut, InspectRenderOptions, InspectReport, InspectSummary, InspectTaintFlow, InspectTaintStep,
@@ -20,6 +21,22 @@ fn span(start: u32) -> Span {
         start: u64::from(start),
         end: u64::from(start + 1),
     }
+}
+
+#[test]
+fn raw_taint_render_caches_only_the_requested_page() {
+    assert_eq!(
+        inspect_eager_window(7, 100_000, true)
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec![7]
+    );
+    assert_eq!(
+        inspect_eager_window(7, 100, false)
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 7, 8, 9, 10]
+    );
 }
 
 fn assign_event() -> FlowEvent {
@@ -384,7 +401,7 @@ fn inspect_retrieval_prefilter_scopes_graph_flow_queries() {
 }
 
 fn sample_taint_flow() -> InspectTaintFlow {
-    InspectTaintFlow {
+    let mut flow = InspectTaintFlow {
         taint_id: "T:1234".to_string(),
         entry: "handle".to_string(),
         entry_kind: Some(DeclKind::Function),
@@ -407,7 +424,23 @@ fn sample_taint_flow() -> InspectTaintFlow {
                 param_name: Some("command".to_string()),
             }],
         }],
-    }
+        json_size_upper_bound: 0,
+    };
+    flow.json_size_upper_bound = calculate_inspect_taint_flow_json_upper_bound(&flow);
+    flow
+}
+
+#[test]
+fn raw_taint_page_cost_is_allocation_free_and_conservative() {
+    let mut flow = sample_taint_flow();
+    flow.entry = "quoted \"entry\"\nwith control \\u{0007} and unicode 盆".to_string();
+    flow.steps[0].tainted_args[0].value_text = "cmd\\\"value".to_string();
+    let serialized = serde_json::to_string(&flow).expect("serialize representative flow");
+
+    assert!(
+        inspect_taint_flow_json_upper_bound(&flow) >= serialized.len() as u64,
+        "the paging estimator must remain conservative without serializing production rows"
+    );
 }
 
 fn sample_structural_flow(number: u32) -> InspectFlowRendered {

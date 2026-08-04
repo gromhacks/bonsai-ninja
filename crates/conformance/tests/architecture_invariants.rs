@@ -2159,14 +2159,30 @@ fn every_language_adapter_owns_its_tree_sitter_lowering() {
             "module_path_syntax:",
             "super_receiver_tokens:",
             "implicit_receiver_tokens:",
-            "decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER)",
+            "call_kinds:",
+            "call_ref_kinds:",
+            "argument_passing_mode_extractor:",
+            "decl_index_with_handler(",
             "fn extract_imports",
         ] {
             if !source.contains(required) {
                 violations.push(format!("{name}: missing adapter-owned `{required}`"));
             }
         }
+        for forbidden in ["GENERIC_HANDLER", "COMMON_CALL_KINDS", "with_fn_kinds"] {
+            if source.contains(forbidden) {
+                violations.push(format!(
+                    "{name}: inherits shared syntax through forbidden `{forbidden}`"
+                ));
+            }
+        }
     }
+
+    let shared_kit = read(&root.join("crates/lang_api/src/kit/mod.rs"));
+    assert!(
+        !shared_kit.contains("|| GENERIC_HANDLER"),
+        "GrammarHandler classification must use only the active adapter's exact syntax inventory"
+    );
 
     assert_eq!(checked, 21, "expected every bundled language compiler frontend");
     assert!(
@@ -2174,6 +2190,34 @@ fn every_language_adapter_owns_its_tree_sitter_lowering() {
         "each lang_* crate must own its Tree-sitter syntax lowering:\n  {}",
         violations.join("\n  ")
     );
+}
+
+#[test]
+fn grammar_variants_are_selected_by_the_owning_adapter() {
+    let root = repo_root();
+    let typescript = read(&root.join("crates/lang_typescript/src/lib.rs"));
+    let parser = read(&root.join("crates/parser/src/lib.rs"));
+    let highlighter_source = read(&root.join("crates/cli/src/syntax_highlight.rs"));
+    let highlighter = production_source(&highlighter_source);
+
+    assert!(
+        typescript.contains("fn grammar_name_for_path")
+            && typescript.contains("TSX_PACK_NAME")
+            && typescript.contains("grammar_pack_for_file(file, ctx)"),
+        "the TypeScript adapter must select its TSX grammar for every direct and cached parse"
+    );
+    assert!(
+        parser.contains("adapter.grammar_name_for_path(&path)")
+            && parser.contains("adapter.tree_sitter_language_for_path(&path)")
+            && parser.contains("grammar_name: &'static str"),
+        "the parser cache must key and load the adapter-selected grammar variant"
+    );
+    for forbidden in ["\"tsx\"", "\"mts\"", "\"cts\""] {
+        assert!(
+            !highlighter.contains(forbidden),
+            "syntax highlighting must derive {forbidden} from adapter extensions, not a parallel CLI table"
+        );
+    }
 }
 
 // docs/contributing/review-checklist.mdx §2.8 drift guards. Each test asserts a specific
@@ -2271,8 +2315,7 @@ fn every_adapter_populates_visibility_from_syntax() {
             || body.contains("Visibility::Private")
             || body.contains("Visibility::Module")
             || body.contains("Visibility::Protected")
-            || body.contains("Visibility::Crate")
-            || body.contains("with_fn_kinds_and_implicit_receivers");
+            || body.contains("Visibility::Crate");
         if !has_visibility_pass {
             violations.push(format!(
                 "{}: adapter does not derive visibility from syntax markers",
@@ -3201,6 +3244,7 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
     let decl_scan = function_body(&inspect, "collect_decl_hits");
     let render_flow = function_body(&inspect, "render_flow_with_cached_call_spans");
     let render_function = function_body(&inspect, "render_function_source");
+    let render_report = function_body(&inspect, "render_inspect_report_text");
     assert!(
         command.contains("drop(edge_resolver)")
             && command.contains("drop(chain_cache)")
@@ -3231,6 +3275,26 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
             && function_body(&workspace, "exact_decl").contains("compiler_index_for_exact_bodies()")
             && !function_body(&workspace, "exact_decl").contains("compiler_linkage_index()"),
         "inspect must use compact compiler headers for matching and hydrate selected exact file bodies through the active header/linkage generation"
+    );
+    assert!(
+        render_report.contains("inspect_taint_flow_json_upper_bound")
+            && render_report.contains("let taint_unit_costs")
+            && inspect.contains("json_size_upper_bound")
+            && inspect.contains("calculate_inspect_taint_flow_json_upper_bound")
+            && !render_report.contains("serde_json::to_string(&report.taint_flows"),
+        "inspect pagination must reuse worker-precomputed raw-flow costs without serializing or rescanning every exact result during rendering"
+    );
+    assert!(
+        body.contains(".par_iter()")
+            && body.contains("rooted_semantic_query_worker_count")
+            && !body.contains("split_first()"),
+        "memory-bounded inspect closures must schedule every independent entry together instead of leaving one arbitrary entry on the serial critical path"
+    );
+    assert!(
+        inspect.contains("inspect_eager_window")
+            && inspect.contains("!report.taint_flows.is_empty()")
+            && function_body(&inspect, "inspect_eager_window").contains("if has_raw_taint"),
+        "raw-taint inspect must render only the requested page instead of eagerly formatting unrelated future pages"
     );
     for forbidden in [
         "dataflow().graph_for",
@@ -4739,12 +4803,20 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
         "taint source seed planning must derive carriers from exact AST bodies, not compact headers"
     );
     let analysis = read(&repo_root().join("crates/security/src/analysis/mod.rs"));
+    assert!(
+        function_body(&analysis, "begin_dependency_package_snapshot")
+            .contains("begin_workspace_dependency_package_snapshot("),
+        "the shared analysis snapshot helper must open one immutable workspace dependency snapshot"
+    );
     for function in [
         "run_taint_analysis_with_phase_progress",
         "run_source_analysis_with_phase_progress",
+        "source_inventory_with_progress",
+        "sink_inventory_with_progress",
+        "sanitizer_inventory_with_progress",
     ] {
         assert!(
-            function_body(&analysis, function).contains("begin_workspace_dependency_package_snapshot("),
+            function_body(&analysis, function).contains("begin_dependency_package_snapshot(ws, pack)"),
             "{function} must retain one immutable dependency-manifest snapshot for the complete analysis"
         );
     }
@@ -4768,9 +4840,10 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
     assert!(
         broad_match.contains("workspace_dependency_package_scan_lock(&root)")
             && broad_match.contains("workspace_dependency_package_context_for_scan(")
-            && function_body(&dependencies, "refresh_workspace_dependency_package_context")
-                .contains("cache.insert(root_key, Arc::downgrade(&context))"),
-        "broad matcher phases must refresh non-VFS dependency manifests before sharing package facts"
+            && !dependencies.contains("refresh_workspace_dependency_package_context")
+            && function_body(&dependencies, "begin_workspace_dependency_package_snapshot")
+                .contains("build_workspace_dependency_package_context(root, &pack.metadata)"),
+        "broad matcher phases must reuse the analysis-owned immutable, rulepack-derived dependency snapshot"
     );
     for forbidden in [
         "allows_without_package",
@@ -5267,7 +5340,7 @@ fn structured_security_guards_are_rulepack_driven() {
     );
     let path_guard = function_body(guards_runtime, "path_containment_guard_sanitizer");
     assert!(
-        path_guard.contains("GuardProfile::PythonPathContainment")
+        path_guard.contains("GuardProfile::CanonicalPathContainment")
             && path_guard.contains("path_containment_guard"),
         "path containment must be selected by typed analysis semantics"
     );

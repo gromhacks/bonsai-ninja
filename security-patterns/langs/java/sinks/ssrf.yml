@@ -156,7 +156,7 @@
           new URL(input).openConnection();
         }
       }
-    expect_match_text: [openConnection]
+    expect_match_text: [new URL(input).openConnection]
   - name: tainted local URL receiver
     code: |
       import java.net.URL;

@@ -14,7 +14,7 @@
 
 use crate::cache_fingerprint::dependency_metadata_fingerprint_for_sidecar;
 use bonsai_common::{wire, workspace_bonsai_dir, FileId, MATCHER_POLICY_FINGERPRINT};
-use bonsai_db::AnalyzerDb;
+use bonsai_db::{AnalyzerDb, COMPILER_OBJECT_CACHE_VERSION};
 use bonsai_factstore::{FactStoreReader, FactStoreWriter};
 use bonsai_hash::fnv1a_bytes64;
 use bonsai_index::{GlobalIndex, ReceiverAncestry};
@@ -41,6 +41,10 @@ use std::sync::Arc;
 /// Version 10 retains standalone lambda/local-callable lexical parents and
 /// Perl package/static-call identity from compiler-object ABI v15.
 ///
+/// Version 11 binds every linkage generation to the exact compiler frontend
+/// ABI. Adapter lowering changes can no longer leave a source-current symbol
+/// header reusable beside newly lowered compiler-object bodies.
+///
 /// Version 6 stores declaration headers as independently decodable per-file
 /// partitions. Scoped compiler worklists no longer allocate every workspace
 /// header merely to replay a handful of exact bodies.
@@ -52,7 +56,7 @@ use std::sync::Arc;
 /// declaration/type header and call-linkage payloads. File-local inventory
 /// scans can preserve cross-file receiver constraints without hydrating the
 /// complete global symbol table.
-pub const LINKAGE_CACHE_VERSION: u32 = 10;
+pub const LINKAGE_CACHE_VERSION: u32 = 11;
 
 const LINKAGE_TABLE_ID: u32 = 103;
 const METADATA_KEY: u64 = 0;
@@ -64,6 +68,7 @@ const FIXED_ENTRY_COUNT: usize = 3;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct LinkageMetadata {
     version: u32,
+    compiler_frontend_abi: u32,
     matcher_policy_fingerprint: u128,
     /// Exact VFS identity/order used to assign stable FileId/SymbolId values.
     files: Vec<(u32, String, u64)>,
@@ -91,6 +96,7 @@ pub(crate) fn save_linkage_sidecar(
     let header_files = index.all_files().map(FileId::raw).collect::<Vec<_>>();
     let metadata = LinkageMetadata {
         version: LINKAGE_CACHE_VERSION,
+        compiler_frontend_abi: COMPILER_OBJECT_CACHE_VERSION,
         matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT,
         files: current_source_inputs(db),
         dependency_metadata_fingerprint: dependency_metadata_fingerprint_for_sidecar(path),
@@ -447,6 +453,9 @@ fn validate_metadata_base(path: &Path, metadata: &LinkageMetadata) -> std::io::R
     if metadata.version != LINKAGE_CACHE_VERSION {
         return Err(invalid_data("linkage sidecar schema version mismatch"));
     }
+    if metadata.compiler_frontend_abi != COMPILER_OBJECT_CACHE_VERSION {
+        return Err(invalid_data("linkage sidecar compiler frontend ABI mismatch"));
+    }
     if metadata.matcher_policy_fingerprint != MATCHER_POLICY_FINGERPRINT {
         return Err(invalid_data("linkage sidecar matcher-policy mismatch"));
     }
@@ -466,6 +475,7 @@ fn metadata_pipeline_hash(metadata: &LinkageMetadata) -> u64 {
     hasher.absorb(b"bonsai-linkage-sidecar-v1");
     hasher.absorb_separator();
     hasher.absorb(&metadata.version.to_le_bytes());
+    hasher.absorb(&metadata.compiler_frontend_abi.to_le_bytes());
     hasher.absorb(&metadata.matcher_policy_fingerprint.to_le_bytes());
     hasher.absorb(&metadata.dependency_metadata_fingerprint.to_le_bytes());
     hasher.absorb(&metadata.declaration_count.to_le_bytes());

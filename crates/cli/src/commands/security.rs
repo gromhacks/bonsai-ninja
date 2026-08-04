@@ -30,11 +30,10 @@ use bonsai_common::{FuncId, Precision, Span};
 use bonsai_sdk::{
     load_rulepack, load_workspace_local_rules, parse_severity, security_match_rows, tree_file_rel,
     CombinedFindingWithChain, CombinedSourceAnalysisCandidate, DependencyInventoryOptions, DependencyRow,
-    Finding, FindingMatch, FindingStatus, PackInventoryOptions, PackRuleRow, Rule, RuleKind, RuleMatch,
-    Rulepack, RuntimeDisabledRule, SecurityInventoryOptions, SecurityMatchRow, SecurityReport, Severity,
-    SourceAnalysisOptions, SourceLineageStatus, SourceLineageSummary, TaintAnalysisOptions,
-    TaintAnalysisReport, TaintPropagationArg, TaintPropagationStep, TrustClass, CANONICAL_SINK_FAMILIES,
-    FAMILY_NOT_APPLICABLE,
+    Finding, FindingMatch, FindingStatus, PackAuditReport, PackInventoryOptions, PackRuleRow, Rule, RuleKind,
+    RuleMatch, Rulepack, RulepackMetadata, RuntimeDisabledRule, SecurityInventoryOptions, SecurityMatchRow,
+    SecurityReport, Severity, SourceAnalysisOptions, SourceLineageStatus, SourceLineageSummary,
+    TaintAnalysisOptions, TaintAnalysisReport, TaintPropagationArg, TaintPropagationStep, TrustClass,
 };
 use comfy_table::Cell;
 use serde::{Deserialize, Serialize};
@@ -445,13 +444,15 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             output: _,
         } => {
             apply_profile(
+                &pack.metadata,
                 profile.as_deref(),
-                &mut trust,
-                &mut severity,
-                &mut exclude_files,
-                Some(&mut exclude_tests),
-                &mut context,
-                /* set_severity = */ true,
+                ProfileOverrides {
+                    trust: &mut trust,
+                    severity: Some(&mut severity),
+                    exclude_files: &mut exclude_files,
+                    exclude_tests: Some(&mut exclude_tests),
+                    context: &mut context,
+                },
             )?;
             let paging_cfg =
                 paging_from_cli(context.as_deref(), page.as_deref(), all, format.paging_format())?;
@@ -497,16 +498,17 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             format,
             output: _,
         } => {
-            let mut ignored_severity: Option<String> = None;
             let mut exclude_tests = false;
             apply_profile(
+                &pack.metadata,
                 profile.as_deref(),
-                &mut trust,
-                &mut ignored_severity,
-                &mut exclude_files,
-                Some(&mut exclude_tests),
-                &mut context,
-                /* set_severity = */ false,
+                ProfileOverrides {
+                    trust: &mut trust,
+                    severity: None,
+                    exclude_files: &mut exclude_files,
+                    exclude_tests: Some(&mut exclude_tests),
+                    context: &mut context,
+                },
             )?;
             let paging_cfg = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
             cmd_source_analysis(
@@ -562,181 +564,53 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
     }
 }
 
-/// File-path filters excluded by `--profile production`. Mirrors the
-/// SKILL.md "File Exclusion Defaults" set: common test, fixture,
-/// sample, vendored dependency, build artifact, generated-code, and
-/// language-specific non-production layouts.
-///
-/// Layered relationship with the workspace's index-time skip list
-/// (`bonsai_workspace::SKIP_SEGMENTS`):
-///   1. SKIP_SEGMENTS prevents files from being parsed/indexed at
-///      all — vendored deps (`node_modules`, `target`, `vendor`,
-///      `.git`) the user never wants to analyse.
-///   2. PRODUCTION_EXCLUDES is a query-time filter on the indexed
-///      workspace — keeps tests/fixtures/build-output INDEXED (so
-///      `inspect`, `browse`, `flow` still see them) but drops them
-///      from the security finding stream when this profile is
-///      active. This is deliberate — security review wants
-///      production code only, while `inspect` regularly needs to
-///      walk into a test to see the harness setup.
-///   3. The `--exclude-tests` flag is the third path-filter layer:
-///      it drops findings whose source OR sink lives in a
-///      `path_is_test_file` path (test-only subset of
-///      PRODUCTION_EXCLUDES). Use it without `--profile production`
-///      when you want the broader scan but no test-fixture noise.
-///
-/// Test-related entries below are kept in lockstep with
-/// `bonsai_security::finding::path_is_test_file` so the two
-/// classifications stay coherent.
-const PRODUCTION_EXCLUDES: &[&str] = &[
-    // Cross-language tests, fixtures, samples, and harnesses.
-    "test/",
-    "__tests__",
-    "__mocks__",
-    "tests/",
-    "spec/",
-    "specs/",
-    "fixture/",
-    "fixtures/",
-    "mock/",
-    "mocks/",
-    "sample/",
-    "samples/",
-    // `example` is also the conventional Java package component in
-    // `src/main/java/com/example/...`. Keep the singular project layout
-    // root-anchored so production filtering never drops compiled
-    // application code merely because its namespace contains `example`.
-    "^example/",
-    "examples/",
-    "demo/",
-    "demos/",
-    "e2e/",
-    "integration/",
-    "acceptance/",
-    "_test.",
-    ".test.",
-    "_spec.",
-    ".spec.",
-    "_mock.",
-    ".mock.",
-    // JavaScript / TypeScript ecosystem.
-    "node_modules/",
-    "bower_components/",
-    "coverage/",
-    "cypress/",
-    "playwright/",
-    "storybook/",
-    ".storybook/",
-    ".next/",
-    ".nuxt/",
-    ".svelte-kit/",
-    // Python ecosystem.
-    "conftest.py",
-    ".venv/",
-    "venv/",
-    "site-packages/",
-    "_pb2.py",
-    // JVM ecosystem.
-    "src/test/",
-    "src/it/",
-    "Test.java",
-    "Tests.java",
-    "IT.java",
-    "Test.kt",
-    "Tests.kt",
-    "IT.kt",
-    "Test.scala",
-    "Tests.scala",
-    "IntegrationTest",
-    // Go ecosystem.
-    "_test.go",
-    "testdata/",
-    "Godeps/",
-    // Ruby / PHP conventions.
-    "_spec.rb",
-    "_test.rb",
-    "phpunit",
-    // Common first-party helper/tooling layouts that are not deployed
-    // application code but are often present in source distributions.
-    "support/",
-    // C# / .NET and Swift conventions.
-    "Tests/",
-    ".Tests",
-    "UITests",
-    "XCTest",
-    "androidTest/",
-    "bin/",
-    "obj/",
-    ".build/",
-    // Rust, C, C++, and native build outputs.
-    "target/",
-    "benches/",
-    "vendor/",
-    "third_party/",
-    "third-party/",
-    "_deps/",
-    "CMakeFiles/",
-    "cmake-build",
-    "Pods/",
-    "Carthage/",
-    // Generic build, generated, documentation, and deployment fixtures.
-    "dist/",
-    "build/",
-    "out/",
-    "generated/",
-    "autogen/",
-    ".gen.",
-    "_gen.",
-    "proto/gen/",
-    "migrations/",
-    "docs/",
-    "doc/",
-    "scripts/",
-    "deploy/",
-    "deployments/",
-    "broadcast/",
-    "cache/",
-];
+/// Apply a rulepack-declared profile to per-flag fields. Explicit CLI values
+/// win; metadata supplies only missing defaults. This keeps deployment trust,
+/// severity, context, and ecosystem path inventories out of CLI source.
+struct ProfileOverrides<'a> {
+    trust: &'a mut Option<String>,
+    severity: Option<&'a mut Option<String>>,
+    exclude_files: &'a mut Vec<String>,
+    exclude_tests: Option<&'a mut bool>,
+    context: &'a mut Option<String>,
+}
 
-/// Apply a profile bundle to per-flag fields in-place. Per-flag values
-/// already set by the user take precedence — the profile only fills
-/// in defaults. Today only `production` is recognized; unknown
-/// profile names are an error so typos surface immediately.
 fn apply_profile(
+    metadata: &RulepackMetadata,
     profile: Option<&str>,
-    trust: &mut Option<String>,
-    severity: &mut Option<String>,
-    exclude_files: &mut Vec<String>,
-    exclude_tests: Option<&mut bool>,
-    context: &mut Option<String>,
-    set_severity: bool,
+    overrides: ProfileOverrides<'_>,
 ) -> Result<()> {
     let Some(name) = profile else {
         return Ok(());
     };
-    match name {
-        "production" => {
-            if trust.is_none() {
-                *trust = Some("remote".to_string());
-            }
-            if set_severity && severity.is_none() {
-                *severity = Some("high".to_string());
-            }
-            if exclude_files.is_empty() {
-                exclude_files.extend(PRODUCTION_EXCLUDES.iter().map(|s| (*s).to_string()));
-            }
-            if let Some(exclude_tests) = exclude_tests {
-                *exclude_tests = true;
-            }
-            if context.is_none() {
-                *context = Some("16k".to_string());
-            }
-            Ok(())
-        }
-        other => Err(anyhow::anyhow!(
-            "security: unknown --profile `{other}`; supported: production"
-        )),
+    let Some(profile) = metadata.profiles.get(name) else {
+        let mut supported = metadata.profiles.keys().map(String::as_str).collect::<Vec<_>>();
+        supported.sort_unstable();
+        return Err(anyhow::anyhow!(
+            "security: unknown --profile `{name}`; supported: {}",
+            supported.join(", ")
+        ));
+    };
+    if overrides.trust.is_none() {
+        *overrides.trust = profile.trust.map(|value| value.as_str().to_string());
     }
+    if let Some(severity) = overrides.severity {
+        if severity.is_none() {
+            *severity = profile.severity.map(|value| value.as_str().to_string());
+        }
+    }
+    if overrides.exclude_files.is_empty() {
+        overrides.exclude_files.clone_from(&profile.exclude_paths);
+    }
+    if profile.exclude_tests == Some(true) {
+        if let Some(exclude_tests) = overrides.exclude_tests {
+            *exclude_tests = true;
+        }
+    }
+    if overrides.context.is_none() {
+        overrides.context.clone_from(&profile.context);
+    }
+    Ok(())
 }
 
 /// Resolve the rulepack directory: explicit `--rules-dir` wins; otherwise
@@ -4547,8 +4421,8 @@ fn render_audit(
     // narrower than the resulting total.
     let u = ui();
     let mut headers: Vec<&str> = vec!["lang", "src", "san"];
-    for fam in CANONICAL_SINK_FAMILIES {
-        headers.push(family_short_label(fam));
+    for fam in &report.canonical_sink_families {
+        headers.push(family_short_label(&report, fam));
     }
     headers.push("gaps");
     let mut t = u.table(&headers);
@@ -4566,7 +4440,7 @@ fn render_audit(
             Cell::new(count_cell(u, lang.sanitizers.enabled, 5)),
         ];
         if !lang.canonical_sink_families_applicable {
-            for _ in CANONICAL_SINK_FAMILIES {
+            for _ in &report.canonical_sink_families {
                 row.push(Cell::new(u.dim("n/a")));
             }
             row.push(Cell::new(u.dim("n/a")));
@@ -4574,8 +4448,8 @@ fn render_audit(
             continue;
         }
         let mut gaps: Vec<&str> = Vec::new();
-        for fam in CANONICAL_SINK_FAMILIES {
-            let entry = lang.sinks.get(*fam);
+        for fam in &report.canonical_sink_families {
+            let entry = lang.sinks.get(fam);
             let not_applicable = entry.is_some_and(|e| e.not_applicable);
             if not_applicable {
                 row.push(Cell::new(u.dim("n/a")));
@@ -4584,7 +4458,7 @@ fn render_audit(
             let enabled = entry.map_or(0, |e| e.enabled);
             row.push(Cell::new(count_cell(u, enabled, 3)));
             if enabled == 0 {
-                gaps.push(*fam);
+                gaps.push(fam.as_str());
             }
         }
         let gap_str = if gaps.is_empty() {
@@ -4592,7 +4466,7 @@ fn render_audit(
         } else {
             // Short form in the gaps cell too so it doesn't force the
             // row to balloon past the terminal width.
-            let shorts: Vec<&str> = gaps.iter().map(|f| family_short_label(f)).collect();
+            let shorts: Vec<&str> = gaps.iter().map(|f| family_short_label(&report, f)).collect();
             shorts.join(",")
         };
         row.push(Cell::new(u.warn(&gap_str)));
@@ -4613,46 +4487,46 @@ fn render_audit(
         );
         cli_println!(
             "{}",
-            u.dim("ecosystem-specific languages use their own security taxonomy; Solidity is smart-contract analysis, not web/app taint parity.")
+            u.dim("ecosystem-specific languages use the security model declared by rulepack metadata, not app/web taint parity.")
         );
     }
-    if !FAMILY_NOT_APPLICABLE.is_empty() {
-        let visible_languages: Vec<&str> = report
-            .languages
-            .iter()
-            .map(|lang| lang.language.as_str())
-            .collect();
-        let descriptions: Vec<String> = FAMILY_NOT_APPLICABLE
-            .iter()
-            .filter(|(lang, _)| visible_languages.contains(lang))
-            .map(|(lang, fam)| format!("{lang}/{fam}"))
-            .collect();
-        if !descriptions.is_empty() {
-            cli_println!(
-                "{}",
-                u.dim(&format!(
-                    "n/a (per-cell) = family intentionally not applicable for that language ({})",
-                    descriptions.join(", ")
-                ))
-            );
-        }
+    let descriptions = report
+        .languages
+        .iter()
+        .flat_map(|language| {
+            language
+                .sinks
+                .iter()
+                .filter(|(_, count)| count.not_applicable)
+                .map(|(family, _)| format!("{}/{family}", language.language))
+        })
+        .collect::<Vec<_>>();
+    if !descriptions.is_empty() {
+        cli_println!(
+            "{}",
+            u.dim(&format!(
+                "n/a (per-cell) = family intentionally not applicable for that language ({})",
+                descriptions.join(", ")
+            ))
+        );
     }
     cli_println!(
         "{}",
         u.dim(&format!(
             "covered: {} language(s); canonical app/web sink families tracked: {}",
             report.languages.len(),
-            CANONICAL_SINK_FAMILIES.len()
+            report.canonical_sink_families.len()
         ))
     );
     // Legend — print every abbreviation ↔ full family name so the
     // column headers are self-documenting.
-    let legend = CANONICAL_SINK_FAMILIES
+    let legend = report
+        .canonical_sink_families
         .iter()
         .map(|fam| {
-            let short = family_short_label(fam);
-            if short == *fam {
-                (*fam).to_string()
+            let short = family_short_label(&report, fam);
+            if short == fam {
+                fam.to_string()
             } else {
                 format!("{short}={fam}")
             }
@@ -4670,31 +4544,12 @@ fn render_audit(
 /// tables don't force comfy-table into char-wrapping mode. Families
 /// whose natural name is already short (`xss`, `jwt`, `tls`, …) are
 /// returned verbatim.
-fn family_short_label(fam: &str) -> &'static str {
-    match fam {
-        "cmdi" => "cmdi",
-        "sqli" => "sqli",
-        "nosql" => "nosq",
-        "path" => "path",
-        "ssrf" => "ssrf",
-        "xss" => "xss",
-        "eval" => "eval",
-        "deserialization" => "dser",
-        "xxe" => "xxe",
-        "ldap" => "ldap",
-        "jwt" => "jwt",
-        "crypto" => "cryp",
-        "tls" => "tls",
-        "template" => "tmpl",
-        "open_redirect" => "oredr",
-        "file_upload" => "upld",
-        "header_injection" => "hdr",
-        // Unknown family — return a stable placeholder rather than
-        // leaking a fresh `Box::leak(String)` on every call. The
-        // CANONICAL list is closed today; if it grows, add an arm
-        // above so the column shows the real abbreviation.
-        _ => "?",
-    }
+fn family_short_label<'a>(report: &'a PackAuditReport, family: &'a str) -> &'a str {
+    report
+        .sink_family_short_labels
+        .get(family)
+        .map(String::as_str)
+        .unwrap_or(family)
 }
 
 /// Pattern tree: rules grouped by (lang, kind, family) with headers

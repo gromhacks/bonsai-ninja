@@ -1015,18 +1015,12 @@ fn source_name_is_call_target_component(source_name: &str, source_call: Option<&
     if source_name == source_call || source_name == short_qualified_tail(source_call) {
         return true;
     }
-    for sep in bonsai_common::QUALIFIED_NAME_SEPARATORS {
-        if source_call
-            .strip_prefix(source_name)
-            .is_some_and(|rest| rest.starts_with(sep))
-        {
-            return true;
-        }
-    }
-    source_call
-        .split(['.', ':'])
-        .flat_map(|part| part.split("->"))
-        .any(|component| component == source_name)
+    source_call.match_indices(source_name).any(|(start, component)| {
+        let before = &source_call[..start];
+        let after = &source_call[start + component.len()..];
+        (before.is_empty() || bonsai_common::ends_at_qualified_name_boundary(before))
+            && (after.is_empty() || bonsai_common::starts_at_qualified_name_boundary(after))
+    })
 }
 
 /// Insert an adapter/tree-sitter-derived carrier into the graph seed set.
@@ -1362,17 +1356,17 @@ fn token_api_seed_nodes(
             continue;
         }
         names.push(seed.to_string());
-        let already_sigiled = seed
-            .chars()
-            .next()
-            .is_some_and(|first| bonsai_common::IDENTIFIER_SIGILS.contains(&first));
-        if !already_sigiled {
-            names.extend(
-                bonsai_common::IDENTIFIER_SIGILS
-                    .iter()
-                    .map(|sigil| format!("{sigil}{seed}")),
-            );
+    }
+    // Match the concrete spellings the active adapter emitted instead of
+    // inventing a cross-language sigil vocabulary. This preserves the token
+    // API's bare-name compatibility for sigiled parameters/locals while
+    // remaining exact to the parsed function body.
+    if let Some(decl) = entry_decl {
+        let requested = names.clone();
+        for param in &decl.params {
+            push_equivalent_adapter_name(&mut names, &requested, param);
         }
+        collect_equivalent_adapter_write_names(&decl.flow_events, &requested, &mut names);
     }
     // The token API distinguishes scalar value taint
     // (`args`) from descendant-container taint (`args.*`).  Do not use the
@@ -1440,6 +1434,53 @@ fn token_api_seed_nodes(
     nodes.sort();
     nodes.dedup();
     nodes
+}
+
+fn push_equivalent_adapter_name(out: &mut Vec<String>, requested: &[String], candidate: &str) {
+    let candidate = candidate.trim();
+    let canonical = bonsai_common::trim_leading_name_punctuation(candidate);
+    if candidate.is_empty()
+        || canonical.is_empty()
+        || !requested
+            .iter()
+            .any(|name| bonsai_common::trim_leading_name_punctuation(name.trim()) == canonical)
+        || out.iter().any(|name| name == candidate)
+    {
+        return;
+    }
+    out.push(candidate.to_string());
+}
+
+fn collect_equivalent_adapter_write_names(events: &[FlowEvent], requested: &[String], out: &mut Vec<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Assign { target, .. } | FlowEvent::AggregateAssign { target, .. } => {
+                push_equivalent_adapter_name(out, requested, target);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_equivalent_adapter_write_names(then_events, requested, out);
+                collect_equivalent_adapter_write_names(else_events, requested, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_equivalent_adapter_write_names(body, requested, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_equivalent_adapter_write_names(body, requested, out);
+                collect_equivalent_adapter_write_names(catch_events, requested, out);
+                collect_equivalent_adapter_write_names(finally_events, requested, out);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn token_descendant_read_seed_nodes(
@@ -1580,11 +1621,17 @@ fn collect_seed_matching_output_arg_names(events: &[FlowEvent], seeds: &TokenSet
     };
     let value_matches = |value: &str| -> bool {
         let value = normalise_qualified_text(value);
-        let value = value.trim().trim_start_matches(['$', '@', '%', '&', '*']).trim();
+        let value = value
+            .trim()
+            .trim_start_matches(bonsai_common::is_name_punctuation)
+            .trim();
         !value.is_empty()
             && seeds.iter().any(|seed| {
                 let seed = normalise_qualified_text(seed);
-                let seed = seed.trim().trim_start_matches(['$', '@', '%', '&', '*']).trim();
+                let seed = seed
+                    .trim()
+                    .trim_start_matches(bonsai_common::is_name_punctuation)
+                    .trim();
                 !seed.ends_with(".*") && seed == value
             })
     };
@@ -3274,8 +3321,7 @@ fn descendant_storage_bases(name: &str) -> Vec<String> {
 fn normalize_storage_text(text: &str) -> String {
     let trimmed = text
         .trim()
-        .trim_start_matches(['&', '*'])
-        .trim_start_matches("mut ")
+        .trim_start_matches(bonsai_common::is_name_punctuation)
         .trim();
     let mut out = String::with_capacity(trimmed.len());
     let mut quote: Option<char> = None;
@@ -3300,16 +3346,14 @@ fn normalize_storage_text(text: &str) -> String {
         match ch {
             '[' | '(' => out.push('.'),
             ']' | ')' => {}
-            ':' if out.ends_with(':') => {}
-            '-' | '>' => out.push('.'),
-            ch if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '$' || ch == '@' => {
+            ch if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' => {
                 out.push(ch);
             }
             _ => out.push('.'),
         }
     }
     out.split('.')
-        .map(|part| part.trim().trim_start_matches(['$', '@', '%']))
+        .map(|part| part.trim().trim_start_matches(bonsai_common::is_name_punctuation))
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(".")
@@ -3618,12 +3662,7 @@ fn has_unescaped_regex_alternation(pattern: &str) -> bool {
 }
 
 fn normalise_passthrough_callee(value: &str) -> String {
-    value
-        .trim()
-        .trim_end_matches("()")
-        .replace("::", ".")
-        .replace("->", ".")
-        .replace(':', ".")
+    bonsai_common::normalize_qualified_name(value.trim().trim_end_matches("()"))
 }
 
 fn passthrough_compiled_regex_matches(
@@ -3814,7 +3853,9 @@ fn receiver_state_matches(
         };
         let expected_tail = short_member_tail(expected);
         receiver_types.iter().any(|actual| {
-            let actual = actual.trim().trim_start_matches(['&', '*', '?', '!']);
+            let actual = actual
+                .trim()
+                .trim_start_matches(bonsai_common::is_name_punctuation);
             actual == expected || short_member_tail(actual) == expected_tail
         })
     })
@@ -3826,26 +3867,18 @@ fn configured_receiver_type_matches(expected: Option<&str>, observed: &[String])
     };
     let expected_tail = short_member_tail(expected);
     observed.iter().any(|actual| {
-        let actual = actual.trim().trim_start_matches(['&', '*', '?', '!']);
+        let actual = actual
+            .trim()
+            .trim_start_matches(bonsai_common::is_name_punctuation);
         actual == expected || short_member_tail(actual) == expected_tail
     })
 }
 
-/// Last `.` / `::` / `:` qualified segment, mirroring
-/// `bonsai_callgraph::short_callee` semantics without the
-/// dependency cycle: the qualified-prefix-stripped tail of an
-/// identifier-like text. Empty input returns empty.
+/// Qualified-prefix-stripped tail of a compiler-classified name. Empty input
+/// returns empty. Punctuation boundaries are recognized structurally rather
+/// than through a cross-language separator inventory.
 fn short_member_tail(name: &str) -> &str {
-    let mut tail = name.trim();
-    for sep in ["::", "->", "."] {
-        if let Some((_, rest)) = tail.rsplit_once(sep) {
-            tail = rest;
-        }
-    }
-    if let Some((_, rest)) = tail.rsplit_once(':') {
-        tail = rest;
-    }
-    tail
+    bonsai_common::short_qualified_tail(name.trim())
 }
 
 /// Deterministic compiler callgraph pre-order rooted at `source_func`.
@@ -4228,7 +4261,7 @@ impl CallEventSummary {
 
 fn normalise_output_arg_target_text(text: &str) -> String {
     normalise_qualified_text(text)
-        .trim_start_matches(bonsai_common::REFERENCE_SIGILS)
+        .trim_start_matches(bonsai_common::is_name_punctuation)
         .trim()
         .to_string()
 }

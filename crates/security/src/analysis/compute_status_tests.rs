@@ -27,6 +27,19 @@ fn sanitizer(tag: Option<&str>) -> FindingMatch {
     }
 }
 
+fn bundled_metadata() -> &'static RulepackMetadata {
+    static METADATA: std::sync::OnceLock<RulepackMetadata> = std::sync::OnceLock::new();
+    METADATA.get_or_init(|| {
+        crate::loader::load_rulepack(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("security-patterns"),
+        )
+        .expect("bundled rulepack")
+        .metadata
+    })
+}
+
 fn validation_rule_from_yaml(yaml: &str) -> Rule {
     let mut rule: Rule = serde_yaml::from_str(yaml).expect("rule yaml parses");
     rule.kind = RuleKind::Sink;
@@ -46,10 +59,23 @@ fn validation_rule_from_yaml(yaml: &str) -> Rule {
 
 #[test]
 fn pack_audit_security_model_marks_solidity_as_smart_contract() {
-    assert_eq!(security_model_for_lang("solidity"), "smart-contract");
-    assert!(!canonical_sink_audit_applies("solidity"));
-    assert_eq!(security_model_for_lang("java"), "app-web-taint");
-    assert!(canonical_sink_audit_applies("java"));
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../security-patterns");
+    let pack = crate::loader::load_rulepack(&root).expect("bundled rulepack");
+    let report = pack_audit(&pack, None);
+    let solidity = report
+        .languages
+        .iter()
+        .find(|language| language.language == "solidity")
+        .expect("Solidity audit row");
+    assert_eq!(solidity.security_model, "smart-contract");
+    assert!(!solidity.canonical_sink_families_applicable);
+    let java = report
+        .languages
+        .iter()
+        .find(|language| language.language == "java")
+        .expect("Java audit row");
+    assert_eq!(java.security_model, "app-web-taint");
+    assert!(java.canonical_sink_families_applicable);
 }
 
 #[test]
@@ -101,22 +127,6 @@ fn tainted_argument_evidence_preserves_structured_ast_operands() {
     let info = tainted_arg_info_from_events(&events, span, &tainted);
     assert_eq!(info.source_names, ["prefix", "command"]);
     assert_eq!(tainted_arg_target_keys(&info), ["command", "prefix"]);
-}
-
-#[test]
-fn clean_conditional_value_part_rejects_value_identifiers() {
-    assert!(
-        clean_conditional_value_part("cond ? \"clean-then\" : \"clean-else\"")
-            .is_some_and(value_part_contains_only_clean_literals)
-    );
-    assert!(clean_conditional_value_part(
-        "if cond { \"clean-then\".to_string() } else { \"clean-else\".to_string() }"
-    )
-    .is_some_and(value_part_contains_only_clean_literals));
-    assert!(
-        !clean_conditional_value_part("cond ? user_value : \"clean-else\"")
-            .is_some_and(value_part_contains_only_clean_literals)
-    );
 }
 
 #[test]
@@ -230,7 +240,12 @@ fn clean_assign_event(target: &str, start: u64, end: u64) -> bonsai_lang_api::Fl
     }
 }
 
-fn single_rule_pack(rule: Rule) -> Rulepack {
+fn single_rule_pack(mut rule: Rule) -> Rulepack {
+    // Focused rules bypass the production loader, so inherit the same
+    // rulepack-owned package/tag/category defaults explicitly. This keeps
+    // validator tests faithful without attaching the bundled pack's complete
+    // taxonomy to a deliberately one-rule fixture.
+    bundled_metadata().apply_rule_defaults(&mut rule);
     let mut pack = Rulepack::default();
     pack.packs.insert(
         rule.language.clone(),
@@ -306,6 +321,48 @@ description: VelocityEngine.evaluate(tainted template) reaches server-side templ
         "expected adapter-visible package warning, got {:#?}",
         report.issues
     );
+}
+
+#[test]
+fn validator_rejects_stale_rulepack_taxonomy_metadata() {
+    let rule = validation_rule_from_yaml(
+        r"
+id: python.test.sink
+enabled: true
+language: python
+tag: test-sink
+severity: high
+cwe: [CWE-20]
+match:
+  kind: call
+  callee: {name: sink}
+match_examples:
+  - name: test sink
+    code: |
+      def demo(value):
+          sink(value)
+    expect_match_text: [sink]
+description: Test sink.
+",
+    );
+    let mut pack = single_rule_pack(rule);
+    pack.metadata
+        .sanitizer_credits
+        .insert("missing-sanitizer".to_string(), vec!["missing-sink".to_string()]);
+
+    let report = validate_pack(
+        &pack,
+        &PackInventoryOptions::default(),
+        bonsai_adapters::all_languages_registry(),
+    );
+    assert!(report
+        .issues
+        .iter()
+        .any(|issue| issue.code == "unknown-sanitizer-credit-tag"));
+    assert!(report
+        .issues
+        .iter()
+        .any(|issue| issue.code == "unknown-sanitizer-credit-sink-tag"));
 }
 
 #[test]
@@ -442,45 +499,6 @@ fn receiver_agnostic_regex_detector_recognizes_canonical_form() {
     assert!(!regex_prefix_is_receiver_agnostic(r"^request\.body$"));
     // Uppercase Type prefix — also not receiver-agnostic.
     assert!(!regex_prefix_is_receiver_agnostic(r"^HttpRequest\.body$"));
-}
-
-#[test]
-fn distro_smell_detector_flags_per_language_distribution_names() {
-    // Java/Kotlin/Scala: Maven coordinate `groupId-artifactId`.
-    assert!(package_signal_distro_smell("java", "spring-expression").is_some());
-    assert!(package_signal_distro_smell("kotlin", "kafka-clients").is_some());
-    assert!(package_signal_distro_smell("scala", "akka-http").is_some());
-    // Real JVM packages have dots — never flagged.
-    assert!(package_signal_distro_smell("java", "org.springframework.expression").is_none());
-    assert!(package_signal_distro_smell("kotlin", "com.hubspot.jinjava").is_none());
-    // Single-token packages without hyphens are fine.
-    assert!(package_signal_distro_smell("java", "httpx").is_none());
-    // Python: PyPI distros never appear as imports.
-    assert!(package_signal_distro_smell("python", "python-jose").is_some());
-    assert!(package_signal_distro_smell("python", "argon2-cffi").is_some());
-    assert!(package_signal_distro_smell("python", "flask").is_none());
-    assert!(package_signal_distro_smell("python", "google.cloud.storage").is_none());
-    // Rust: crate hyphens become underscores in `use`.
-    assert!(package_signal_distro_smell("rust", "percent-encoding").is_some());
-    assert!(package_signal_distro_smell("rust", "percent_encoding").is_none());
-    // Swift: SwiftPM hyphens vs CamelCase modules.
-    assert!(package_signal_distro_smell("swift", "async-http-client").is_some());
-    assert!(package_signal_distro_smell("swift", "AsyncHTTPClient").is_none());
-    // Perl/Dart: hyphens are illegal in `use` / pub package names.
-    assert!(package_signal_distro_smell("perl", "Net-LDAP").is_some());
-    assert!(package_signal_distro_smell("perl", "Net::LDAP").is_none());
-    assert!(package_signal_distro_smell("dart", "dart-core").is_some());
-    // Languages whose imports legitimately carry hyphens — never flagged.
-    assert!(package_signal_distro_smell("javascript", "sanitize-html").is_none());
-    assert!(package_signal_distro_smell("typescript", "@adonisjs/core").is_none());
-    assert!(package_signal_distro_smell("ruby", "rest-client").is_none());
-    assert!(package_signal_distro_smell("lua", "lua-resty-string").is_none());
-    assert!(package_signal_distro_smell("c", "linux-gpio").is_none());
-    assert!(package_signal_distro_smell("cpp", "cpp-httplib").is_none());
-    assert!(package_signal_distro_smell("go", "github.com/foo/bar").is_none());
-    assert!(package_signal_distro_smell("php", "Foo\\Bar").is_none());
-    assert!(package_signal_distro_smell("erlang", "mongodb-erlang").is_none());
-    assert!(package_signal_distro_smell("solidity", "./Foo.sol").is_none());
 }
 
 #[test]
@@ -635,8 +653,15 @@ fn workspace_relative_path_filters_ignore_generated_ancestors() {
 #[test]
 fn workspace_relative_test_filters_ignore_test_ancestors() {
     let root = std::path::Path::new("/repo/tests/chosen-workspace");
+    let patterns = &bundled_metadata().test_path_patterns;
     assert!(
-        !path_is_excluded_with_root(Some(root), "/repo/tests/chosen-workspace/app.py", &[], true),
+        !path_is_excluded_with_root(
+            Some(root),
+            "/repo/tests/chosen-workspace/app.py",
+            &[],
+            true,
+            patterns,
+        ),
         "--exclude-tests must not classify a selected workspace as tests because a parent is named tests"
     );
     assert!(
@@ -644,7 +669,8 @@ fn workspace_relative_test_filters_ignore_test_ancestors() {
             Some(root),
             "/repo/tests/chosen-workspace/tests/test_app.py",
             &[],
-            true
+            true,
+            patterns,
         ),
         "--exclude-tests must still apply to test paths inside the selected workspace"
     );
@@ -653,13 +679,16 @@ fn workspace_relative_test_filters_ignore_test_ancestors() {
 #[test]
 fn workspace_relative_from_test_flag_ignores_test_ancestors() {
     let root = std::path::Path::new("/repo/tests/chosen-workspace");
+    let patterns = &bundled_metadata().test_path_patterns;
     assert!(!path_is_test_file_with_root(
         Some(root),
-        "/repo/tests/chosen-workspace/app.py"
+        "/repo/tests/chosen-workspace/app.py",
+        patterns,
     ));
     assert!(path_is_test_file_with_root(
         Some(root),
-        "/repo/tests/chosen-workspace/tests/test_app.py"
+        "/repo/tests/chosen-workspace/tests/test_app.py",
+        patterns,
     ));
 }
 
@@ -1567,7 +1596,7 @@ fn combined_findings_keep_pattern_and_taint_evidence_separate() {
 #[test]
 fn empty_chain_is_unsanitized() {
     assert_eq!(
-        compute_status(&[], Some("sql-injection")),
+        compute_status(bundled_metadata(), &[], Some("sql-injection")),
         FindingStatus::Unsanitized
     );
 }
@@ -1576,7 +1605,7 @@ fn empty_chain_is_unsanitized() {
 fn same_tag_credit_is_sanitized() {
     let chain = [sanitizer(Some("sql-injection"))];
     assert_eq!(
-        compute_status(&chain, Some("sql-injection")),
+        compute_status(bundled_metadata(), &chain, Some("sql-injection")),
         FindingStatus::Sanitized
     );
 }
@@ -1584,14 +1613,17 @@ fn same_tag_credit_is_sanitized() {
 #[test]
 fn cross_tag_credit_is_sanitized() {
     let chain = [sanitizer(Some("html-encode"))];
-    assert_eq!(compute_status(&chain, Some("xss")), FindingStatus::Sanitized);
+    assert_eq!(
+        compute_status(bundled_metadata(), &chain, Some("xss")),
+        FindingStatus::Sanitized
+    );
 }
 
 #[test]
 fn wrong_context_real_sanitizer_is_wrong_context() {
     let chain = [sanitizer(Some("html-encode"))];
     assert_eq!(
-        compute_status(&chain, Some("open-redirect")),
+        compute_status(bundled_metadata(), &chain, Some("open-redirect")),
         FindingStatus::WrongContext
     );
 }
@@ -1599,14 +1631,17 @@ fn wrong_context_real_sanitizer_is_wrong_context() {
 #[test]
 fn passthrough_only_chain_is_unsanitized_not_wrong_context() {
     let chain = [sanitizer(Some("passthrough-decode"))];
-    assert_eq!(compute_status(&chain, Some("xss")), FindingStatus::Unsanitized);
+    assert_eq!(
+        compute_status(bundled_metadata(), &chain, Some("xss")),
+        FindingStatus::Unsanitized
+    );
 }
 
 #[test]
 fn validation_only_chain_is_unsanitized() {
     let chain = [sanitizer(Some("validation"))];
     assert_eq!(
-        compute_status(&chain, Some("sql-injection")),
+        compute_status(bundled_metadata(), &chain, Some("sql-injection")),
         FindingStatus::Unsanitized
     );
 }
@@ -1615,68 +1650,63 @@ fn validation_only_chain_is_unsanitized() {
 fn allowlist_and_shape_sanitizers_credit_targeted_sink_families() {
     let chain = [sanitizer(Some("allowlist-validate"))];
     assert_eq!(
-        compute_status(&chain, Some("sql-injection")),
+        compute_status(bundled_metadata(), &chain, Some("sql-injection")),
         FindingStatus::Sanitized
     );
-    assert_eq!(compute_status(&chain, Some("ssrf")), FindingStatus::Sanitized);
+    assert_eq!(
+        compute_status(bundled_metadata(), &chain, Some("ssrf")),
+        FindingStatus::Sanitized
+    );
 
     let regex_chain = [sanitizer(Some("regex-validate"))];
     assert_eq!(
-        compute_status(&regex_chain, Some("path-traversal")),
+        compute_status(bundled_metadata(), &regex_chain, Some("path-traversal")),
         FindingStatus::Sanitized
     );
 
     let chars_chain = [sanitizer(Some("char-allowlist"))];
     assert_eq!(
-        compute_status(&chars_chain, Some("header-injection")),
+        compute_status(bundled_metadata(), &chars_chain, Some("header-injection")),
         FindingStatus::Sanitized
     );
 }
 
 #[test]
-fn compiler_clean_value_credits_every_sink_context() {
-    let chain = [sanitizer(Some("compiler-clean-value"))];
+fn compiler_proofs_use_the_selected_sink_tag_without_wildcard_taxonomy() {
+    let code_chain = [sanitizer(Some("code-injection"))];
     assert_eq!(
-        compute_status(&chain, Some("code-injection")),
+        compute_status(bundled_metadata(), &code_chain, Some("code-injection")),
         FindingStatus::Sanitized
     );
+    let command_chain = [sanitizer(Some("command-injection"))];
     assert_eq!(
-        compute_status(&chain, Some("command-injection")),
+        compute_status(bundled_metadata(), &command_chain, Some("command-injection")),
         FindingStatus::Sanitized
     );
-    assert_eq!(compute_status(&chain, Some("xss")), FindingStatus::Sanitized);
-}
-
-#[test]
-fn go_header_char_allowlist_condition_recognizes_printable_guard() {
-    assert!(header_char_allowlist_condition(
-        "ch >= 0x20 && ch != 0x7f && ch != '\"' && ch != '\\\\'",
-        "ch"
-    ));
-    assert!(!header_char_allowlist_condition("ch != '\\r'", "ch"));
-    assert!(!header_char_allowlist_condition(
-        "other >= 0x20 && other != 0x7f",
-        "ch"
-    ));
+    let xss_chain = [sanitizer(Some("xss"))];
+    assert_eq!(
+        compute_status(bundled_metadata(), &xss_chain, Some("xss")),
+        FindingStatus::Sanitized
+    );
 }
 
 #[test]
 fn parameter_and_same_origin_sanitizers_credit_contextual_sinks() {
     let db_chain = [sanitizer(Some("db-bind-parameter"))];
     assert_eq!(
-        compute_status(&db_chain, Some("sql-injection")),
+        compute_status(bundled_metadata(), &db_chain, Some("sql-injection")),
         FindingStatus::Sanitized
     );
 
     let redirect_chain = [sanitizer(Some("same-origin-path"))];
     assert_eq!(
-        compute_status(&redirect_chain, Some("open-redirect")),
+        compute_status(bundled_metadata(), &redirect_chain, Some("open-redirect")),
         FindingStatus::Sanitized
     );
 
     let xpath_chain = [sanitizer(Some("xpath-parameter"))];
     assert_eq!(
-        compute_status(&xpath_chain, Some("xpath-injection")),
+        compute_status(bundled_metadata(), &xpath_chain, Some("xpath-injection")),
         FindingStatus::Sanitized
     );
 }
@@ -1693,7 +1723,10 @@ fn local_trust_severity_is_capped_at_medium() {
 #[test]
 fn untagged_only_chain_is_unsanitized() {
     let chain = [sanitizer(None)];
-    assert_eq!(compute_status(&chain, Some("xss")), FindingStatus::Unsanitized);
+    assert_eq!(
+        compute_status(bundled_metadata(), &chain, Some("xss")),
+        FindingStatus::Unsanitized
+    );
 }
 
 #[test]
@@ -1703,7 +1736,7 @@ fn passthrough_plus_real_wrong_context_is_wrong_context() {
         sanitizer(Some("html-encode")),
     ];
     assert_eq!(
-        compute_status(&chain, Some("open-redirect")),
+        compute_status(bundled_metadata(), &chain, Some("open-redirect")),
         FindingStatus::WrongContext
     );
 }
@@ -1712,7 +1745,7 @@ fn passthrough_plus_real_wrong_context_is_wrong_context() {
 fn credit_after_wrong_context_short_circuits_to_sanitized() {
     let chain = [sanitizer(Some("html-encode")), sanitizer(Some("sql-injection"))];
     assert_eq!(
-        compute_status(&chain, Some("sql-injection")),
+        compute_status(bundled_metadata(), &chain, Some("sql-injection")),
         FindingStatus::Sanitized
     );
 }
@@ -1720,9 +1753,9 @@ fn credit_after_wrong_context_short_circuits_to_sanitized() {
 // ── Distribution-name + ungated-regex validator integration ────────
 
 #[test]
-fn validator_rejects_maven_artifact_in_java_packages_field() {
-    // `kafka-clients` is a Maven coordinate, not a Java package
-    // string the adapter sees in `import` lines. Catch at load.
+fn validator_reports_package_signal_missing_from_adapter_import_facts() {
+    // Compare rule data with compiler import facts instead of guessing
+    // package-manager naming conventions in shared analysis.
     let rule = validation_rule_from_yaml(
         r"
 id: java.source.kafka_consumer_record
@@ -1753,43 +1786,29 @@ description: ConsumerRecord.value() exposes attacker-controlled queue payload to
         &PackInventoryOptions::default(),
         bonsai_adapters::all_languages_registry(),
     );
-    let distro = report
+    let mismatches = report
         .issues
         .iter()
-        .filter(|i| i.code == "package-is-distribution-name")
+        .filter(|i| i.code == "package-signal-not-adapter-visible")
         .collect::<Vec<_>>();
     assert!(
-        !distro.is_empty(),
-        "expected package-is-distribution-name error, got {:#?}",
+        !mismatches.is_empty(),
+        "expected adapter-visible package warning, got {:#?}",
         report.issues
     );
     assert!(
-        distro.iter().any(|i| i.message.contains("kafka-clients")),
-        "error should name the offending signal, got {:#?}",
-        distro
+        mismatches.iter().any(|i| i.message.contains("kafka-clients")),
+        "warning should name the offending signal, got {:#?}",
+        mismatches
     );
     assert!(
-        distro.iter().all(|i| i.level == "error"),
-        "distribution-name issues must be error-level"
+        mismatches.iter().all(|i| i.level == "warning"),
+        "adapter-visible mismatches must be warnings"
     );
 }
 
 #[test]
-fn validator_accepts_hyphenated_npm_package_in_javascript() {
-    // Hyphens are legitimate in npm/JS imports
-    // (`require("sanitize-html")`), so the validator must NOT
-    // fire for JS — only the language-aware list (Java/Kotlin/
-    // Scala/Python/Rust/Swift/Perl/Dart).
-    assert!(package_signal_distro_smell("javascript", "sanitize-html").is_none());
-    assert!(package_signal_distro_smell("typescript", "@adonisjs/core").is_none());
-    assert!(package_signal_distro_smell("ruby", "rest-client").is_none());
-    assert!(package_signal_distro_smell("lua", "lua-resty-string").is_none());
-}
-
-#[test]
-fn validator_rejects_pypi_distribution_name_in_python_packages_field() {
-    // `python-jose` is a PyPI distribution; the adapter only
-    // sees `jose` in `import` statements.
+fn validator_reports_python_package_signal_missing_from_adapter_import_facts() {
     let rule = validation_rule_from_yaml(
         r"
 id: python.jwt.jose_decode
@@ -1823,10 +1842,10 @@ description: jose.jwt.decode without verification reads attacker-controlled JWT 
         report
             .issues
             .iter()
-            .any(|i| i.code == "package-is-distribution-name"
+            .any(|i| i.code == "package-signal-not-adapter-visible"
                 && i.message.contains("python-jose")
-                && i.level == "error"),
-        "expected python distribution-name error, got {:#?}",
+                && i.level == "warning"),
+        "expected adapter-visible package warning, got {:#?}",
         report.issues
     );
 }

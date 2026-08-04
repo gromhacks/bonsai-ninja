@@ -6,7 +6,7 @@ use bonsai_lang_api::{
     decl_index_with_handler,
     kit::{
         collect_kinds, language_from_pack, node_text, package_module_segments_with_workspace_prefix,
-        parse_with, span_of, with_fn_kinds_and_implicit_receivers,
+        parse_with, span_of,
     },
     AdapterContext, AdapterError, AssignValueKind, CharacterConstraintDomain, CharacterConstraintFact,
     CharacterConstraintOutput, CharacterSubstitutionDomain, CharacterSubstitutionFact, ConditionEquality,
@@ -14,7 +14,7 @@ use bonsai_lang_api::{
     FiniteLiteralSelectionFact, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
     LanguageAdapter, LanguageCapabilities, LanguageId, ParseRecoveryEdit, SameOriginPathConstraintFact,
     StaticScalarValue, StringCompositionFact, StringCompositionPart, SyntaxTree, TypeAliasBinding, Vfs,
-    Visibility,
+    Visibility, EMPTY_HANDLER,
 };
 use parse_recovery::java_parse_recovery_edits;
 use tree_sitter::{Language, Node, Tree};
@@ -62,7 +62,24 @@ const JAVA_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
 ];
 
 const HANDLER: GrammarHandler = GrammarHandler {
+    fn_kinds: &["method_declaration", "constructor_declaration"],
+    call_kinds: &[
+        "method_invocation",
+        "object_creation_expression",
+        "explicit_constructor_invocation",
+    ],
+    argument_passing_mode_extractor: None,
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+    runtime_type_guard_operators: &["instanceof"],
+    call_ref_kinds: &[
+        "method_invocation",
+        "object_creation_expression",
+        "explicit_constructor_invocation",
+        "method_reference",
+    ],
+    callable_reference_kinds: &["method_reference"],
+    member_expression_kinds: &["field_access"],
+    subscript_expression_kinds: &["array_access"],
     class_kinds: &[
         "class_declaration",
         "interface_declaration",
@@ -78,18 +95,38 @@ const HANDLER: GrammarHandler = GrammarHandler {
         ("class_declaration", DeclKind::Class),
     ],
     method_owner_barrier_kinds: &["object_creation_expression"],
+    method_kinds: &["method_declaration"],
+    method_context_kinds: &[
+        "class_declaration",
+        "interface_declaration",
+        "enum_declaration",
+        "annotation_type_declaration",
+        "record_declaration",
+    ],
+    constructor_method_kinds: &["constructor_declaration"],
+    if_kinds: &["if_statement", "switch_expression"],
+    for_kinds: &["for_statement"],
+    foreach_kinds: &["enhanced_for_statement"],
+    while_kinds: &["while_statement"],
+    do_kinds: &["do_statement"],
     // Java try-with-resources binds `try (T r = expr) { .. }` as a
     // `resource` node, which exposes the same `name`/`value` fields the
-    // generic assignment branch reads. Marking it an assignment emits the
+    // assignment branch reads. Marking it an assignment emits the
     // `r = expr` Assign so the call-RHS summary can carry return-value
-    // taint into `r`. `is_assignment` ORs this with GENERIC_HANDLER, so the
-    // generic kinds (variable_declarator, etc.) still resolve.
-    assignment_kinds: &["resource"],
-    ..with_fn_kinds_and_implicit_receivers(
-        &["method_declaration", "constructor_declaration"],
-        &["this", "super"],
-        &[],
-    )
+    // taint into `r`. This is the complete Java grammar inventory; shared
+    // lowering does not add a cross-language fallback.
+    assignment_kinds: &["assignment_expression", "variable_declarator", "resource"],
+    return_kinds: &["return_statement"],
+    throw_kinds: &["throw_statement"],
+    lambda_kinds: &["lambda_expression"],
+    try_kinds: &["try_statement", "try_with_resources_statement"],
+    catch_kinds: &["catch_clause"],
+    finally_kinds: &["finally_clause"],
+    break_kinds: &["break_statement"],
+    continue_kinds: &["continue_statement"],
+    yield_kinds: &["yield_statement"],
+    implicit_receiver_names: &["this", "super"],
+    ..EMPTY_HANDLER
 };
 
 #[derive(Debug, Default, Copy, Clone)]
@@ -150,6 +187,10 @@ impl LanguageAdapter for JavaAdapter {
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["this"],
+            receiver_type_syntax: bonsai_lang_api::ReceiverTypeSyntax {
+                wrapper_calls: &[],
+                class_object_suffixes: &[".class"],
+            },
             call_text_prefilter: bonsai_lang_api::CallTextPrefilter::Parenthesized,
             ..LanguageCapabilities::partial_baseline()
         }
@@ -240,6 +281,7 @@ impl LanguageAdapter for JavaAdapter {
                 decl.bases = bases.clone();
             }
         }
+        qualify_java_instance_field_receivers(&mut index, &tree, src);
         rewrite_java_explicit_constructor_invocations(&mut index);
         let constants_by_class = collect_java_class_string_constants(&tree, file, src);
         attach_java_class_string_constants(&mut index, &constants_by_class);
@@ -401,7 +443,9 @@ fn java_same_origin_path_constraints(
                 facts.push(SameOriginPathConstraintFact {
                     function_span: decl.span,
                     guard_span: span_of(file, guard),
-                    input_param_index,
+                    input_place: parameter.clone(),
+                    input_param_index: Some(input_param_index),
+                    provider_call: None,
                     rejects_scheme: true,
                     rejects_authority: true,
                     requires_absolute_path,
@@ -1129,6 +1173,7 @@ struct JavaBinding<'tree> {
     scope: Node<'tree>,
     finite_map: bool,
     is_field: bool,
+    is_static: bool,
 }
 
 struct JavaBindings<'tree> {
@@ -1142,7 +1187,11 @@ impl<'tree> JavaBindings<'tree> {
         let smallest_scope = candidates
             .iter()
             .map(|index| &self.bindings[*index])
-            .filter(|binding| binding.scope.start_byte() <= use_start && use_end <= binding.scope.end_byte())
+            .filter(|binding| {
+                binding.scope.start_byte() <= use_start
+                    && use_end <= binding.scope.end_byte()
+                    && (binding.is_field || binding.initializer.end_byte() <= use_start)
+            })
             .map(|binding| binding.scope.end_byte() - binding.scope.start_byte())
             .min()?;
         let mut candidates = candidates
@@ -1152,6 +1201,7 @@ impl<'tree> JavaBindings<'tree> {
                 binding.scope.start_byte() <= use_start
                     && use_end <= binding.scope.end_byte()
                     && binding.scope.end_byte() - binding.scope.start_byte() == smallest_scope
+                    && (binding.is_field || binding.initializer.end_byte() <= use_start)
             });
         let binding = candidates.next()?;
         candidates.next().is_none().then_some(binding)
@@ -1188,6 +1238,7 @@ fn java_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> JavaBindings<'tr
             finite_map: java_declaration_has_final_modifier(declaration)
                 && value.is_some_and(|value| java_is_finite_literal_map(value, src)),
             is_field,
+            is_static: is_field && java_field_has_modifier(declaration, src, "static"),
         });
     }
 
@@ -1283,6 +1334,183 @@ fn java_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> JavaBindings<'tr
     JavaBindings { bindings, by_name }
 }
 
+/// Qualify a method-call receiver that Tree-sitter parsed as a bare
+/// identifier when Java's lexical binding rules prove that identifier is an
+/// instance field of the current class (`data.cmd()` ->
+/// `this.data.cmd()`). The shared IDG consumes the resulting place directly;
+/// it must not guess whether an arbitrary bare receiver is a local, field,
+/// type, or package.
+fn qualify_java_instance_field_receivers(index: &mut DeclIndex, tree: &Tree, src: &[u8]) {
+    let Some(current_receiver) = HANDLER
+        .implicit_receiver_names
+        .first()
+        .copied()
+        .filter(|name| !name.is_empty())
+    else {
+        return;
+    };
+    let bindings = java_bindings(tree, src);
+
+    // Field initializers and later receiver calls must name the same storage
+    // place. Tree-sitter exposes the declarator target as a bare identifier,
+    // but Java resolves a non-static field target through the current
+    // instance. Canonicalize the compiler fact here so shared guard/IDG code
+    // never has to treat `field` and `this.field` as language-specific aliases.
+    for fact in &mut index.assignment_values {
+        let (Some(target_span), Some(target)) = (fact.target_span, fact.target.as_deref()) else {
+            continue;
+        };
+        let Some(target_node) =
+            bonsai_lang_api::kit::node_at_span(tree.root_node(), target_span, &["identifier"])
+                .filter(|node| node.kind() == "identifier")
+        else {
+            continue;
+        };
+        let target_name = node_text(&target_node, src).trim();
+        if target_name.is_empty() || target_name != target {
+            continue;
+        }
+        let Some(binding) = bindings.resolve(target_name, target_node.start_byte(), target_node.end_byte())
+        else {
+            continue;
+        };
+        if binding.is_field
+            && !binding.is_static
+            && java_enclosing_class_body(target_node).is_some_and(|body| body.id() == binding.scope.id())
+        {
+            fact.target = Some(format!("{current_receiver}.{target_name}"));
+        }
+    }
+
+    let mut rewrites: std::collections::HashMap<Span, (String, String)> = std::collections::HashMap::new();
+
+    for fact in &mut index.call_receivers {
+        if fact.role != bonsai_lang_api::CallReceiverRole::Value {
+            continue;
+        }
+        let Some(receiver_node) =
+            bonsai_lang_api::kit::node_at_span(tree.root_node(), fact.receiver_span, &["identifier"])
+                .filter(|node| node.kind() == "identifier")
+        else {
+            continue;
+        };
+        let receiver_name = node_text(&receiver_node, src).trim();
+        if receiver_name.is_empty() {
+            continue;
+        }
+        let Some(binding) = bindings.resolve(
+            receiver_name,
+            receiver_node.start_byte(),
+            receiver_node.end_byte(),
+        ) else {
+            continue;
+        };
+        // A field of a lexically enclosing outer class is not `this.field`
+        // in a nested class. Only the nearest class body's non-static field
+        // is the current receiver's instance state.
+        if !binding.is_field
+            || binding.is_static
+            || java_enclosing_class_body(receiver_node).is_none_or(|body| body.id() != binding.scope.id())
+        {
+            continue;
+        }
+        let qualified = format!("{current_receiver}.{receiver_name}");
+        fact.value_flow = bonsai_lang_api::ExpressionFlow::from_place(qualified.clone());
+        rewrites.insert(fact.call_span, (receiver_name.to_string(), qualified));
+    }
+
+    if rewrites.is_empty() {
+        return;
+    }
+    for decl in &mut index.defs {
+        qualify_java_field_receiver_events(&mut decl.flow_events, &rewrites);
+        decl.receiver_state_sources = bonsai_lang_api::kit::collect_receiver_state_sources(
+            &decl.flow_events,
+            &decl.params,
+            HANDLER.implicit_receiver_names,
+        );
+    }
+}
+
+fn java_enclosing_class_body(mut node: Node<'_>) -> Option<Node<'_>> {
+    while let Some(parent) = node.parent() {
+        if parent.kind() == "class_body" {
+            return Some(parent);
+        }
+        node = parent;
+    }
+    None
+}
+
+fn qualify_java_field_receiver_events(
+    events: &mut [FlowEvent],
+    rewrites: &std::collections::HashMap<Span, (String, String)>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span, name, receiver, ..
+            } => {
+                if let Some((unqualified, qualified)) = rewrites.get(span) {
+                    if receiver.as_deref() == Some(unqualified.as_str()) {
+                        *receiver = Some(qualified.clone());
+                    }
+                    qualify_java_receiver_prefix(name, unqualified, qualified);
+                }
+            }
+            FlowEvent::Assign {
+                span, source_call, ..
+            } => {
+                if let Some(source_call) = source_call {
+                    for (call_span, (unqualified, qualified)) in rewrites {
+                        if span.file == call_span.file
+                            && span.start <= call_span.start
+                            && call_span.end <= span.end
+                        {
+                            qualify_java_receiver_prefix(source_call, unqualified, qualified);
+                        }
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                qualify_java_field_receiver_events(then_events, rewrites);
+                qualify_java_field_receiver_events(else_events, rewrites);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                qualify_java_field_receiver_events(body, rewrites);
+                qualify_java_field_receiver_events(catch_events, rewrites);
+                qualify_java_field_receiver_events(finally_events, rewrites);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                qualify_java_field_receiver_events(body, rewrites);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn qualify_java_receiver_prefix(value: &mut String, unqualified: &str, qualified: &str) {
+    if value == unqualified {
+        *value = qualified.to_string();
+        return;
+    }
+    if value
+        .strip_prefix(unqualified)
+        .is_some_and(|suffix| suffix.starts_with('.'))
+    {
+        value.replace_range(..unqualified.len(), qualified);
+    }
+}
+
 fn push_java_blocking_binding<'tree>(
     bindings: &mut Vec<JavaBinding<'tree>>,
     name_node: Node<'tree>,
@@ -1298,6 +1526,7 @@ fn push_java_blocking_binding<'tree>(
         scope,
         finite_map: false,
         is_field: false,
+        is_static: false,
     });
 }
 
@@ -1581,7 +1810,7 @@ fn merge_java_condition_junction(
 fn java_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
     ConditionOperandFact {
         span: span_of(file, &node),
-        value_flow: bonsai_lang_api::kit::expression_flow_from_node(node, file, src),
+        value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(node, file, src, &HANDLER),
         static_string: java_static_string_literal(node, src),
         static_value: java_static_scalar(node, src),
     }
@@ -1861,7 +2090,14 @@ fn populate_java_static_scalar_facts(index: &mut DeclIndex, tree: &Tree, file: F
             .get(&(fact.receiver_span.start, fact.receiver_span.end))
             .cloned();
     }
-    bonsai_lang_api::kit::populate_call_argument_static_values(index, tree, file, src, java_static_scalar);
+    bonsai_lang_api::kit::populate_call_argument_static_values(
+        index,
+        tree,
+        file,
+        src,
+        &HANDLER,
+        java_static_scalar,
+    );
     populate_java_array_argument_sequences(index, tree, file, src);
 }
 
@@ -2357,10 +2593,11 @@ fn canonical_java_type_name(raw: &str) -> Option<String> {
     Some(bare_type.to_string())
 }
 
-/// Preserve Java source-level fully-qualified class names as additional
-/// receiver evidence for package-gated rules (`javax.naming.Foo x; x.bar()`).
-/// Nested classes like `Outer.Inner` are intentionally ignored unless at least
-/// one qualifier segment looks package-like.
+/// Preserve Java source-level qualified type names as additional receiver
+/// evidence. Package-qualified (`javax.naming.Foo`) and nested
+/// (`Outer.Inner`) types both carry semantic owner information that the
+/// resolver needs; reducing either to the final identifier can make distinct
+/// declarations indistinguishable or make a nested member unreachable.
 fn qualified_java_type_name(raw: &str) -> Option<String> {
     let without_generics = raw.split('<').next().unwrap_or(raw);
     let without_arrays = without_generics.split('[').next().unwrap_or(without_generics);
@@ -2373,12 +2610,6 @@ fn qualified_java_type_name(raw: &str) -> Option<String> {
     }
     let tail = segments.last()?.trim();
     if tail.is_empty() || !tail.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-        return None;
-    }
-    let has_package_segment = segments[..segments.len() - 1]
-        .iter()
-        .any(|segment| segment.chars().next().is_some_and(|c| c.is_ascii_lowercase()));
-    if !has_package_segment {
         return None;
     }
     Some(qualified.to_string())
@@ -2448,8 +2679,48 @@ fn collect_java_imports(tree: &Tree, file: FileId, src: &[u8]) -> Vec<ImportSpec
         .into_iter()
         .filter_map(|import| java_import_spec(import, file, src))
         .collect();
+    imports.extend(
+        collect_kinds(tree, &["scoped_type_identifier"])
+            .into_iter()
+            .filter(|type_use| !has_ancestor_kind(*type_use, "import_declaration"))
+            .filter(|type_use| {
+                type_use
+                    .parent()
+                    .is_none_or(|parent| parent.kind() != "scoped_type_identifier")
+            })
+            .filter_map(|type_use| java_qualified_type_package_spec(type_use, file, src)),
+    );
     imports.sort_by_key(|import| import.span.start);
+    imports.dedup_by(|left, right| left.span == right.span && left.module == right.module);
     imports
+}
+
+/// Lower a fully-qualified Java type use into file-local package evidence.
+/// This is not a source import and therefore stays hidden from the public
+/// import inventory, but the exact qualifier is available to resolver and
+/// security package gates. Nested class names are harmless here: consumers
+/// still require an exact rule-declared package prefix.
+fn java_qualified_type_package_spec(type_use: Node<'_>, file: FileId, src: &[u8]) -> Option<ImportSpec> {
+    let module = node_text(&type_use, src).trim();
+    let alias = import_tail_binding(module)?;
+    Some(ImportSpec {
+        span: span_of(file, &type_use),
+        module: module.to_string(),
+        alias: Some(alias),
+        is_wildcard: false,
+        original_name: None,
+        scope: ImportScope::Local,
+    })
+}
+
+fn has_ancestor_kind(mut node: Node<'_>, kind: &str) -> bool {
+    while let Some(parent) = node.parent() {
+        if parent.kind() == kind {
+            return true;
+        }
+        node = parent;
+    }
+    false
 }
 
 fn java_import_spec(import: Node<'_>, file: FileId, src: &[u8]) -> Option<ImportSpec> {

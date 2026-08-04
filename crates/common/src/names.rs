@@ -1,72 +1,9 @@
-//! Name normalization helpers shared across crates.
+//! Language-neutral name helpers.
 //!
-//! Owns the cross-crate constants for identifier sigils
-//! ([`IDENTIFIER_SIGILS`]) and qualified-name separators
-//! ([`QUALIFIED_NAME_SEPARATORS`]) plus the canonical
-//! `short_qualified_tail`, `qualified_names_match`, and
-//! `callable_reference_variants` helpers.
-
-/// Identifier sigils used by adapters to mark scalar/array/hash
-/// (`$`, `@`, `%`) variables (Perl, PHP). The engine treats `$foo`,
-/// `@foo`, `%foo`, and `foo` as referring to the same identifier
-/// when the sigil is missing in the queried form, since adapters
-/// emit the same identifier with and without sigil depending on the
-/// surrounding syntactic context.
-///
-/// Kept here because three crates (`bonsai_taint::text`,
-/// `bonsai_taint`'s IDG compatibility API, `bonsai_security::matcher` indirectly via
-/// `qualified_access_bases`) all need the same set; defining it
-/// once prevents drift.
-pub const IDENTIFIER_SIGILS: &[char] = &['$', '@', '%'];
-
-/// Reference / pointer sigils that adapters keep on raw type and
-/// expression text — Rust's `&` borrow, C/C++'s `*` pointer, mixed
-/// usage in PHP `&$ref` and Perl. Engine code that compares names
-/// strips these because `&Foo`, `*Foo`, and `Foo` denote the same
-/// underlying identifier for taint and resolution purposes.
-///
-/// Defined alongside [`IDENTIFIER_SIGILS`] so the two sets can be
-/// composed without re-listing characters at every call site.
-pub const REFERENCE_SIGILS: &[char] = &['&', '*'];
-
-/// Combined punctuation strip used at qualified-text comparison
-/// sites (`actual.trim_start_matches(ALL_NAME_PUNCTUATION)`). The
-/// union of [`IDENTIFIER_SIGILS`] and [`REFERENCE_SIGILS`] — adapter
-/// emissions can carry either family on raw expression text and the
-/// engine should normalise both before comparing.
-pub const ALL_NAME_PUNCTUATION: &[char] = &['$', '@', '%', '&', '*'];
-
-/// Qualified-name separators recognized by the workspace. `.` is the
-/// universal member access; `::` is Rust/C++/Perl module separator;
-/// `->` is C/C++/PHP/Perl pointer member access; `:` is Erlang
-/// remote call; and `\\` is a PHP namespace separator. Order matters
-/// when used by callers that try candidates in priority order — pick
-/// the longer alternative first.
-pub const QUALIFIED_NAME_SEPARATORS: &[&str] = &["::", "->", ".", ":", "\\"];
-
-/// Canonical projection forms that EVERY `normalise_qualified_text`-style
-/// canonicalizer must agree on. Subscript / arrow / symbol-key field
-/// access all collapse to one dotted key, so the taint engine and the
-/// security matcher hash `obj['x']`, `obj.x`, `obj->x`, and `obj[:x]`
-/// to the same `obj.x`. There are THREE independent copies of this
-/// canonicalization — the adapter kit (`bonsai_lang_api::kit::qualified`),
-/// the taint engine (`bonsai_taint::text`), and the IDG transfer pass
-/// (`bonsai_idg::transfer`). Each carries a conformance test asserting it
-/// matches these vectors, so the copies cannot silently drift. This guards
-/// the exact class of bug that shipped a real recall regression: the Ruby
-/// `[:sym]` colon-strip diverging between two of the copies.
-///
-/// Only includes forms where all copies AGREE — i.e. no leading `&`/`*`
-/// sigils or interior whitespace, which the engine copy strips but the
-/// adapter copy (grammar-clean tree-sitter input) does not.
-pub const PROJECTION_CANONICALIZATION_VECTORS: &[(&str, &str)] = &[
-    ("obj.cmd", "obj.cmd"),
-    ("obj['cmd']", "obj.cmd"),
-    ("obj[\"cmd\"]", "obj.cmd"),
-    ("conn->host", "conn.host"),
-    ("params[:token]", "params.token"),
-    ("args[:cmd]", "args.cmd"),
-];
+//! This module deliberately owns no source-language punctuation inventory.
+//! Adapters lower language syntax; shared candidate lookup only reasons about
+//! identifier-shaped segments and punctuation boundaries. Exact identity is
+//! still established by compiler symbols and the resolver.
 
 /// Filename prefix used by the VFS case-sensitivity probe.
 ///
@@ -99,19 +36,16 @@ pub fn is_bonsai_case_probe_path(path: &std::path::Path) -> bool {
         && nanos.chars().all(|c| c.is_ascii_digit())
 }
 
-/// Tail of a qualified call/reference name.
+/// Return the final identifier-shaped segment in a qualified compiler name.
 ///
-/// Handles every separator in [`QUALIFIED_NAME_SEPARATORS`]. This is a
-/// lexical operation over an adapter-emitted callable name; semantic
-/// resolution remains the responsibility of the resolver.
+/// This is intentionally vocabulary-free: it recognizes a top-level run of
+/// non-identifier punctuation between two identifier segments instead of a
+/// union of source-language separators. Delimiters nested inside generic,
+/// call, or subscript syntax are ignored. This is candidate lookup only;
+/// semantic resolution remains authoritative.
 #[must_use]
 pub fn short_qualified_tail(name: &str) -> &str {
-    let cut = QUALIFIED_NAME_SEPARATORS
-        .iter()
-        .filter_map(|separator| name.rfind(separator).map(|index| index + separator.len()))
-        .max()
-        .unwrap_or(0);
-    &name[cut..]
+    qualified_boundary(name).map_or(name, |(_, tail_start)| &name[tail_start..])
 }
 
 /// True when two adapter-emitted qualified names are identical or
@@ -129,99 +63,182 @@ pub fn qualified_names_match(left: &str, right: &str) -> bool {
     !left_tail.is_empty() && left_tail == short_qualified_tail(right)
 }
 
-/// Return normalized callable-reference spellings for language syntax
-/// that passes a function as a value rather than calling it directly.
-///
-/// This is intentionally syntax-only. It does not decide whether the
-/// value is safe, dangerous, source, sink, or sanitizer; resolver users
-/// still have to prove that the returned name reaches a workspace
-/// callable under the caller's semantic context.
+/// True when `prefix` ends at a qualified-name punctuation boundary.
 #[must_use]
-pub fn callable_reference_variants(raw: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    push_callable_variant(&mut out, raw);
-
-    let mut s = raw.trim();
-    if s.is_empty() {
-        return out;
-    }
-
-    if let Some(rest) = s.strip_prefix("fun ") {
-        s = rest.trim();
-        push_callable_variant(&mut out, strip_arity_suffix(s));
-    }
-
-    if let Some(rest) = s.strip_prefix('&') {
-        push_callable_variant(&mut out, strip_arity_suffix(rest.trim()));
-    }
-
-    if let Some(rest) = s.strip_prefix("\\&") {
-        push_callable_variant(&mut out, rest.trim());
-    }
-
-    if let Some(inner) = quoted_bare_callable(s) {
-        push_callable_variant(&mut out, inner);
-    }
-
-    if let Some(inner) = method_symbol_callable(s) {
-        push_callable_variant(&mut out, inner);
-    }
-
-    if let Some(trimmed) = s.strip_suffix('.') {
-        push_callable_variant(&mut out, trimmed.trim());
-    }
-
-    if let Some(trimmed) = s.strip_suffix("->") {
-        push_callable_variant(&mut out, trimmed.trim());
-    }
-
-    let tail = short_qualified_tail(s);
-    if tail != s && !tail.is_empty() {
-        push_callable_variant(&mut out, tail);
-    }
-
-    out
+pub fn ends_at_qualified_name_boundary(prefix: &str) -> bool {
+    prefix
+        .chars()
+        .next_back()
+        .is_some_and(|ch| !is_name_segment_char(ch))
 }
 
-fn push_callable_variant(out: &mut Vec<String>, value: &str) {
-    let value = value.trim();
-    if value.is_empty() || out.iter().any(|existing| existing == value) {
-        return;
-    }
-    out.push(value.to_string());
+/// True when `suffix` starts at a qualified-name punctuation boundary.
+#[must_use]
+pub fn starts_at_qualified_name_boundary(suffix: &str) -> bool {
+    suffix.chars().next().is_some_and(|ch| !is_name_segment_char(ch))
 }
 
-fn strip_arity_suffix(value: &str) -> &str {
-    let value = value.trim();
-    if let Some((name, arity)) = value.rsplit_once('/') {
-        if !name.is_empty() && arity.chars().all(|c| c.is_ascii_digit()) {
-            return name.trim();
+/// Strip source punctuation preceding an adapter-emitted identifier/place.
+///
+/// No concrete sigil is known here. The operation stops at the first Unicode
+/// alphanumeric or underscore and is safe only for compiler facts already
+/// classified as names—not arbitrary source text.
+#[must_use]
+pub fn trim_leading_name_punctuation(value: &str) -> &str {
+    value.trim_start_matches(is_name_punctuation)
+}
+
+/// Predicate used with `str::trim_start_matches` for compiler-classified
+/// names. It is structural Unicode classification, not a source-language
+/// punctuation inventory.
+#[must_use]
+pub fn is_name_punctuation(ch: char) -> bool {
+    !is_name_segment_char(ch)
+}
+
+/// Return the owner portion of a qualified compiler name.
+#[must_use]
+pub fn qualified_name_owner(name: &str) -> Option<&str> {
+    qualified_boundary(name)
+        .and_then(|(separator_start, _)| name.get(..separator_start))
+        .map(str::trim)
+        .filter(|owner| !owner.is_empty())
+}
+
+/// Split a compiler-qualified name into top-level identifier segments without
+/// knowing the source language's separator vocabulary.
+#[must_use]
+pub fn qualified_name_segments(name: &str) -> Vec<&str> {
+    let mut reversed = Vec::new();
+    let mut remaining = name.trim();
+    while let Some((separator_start, tail_start)) = qualified_boundary(remaining) {
+        let tail = remaining[tail_start..].trim();
+        if !tail.is_empty() {
+            reversed.push(tail);
         }
+        let owner = remaining[..separator_start].trim();
+        if owner.is_empty() || owner == remaining {
+            break;
+        }
+        remaining = owner;
     }
-    value
+    if !remaining.is_empty() {
+        reversed.push(remaining);
+    }
+    reversed.reverse();
+    reversed
 }
 
-fn quoted_bare_callable(value: &str) -> Option<&str> {
-    let value = value.trim();
-    let quote = value.as_bytes().first().copied()?;
-    if !matches!(quote, b'\'' | b'"') || value.as_bytes().last().copied()? != quote {
+/// Return every non-empty top-level qualified-name prefix while preserving
+/// the adapter-emitted punctuation between its segments.
+///
+/// This is the structural replacement for shared callers that previously
+/// tried a union of source-language separators. The input must already be a
+/// compiler-classified name or module identity. No punctuation spelling is
+/// interpreted here.
+#[must_use]
+pub fn qualified_name_prefixes(name: &str) -> Vec<&str> {
+    let mut reversed = Vec::new();
+    let mut remaining = name.trim();
+    if remaining.is_empty() {
+        return reversed;
+    }
+    reversed.push(remaining);
+    while let Some((separator_start, _)) = qualified_boundary(remaining) {
+        let owner = remaining[..separator_start].trim();
+        if owner.is_empty() || owner == remaining {
+            break;
+        }
+        reversed.push(owner);
+        remaining = owner;
+    }
+    reversed.reverse();
+    reversed
+}
+
+/// Split a compiler-qualified name at its first structural punctuation
+/// boundary. The returned tail preserves any later qualification.
+#[must_use]
+pub fn split_qualified_name_head_tail(name: &str) -> Option<(&str, &str)> {
+    let trimmed = name.trim();
+    let prefixes = qualified_name_prefixes(trimmed);
+    if prefixes.len() < 2 {
         return None;
     }
-    let inner = value.get(1..value.len().saturating_sub(1))?.trim();
-    looks_like_callable_ident(inner).then_some(inner)
+    let head = *prefixes.first()?;
+    let tail = trimmed
+        .strip_prefix(head)?
+        .trim_start_matches(is_name_punctuation)
+        .trim();
+    (!head.is_empty() && !tail.is_empty()).then_some((head, tail))
 }
 
-fn method_symbol_callable(value: &str) -> Option<&str> {
-    let value = value.trim();
-    let inner = value.strip_prefix("method(")?.strip_suffix(')')?.trim();
-    let inner = inner.strip_prefix(':').unwrap_or(inner).trim();
-    looks_like_callable_ident(inner).then_some(inner)
+/// Split a compiler-qualified name at its final structural punctuation
+/// boundary.
+#[must_use]
+pub fn split_qualified_name_owner_tail(name: &str) -> Option<(&str, &str)> {
+    let trimmed = name.trim();
+    let owner = qualified_name_owner(trimmed)?;
+    let tail = short_qualified_tail(trimmed).trim();
+    (!owner.is_empty() && !tail.is_empty()).then_some((owner, tail))
 }
 
-fn looks_like_callable_ident(value: &str) -> bool {
-    let mut chars = value.chars();
-    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
-        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+/// Canonicalize top-level compiler-qualified name segments to dotted IR.
+///
+/// The input must already be classified as a name/place by an adapter. No
+/// separator spelling is recognized here; structural punctuation boundaries
+/// between top-level identifier segments become the canonical `.` delimiter.
+#[must_use]
+pub fn normalize_qualified_name(name: &str) -> String {
+    let segments = qualified_name_segments(name);
+    if segments.len() <= 1 {
+        return name.trim().to_string();
+    }
+    segments.join(".")
+}
+
+fn qualified_boundary(name: &str) -> Option<(usize, usize)> {
+    let mut depth = 0_u32;
+    let mut punctuation_start = None;
+    let mut last_boundary = None;
+    let mut previous_was_name = false;
+
+    for (index, ch) in name.char_indices() {
+        match ch {
+            '(' | '[' | '{' | '<' => {
+                depth = depth.saturating_add(1);
+                punctuation_start = None;
+                previous_was_name = false;
+            }
+            ')' | ']' | '}' | '>' if depth > 0 => {
+                depth = depth.saturating_sub(1);
+                punctuation_start = None;
+                previous_was_name = depth == 0;
+            }
+            _ if depth == 0 && is_name_segment_char(ch) => {
+                if let Some(start) = punctuation_start.take() {
+                    if previous_was_name
+                        || name[..start]
+                            .chars()
+                            .next_back()
+                            .is_some_and(is_name_segment_char)
+                    {
+                        last_boundary = Some((start, index));
+                    }
+                }
+                previous_was_name = true;
+            }
+            _ if depth == 0 => {
+                punctuation_start.get_or_insert(index);
+            }
+            _ => {}
+        }
+    }
+    last_boundary
+}
+
+fn is_name_segment_char(ch: char) -> bool {
+    ch == '_' || ch.is_alphanumeric()
 }
 
 /// Per-workspace bonsai cache/state directory.

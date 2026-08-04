@@ -11,7 +11,7 @@
 #   2. mega-cli          — engine emits the expected per-lang finding
 #                          counts on the mega_flow fixture
 #   3. sanitizer-credit  — sanitizer tag vocabulary in YAML matches the
-#                          Rust MAPPING table
+#                          rulepack sanitizer-credit metadata
 #   4. logic-alignment   — cross-rule logic checks: identical
 #                          callee/regex+kind+language but different tags
 #                          (silent classification drift)

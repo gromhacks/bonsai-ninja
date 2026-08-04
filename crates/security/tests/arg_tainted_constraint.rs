@@ -661,9 +661,12 @@ fn matcher_policy_fingerprint_was_bumped_for_arg_tainted() {
     // Bumped 0x0034 → 0x0035 when call-result argument-carrier pruning
     // started canonicalizing adapter-owned identifier sigils, changing
     // Perl/PHP IDG reachability and invalidating warm graph facts.
+    // Bumped 0x0035 → 0x0036 when typed receiver evidence became
+    // authoritative and qualified/import matching moved to structural
+    // compiler names, changing cached matcher and reachability facts.
     assert_eq!(
         bonsai_security::MATCHER_POLICY_FINGERPRINT,
-        0x4d41_5443_4845_525f_504f_4c49_4359_0035_u128
+        0x4d41_5443_4845_525f_504f_4c49_4359_0036_u128
     );
 }
 

@@ -78,7 +78,10 @@ pub struct ImportOut {
 /// is module-style rather than path-style.
 fn pascal_to_snake(module: &str) -> String {
     let mut out = String::with_capacity(module.len() + 8);
-    for (segment_idx, segment) in module.split(['.', ':', '\\']).enumerate() {
+    for (segment_idx, segment) in bonsai_common::qualified_name_segments(module)
+        .into_iter()
+        .enumerate()
+    {
         // Module separators become path separators.
         if segment_idx > 0 {
             out.push('/');
@@ -122,6 +125,13 @@ struct WorkspaceModuleResolver {
     /// FileId → full path. Used when widening `.h` includes to
     /// their sibling `.c` / `.cpp` implementation files.
     path_by_file: ahash::AHashMap<bonsai_common::FileId, std::path::PathBuf>,
+    /// Source suffixes present in this workspace. Candidate expansion is
+    /// therefore driven by registered workspace files rather than a shared
+    /// cross-language extension inventory.
+    extensions: Vec<String>,
+    /// Exact directory+stem siblings, used only when an imported declaration
+    /// file has no callable bodies of its own.
+    siblings_by_stem: ahash::AHashMap<String, Vec<bonsai_common::FileId>>,
 }
 
 impl WorkspaceModuleResolver {
@@ -134,9 +144,31 @@ impl WorkspaceModuleResolver {
             ahash::AHashMap::default();
         let mut path_by_file: ahash::AHashMap<bonsai_common::FileId, std::path::PathBuf> =
             ahash::AHashMap::default();
+        let mut extensions = Vec::new();
+        let mut siblings_by_stem: ahash::AHashMap<String, Vec<bonsai_common::FileId>> =
+            ahash::AHashMap::default();
         for file in ws.vfs().all_files() {
+            if ws.db().adapter_for(file).is_none() {
+                continue;
+            }
             let Ok(path) = ws.vfs().path(file) else { continue };
             path_by_file.insert(file, (*path).clone());
+            if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
+                let extension = format!(".{extension}");
+                if !extensions.contains(&extension) {
+                    extensions.push(extension);
+                }
+            }
+            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                let key = normalize_path_key(
+                    &path
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new(""))
+                        .join(stem)
+                        .to_string_lossy(),
+                );
+                siblings_by_stem.entry(key).or_default().push(file);
+            }
             let normalized = normalize_path_key(&path.to_string_lossy());
             let parts: Vec<&str> = normalized.split('/').filter(|p| !p.is_empty()).collect();
             // Index every contiguous tail.
@@ -148,9 +180,12 @@ impl WorkspaceModuleResolver {
             }
             suffix_to_files.entry(normalized).or_default().push(file);
         }
+        extensions.sort();
         Self {
             suffix_to_files,
             path_by_file,
+            extensions,
+            siblings_by_stem,
         }
     }
 
@@ -159,6 +194,20 @@ impl WorkspaceModuleResolver {
     fn files_for_candidate(&self, candidate: &std::path::Path) -> Vec<bonsai_common::FileId> {
         let want = normalize_path_key(&candidate.to_string_lossy());
         self.suffix_to_files.get(&want).cloned().unwrap_or_default()
+    }
+
+    fn files_with_same_stem(&self, path: &std::path::Path) -> &[bonsai_common::FileId] {
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            return &[];
+        };
+        let key = normalize_path_key(
+            &path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(""))
+                .join(stem)
+                .to_string_lossy(),
+        );
+        self.siblings_by_stem.get(&key).map(Vec::as_slice).unwrap_or(&[])
     }
 }
 
@@ -225,16 +274,9 @@ fn resolve_workspace_module_bindings(
     let importer_dir = std::path::Path::new(importer_path)
         .parent()
         .map(std::path::Path::to_path_buf);
-    // Candidate paths to check: verbatim, with common extensions,
-    // relative to importer's dir. Extensions cover the languages
-    // that use whole-module includes (.rb, .py, .php, .go, .js,
-    // .ts, .lua, .pl, .ex, .erl, .dart, .swift, .m, .rs, .kt,
-    // .scala, .java, .cs, .c, .cpp, .sol, .h, .hpp, .hxx).
-    let exts: &[&str] = &[
-        "", ".rb", ".py", ".php", ".go", ".js", ".mjs", ".cjs", ".ts", ".lua", ".pl", ".pm", ".ex", ".erl",
-        ".dart", ".swift", ".m", ".rs", ".kt", ".scala", ".java", ".cs", ".c", ".cpp", ".cxx", ".cc", ".h",
-        ".hpp", ".hxx", ".sol",
-    ];
+    // Candidate paths are verbatim plus the source suffixes actually present
+    // in this workspace. The browse layer never owns a language extension
+    // inventory; adapters and the VFS determine which files exist.
     // Also consider the module's snake_case form for ecosystems
     // whose file-naming convention differs from the module-name
     // convention. Elixir `alias MyApp.AuthService` resolves to
@@ -250,14 +292,8 @@ fn resolve_workspace_module_bindings(
     // skip the snake_case / tail transforms entirely — splitting
     // on `.` treats the file extension as a module segment and
     // produces nonsense tails like `"h"`. We detect a filename by
-    // the presence of a known-extension suffix.
-    let has_filename_ext = [
-        ".h", ".hpp", ".hxx", ".c", ".cc", ".cpp", ".cxx", ".m", ".py", ".rb", ".php", ".go", ".js", ".mjs",
-        ".cjs", ".ts", ".lua", ".pl", ".pm", ".ex", ".erl", ".dart", ".swift", ".rs", ".kt", ".scala",
-        ".java", ".cs", ".sol",
-    ]
-    .iter()
-    .any(|ext| stripped.ends_with(ext));
+    // the presence of a suffix that exists in the current workspace.
+    let has_filename_ext = resolver.extensions.iter().any(|ext| stripped.ends_with(ext));
     let mut module_bases: Vec<String> = vec![stripped.to_string()];
     if !has_filename_ext {
         let snake_case = pascal_to_snake(stripped);
@@ -274,10 +310,9 @@ fn resolve_workspace_module_bindings(
         // Also try the raw module tail (`MyApp.AuthService` →
         // `AuthService`) for Java / C# / Scala conventions that
         // keep the filename matching the class name.
-        if let Some(tail) = stripped.rsplit(['.', ':', '\\', '/']).next() {
-            if !tail.is_empty() && tail != stripped && !module_bases.iter().any(|b| b == tail) {
-                module_bases.push(tail.to_string());
-            }
+        let tail = bonsai_common::short_qualified_tail(stripped);
+        if !tail.is_empty() && tail != stripped && !module_bases.iter().any(|b| b == tail) {
+            module_bases.push(tail.to_string());
         }
     } else {
         // Filename-style: the module string IS already the file
@@ -296,7 +331,7 @@ fn resolve_workspace_module_bindings(
     }
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     for base in &module_bases {
-        for ext in exts {
+        for ext in std::iter::once("").chain(resolver.extensions.iter().map(String::as_str)) {
             let with_ext = if ext.is_empty() || base.ends_with(ext) {
                 base.clone()
             } else {
@@ -324,33 +359,34 @@ fn resolve_workspace_module_bindings(
             push_unique_file(&mut resolved, &mut seen, file);
         }
     }
-    // If the direct match landed on a C/C++ header (`.h`/`.hpp`/
-    // `.hxx`) also include the sibling implementation file
-    // (`.c` / `.cpp` / `.cxx` / `.cc`) in the same directory with
-    // the same stem. Tree-sitter-c/cpp adapters emit the header's
-    // function prototypes but not as `DeclKind::Function` — the
-    // implementation file is where the symbol's flow-id labels
-    // actually live.
-    const HEADER_EXTS: [&str; 3] = ["h", "hpp", "hxx"];
-    const SOURCE_EXTS: [&str; 4] = ["c", "cpp", "cxx", "cc"];
+    // Declaration-only files may resolve an import but carry no callable
+    // bodies. In that case, include exact same-directory/same-stem siblings
+    // that do carry bodies. This is compiler-fact driven and works for any
+    // adapter without naming header/source extensions here.
     let initial: Vec<bonsai_common::FileId> = resolved.clone();
     for file in initial {
         let Some(path) = resolver.path_by_file.get(&file) else {
             continue;
         };
-        let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if !HEADER_EXTS.contains(&ext) {
+        if global.decls_in(file).iter().any(|decl| {
+            matches!(
+                decl.kind,
+                bonsai_lang_api::DeclKind::Function
+                    | bonsai_lang_api::DeclKind::Method
+                    | bonsai_lang_api::DeclKind::Constructor
+            )
+        }) {
             continue;
         }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let Some(dir) = path.parent() else { continue };
-        for src_ext in SOURCE_EXTS {
-            let sibling = dir.join(format!("{stem}.{src_ext}"));
-            for other in resolver.files_for_candidate(&sibling) {
+        for &other in resolver.files_with_same_stem(path) {
+            if global.decls_in(other).iter().any(|decl| {
+                matches!(
+                    decl.kind,
+                    bonsai_lang_api::DeclKind::Function
+                        | bonsai_lang_api::DeclKind::Method
+                        | bonsai_lang_api::DeclKind::Constructor
+                )
+            }) {
                 push_unique_file(&mut resolved, &mut seen, other);
             }
         }
@@ -465,11 +501,7 @@ pub fn imports(ws: &Workspace, f: &ImportsFilters<'_>) -> Result<Vec<ImportOut>,
                     }
                     // Module-tail heuristic — split on the last
                     // `.`, `/`, or `::` separator the grammar used.
-                    let tail = imp
-                        .module
-                        .rsplit(['.', '/', ':', '\\'])
-                        .next()
-                        .unwrap_or(&imp.module)
+                    let tail = bonsai_common::short_qualified_tail(&imp.module)
                         .trim_matches(|c: char| matches!(c, '"' | '\'' | '`'))
                         .trim();
                     if !tail.is_empty() && tail != imp.module && !local_bindings.iter().any(|n| n == tail) {

@@ -9,6 +9,55 @@ fn conformance_traced() {
 }
 
 #[test]
+fn jump_expression_lowering_distinguishes_throw_and_return() {
+    use bonsai_lang_api::FlowEvent;
+
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        Arc::new(bonsai_lang_kotlin::KotlinAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "App.kt",
+            r#"
+fun handle(token: String) {
+  try { throw RuntimeException(token) }
+  catch (e: Exception) { sink(e.message ?: "") }
+}
+fun identity(value: String): String { return value }
+fun sink(value: String) {}
+"#,
+        )],
+    );
+    let global = ws.db().global_index();
+    let handle = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "handle")
+        .expect("handle declaration");
+    let body = handle.flow_events.iter().find_map(|event| match event {
+        FlowEvent::Try { body, .. } => Some(body),
+        _ => None,
+    });
+    assert!(
+        body.is_some_and(|body| body.iter().any(
+            |event| matches!(event, FlowEvent::Throw { value_name: Some(value), .. } if value == "token")
+        )),
+        "Kotlin throw payload was not lowered from the parsed jump expression: {:#?}",
+        handle.flow_events
+    );
+
+    let identity = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "identity")
+        .expect("identity declaration");
+    assert!(identity
+        .flow_events
+        .iter()
+        .any(|event| matches!(event, FlowEvent::Return { value_name: Some(value), .. } if value == "value")));
+}
+
+#[test]
 fn annotated_parameters_bind_annotation_to_value_name() {
     use bonsai_lang_api::LanguageAdapter;
 
@@ -43,6 +92,86 @@ class App {
     assert_eq!(handle.param_annotations.len(), handle.params.len());
     assert_eq!(handle.param_annotations[0], ["MatrixParam"]);
     assert!(handle.param_annotations[1].is_empty());
+}
+
+#[test]
+fn custom_getter_qualifies_constructor_property_as_receiver_state() {
+    use bonsai_lang_api::{FlowEvent, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_kotlin::KotlinAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Storage.kt",
+            r#"
+data class Envelope(val cmd: String)
+
+abstract class BaseRepository(val data: Envelope) {
+  open val cmd: String get() = data.cmd
+}
+"#,
+        )],
+    );
+    let global = ws.db().global_index();
+    let getter = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "cmd" && decl.params.is_empty())
+        .expect("custom property getter");
+    let value_flow = getter
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Return { value_flow, .. } => Some(value_flow),
+            _ => None,
+        })
+        .expect("getter return flow");
+    assert_eq!(value_flow.place.as_deref(), Some("this.data.cmd"));
+    assert_eq!(
+        value_flow
+            .projection
+            .as_ref()
+            .map(|projection| (projection.base.as_str(), projection.path.as_slice())),
+        Some(("this", ["data".to_string(), "cmd".to_string()].as_slice()))
+    );
+    assert_eq!(value_flow.source_names, ["this.data.cmd"]);
+}
+
+#[test]
+fn primary_constructor_delegation_is_an_exact_constructor_call() {
+    use bonsai_lang_api::{CallKind, FlowEvent, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_kotlin::KotlinAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Storage.kt",
+            r#"
+open class Base(val data: String)
+class Child(data: String) : Base(data)
+"#,
+        )],
+    );
+    let global = ws.db().global_index();
+    let child = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "Child" && matches!(decl.kind, bonsai_lang_api::DeclKind::Constructor))
+        .expect("Child primary constructor");
+    assert!(
+        child.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call {
+                name,
+                call_kind: CallKind::Constructor,
+                args,
+                ..
+            } if name == "Base"
+                && args.first().and_then(|arg| arg.place.as_deref()) == Some("data")
+        )),
+        "base delegation must come from constructor_invocation syntax: {:#?}",
+        child.flow_events
+    );
 }
 
 #[test]

@@ -38,6 +38,10 @@ const HANDLER: GrammarHandler = GrammarHandler {
     do_kinds: &["repeat_statement"],
     loop_kinds: &[],
     call_kinds: &["function_call", "method_call"],
+    argument_passing_mode_extractor: None,
+    call_ref_kinds: &["function_call", "method_call"],
+    member_expression_kinds: &["dot_index_expression"],
+    subscript_expression_kinds: &["bracket_index_expression"],
     assignment_kinds: &["assignment_statement", "variable_declaration"],
     return_kinds: &["return_statement"],
     throw_kinds: &[],
@@ -60,6 +64,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     implicit_receiver_prefixes: &[],
     tail_expression_returns: false,
     void_return_type_names: &[],
+    ..bonsai_lang_api::EMPTY_HANDLER
 };
 
 #[derive(Debug, Default, Copy, Clone)]
@@ -100,13 +105,11 @@ impl LanguageAdapter for LuaAdapter {
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
-        let local_fn_spans =
+        let (local_fn_spans, table_member_names) =
             if let Some((snapshot, tree)) = bonsai_lang_api::kit::parse_with(PACK_NAME, file, ctx) {
-                idx.refs.extend(synthesize_lua_global_arg_refs(
-                    &tree,
-                    snapshot.text.as_bytes(),
-                    file,
-                ));
+                let source = snapshot.text.as_bytes();
+                idx.refs
+                    .extend(synthesize_lua_global_arg_refs(&tree, source, file));
                 // Two grammar variants for `local function foo() ... end`:
                 //   - some tree-sitter-lua releases produce a dedicated
                 //     `local_function` node kind;
@@ -137,14 +140,15 @@ impl LanguageAdapter for LuaAdapter {
                         }
                     }
                 }
-                spans
+                (spans, collect_lua_table_member_names(&tree, source, file))
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             };
         // Lua has no language-level module boundary; file stem is the
         // closest semantic anchor for qualified_name and module_path.
         // See `docs/contributing/design-patterns.mdx::Semantic Resolution Always`.
         bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
+        apply_lua_table_member_semantic_identity(&mut idx, &table_member_names);
         // `local function` is chunk-private (file-scoped). Mark these
         // as Visibility::Private so the resolver refuses cross-file
         // calls to local Lua helpers.
@@ -244,6 +248,50 @@ impl LanguageAdapter for LuaAdapter {
             }
         }
         idx
+    }
+}
+
+/// Preserve the table owner of Lua's declaration syntax
+/// `function Table.member(...)`. The generic declaration walker correctly
+/// extracts the callable's short name, while the adapter owns the table path
+/// needed to resolve `Table.member(...)` as the same declaration.
+fn collect_lua_table_member_names(
+    tree: &Tree,
+    src: &[u8],
+    file: FileId,
+) -> Vec<(bonsai_common::Span, String)> {
+    let mut out = Vec::new();
+    for declaration in collect_kinds(tree, &["function_declaration"]) {
+        let Some(name_node) = declaration.child_by_field_name("name") else {
+            continue;
+        };
+        let rendered = node_text(&name_node, src).trim();
+        if !rendered.contains(['.', ':']) {
+            continue;
+        }
+        let canonical = rendered
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .map(|character| if character == ':' { '.' } else { character })
+            .collect::<String>();
+        if canonical.split('.').any(str::is_empty) {
+            continue;
+        }
+        out.push((span_of(file, &declaration), canonical));
+    }
+    out
+}
+
+fn apply_lua_table_member_semantic_identity(
+    index: &mut DeclIndex,
+    table_members: &[(bonsai_common::Span, String)],
+) {
+    for declaration in &mut index.defs {
+        let Some((_, qualified_name)) = table_members.iter().find(|(span, _)| *span == declaration.span)
+        else {
+            continue;
+        };
+        declaration.qualified_name = Some(qualified_name.clone());
     }
 }
 

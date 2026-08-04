@@ -174,6 +174,7 @@ where
     let transfer = bonsai_idg::TransferOptions::compiler_semantics(complete_field_place_languages)
         .semantic_fingerprint();
     let pipeline_hash = idg_pipeline_hash()
+        ^ compiler_frontend_idg_fingerprint(COMPILER_OBJECT_CACHE_VERSION)
         ^ content
         ^ transfer
         ^ u64::from(callgraph_sidecar::CALLGRAPH_CACHE_VERSION).wrapping_mul(0x9E37_79B1_85EB_CA87)
@@ -5099,9 +5100,7 @@ fn trace_step_callee_label(message: &str) -> Option<&str> {
 fn normalized_external_call_label(label: &str) -> &str {
     label
         .trim()
-        .trim_start_matches(bonsai_common::REFERENCE_SIGILS)
-        .trim_start_matches('&')
-        .trim_start_matches('*')
+        .trim_start_matches(bonsai_common::is_name_punctuation)
 }
 
 #[derive(Debug, Default)]
@@ -5344,7 +5343,59 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // adapter-declared implicit class receivers resolve inherited
     // constructors. Rebuild linkage, callgraph, IDG, and taint facts whose
     // identities or attribution depend on those compiler semantics.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 55;
+    // v55 (2026-08-02): compiler-object v39 moves grammar, call-shape,
+    // pseudo-call, receiver-type, and write-back recognition behind the
+    // owning adapters. Rebuild graphs whose lowered call/storage identities
+    // came from the retired shared fallback inventories.
+    // v56 (2026-08-03): aggregate `yield` keeps a non-collapsing generator
+    // boundary and adapter-proven iterable bindings reuse the statement's
+    // existing write node. Rebuild IDG and taint sidecars so a cached graph
+    // cannot retain the former missing generator-field path.
+    // v59 (2026-08-03): field forwarding retains the owning aggregate fact
+    // and no longer composes sibling paths beneath synthetic field writes.
+    // v60 (2026-08-03): Go pointer/composite initializers are lowered once
+    // from their `var_spec` and exact Tree-sitter aggregate value shape;
+    // invalidate graphs that contain wrapper/type/RHS phantom assignments.
+    // v61 (2026-08-03): Kotlin custom getters qualify constructor-declared
+    // property roots as implicit receiver projections before IDG lowering.
+    // v62 (2026-08-03): Kotlin primary-constructor delegation is emitted as
+    // an exact constructor call, preserving receiver state through bases.
+    // v63 (2026-08-03): Elixir value-field assignment RHS nodes lower to
+    // exact field projections instead of dangling pseudo-call results.
+    // v64 (2026-08-03): Elixir `cond` assignment results lower from exact
+    // clause value expressions instead of an unresolved macro call result.
+    // v65 (2026-08-03): Elixir `try` expression results retain exact body and
+    // rescue/catch/else value dependencies while excluding `after` effects.
+    // v66 (2026-08-03): Elixir control-expression map results preserve their
+    // exact per-field branch joins and map-update dependencies.
+    // v67 (2026-08-03): exact relative nested type paths resolve constructors
+    // across same-module files without a leaf-name fallback.
+    // v68 (2026-08-03): constructor delegation preserves each projected
+    // receiver field base, and inherited method dispatch retains the current
+    // object's canonical adapter-declared storage identity.
+    // v69 (2026-08-03): demand-filtered field rows retain the complete finite
+    // suffix universe proven by adapter-lowered Read/Write places. Rebuild
+    // stitched graphs so nested returned fields cannot disappear merely
+    // because their concrete row was outside the current target corridor.
+    // v70 (2026-08-03): Java non-static field initializers and receiver calls
+    // share one adapter-canonical `this.field` place. Invalidate graphs that
+    // retained the former split field identities.
+    // v71 (2026-08-03): PHP callable literals, Go nested aggregate argument
+    // dependencies, and file-derived qualified places now come exclusively
+    // from canonical adapter/compiler facts. Rebuild stitched identities and
+    // transfer edges produced under the former shared text interpretation.
+    // v72 (2026-08-03): direct-call assignment lowering crosses only the
+    // immediate operand of Tree-sitter-proven transparent wrappers. Nested
+    // condition/helper calls no longer replace a compound RHS, and exact
+    // adapter projections remain the value-carrying facts.
+    // v73 (2026-08-03): exact AST-demanded symbolic field projections and
+    // aggregate-consumption markers replace phantom descendant promotion.
+    // v74 (2026-08-03): C++ direct initialization exposes its constructor
+    // boundary, changing call/receiver-state stitching for those declarations.
+    // v75 (2026-08-03): parameter-less receiver accessors map object roots
+    // exactly, and resolver-proven receiver-plus-selector projections extend
+    // the finite syntax demand universe across constructor/inheritance hops.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 75;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 
@@ -5377,6 +5428,11 @@ pub fn analyzer_build_fingerprint() -> &'static str {
 
 fn idg_workspace_pipeline_hash(db: &AnalyzerDb, root: Option<&Path>) -> u64 {
     let mut pipeline_hash = idg_pipeline_hash()
+        // The IDG is lowered from immutable compiler objects. Any frontend
+        // ABI bump can change declaration, call, assignment, or FlowEvent
+        // facts even when every source byte and the on-disk IDG layout stay
+        // unchanged, so an older graph must never survive that bump.
+        ^ compiler_frontend_idg_fingerprint(COMPILER_OBJECT_CACHE_VERSION)
         ^ crate::cache_fingerprint::workspace_content_fingerprint(db)
         ^ default_workspace_idg_transfer_options(db).semantic_fingerprint()
         ^ u64::from(callgraph_sidecar::CALLGRAPH_CACHE_VERSION).wrapping_mul(0x9E37_79B1_85EB_CA87);
@@ -5384,6 +5440,10 @@ fn idg_workspace_pipeline_hash(db: &AnalyzerDb, root: Option<&Path>) -> u64 {
         pipeline_hash ^= crate::cache_fingerprint::dependency_metadata_fingerprint(root);
     }
     pipeline_hash
+}
+
+fn compiler_frontend_idg_fingerprint(version: u32) -> u64 {
+    u64::from(version).wrapping_mul(0xD6E8_FEB8_6659_FD93)
 }
 
 fn default_workspace_idg_transfer_options(db: &AnalyzerDb) -> bonsai_idg::TransferOptions {

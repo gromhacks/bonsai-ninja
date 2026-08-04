@@ -280,20 +280,25 @@ LanguageCapabilities::effective_super_receiver_tokens()
 LanguageCapabilities::effective_implicit_receiver_tokens()
 ```
 
-Shared textual helpers are limited to normalization of the canonical IR
-spellings already emitted by adapters:
+Shared textual helpers own no union of source tokens. They may identify the
+last top-level identifier segment or remove leading punctuation from a fact
+the adapter already classified as a name. Those vocabulary-free operations
+are candidate lookup only; symbol identity still goes through the contextual
+resolver.
 
-- [`IDENTIFIER_SIGILS`] — `$ @ %` (Perl / PHP / Ruby variable sigils).
-- [`REFERENCE_SIGILS`] — `& *` (Rust borrow / C pointer / reference).
-- [`ALL_NAME_PUNCTUATION`] — union of the two; used at qualified-text
-  comparison sites that need to strip whichever variant the adapter
-  emitted.
-- [`QUALIFIED_NAME_SEPARATORS`] — `::`, `->`, `.`, `:` for tail
-  candidate-tail extraction only; symbol identity still goes through the
-  contextual resolver.
-- `LanguageCapabilities::module_path_syntax` — rooted qualified-name
-  prefixes declared by each adapter. Shared resolution never carries a
-  cross-language prefix inventory.
+Adapter capabilities carry the source syntax that a shared pass actually
+needs:
+
+- `LanguageCapabilities::module_path_syntax` declares rooted qualified-name
+  prefixes;
+- `LanguageCapabilities::callable_reference_syntax` declares callable-value
+  prefixes, numeric arity notation, an optional symbol wrapper, and trailing
+  invocation punctuation;
+- `quoted_callable_literals` separately opts into quoted callable values.
+
+An adapter-emitted parameter or assignment supplies its own concrete spelling
+to token compatibility lookup. Shared taint does not manufacture sigiled
+variants from a cross-language list.
 
 New source syntax belongs in its adapter's `GrammarHandler`, AST post-pass,
 or capability declaration. Emit a structural fact (`CallKind::Constructor`,

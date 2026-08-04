@@ -27,14 +27,14 @@ fn call(name: &str) -> FlowEvent {
     }
 }
 
-fn assign_call_args(target: &str, callee: &str, args: &[&str]) -> FlowEvent {
+fn assign_call_args(target: &str, callee: &str, args: &[&str], source_names: &[&str]) -> FlowEvent {
     FlowEvent::Assign {
         span: Span::new(FileId::INVALID, 0, 0),
         target: target.to_string(),
         source_name: None,
         source_call: Some(callee.to_string()),
         source_call_args: args.iter().map(|arg| (*arg).to_string()).collect(),
-        source_names: Vec::new(),
+        source_names: source_names.iter().map(|name| (*name).to_string()).collect(),
         declares_new_binding: false,
         value_kind: None,
     }
@@ -113,6 +113,7 @@ fn call_argument_expression_tokens_propagate_to_target() {
             "valid",
             "Try",
             &["envelope.copy(cmd = routed, user = user, length = routed.length)"],
+            &["envelope", "routed", "user"],
         ),
     ];
     let out = assign_chain_taints(&seed(&["envelope"]), &events);
@@ -151,6 +152,7 @@ fn multiline_closure_argument_tokens_propagate_to_target() {
             "valid",
             "(|| -> Result<Envelope, &str> { Ok(Envelope { cmd: routed.clone() }) })().unwrap_or_else",
             &["|_| Envelope {\n        kind: envelope.kind.clone(),\n        cmd: routed.clone(),\n        user: user.clone(),\n        length: routed.len(),\n        extras: envelope.extras.clone(),\n    }"],
+            &["envelope", "routed", "user"],
         ),
     ];
     let out = assign_chain_taints(&seed(&["envelope"]), &events);

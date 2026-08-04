@@ -1,5 +1,19 @@
 use super::*;
 
+#[test]
+fn method_symbol_reference_is_adapter_owned_and_rejects_ordinary_calls() {
+    let language = language_from_pack(PACK_NAME).expect("ruby grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set ruby grammar");
+    let src = "cb = method(:helper)\nvalue = method(name)\n";
+    let tree = parser.parse(src, None).expect("parse ruby source");
+    let refs = collect_kinds(&tree, &["call", "method_call"])
+        .into_iter()
+        .filter_map(|node| extract_ruby_callable_reference(node, src.as_bytes()))
+        .collect::<Vec<_>>();
+    assert_eq!(refs, vec!["helper"]);
+}
+
 fn parse_import_specs(src: &str) -> Vec<ImportSpec> {
     let language = language_from_pack(PACK_NAME).expect("ruby grammar");
     let mut parser = tree_sitter::Parser::new();

@@ -21,7 +21,8 @@
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::LanguageRegistry;
 use bonsai_taint::{
-    call_site_receives_taint, interprocedural_taint, InterTaintConfig, ReceiverStatePropagation, TokenSet,
+    call_site_receives_taint, compose_idg_seed_nodes, ensure_idg_service, interprocedural_taint,
+    CallResultPassthrough, IdgSeedRequest, InterTaintConfig, ReceiverStatePropagation, TokenSet,
 };
 use bonsai_vfs::Vfs;
 use std::sync::Arc;
@@ -1754,6 +1755,110 @@ fn csharp_mega_flow_handle_reaches_execute_from_readline_value() {
 }
 
 #[test]
+fn java_mega_flow_record_field_reaches_execute_without_tainting_siblings() {
+    let db = open_fixture("java/mega_flow");
+    let global = db.global_index();
+    let handle = func_id(&db, "handle");
+    let execute = func_id(&db, "execute");
+
+    let source_span = call_span(&db, handle, "req.getParameter", None);
+    let sink_span = call_span(&db, execute, "Runtime.getRuntime().exec", Some("cmd"));
+    let idg = ensure_idg_service(&db);
+    let mut anchored_names = TokenSet::default();
+    anchored_names.insert("raw".to_string());
+    anchored_names.insert("req.getParameter".to_string());
+    let anchored_nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::rule_match(handle, &anchored_names, Some(source_span), &[]),
+        global.as_ref(),
+        idg.as_ref(),
+    );
+    let anchored_calls = idg.tainted_call_args_in_closure(&anchored_nodes);
+    assert!(
+        anchored_calls
+            .iter()
+            .any(|(_, call_span, idx)| *call_span == sink_span && *idx == 0),
+        "a span-anchored Java source-call return must reach the record cmd sink; seeds={:?}; calls={anchored_calls:?}",
+        anchored_nodes
+            .iter()
+            .filter_map(|node| idg.resolve_point(*node))
+            .collect::<Vec<_>>()
+    );
+    let sink_nodes = idg.nodes_at_span(execute, sink_span);
+    let lineage_funcs = global
+        .all_files()
+        .flat_map(|file| global.functions_in(file))
+        .map(|decl| bonsai_common::FuncId::new(decl.symbol.raw()))
+        .collect::<ahash::AHashSet<_>>();
+    let relevance = idg.target_relevance_within_funcs_with_max_precision(
+        &sink_nodes,
+        None,
+        &lineage_funcs,
+        Some(bonsai_common::Precision::Narrowed),
+    );
+    let targeted = idg.forward_closure_evidence_rooted_at_func_within_funcs_and_relevance_with_max_precision(
+        &anchored_nodes,
+        handle,
+        &lineage_funcs,
+        Some(&relevance),
+        Some(bonsai_common::Precision::Narrowed),
+    );
+    assert!(
+        targeted.nodes.iter().any(|node| sink_nodes.contains(node)),
+        "target relevance must retain the Java record source-to-sink path; seeds={:?}; targets={:?}; closure={:?}",
+        anchored_nodes
+            .iter()
+            .filter_map(|node| idg.resolve_point(*node))
+            .collect::<Vec<_>>(),
+        sink_nodes
+            .iter()
+            .filter_map(|node| idg.resolve_point(*node))
+            .collect::<Vec<_>>(),
+        targeted
+            .nodes
+            .iter()
+            .filter_map(|node| idg.resolve_point(*node))
+            .collect::<Vec<_>>()
+    );
+    let mut raw_seed = TokenSet::default();
+    raw_seed.insert("req.getParameter".to_string());
+    let raw_result = interprocedural_taint(handle, &raw_seed, &InterTaintConfig::default(), &db);
+    assert!(
+        raw_result
+            .call_records
+            .iter()
+            .any(|record| record.callee == execute),
+        "Java record cmd field must reach execute across the full pipeline; records={:?}",
+        raw_result
+            .call_records
+            .iter()
+            .filter_map(|record| {
+                let caller = global
+                    .decl_of(bonsai_common::SymbolId::new(record.caller.raw()))?
+                    .name
+                    .clone();
+                let callee = global
+                    .decl_of(bonsai_common::SymbolId::new(record.callee.raw()))?
+                    .name
+                    .clone();
+                Some((caller, callee, record.tainted_args.clone()))
+            })
+            .collect::<Vec<_>>()
+    );
+
+    let mut user_seed = TokenSet::default();
+    user_seed.insert("req.getHeader".to_string());
+    let user_result = interprocedural_taint(handle, &user_seed, &InterTaintConfig::default(), &db);
+    assert!(
+        !user_result
+            .call_records
+            .iter()
+            .any(|record| record.callee == execute),
+        "Java record user sibling field must not reach execute; records={:?}",
+        user_result.call_records
+    );
+}
+
+#[test]
 fn python_mega_flow_handle_reaches_execute_from_request_args_get() {
     let db = open_fixture("python/mega_flow");
     let global = db.global_index();
@@ -1841,10 +1946,40 @@ fn php_mega_flow_handle_reaches_execute_from_readline_value() {
     let execute = func_id(&db, "execute");
     let mut seed = TokenSet::default();
     seed.insert("readline".to_string());
-    let result = interprocedural_taint(handle, &seed, &InterTaintConfig::default(), &db);
+    let result = interprocedural_taint(
+        handle,
+        &seed,
+        &InterTaintConfig {
+            // Mirrors the declarative PHP typing rules used by production.
+            // This compatibility API is deliberately rulepack-free, so its
+            // caller supplies external-library transfer summaries explicitly.
+            call_result_passthroughs: vec![
+                CallResultPassthrough {
+                    callee: "array_map".to_string(),
+                    receiver_type: None,
+                    input_arg_indices: vec![1, 2, 3, 4, 5, 6, 7],
+                    input_receiver: false,
+                },
+                CallResultPassthrough {
+                    callee: "array_filter".to_string(),
+                    receiver_type: None,
+                    input_arg_indices: vec![0],
+                    input_receiver: false,
+                },
+                CallResultPassthrough {
+                    callee: "array_reduce".to_string(),
+                    receiver_type: None,
+                    input_arg_indices: vec![0, 2],
+                    input_receiver: false,
+                },
+            ],
+            ..Default::default()
+        },
+        &db,
+    );
     assert!(
         result.call_records.iter().any(|record| record.callee == execute),
-        "expected PHP mega flow to propagate readline into execute; records={:?}",
+        "expected PHP mega flow to propagate readline into execute; records={:?}; calls={:?}",
         result
             .call_records
             .iter()
@@ -1859,7 +1994,8 @@ fn php_mega_flow_handle_reaches_execute_from_readline_value() {
                     .clone();
                 Some((caller, callee, record.tainted_args.clone()))
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        result.tainted_calls
     );
     assert!(
         result.tainted_calls.iter().any(|call| {

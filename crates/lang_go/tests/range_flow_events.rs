@@ -396,37 +396,184 @@ func partial(s string) string {
     assert_eq!(constraint.input_param_index, Some(0));
     assert!(matches!(
         &constraint.domain,
-        CharacterConstraintDomain::ExcludesExact { characters }
+        CharacterConstraintDomain::ProviderBound {
+            factory_call,
+            operation_call,
+            domain,
+        }
+            if factory_call == "strings.Map"
+                && operation_call == "strings.Map"
+                && matches!(domain.as_ref(), CharacterConstraintDomain::ExcludesExact { characters }
             if characters == &["\r".to_string(), "\n".to_string()]
+                )
     ));
 }
 
 #[test]
-fn callback_guards_are_adapter_owned_exact_compiler_facts() {
+fn guarded_append_loop_emits_exact_character_constraint_without_security_policy() {
+    let db = db_with(
+        r#"
+package main
+
+func safe(filename string) string {
+    clean := make([]byte, 0, 255)
+    for i := 0; i < len(filename); i++ {
+        ch := filename[i]
+        if ch >= 0x20 && ch != 0x7f {
+            clean = append(clean, ch)
+        }
+    }
+    return string(clean)
+}
+
+func weak(filename string) string {
+    clean := make([]byte, 0, 255)
+    for i := 0; i < len(filename); i++ {
+        ch := filename[i]
+        if ch != '\n' { clean = append(clean, ch) }
+    }
+    return string(clean)
+}
+"#,
+    );
+    let file = db.vfs().all_files().into_iter().next().expect("Go source file");
+    let index = db.decl_index(file).expect("Go declaration index");
+    let safe = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "safe")
+        .expect("safe decl");
+    let facts = index
+        .character_constraints
+        .iter()
+        .filter(|fact| fact.function_span == safe.span)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        facts.len(),
+        1,
+        "safe loop should lower once: {:#?}",
+        index.character_constraints
+    );
+    assert_eq!(facts[0].input_place, "filename");
+    assert_eq!(facts[0].input_param_index, Some(0));
+    assert!(matches!(
+        &facts[0].output,
+        CharacterConstraintOutput::Assignment { target } if target == "clean"
+    ));
+    assert!(matches!(
+        &facts[0].domain,
+        CharacterConstraintDomain::ExcludesExact { characters }
+            if characters == &["\r".to_string(), "\n".to_string()]
+    ));
+    let weak = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "weak")
+        .expect("weak decl");
+    assert!(
+        index
+            .character_constraints
+            .iter()
+            .all(|fact| fact.function_span != weak.span),
+        "a partial newline-only filter is not a complete CR/LF boundary"
+    );
+}
+
+#[test]
+fn same_origin_predicate_and_fallback_lower_to_caller_postcondition() {
+    let db = db_with(
+        r#"
+package main
+
+func sameOrigin(s string) bool {
+    return len(s) > 0 && s[0] == '/' && (len(s) == 1 || s[1] != '/')
+}
+
+func redirect(target string) {
+    if !sameOrigin(target) { target = "/" }
+    consume(target)
+}
+
+func weak(target string) {
+    if len(target) > 0 { target = "/" }
+    consume(target)
+}
+"#,
+    );
+    let file = db.vfs().all_files().into_iter().next().expect("Go source file");
+    let index = db.decl_index(file).expect("Go declaration index");
+    let redirect = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "redirect")
+        .expect("redirect decl");
+    let facts = index
+        .same_origin_path_constraints
+        .iter()
+        .filter(|fact| fact.function_span == redirect.span)
+        .collect::<Vec<_>>();
+    let [fact] = facts.as_slice() else {
+        panic!(
+            "exact same-origin caller fact missing: {:#?}",
+            index.same_origin_path_constraints
+        );
+    };
+    assert_eq!(fact.input_place, "target");
+    assert_eq!(fact.input_param_index, Some(0));
+    assert!(fact.rejects_scheme && fact.rejects_authority);
+    assert!(fact.requires_absolute_path && fact.rejects_scheme_relative_path);
+    let weak = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "weak")
+        .expect("weak decl");
+    assert!(index
+        .same_origin_path_constraints
+        .iter()
+        .all(|fact| fact.function_span != weak.span));
+
+    let local_db = db_with(
+        r#"
+package main
+func sameOrigin(s string) bool {
+    return len(s) > 0 && s[0] == '/' && (len(s) == 1 || s[1] != '/')
+}
+func redirect() {
+    target := source()
+    if !sameOrigin(target) { target = "/" }
+    consume(target)
+}
+"#,
+    );
+    let local_file = local_db
+        .vfs()
+        .all_files()
+        .into_iter()
+        .next()
+        .expect("Go source file");
+    let local_index = local_db.decl_index(local_file).expect("Go declaration index");
+    let local = local_index
+        .same_origin_path_constraints
+        .first()
+        .expect("caller-local same-origin fact");
+    assert_eq!(local.input_place, "target");
+    assert_eq!(local.input_param_index, None);
+}
+
+#[test]
+fn callback_selector_guards_are_api_neutral_compiler_facts() {
     let db = db_with(
         r#"
 package main
 import (
     "github.com/golang-jwt/jwt/v5"
-    "encoding/xml"
-    "fmt"
-    "io"
 )
 
-var charsets = map[string]bool{"utf-8": true}
-
-func verify(raw string, key []byte, body io.Reader) {
+func verify(raw string, key []byte) {
     jwt.Parse(raw, func(t *jwt.Token) (any, error) {
         if t.Method.Alg() != "HS256" { return nil, jwt.ErrSignatureInvalid }
         return key, nil
     })
-    decoder := xml.NewDecoder(body)
-    decoder.Strict = true
-    decoder.CharsetReader = func(label string, input io.Reader) (io.Reader, error) {
-        if !charsets[label] { return nil, fmt.Errorf("unsupported") }
-        return input, nil
-    }
-    decoder.Decode(nil)
 }
 
 func unsafe(raw string, key []byte) {
@@ -447,22 +594,20 @@ func unsafe(raw string, key []byte) {
         index
             .compiler_guards
             .iter()
-            .filter(|fact| fact.capability == "callback.algorithm-pinned")
+            .filter(|fact| fact.capability == "callback.selector-result-pinned")
             .count(),
         1,
         "only the algorithm-pinned callback is proven; imports={imports:#?}, guards={:#?}",
         index.compiler_guards,
     );
-    assert_eq!(
-        index
-            .compiler_guards
-            .iter()
-            .filter(|fact| fact.capability == "decoder.remote-resolution-disabled")
-            .count(),
-        1,
-        "the strict allowlisted decoder callback is proven: {:#?}",
-        index.compiler_guards
-    );
+    let fact = index
+        .compiler_guards
+        .iter()
+        .find(|fact| fact.capability == "callback.selector-result-pinned")
+        .expect("selector-pin fact");
+    assert!(fact.evidence.contains(&"callback-argument:1".to_string()));
+    assert!(fact.evidence.contains(&"selector:Method.Alg".to_string()));
+    assert!(fact.evidence.contains(&"literal:hs256".to_string()));
 }
 
 #[test]

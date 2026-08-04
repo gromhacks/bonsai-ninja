@@ -6,23 +6,54 @@ use bonsai_lang_api::{
         c_family_preproc_imports, collect_kinds, collect_param_type_aliases, first_named_child_of_kind,
         language_from_pack, node_text, parse_with, span_of,
     },
-    with_fn_kinds, AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasVocabulary, Visibility,
+    AdapterContext, AdapterError, ArgumentPassingMode, DeclIndex, GrammarHandler, GuardedValueFilterFact,
+    ImportIndex, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasVocabulary,
+    Visibility, EMPTY_HANDLER,
 };
 use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("c");
 const PACK_NAME: &str = "c";
 const HANDLER: GrammarHandler = GrammarHandler {
+    fn_kinds: &["function_definition"],
+    if_kinds: &["if_statement", "conditional_expression", "switch_statement"],
+    for_kinds: &["for_statement"],
+    while_kinds: &["while_statement"],
+    do_kinds: &["do_statement"],
+    call_kinds: &["call_expression"],
+    argument_passing_mode_extractor: Some(c_argument_passing_mode),
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+    value_free_expression_kinds: &["sizeof_expression", "alignof_expression"],
+    call_ref_kinds: &["call_expression"],
+    member_expression_kinds: &["field_expression"],
+    subscript_expression_kinds: &["subscript_expression"],
+    syntax_error_tolerant_call_names: &["va_arg", "__builtin_va_arg"],
     class_kinds: &["struct_specifier", "union_specifier"],
     class_decl_kinds: &[
         ("struct_specifier", bonsai_lang_api::DeclKind::Struct),
         ("union_specifier", bonsai_lang_api::DeclKind::Struct),
     ],
+    assignment_kinds: &["assignment_expression", "init_declarator"],
+    return_kinds: &["return_statement"],
+    break_kinds: &["break_statement"],
+    continue_kinds: &["continue_statement"],
     nested_type_ownership: false,
-    ..with_fn_kinds(&["function_definition"])
+    ..EMPTY_HANDLER
 };
+
+fn c_argument_passing_mode(argument: Node<'_>, value: Node<'_>) -> ArgumentPassingMode {
+    if [argument, value].into_iter().any(|node| {
+        matches!(node.kind(), "pointer_expression" | "unary_expression") && {
+            let mut cursor = node.walk();
+            let has_address_of = node.children(&mut cursor).any(|child| child.kind() == "&");
+            has_address_of
+        }
+    }) {
+        ArgumentPassingMode::WriteBack
+    } else {
+        ArgumentPassingMode::Value
+    }
+}
 
 /// C function parameters: every binding is `Type declarator`. The
 /// kit's `param_alias_from_node` consults `child_by_field_name("type")`
@@ -69,7 +100,12 @@ impl LanguageAdapter for CAdapter {
         vfs: &bonsai_lang_api::Vfs,
         tree: &Tree,
     ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
-        bonsai_lang_api::c_family_declaration_macro_recovery_edits(snapshot, vfs, tree)
+        bonsai_lang_api::c_family_declaration_macro_recovery_edits(
+            snapshot,
+            vfs,
+            tree,
+            &["va_arg", "__builtin_va_arg"],
+        )
     }
     fn capabilities(&self) -> LanguageCapabilities {
         // Macros: tree-sitter-c parses `STR_CPY(dest, src)` and
@@ -146,6 +182,7 @@ impl LanguageAdapter for CAdapter {
                     decl.type_aliases = aliases.clone();
                 }
             }
+            decl_index.guarded_value_filters = c_guarded_value_filter_facts(&decl_index, &tree, file, src);
         }
         for decl in &mut decl_index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
@@ -153,9 +190,11 @@ impl LanguageAdapter for CAdapter {
                 .params
                 .iter()
                 .any(|param| param == bonsai_lang_api::kit::SYNTHETIC_VARARGS_PARAM);
-            bonsai_lang_api::kit::normalize_c_variadic_builtin_flow(
+            bonsai_lang_api::kit::normalize_variadic_builtin_flow(
                 &mut decl.flow_events,
                 has_variadic_param,
+                &["va_start", "__builtin_va_start"],
+                &["va_arg", "__builtin_va_arg"],
             );
             inject_c_lifecycle_events(&mut decl.flow_events);
         }
@@ -164,6 +203,302 @@ impl LanguageAdapter for CAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+/// Lower C's element-at-a-time filtered-buffer construction without assigning
+/// security meaning to the predicate call. A security rule must match the
+/// exact predicate span before this compiler fact can receive sanitizer
+/// credit.
+fn c_guarded_value_filter_facts(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<GuardedValueFilterFact> {
+    let mut facts = Vec::new();
+    for function in collect_kinds(tree, &["function_definition"]) {
+        let function_span = span_of(file, &function);
+        if !index.defs.iter().any(|decl| decl.span == function_span) {
+            continue;
+        }
+        let Some(body) = function.child_by_field_name("body") else {
+            continue;
+        };
+        let assignments = descendant_nodes_of_kind(body, "assignment_expression");
+        let initializers = descendant_nodes_of_kind(body, "init_declarator");
+        for branch in descendant_nodes_of_kind(body, "if_statement") {
+            if !has_loop_ancestor_within(branch, function) {
+                continue;
+            }
+            let Some(condition) = branch.child_by_field_name("condition") else {
+                continue;
+            };
+            let mut predicates = Vec::new();
+            collect_positively_required_predicate_calls(condition, src, &mut predicates);
+            let Some(consequence) = branch.child_by_field_name("consequence") else {
+                continue;
+            };
+            for predicate in predicates {
+                let Some(input_place) = predicate_subscript_input(predicate, src) else {
+                    continue;
+                };
+                for write in descendant_nodes_of_kind(consequence, "assignment_expression") {
+                    let Some((output_place, copied_input)) = filtered_element_copy(write, src) else {
+                        continue;
+                    };
+                    if copied_input != input_place
+                        || !output_is_zero_initialized(&initializers, &output_place, write.start_byte(), src)
+                        || !output_has_only_filtered_or_zero_writes(&assignments, &output_place, write, src)
+                        || !output_is_zero_terminated_after(
+                            &assignments,
+                            &output_place,
+                            write.end_byte(),
+                            src,
+                        )
+                    {
+                        continue;
+                    }
+                    let predicate_callee = predicate.child_by_field_name("function").unwrap_or(predicate);
+                    facts.push(GuardedValueFilterFact {
+                        function_span,
+                        predicate_call_span: span_of(file, &predicate_callee),
+                        write_span: span_of(file, &write),
+                        input_place: input_place.clone(),
+                        output_place,
+                    });
+                }
+            }
+        }
+    }
+    facts.sort_by(|left, right| {
+        (
+            left.function_span.start,
+            left.predicate_call_span.start,
+            left.write_span.start,
+            left.input_place.as_str(),
+            left.output_place.as_str(),
+        )
+            .cmp(&(
+                right.function_span.start,
+                right.predicate_call_span.start,
+                right.write_span.start,
+                right.input_place.as_str(),
+                right.output_place.as_str(),
+            ))
+    });
+    facts.dedup();
+    facts
+}
+
+fn descendant_nodes_of_kind<'tree>(root: Node<'tree>, kind: &str) -> Vec<Node<'tree>> {
+    let mut matches = Vec::new();
+    let mut work = vec![root];
+    while let Some(node) = work.pop() {
+        if node != root && node.kind() == kind {
+            matches.push(node);
+        }
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.named_children(&mut cursor).collect();
+        work.extend(children.into_iter().rev());
+    }
+    matches
+}
+
+fn has_loop_ancestor_within(node: Node<'_>, function: Node<'_>) -> bool {
+    let mut parent = node.parent();
+    while let Some(ancestor) = parent {
+        if ancestor == function {
+            return false;
+        }
+        if matches!(
+            ancestor.kind(),
+            "for_statement" | "while_statement" | "do_statement"
+        ) {
+            return true;
+        }
+        parent = ancestor.parent();
+    }
+    false
+}
+
+/// Collect calls whose truth is required for the enclosing condition to be
+/// true. Positive conjunctions preserve that implication; disjunctions,
+/// negation, and comparisons do not.
+fn collect_positively_required_predicate_calls<'tree>(
+    condition: Node<'tree>,
+    src: &[u8],
+    out: &mut Vec<Node<'tree>>,
+) {
+    match condition.kind() {
+        "parenthesized_expression" => {
+            if let Some(inner) = first_named_child(condition) {
+                collect_positively_required_predicate_calls(inner, src, out);
+            }
+        }
+        "call_expression" => out.push(condition),
+        "binary_expression" if binary_operator_text(condition, src) == Some("&&") => {
+            if let Some(left) = condition.child_by_field_name("left") {
+                collect_positively_required_predicate_calls(left, src, out);
+            }
+            if let Some(right) = condition.child_by_field_name("right") {
+                collect_positively_required_predicate_calls(right, src, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn binary_operator_text<'a>(node: Node<'_>, src: &'a [u8]) -> Option<&'a str> {
+    let mut cursor = node.walk();
+    let operator = node
+        .children(&mut cursor)
+        .find(|child| !child.is_named())
+        .map(|child| node_text(&child, src).trim());
+    operator
+}
+
+fn first_named_child(node: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = node.walk();
+    let child = node.named_children(&mut cursor).next();
+    child
+}
+
+fn predicate_subscript_input(predicate: Node<'_>, src: &[u8]) -> Option<String> {
+    let arguments = predicate.child_by_field_name("arguments")?;
+    let argument = first_named_child(arguments)?;
+    let subscripts = node_and_descendants_of_kind(argument, "subscript_expression");
+    let [subscript] = subscripts.as_slice() else {
+        return None;
+    };
+    subscript_base_place(*subscript, src)
+}
+
+fn node_and_descendants_of_kind<'tree>(root: Node<'tree>, kind: &str) -> Vec<Node<'tree>> {
+    let mut matches = Vec::new();
+    if root.kind() == kind {
+        matches.push(root);
+    }
+    matches.extend(descendant_nodes_of_kind(root, kind));
+    matches
+}
+
+fn filtered_element_copy(write: Node<'_>, src: &[u8]) -> Option<(String, String)> {
+    if assignment_operator_text(write, src)? != "=" {
+        return None;
+    }
+    let left = write.child_by_field_name("left")?;
+    let right = write.child_by_field_name("right")?;
+    if left.kind() != "subscript_expression" || right.kind() != "subscript_expression" {
+        return None;
+    }
+    Some((
+        subscript_base_place(left, src)?,
+        subscript_base_place(right, src)?,
+    ))
+}
+
+fn assignment_operator_text<'a>(node: Node<'_>, src: &'a [u8]) -> Option<&'a str> {
+    let left = node.child_by_field_name("left")?;
+    let right = node.child_by_field_name("right")?;
+    let between = src.get(left.end_byte()..right.start_byte())?;
+    std::str::from_utf8(between).ok().map(str::trim)
+}
+
+fn subscript_base_place(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let base = node.child_by_field_name("argument")?;
+    let value = node_text(&base, src).trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn output_is_zero_initialized(initializers: &[Node<'_>], output: &str, before: usize, src: &[u8]) -> bool {
+    initializers
+        .iter()
+        .copied()
+        .filter(|declarator| declarator.end_byte() <= before)
+        .any(|declarator| {
+            let Some(binding) = declarator.child_by_field_name("declarator") else {
+                return false;
+            };
+            let Some(value) = declarator.child_by_field_name("value") else {
+                return false;
+            };
+            binding.kind() == "array_declarator"
+                && declarator_base_place(binding, src).as_deref() == Some(output)
+                && zero_initializer(value, src)
+        })
+}
+
+fn declarator_base_place(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() == "identifier" {
+        return Some(node_text(&node, src).to_string());
+    }
+    node.child_by_field_name("declarator")
+        .and_then(|inner| declarator_base_place(inner, src))
+}
+
+fn zero_initializer(node: Node<'_>, src: &[u8]) -> bool {
+    if node.kind() != "initializer_list" {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let values: Vec<_> = node.named_children(&mut cursor).collect();
+    !values.is_empty() && values.into_iter().all(|value| zero_scalar(value, src))
+}
+
+fn zero_scalar(node: Node<'_>, src: &[u8]) -> bool {
+    matches!(node.kind(), "number_literal" | "char_literal")
+        && matches!(node_text(&node, src).trim(), "0" | "'\\0'")
+}
+
+fn output_has_only_filtered_or_zero_writes(
+    assignments: &[Node<'_>],
+    output: &str,
+    filtered_write: Node<'_>,
+    src: &[u8],
+) -> bool {
+    let mut dynamic_writes = 0usize;
+    for assignment in assignments {
+        let Some(left) = assignment.child_by_field_name("left") else {
+            continue;
+        };
+        let targets_output = if left.kind() == "subscript_expression" {
+            subscript_base_place(left, src).as_deref() == Some(output)
+        } else {
+            node_text(&left, src).trim() == output
+        };
+        if !targets_output {
+            continue;
+        }
+        let Some(right) = assignment.child_by_field_name("right") else {
+            return false;
+        };
+        if zero_scalar(right, src) {
+            continue;
+        }
+        dynamic_writes += 1;
+        if *assignment != filtered_write || filtered_element_copy(*assignment, src).is_none() {
+            return false;
+        }
+    }
+    dynamic_writes == 1
+}
+
+fn output_is_zero_terminated_after(assignments: &[Node<'_>], output: &str, after: usize, src: &[u8]) -> bool {
+    assignments
+        .iter()
+        .copied()
+        .filter(|assignment| assignment.start_byte() >= after)
+        .any(|assignment| {
+            assignment
+                .child_by_field_name("left")
+                .filter(|left| left.kind() == "subscript_expression")
+                .and_then(|left| subscript_base_place(left, src))
+                .as_deref()
+                == Some(output)
+                && assignment
+                    .child_by_field_name("right")
+                    .is_some_and(|right| zero_scalar(right, src))
+        })
 }
 
 /// Tree-sitter can recover from macro-heavy C headers by stretching a

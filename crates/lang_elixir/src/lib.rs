@@ -6,22 +6,63 @@
 //! identifier in the grammar handler. Constructs with `do ... end`
 //! blocks (function bodies, branches, loops) all share the `do_block`
 //! grammar kind.
-use bonsai_common::FileId;
+use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{
-        call_arg_from_node, collect_kinds, expression_flow_from_node, first_named_child_of_kind,
-        language_from_pack, node_at_span, node_text, parse_with, span_of,
+        call_arg_from_node_with_handler, collect_kinds, first_named_child_of_kind, language_from_pack,
+        node_at_span, node_text, parse_with, span_of,
     },
-    with_fn_kinds, AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref, RefKind,
-    SyntaxSpecialForm, Visibility,
+    AdapterContext, AdapterError, AssignmentValueFact, DeclIndex, ExpressionFlow, GrammarHandler,
+    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref,
+    RefKind, SyntaxSpecialForm, Visibility, EMPTY_HANDLER,
 };
 use bonsai_lang_api::{AssignValueKind, FlowEvent};
 use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("elixir");
 const PACK_NAME: &str = "elixir";
+
+fn direct_token(node: Node<'_>, src: &[u8], expected: &str) -> bool {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return false;
+    }
+    loop {
+        let child = cursor.node();
+        if !child.is_named() && node_text(&child, src).trim() == expected {
+            return true;
+        }
+        if !cursor.goto_next_sibling() {
+            return false;
+        }
+    }
+}
+
+fn extract_elixir_callable_reference(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() != "unary_operator" || !direct_token(node, src, "&") {
+        return None;
+    }
+    let operand = node
+        .child_by_field_name("operand")
+        .or_else(|| node.named_child(0))?;
+    if operand.kind() != "binary_operator" || !direct_token(operand, src, "/") {
+        return None;
+    }
+    let function = operand
+        .child_by_field_name("left")
+        .or_else(|| operand.named_child(0))?;
+    let arity = operand.child_by_field_name("right").or_else(|| {
+        u32::try_from(operand.named_child_count().saturating_sub(1))
+            .ok()
+            .and_then(|index| operand.named_child(index))
+    })?;
+    if arity.kind() != "integer" {
+        return None;
+    }
+    let function = node_text(&function, src).trim();
+    (!function.is_empty()).then(|| function.to_string())
+}
 // Elixir has no direct `function_definition` grammar node. Function
 // definitions come through as `call` nodes with target `def` / `defp`.
 // Accepting `call` as the fn-kind means the adapter treats every call
@@ -31,16 +72,35 @@ const PACK_NAME: &str = "elixir";
 // syntax — precision upgrades would require a hand-rolled handler
 // filtering by target.
 const HANDLER: GrammarHandler = GrammarHandler {
+    fn_kinds: &["call"],
+    call_kinds: &["call"],
+    argument_passing_mode_extractor: None,
     assignment_kinds: &["binary_operator"],
+    call_ref_kinds: &["call"],
+    subscript_expression_kinds: &["index_expression"],
+    non_call_ref_names: &[
+        "def",
+        "defp",
+        "defmodule",
+        "defmacro",
+        "defmacrop",
+        "defprotocol",
+        "defimpl",
+        "defdelegate",
+        "defstruct",
+        "defexception",
+    ],
+    callable_reference_extractor: Some(extract_elixir_callable_reference),
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     // Elixir functions return their final expression; the kit emits a
     // `Return` for the last statement of the `do` block.
     tail_expression_returns: true,
+    lambda_kinds: &["anonymous_function", "do_block"],
     special_forms: &[
         SyntaxSpecialForm::CallEncodedControlFlow,
         SyntaxSpecialForm::DirectDoBlockBody,
     ],
-    ..with_fn_kinds(&["call"])
+    ..EMPTY_HANDLER
 };
 
 #[derive(Debug, Default, Copy, Clone)]
@@ -76,6 +136,12 @@ impl LanguageAdapter for ElixirAdapter {
             super_receiver_tokens: &[],
             implicit_receiver_tokens: &[],
             callable_declaration_family: bonsai_lang_api::CallableDeclarationFamily::FunctionClauses,
+            callable_reference_syntax: bonsai_lang_api::CallableReferenceSyntax {
+                prefixes: &["&"],
+                numeric_arity_suffix: true,
+                symbol_wrapper: None,
+                trailing_invocation_punctuation: true,
+            },
             ..LanguageCapabilities::partial_baseline()
         }
     }
@@ -88,7 +154,11 @@ impl LanguageAdapter for ElixirAdapter {
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
             let map_field_assigns = collect_elixir_map_literal_field_assigns(&tree, src, file);
-            let value_field_access_spans = collect_elixir_value_field_access_spans(&tree, file);
+            let value_field_accesses = collect_elixir_value_field_accesses(&tree, src, file);
+            let value_field_assignments = lower_elixir_value_field_assignment_facts(
+                &mut decl_index.assignment_values,
+                &value_field_accesses,
+            );
             let local_callable_invocations = collect_elixir_local_callable_invocations(&tree, src, file);
             decl_index
                 .refs
@@ -106,7 +176,11 @@ impl LanguageAdapter for ElixirAdapter {
                 }
                 inject_elixir_local_callable_invocations(decl, &local_callable_invocations);
                 insert_elixir_map_field_assigns_in_events(&mut decl.flow_events, &map_field_assigns);
-                remove_elixir_value_field_access_calls(&mut decl.flow_events, &value_field_access_spans);
+                lower_elixir_value_field_access_events(
+                    &mut decl.flow_events,
+                    &value_field_accesses,
+                    &value_field_assignments,
+                );
                 normalize_elixir_control_expression_assignments(&mut decl.flow_events, &tree, src);
                 bonsai_lang_api::kit::annotate_tuple_call_result_bindings(&mut decl.flow_events, &tree, src);
             }
@@ -221,7 +295,7 @@ fn collect_elixir_local_callable_invocations(tree: &Tree, src: &[u8], file: File
         let mut args = Vec::new();
         let mut cursor = arguments.walk();
         for argument in arguments.named_children(&mut cursor) {
-            if let Some(argument) = call_arg_from_node(argument, file, src, None) {
+            if let Some(argument) = call_arg_from_node_with_handler(argument, file, src, None, &HANDLER) {
                 args.push(argument);
             }
         }
@@ -433,45 +507,88 @@ fn collect_elixir_map_literal_field_assigns(
         let Some(right) = assignment.child_by_field_name("right") else {
             continue;
         };
-        if right.kind() != "map" {
-            continue;
-        }
         let target = node_text(&left, src).trim().to_string();
         if target.is_empty() {
             continue;
         }
-        let mut fields = Vec::new();
-        for pair in elixir_direct_map_pairs(right) {
-            let Some(key_node) = pair.child_by_field_name("key") else {
-                continue;
-            };
-            let Some(value_node) = pair.child_by_field_name("value") else {
-                continue;
-            };
-            let Some(key) = elixir_map_key(key_node, src) else {
-                continue;
-            };
-            let sources = elixir_value_source_names(value_node, src);
-            fields.push(FlowEvent::Assign {
-                span: span_of(file, &value_node),
-                target: format!("{target}.{key}"),
-                source_name: (sources.len() == 1).then(|| sources[0].clone()),
-                source_call: None,
-                source_call_args: Vec::new(),
-                source_names: sources,
-                declares_new_binding: false,
-                value_kind: Some(AssignValueKind::Compound),
-            });
+        let result_nodes = elixir_assignment_result_nodes(right, src);
+        let mut joined_fields: Vec<(String, Vec<String>)> = Vec::new();
+        for map in result_nodes.into_iter().filter(|node| node.kind() == "map") {
+            for pair in elixir_direct_map_pairs(map) {
+                let Some(key_node) = pair.child_by_field_name("key") else {
+                    continue;
+                };
+                let Some(value_node) = pair.child_by_field_name("value") else {
+                    continue;
+                };
+                let Some(key) = elixir_map_key(key_node, src) else {
+                    continue;
+                };
+                let sources = elixir_value_source_names(value_node, file, src);
+                let field_index =
+                    if let Some(index) = joined_fields.iter().position(|(existing, _)| existing == &key) {
+                        index
+                    } else {
+                        joined_fields.push((key.clone(), Vec::new()));
+                        joined_fields.len() - 1
+                    };
+                let joined = &mut joined_fields[field_index].1;
+                for source in sources {
+                    if !joined.contains(&source) {
+                        joined.push(source);
+                    }
+                }
+            }
         }
+        joined_fields.sort_by(|left, right| left.0.cmp(&right.0));
+        let assign_span = span_of(file, &assignment);
+        let fields = joined_fields
+            .into_iter()
+            .map(|(key, mut sources)| {
+                sources.sort();
+                sources.dedup();
+                FlowEvent::Assign {
+                    span: assign_span,
+                    target: format!("{target}.{key}"),
+                    source_name: (sources.len() == 1).then(|| sources[0].clone()),
+                    source_call: None,
+                    source_call_args: Vec::new(),
+                    value_kind: Some(if sources.is_empty() {
+                        AssignValueKind::Literal
+                    } else {
+                        AssignValueKind::Compound
+                    }),
+                    source_names: sources,
+                    declares_new_binding: false,
+                }
+            })
+            .collect::<Vec<_>>();
         if !fields.is_empty() {
             out.push(ElixirMapFieldAssigns {
-                assign_span: span_of(file, &assignment),
+                assign_span,
                 target,
                 fields,
             });
         }
     }
     out
+}
+
+fn elixir_assignment_result_nodes<'tree>(right: Node<'tree>, src: &[u8]) -> Vec<Node<'tree>> {
+    if right.kind() == "map" {
+        return vec![right];
+    }
+    if right.kind() != "call" {
+        return Vec::new();
+    }
+    let Some(macro_name) = right
+        .child_by_field_name("target")
+        .map(|target| node_text(&target, src).trim())
+        .filter(|name| elixir_control_expression_macro(name))
+    else {
+        return Vec::new();
+    };
+    elixir_control_expression_value_nodes(&right, macro_name, src)
 }
 
 fn elixir_direct_map_pairs(map: Node<'_>) -> Vec<Node<'_>> {
@@ -482,7 +599,7 @@ fn elixir_direct_map_pairs(map: Node<'_>) -> Vec<Node<'_>> {
         for child in node.named_children(&mut cursor) {
             if child.kind() == "pair" {
                 out.push(child);
-            } else if matches!(child.kind(), "map_content" | "keywords") {
+            } else if matches!(child.kind(), "map_content" | "keywords" | "binary_operator") {
                 pending.push(child);
             }
         }
@@ -508,46 +625,13 @@ fn elixir_map_key(node: Node<'_>, src: &[u8]) -> Option<String> {
     Some(key.to_string())
 }
 
-fn elixir_value_source_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
-    fn collect(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
-        match node.kind() {
-            "identifier" => {
-                let source = node_text(&node, src).trim();
-                if !source.is_empty() {
-                    out.push(source.to_string());
-                }
-                return;
-            }
-            // Strings and charlists are not always literals in Elixir: their
-            // CST may contain interpolation children (`"#{raw}"`). Walk
-            // those children so the AST, rather than a text/name table,
-            // determines the field's value dependencies.
-            "integer" | "float" | "atom" | "true" | "false" | "nil" => {
-                return;
-            }
-            "call" => {
-                if node.child_by_field_name("arguments").is_none() {
-                    if let Some(target) = node.child_by_field_name("target") {
-                        if target.kind() == "dot" {
-                            let source = node_text(&target, src).replace([' ', '\t', '\n', '\r'], "");
-                            if !source.is_empty() {
-                                out.push(source);
-                            }
-                            return;
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            collect(child, src, out);
-        }
-    }
-
+fn elixir_value_source_names(node: Node<'_>, file: FileId, src: &[u8]) -> Vec<String> {
+    let flow = bonsai_lang_api::kit::expression_flow_from_node_with_handler(node, file, src, &HANDLER);
     let mut out = Vec::new();
-    collect(node, src, &mut out);
+    if let Some(place) = flow.place {
+        out.push(place);
+    }
+    out.extend(flow.source_names);
     out.sort();
     out.dedup();
     out
@@ -926,7 +1010,7 @@ fn normalize_elixir_control_expression_assignments(events: &mut [FlowEvent], tre
 }
 
 fn elixir_control_expression_macro(name: &str) -> bool {
-    matches!(name, "if" | "unless")
+    matches!(name, "if" | "unless" | "cond" | "try")
 }
 
 fn elixir_control_expression_value_sources(
@@ -949,8 +1033,9 @@ fn elixir_control_expression_value_sources(
         return None;
     }
     let mut out = Vec::new();
-    for value in elixir_control_expression_value_nodes(&conditional, src) {
-        let flow = expression_flow_from_node(value, span.file, src);
+    for value in elixir_control_expression_value_nodes(&conditional, macro_name, src) {
+        let flow =
+            bonsai_lang_api::kit::expression_flow_from_node_with_handler(value, span.file, src, &HANDLER);
         if let Some(place) = flow.place {
             push_elixir_value_source(&mut out, place);
         }
@@ -964,7 +1049,11 @@ fn elixir_control_expression_value_sources(
     Some(out)
 }
 
-fn elixir_control_expression_value_nodes<'tree>(conditional: &Node<'tree>, src: &[u8]) -> Vec<Node<'tree>> {
+fn elixir_control_expression_value_nodes<'tree>(
+    conditional: &Node<'tree>,
+    macro_name: &str,
+    src: &[u8],
+) -> Vec<Node<'tree>> {
     let mut values = Vec::new();
     if let Some(arguments) = conditional
         .child_by_field_name("arguments")
@@ -993,6 +1082,65 @@ fn elixir_control_expression_value_nodes<'tree>(conditional: &Node<'tree>, src: 
         }
     }
     if let Some(block) = first_named_child_of_kind(conditional, "do_block") {
+        if macro_name == "cond" {
+            let mut cursor = block.walk();
+            for clause in block
+                .named_children(&mut cursor)
+                .filter(|child| child.kind() == "stab_clause")
+            {
+                let Some(body) = clause.child_by_field_name("right") else {
+                    continue;
+                };
+                let mut body_cursor = body.walk();
+                let value = body
+                    .named_children(&mut body_cursor)
+                    .filter(|child| child.kind() != "comment")
+                    .last()
+                    .unwrap_or(body);
+                values.push(value);
+            }
+            return values;
+        }
+        if macro_name == "try" {
+            let mut cursor = block.walk();
+            let children = block
+                .named_children(&mut cursor)
+                .filter(|child| child.kind() != "comment")
+                .collect::<Vec<_>>();
+            let branch_block = |node: &Node<'_>| {
+                matches!(
+                    node.kind(),
+                    "rescue_block" | "catch_block" | "else_block" | "after_block"
+                )
+            };
+            let body_end = children.iter().position(branch_block).unwrap_or(children.len());
+            if let Some(value) = children[..body_end].last().copied() {
+                values.push(value);
+            }
+            for branch in children
+                .iter()
+                .copied()
+                .filter(|child| matches!(child.kind(), "rescue_block" | "catch_block" | "else_block"))
+            {
+                let mut branch_cursor = branch.walk();
+                for clause in branch
+                    .named_children(&mut branch_cursor)
+                    .filter(|child| child.kind() == "stab_clause")
+                {
+                    let Some(body) = clause.child_by_field_name("right") else {
+                        continue;
+                    };
+                    let mut body_cursor = body.walk();
+                    let value = body
+                        .named_children(&mut body_cursor)
+                        .filter(|child| child.kind() != "comment")
+                        .last()
+                        .unwrap_or(body);
+                    values.push(value);
+                }
+            }
+            return values;
+        }
         let mut cursor = block.walk();
         let children = block
             .named_children(&mut cursor)
@@ -1150,12 +1298,56 @@ fn elixir_value_field_nodes<'tree>(call_node: Node<'tree>) -> Option<(Node<'tree
     (receiver_is_value && field.kind() == "identifier").then_some((receiver, field))
 }
 
-fn collect_elixir_value_field_access_spans(tree: &Tree, file: FileId) -> Vec<bonsai_common::Span> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ElixirValueFieldAccess {
+    span: Span,
+    place: String,
+}
+
+fn elixir_value_field_place(call_node: Node<'_>, src: &[u8]) -> Option<String> {
+    let (receiver, field) = elixir_value_field_nodes(call_node)?;
+    let receiver = if receiver.kind() == "identifier" {
+        let receiver = node_text(&receiver, src).trim();
+        (!receiver.is_empty()).then(|| receiver.to_string())?
+    } else {
+        elixir_value_field_place(receiver, src)?
+    };
+    let field = node_text(&field, src).trim();
+    (!field.is_empty()).then(|| format!("{receiver}.{field}"))
+}
+
+fn collect_elixir_value_field_accesses(tree: &Tree, src: &[u8], file: FileId) -> Vec<ElixirValueFieldAccess> {
     collect_kinds(tree, &["call"])
         .into_iter()
-        .filter(|call| elixir_value_field_nodes(*call).is_some())
-        .map(|call| span_of(file, &call))
+        .filter_map(|call| {
+            elixir_value_field_place(call, src).map(|place| ElixirValueFieldAccess {
+                span: span_of(file, &call),
+                place,
+            })
+        })
         .collect()
+}
+
+/// Replace an exact `target = value.field` pseudo-call with the compiler IR
+/// for a field projection. The grammar relationship is recovered from the
+/// assignment fact's exact RHS span; rendered assignment text and field-name
+/// inventories are deliberately not consulted.
+fn lower_elixir_value_field_assignment_facts(
+    facts: &mut [AssignmentValueFact],
+    accesses: &[ElixirValueFieldAccess],
+) -> Vec<(Span, String)> {
+    let mut assignments = Vec::new();
+    for fact in facts {
+        let Some(access) = accesses.iter().find(|access| access.span == fact.value_span) else {
+            continue;
+        };
+        fact.call_sites.clear();
+        fact.value_flow = ExpressionFlow::from_place(access.place.clone());
+        fact.direct_call_name = None;
+        fact.direct_call_receiver = None;
+        assignments.push((fact.assignment_span, access.place.clone()));
+    }
+    assignments
 }
 
 /// Surface every syntax-proven value-field access as a read reference. Rule
@@ -1182,9 +1374,10 @@ fn synthesize_elixir_value_field_reads(tree: &Tree, src: &[u8], file: FileId) ->
     refs
 }
 
-fn remove_elixir_value_field_access_calls(
+fn lower_elixir_value_field_access_events(
     events: &mut Vec<FlowEvent>,
-    field_access_spans: &[bonsai_common::Span],
+    field_accesses: &[ElixirValueFieldAccess],
+    assignments: &[(Span, String)],
 ) {
     let original = std::mem::take(events);
     for mut event in original {
@@ -1194,11 +1387,11 @@ fn remove_elixir_value_field_access_calls(
                 else_events,
                 ..
             } => {
-                remove_elixir_value_field_access_calls(then_events, field_access_spans);
-                remove_elixir_value_field_access_calls(else_events, field_access_spans);
+                lower_elixir_value_field_access_events(then_events, field_accesses, assignments);
+                lower_elixir_value_field_access_events(else_events, field_accesses, assignments);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                remove_elixir_value_field_access_calls(body, field_access_spans);
+                lower_elixir_value_field_access_events(body, field_accesses, assignments);
             }
             FlowEvent::Try {
                 body,
@@ -1206,20 +1399,41 @@ fn remove_elixir_value_field_access_calls(
                 finally_events,
                 ..
             } => {
-                remove_elixir_value_field_access_calls(body, field_access_spans);
-                remove_elixir_value_field_access_calls(catch_events, field_access_spans);
-                remove_elixir_value_field_access_calls(finally_events, field_access_spans);
+                lower_elixir_value_field_access_events(body, field_accesses, assignments);
+                lower_elixir_value_field_access_events(catch_events, field_accesses, assignments);
+                lower_elixir_value_field_access_events(finally_events, field_accesses, assignments);
             }
             _ => {}
+        }
+        if let FlowEvent::Assign {
+            span,
+            source_name,
+            source_call,
+            source_call_args,
+            source_names,
+            value_kind,
+            ..
+        } = &mut event
+        {
+            if let Some((_, place)) = assignments
+                .iter()
+                .find(|(assignment_span, _)| assignment_span == span)
+            {
+                *source_name = Some(place.clone());
+                *source_call = None;
+                source_call_args.clear();
+                source_names.clear();
+                *value_kind = Some(AssignValueKind::Compound);
+            }
         }
         let is_value_field_call = matches!(
             &event,
             FlowEvent::Call { span, args, .. }
                 if args.is_empty()
-                    && field_access_spans.iter().any(|field_span| {
-                        field_span.file == span.file
-                            && field_span.start < span.end
-                            && span.start < field_span.end
+                    && field_accesses.iter().any(|field_access| {
+                        field_access.span.file == span.file
+                            && field_access.span.start < span.end
+                            && span.start < field_access.span.end
                     })
         );
         if !is_value_field_call {

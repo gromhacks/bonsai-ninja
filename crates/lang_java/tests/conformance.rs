@@ -12,6 +12,42 @@ fn conformance_traced() {
 }
 
 #[test]
+fn fully_qualified_type_use_is_local_package_evidence() {
+    use bonsai_lang_api::{ImportScope, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Directory.java",
+            r#"
+class Directory {
+  void find(String query) throws Exception {
+    javax.naming.directory.InitialDirContext ctx =
+        new javax.naming.directory.InitialDirContext();
+    ctx.search(query, query, null);
+  }
+}
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let imports = ws.db().import_index(file).expect("Java package facts");
+    assert!(imports.imports.iter().any(|import| {
+        import.module == "javax.naming.directory.InitialDirContext"
+            && import.alias.as_deref() == Some("InitialDirContext")
+            && import.scope == ImportScope::Local
+    }));
+    assert!(
+        imports
+            .imports
+            .iter()
+            .all(|import| import.module != "javax.naming.directory"),
+        "the adapter must emit the exact syntax qualifier, not invent a package prefix"
+    );
+}
+
+#[test]
 fn url_rebuild_assignment_lowers_exact_call_composition() {
     use bonsai_lang_api::{LanguageAdapter, StringCompositionPart};
     use std::sync::Arc;
@@ -46,6 +82,155 @@ class UrlProbe {
             StringCompositionPart::CallOrLiteral { fallback, .. }
         ] if value == "https://" && fallback == "/"
     ));
+}
+
+#[test]
+fn constructor_assignments_inside_try_bind_each_call_result_to_the_declared_local() {
+    use bonsai_lang_api::{AssignValueKind, FlowEvent, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Pipeline.java",
+            r#"
+class App { record Envelope(String cmd) {} }
+class Pipeline {
+  App.Envelope run(String routed) {
+    App.Envelope valid;
+    try {
+      valid = new App.Envelope(routed);
+    } catch (RuntimeException error) {
+      valid = new App.Envelope(routed);
+    }
+    return valid;
+  }
+}
+"#,
+        )],
+    );
+    let file = *ws.db().vfs().all_files().first().expect("fixture file");
+    let index = ws.db().decl_index(file).expect("Java declaration index");
+    let run = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "run")
+        .expect("run declaration");
+    fn collect<'a>(
+        events: &'a [FlowEvent],
+        out: &mut Vec<(&'a Option<String>, &'a Vec<String>, &'a Option<AssignValueKind>)>,
+    ) {
+        for event in events {
+            match event {
+                FlowEvent::Assign {
+                    target,
+                    source_call,
+                    source_call_args,
+                    value_kind,
+                    ..
+                } if target == "valid" => out.push((source_call, source_call_args, value_kind)),
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    collect(then_events, out);
+                    collect(else_events, out);
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => collect(body, out),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    collect(body, out);
+                    collect(catch_events, out);
+                    collect(finally_events, out);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut assignments = Vec::new();
+    collect(&run.flow_events, &mut assignments);
+
+    assert_eq!(assignments.len(), 2, "{:#?}", run.flow_events);
+    assert!(
+        assignments.iter().all(|(source_call, args, value_kind)| {
+            source_call.as_deref() == Some("App.Envelope")
+                && args.as_slice() == ["routed".to_string()]
+                && value_kind == &&Some(AssignValueKind::CallResult)
+        }),
+        "{:#?}",
+        run.flow_events
+    );
+}
+
+#[test]
+fn instance_field_call_receiver_is_qualified_without_overriding_a_shadowing_local() {
+    use bonsai_lang_api::{FlowEvent, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Storage.java",
+            r#"
+record Envelope(String cmd) {}
+class Storage {
+  private final Envelope data;
+  Storage(Envelope data) { this.data = data; }
+  String fromField() { return data.cmd(); }
+  String fromLocal(Envelope data) { return data.cmd(); }
+}
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("Java declaration index");
+
+    let receiver_for = |decl_name: &str| {
+        let decl = index
+            .defs
+            .iter()
+            .find(|decl| decl.name == decl_name)
+            .unwrap_or_else(|| panic!("{decl_name} declaration"));
+        decl.flow_events.iter().find_map(|event| match event {
+            FlowEvent::Call {
+                span, name, receiver, ..
+            } if bonsai_common::short_qualified_tail(name) == "cmd" => {
+                Some((*span, name.clone(), receiver.clone()))
+            }
+            _ => None,
+        })
+    };
+
+    let (field_span, field_call, field_receiver) = receiver_for("fromField").expect("field call");
+    assert_eq!(field_call, "this.data.cmd");
+    assert_eq!(field_receiver.as_deref(), Some("this.data"));
+    assert_eq!(
+        index
+            .call_receivers
+            .iter()
+            .find(|fact| fact.call_span == field_span)
+            .and_then(|fact| fact.value_flow.place.as_deref()),
+        Some("this.data")
+    );
+
+    let (local_span, local_call, local_receiver) = receiver_for("fromLocal").expect("local call");
+    assert_eq!(local_call, "data.cmd");
+    assert_eq!(local_receiver.as_deref(), Some("data"));
+    assert_eq!(
+        index
+            .call_receivers
+            .iter()
+            .find(|fact| fact.call_span == local_span)
+            .and_then(|fact| fact.value_flow.place.as_deref()),
+        Some("data")
+    );
 }
 
 #[test]
@@ -346,7 +531,7 @@ class Box<T extends Payload> {
                 receiver: Some(receiver),
                 receiver_types,
                 ..
-            } if receiver == "data" && receiver_types.iter().any(|ty| ty == "Payload")
+            } if receiver == "this.data" && receiver_types.iter().any(|ty| ty == "Payload")
         )),
         "{:#?}",
         read.flow_events
@@ -554,12 +739,12 @@ class Config {
     let stable = index
         .assignment_values
         .iter()
-        .find(|fact| fact.target.as_deref() == Some("stable"))
+        .find(|fact| fact.target.as_deref() == Some("this.stable"))
         .expect("stable field assignment");
     let mutable = index
         .assignment_values
         .iter()
-        .find(|fact| fact.target.as_deref() == Some("mutable"))
+        .find(|fact| fact.target.as_deref() == Some("this.mutable"))
         .expect("mutable field assignment");
     assert!(stable.target_is_immutable);
     assert_eq!(stable.target_owner, Some(owner));

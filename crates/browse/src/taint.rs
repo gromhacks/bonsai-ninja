@@ -582,26 +582,7 @@ fn span_contains(outer: bonsai_common::Span, inner: bonsai_common::Span) -> bool
 }
 
 fn call_names_match(decl_name: &str, event_name: &str) -> bool {
-    if decl_name == event_name {
-        return true;
-    }
-    let mut tail = event_name;
-    if let Some(idx) = tail.rfind("->") {
-        tail = &tail[idx + 2..];
-    }
-    if let Some((_, rest)) = tail.rsplit_once(['.', ':']) {
-        tail = rest;
-    }
-    if let Some(idx) = tail.find('/') {
-        if tail[idx + 1..].chars().all(|c| c.is_ascii_digit()) {
-            tail = &tail[..idx];
-        }
-    }
-    decl_name == tail
-        || decl_name
-            .rsplit_once(['.', ':'])
-            .map(|(_, suffix)| suffix == tail)
-            .unwrap_or(false)
+    bonsai_common::qualified_names_match(decl_name, event_name)
 }
 
 /// Stable content-hash id for a taint propagation: `T:` + 8

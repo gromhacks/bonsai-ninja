@@ -1,5 +1,5 @@
 use bonsai_lang_api::LanguageRegistry;
-use bonsai_security::loader::LanguagePack;
+use bonsai_security::loader::{load_rulepack, LanguagePack};
 use bonsai_security::{
     build_inventory, MatchKind, MatchSpec, Rule, RuleConstraint, RuleKind, RuleTarget, Rulepack, Severity,
 };
@@ -35,6 +35,7 @@ fn package_rule(package: &str) -> Rule {
         modules: vec![],
         manifests: vec![],
         lockfiles: vec![],
+        package_matching: Default::default(),
         payload_types: vec![],
         match_spec: MatchSpec {
             kind: MatchKind::Call,
@@ -75,6 +76,13 @@ fn dependency_inventory_scans_deep_workspace_manifests() {
     .expect("deep pom");
 
     let mut pack = Rulepack::default();
+    pack.metadata = load_rulepack(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("security-patterns"),
+    )
+    .expect("bundled rulepack")
+    .metadata;
     pack.packs.insert(
         "java".to_string(),
         LanguagePack {

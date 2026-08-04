@@ -60,7 +60,9 @@ use elixir::{
     elixir_call_name, elixir_unwrap_def, emit_elixir_control_flow_call, emit_erlang_functional_loop_call,
     emit_ruby_block_loop_call,
 };
+#[cfg(test)]
 pub use expression_flow::expression_flow_from_node;
+pub use expression_flow::expression_flow_from_node_with_handler;
 pub use identifiers::{
     first_identifier_descendant, first_identifier_like_child, first_named_child, first_named_child_of_kind,
     looks_like_bare_identifier, looks_like_identifier, looks_like_literal_value,
@@ -68,30 +70,32 @@ pub use identifiers::{
 pub use imports::extract_generic_imports;
 pub use param_extraction::extract_param_annotations;
 pub use receiver_writes::{
-    collect_assign_targets, collect_receiver_field_writes, rewrite_implicit_member_reads,
-    ImplicitMemberReadCall,
+    collect_assign_targets, collect_receiver_field_writes, collect_receiver_state_sources,
+    rewrite_implicit_member_reads, ImplicitMemberReadCall,
 };
-pub use return_extraction::{
-    extract_catch_param, extract_return_value_flow, extract_return_value_name, extract_return_value_text,
-    extract_throw_value_name, extract_yield_value_flow,
+pub use return_extraction::{extract_catch_param, extract_return_value_text, extract_throw_value_name};
+#[cfg(test)]
+pub use return_extraction::{extract_return_value_flow, extract_return_value_name, extract_yield_value_flow};
+use return_extraction::{
+    extract_return_value_flow_with_handler, extract_return_value_name_with_handler,
+    extract_yield_value_flow_with_handler,
 };
 pub use runtime_types::extract_runtime_type_narrowing_facts;
 
 pub(crate) use direct_calls::extract_direct_call_info;
 use direct_calls::{
-    direct_call_wrapper_kind, extract_dart_selector_call_info, first_call_descendant, grouping_list_kind,
-    next_named_sibling_within, parameter_list_is_variadic, qualified_method_name_node,
-    synthetic_function_name,
+    extract_dart_selector_call_info, first_call_descendant, next_named_sibling_within,
+    parameter_list_is_variadic, qualified_method_name_node, synthetic_function_name,
+    transparent_direct_call_child,
 };
 use identifiers::has_direct_child_kind;
 use param_extraction::extract_param_names;
-use pseudo_call::{infix_method_receiver, pseudo_call_event};
+use pseudo_call::pseudo_call_event;
 use qualified::{
     binary_operator_is_assignment, normalise_qualified_text, qualified_assign_target,
     type_only_declaration_without_initializer,
 };
 pub(crate) use receiver_writes::argument_place;
-use receiver_writes::collect_receiver_state_sources;
 use syntax_errors::{
     callable_has_syntax_error, has_direct_large_literal_initializer_child, is_initializer_list_kind,
     is_large_data_declaration_node, is_large_literal_initializer_node, retain_flow_events_outside_errors,
@@ -128,11 +132,16 @@ pub fn tuple_result_projection_index(source_names: &[String]) -> Option<usize> {
     })
 }
 
-/// Lower C/C++ variadic ABI builtins into ordinary assignment facts while
-/// they are still in the language-semantic layer. The IDG then sees only
-/// `varargs -> list` and `list -> extracted value` dataflow and carries no
-/// builtin-name inventory.
-pub fn normalize_c_variadic_builtin_flow(events: &mut Vec<FlowEvent>, has_variadic_param: bool) {
+/// Lower adapter-declared variadic ABI builtins into ordinary assignment
+/// facts while they are still in the language-semantic layer. The IDG then
+/// sees only `varargs -> list` and `list -> extracted value` dataflow and
+/// carries no builtin-name inventory.
+pub fn normalize_variadic_builtin_flow(
+    events: &mut Vec<FlowEvent>,
+    has_variadic_param: bool,
+    start_builtins: &[&str],
+    read_builtins: &[&str],
+) {
     let original = std::mem::take(events);
     for mut event in original {
         match &mut event {
@@ -141,11 +150,21 @@ pub fn normalize_c_variadic_builtin_flow(events: &mut Vec<FlowEvent>, has_variad
                 else_events,
                 ..
             } => {
-                normalize_c_variadic_builtin_flow(then_events, has_variadic_param);
-                normalize_c_variadic_builtin_flow(else_events, has_variadic_param);
+                normalize_variadic_builtin_flow(
+                    then_events,
+                    has_variadic_param,
+                    start_builtins,
+                    read_builtins,
+                );
+                normalize_variadic_builtin_flow(
+                    else_events,
+                    has_variadic_param,
+                    start_builtins,
+                    read_builtins,
+                );
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                normalize_c_variadic_builtin_flow(body, has_variadic_param);
+                normalize_variadic_builtin_flow(body, has_variadic_param, start_builtins, read_builtins);
             }
             FlowEvent::Try {
                 body,
@@ -153,9 +172,19 @@ pub fn normalize_c_variadic_builtin_flow(events: &mut Vec<FlowEvent>, has_variad
                 finally_events,
                 ..
             } => {
-                normalize_c_variadic_builtin_flow(body, has_variadic_param);
-                normalize_c_variadic_builtin_flow(catch_events, has_variadic_param);
-                normalize_c_variadic_builtin_flow(finally_events, has_variadic_param);
+                normalize_variadic_builtin_flow(body, has_variadic_param, start_builtins, read_builtins);
+                normalize_variadic_builtin_flow(
+                    catch_events,
+                    has_variadic_param,
+                    start_builtins,
+                    read_builtins,
+                );
+                normalize_variadic_builtin_flow(
+                    finally_events,
+                    has_variadic_param,
+                    start_builtins,
+                    read_builtins,
+                );
             }
             _ => {}
         }
@@ -169,7 +198,10 @@ pub fn normalize_c_variadic_builtin_flow(events: &mut Vec<FlowEvent>, has_variad
             ..
         } = &mut event
         {
-            if source_call.as_deref().is_some_and(c_variadic_read_builtin) {
+            if source_call
+                .as_deref()
+                .is_some_and(|name| adapter_builtin_matches(name, read_builtins))
+            {
                 let list = source_call_args.first().cloned();
                 source_name.clone_from(&list);
                 *source_call = None;
@@ -182,7 +214,7 @@ pub fn normalize_c_variadic_builtin_flow(events: &mut Vec<FlowEvent>, has_variad
 
         if has_variadic_param {
             if let FlowEvent::Call { span, name, args, .. } = &event {
-                if c_variadic_start_builtin(name) {
+                if adapter_builtin_matches(name, start_builtins) {
                     if let Some(target) = args.first().and_then(|arg| arg.place.as_deref()) {
                         if !target.trim().is_empty() {
                             events.push(FlowEvent::Assign {
@@ -204,12 +236,8 @@ pub fn normalize_c_variadic_builtin_flow(events: &mut Vec<FlowEvent>, has_variad
     }
 }
 
-fn c_variadic_start_builtin(name: &str) -> bool {
-    matches!(short_name_of(name.trim()), "va_start" | "__builtin_va_start")
-}
-
-fn c_variadic_read_builtin(name: &str) -> bool {
-    matches!(short_name_of(name.trim()), "va_arg" | "__builtin_va_arg")
+fn adapter_builtin_matches(name: &str, declared_names: &[&str]) -> bool {
+    declared_names.contains(&short_name_of(name.trim()))
 }
 
 /// Normalize hierarchy-owned bare member calls to explicit receiver calls.
@@ -263,7 +291,7 @@ pub fn qualify_bare_hierarchy_member_calls(index: &mut DeclIndex) {
                 names.extend(methods.iter().cloned());
             }
             for base in bases_by_class.get(&class_symbol).into_iter().flatten() {
-                let short = base.rsplit(['.', ':', '\\']).next().unwrap_or(base).trim();
+                let short = bonsai_common::short_qualified_tail(base).trim();
                 if let Some(candidates) = classes_by_name.get(short) {
                     pending.extend(candidates.iter().copied());
                 }
@@ -872,39 +900,32 @@ pub fn node_at_span<'a>(root: Node<'a>, span: Span, expected_kinds: &[&str]) -> 
     exact_typed.or(exact_any).or(tightest_container)
 }
 
-/// Strip generics and qualified prefixes from a type-name string,
-/// leaving the bare class name. `java.io.IOException` → `IOException`.
-/// `List<Foo>` → `List`. `kotlin.collections.MutableList<E>` →
-/// `MutableList`.
+/// Return the final identifier-shaped segment of the outer type constructor.
 ///
-/// Used by adapter typed-exception extraction (Java, Kotlin, C#) to
-/// canonicalize `Throw::thrown_type` and `Try::catch_types` so
-/// fully-qualified and short forms compare equal.
+/// The input is already an adapter-classified type node. This helper is
+/// deliberately structural: it stops before nested generic/aggregate syntax
+/// and finds identifier runs without recognizing any language keyword,
+/// qualifier spelling, pointer prefix, or nullable suffix. Adapters therefore
+/// retain ownership of deciding which Tree-sitter node is a type.
 #[must_use]
 pub fn canonical_simple_type_name(text: &str) -> String {
-    // L3: strip the same array / nullable / force-unwrap / pointer /
-    // reference decorations as `canonical_short_type_name`, so a return
-    // type like `User?` / `byte[]` / `*const T` / `&User` resolves to the
-    // class indexed under its bare name for base-class expansion. Without
-    // this the decorated form misses `by_canonical_name` and no bases are
-    // added (a subclass rule `[Base, method]` never fires).
-    let trimmed = text
+    let outer = text
         .trim()
-        .trim_start_matches('&')
-        .trim()
-        .trim_start_matches("*const ")
-        .trim_start_matches("*mut ")
-        .trim_start_matches('*')
-        .trim_start_matches("mut ")
-        .trim();
-    let head = trimmed.split('<').next().unwrap_or(trimmed);
-    let head = head.split('[').next().unwrap_or(head);
-    let head = head.rsplit('.').next().unwrap_or(head);
-    let head = head.rsplit("::").next().unwrap_or(head).trim();
-    head.trim_end_matches('?')
-        .trim_end_matches('!')
-        .trim()
-        .to_string()
+        .split_once(['<', '['])
+        .map_or_else(|| text.trim(), |(head, _)| head);
+    let mut last = None;
+    let mut start = None;
+    for (index, ch) in outer.char_indices() {
+        if ch == '_' || ch.is_alphanumeric() {
+            start.get_or_insert(index);
+        } else if let Some(segment_start) = start.take() {
+            last = outer.get(segment_start..index);
+        }
+    }
+    if let Some(segment_start) = start {
+        last = outer.get(segment_start..);
+    }
+    last.unwrap_or_default().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -916,19 +937,19 @@ pub fn canonical_simple_type_name(text: &str) -> String {
 /// across Tree-sitter grammars; language-specific kinds are layered on top.
 ///
 /// Fields are grouped logically below. The struct is intentionally
-/// flat rather than nested-structs so adapter declarations stay
-/// ergonomic (`GrammarHandler { fn_kinds: ..., ..GENERIC_HANDLER }`).
+/// flat rather than nested structs so adapter declarations stay ergonomic
+/// with `..EMPTY_HANDLER` while every non-empty syntax list remains local.
 /// New fields land in their group with a comment.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SyntaxSpecialForm {
     /// A call is split across a callee sibling and a selector node.
     SplitSelectorCall,
+    /// A remote-call expression is split into module and function children.
+    RemoteCallExpression,
     /// Builder cascades encode calls/writes as cascade-section nodes.
     CascadeSection,
     /// Explicit object construction is not classified as an ordinary call.
     ObjectConstructionExpression,
-    /// A postfix/operator field expression represents an argumentless call.
-    PostfixOperatorCall,
     /// A call-shaped node with a trailing closure represents deferred work.
     TrailingClosureDefer,
     /// Control-flow constructs are encoded as call nodes with structured bodies.
@@ -942,6 +963,34 @@ pub enum SyntaxSpecialForm {
     /// A call's structured control body is stored in a direct `do_block` child.
     DirectDoBlockBody,
 }
+
+/// Adapter-owned recognizer for a Tree-sitter expression that denotes a
+/// callable value without invoking it. The callback receives only the parsed
+/// node and immutable source bytes; it must return the compiler identity of
+/// the referenced callable or `None`.
+pub type CallableReferenceExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Option<String>;
+
+/// Adapter-owned lowering for grammar constructs that execute like calls but
+/// are not represented by the grammar's ordinary call nodes.
+pub type PseudoCallExtractor =
+    for<'tree> fn(Node<'tree>, FileId, &[u8], &GrammarHandler) -> Option<FlowEvent>;
+
+/// Adapter-owned lowering for one grammar construct that already has a
+/// language-neutral [`FlowEvent`] meaning but cannot be classified by a
+/// unique node kind. The callback is additive: shared walking still descends
+/// into the node so nested calls and value operands remain visible.
+pub type SyntaxEventExtractor =
+    for<'tree> fn(Node<'tree>, FileId, &[u8], &GrammarHandler) -> Option<FlowEvent>;
+
+/// Adapter-owned receiver-node extractor for pseudo calls. Returning the CST
+/// node, rather than rendered text, lets shared indexing build exact value
+/// dependencies without learning the language's pseudo-call grammar.
+pub type PseudoCallReceiverExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Option<Node<'tree>>;
+
+/// Adapter-owned classifier for caller-visible argument write-back syntax.
+/// Shared analysis consumes the resulting language-neutral mode and never
+/// recognizes source tokens such as an address-of or `out` marker.
+pub type ArgumentPassingModeExtractor = for<'tree> fn(Node<'tree>, Node<'tree>) -> crate::ArgumentPassingMode;
 
 #[derive(Clone, Debug, Default)]
 pub struct GrammarHandler {
@@ -997,6 +1046,27 @@ pub struct GrammarHandler {
 
     // === Call / assignment / return / lambda shapes ===
     pub call_kinds: &'static [&'static str],
+    /// Call-shaped grammar components whose enclosing call already owns the
+    /// complete callee and argument list. The method-chain walker must not
+    /// emit these components a second time. This inventory is adapter-owned;
+    /// shared lowering does not recognize a language-specific node kind.
+    pub nested_call_component_kinds: &'static [&'static str],
+    /// Optional adapter callback for call semantics encoded by non-call CST
+    /// nodes (operator forms, language constructs, markup sugar, and similar
+    /// grammar-specific shapes).
+    pub pseudo_call_extractor: Option<PseudoCallExtractor>,
+    /// Optional exact lowering for an otherwise-unclassified syntax event.
+    /// This is used when one grammar node kind represents several semantic
+    /// transfers and the adapter must inspect its parsed token/child shape.
+    pub syntax_event_extractor: Option<SyntaxEventExtractor>,
+    /// Optional adapter callback returning the value receiver of a pseudo
+    /// call. It must classify exactly the same nodes as
+    /// `pseudo_call_extractor` when that pseudo call has a receiver.
+    pub pseudo_call_receiver_extractor: Option<PseudoCallReceiverExtractor>,
+    /// Optional exact classifier for argument passing syntax. Languages that
+    /// do not expose caller-visible write-back leave this unset and receive
+    /// ordinary value semantics.
+    pub argument_passing_mode_extractor: Option<ArgumentPassingModeExtractor>,
     pub assignment_kinds: &'static [&'static str],
     pub return_kinds: &'static [&'static str],
     pub throw_kinds: &'static [&'static str],
@@ -1020,6 +1090,66 @@ pub struct GrammarHandler {
     /// lowering pipeline to recognize. The core walker never selects these
     /// paths from a language id or rule/API name.
     pub special_forms: &'static [SyntaxSpecialForm],
+
+    /// Builtin call spellings whose grammar/runtime semantics are exact
+    /// runtime type predicates. These are language semantics, not security
+    /// APIs, and therefore stay in the owning adapter.
+    pub runtime_type_guard_calls: &'static [&'static str],
+    /// Binary operator node kinds that semantically test a runtime type.
+    pub runtime_type_guard_operators: &'static [&'static str],
+    /// Unary operator node kinds that produce a runtime type label.
+    pub runtime_typeof_operators: &'static [&'static str],
+    /// Equality operator node kinds accepted around a runtime type label.
+    pub runtime_type_equality_operators: &'static [&'static str],
+    /// Tree-sitter node kinds whose operands describe a type or layout but do
+    /// not read the operand's runtime value (`sizeof_expression`, for
+    /// example). The owning adapter declares these exact grammar facts so
+    /// shared lowering can omit their descendants without reparsing text.
+    pub value_free_expression_kinds: &'static [&'static str],
+    /// Language-keyword calls whose arguments are syntax metadata rather than
+    /// runtime value reads (for example C# `nameof`). These are compiler
+    /// semantics owned by the adapter, never security/API matching data.
+    pub value_free_call_names: &'static [&'static str],
+    /// Anonymous unary-operator token kinds whose result does not carry the
+    /// operand's attacker-controlled value. This covers grammars that encode
+    /// the operator and operand under a generic `unary_expression` node.
+    pub value_free_unary_operators: &'static [&'static str],
+
+    // === Reference-index syntax ===
+    /// Complete call-node inventory used by the flat reference index. Unlike
+    /// the flow walker's compatibility overlays, this is a closed adapter
+    /// declaration.
+    pub call_ref_kinds: &'static [&'static str],
+    /// Grammar node kinds that represent member/field projections for flat
+    /// read/write reference indexing.
+    pub member_expression_kinds: &'static [&'static str],
+    /// Grammar node kinds that represent subscript/index projections.
+    pub subscript_expression_kinds: &'static [&'static str],
+    /// Variable node kinds whose leading source punctuation is not part of
+    /// the canonical binding identity.
+    pub sigil_variable_kinds: &'static [&'static str],
+    /// Dedicated global/special-variable node kinds.
+    pub global_variable_kinds: &'static [&'static str],
+    /// A bare subscript receiver also denotes an implicit call-like lookup in
+    /// this grammar/DSL surface.
+    pub subscript_base_call_refs: bool,
+    /// Call-shaped grammar identifiers that are declarations/directives, not
+    /// runtime calls.
+    pub non_call_ref_names: &'static [&'static str],
+    /// Dedicated grammar nodes that emit a canonical pseudo-call reference.
+    pub synthetic_call_ref_names: &'static [(&'static str, &'static str)],
+    /// Adapter-declared punctuation appended to a callee identifier by the
+    /// surrounding call node (for example a macro marker).
+    pub call_name_suffix_tokens: &'static [&'static str],
+    /// Calls whose adapter-proven non-value syntax damage may overlap an
+    /// otherwise valid flow event.
+    pub syntax_error_tolerant_call_names: &'static [&'static str],
+    /// Dedicated grammar nodes whose name/method child is a callable value
+    /// (Java/Kotlin method references, for example).
+    pub callable_reference_kinds: &'static [&'static str],
+    /// Optional adapter callback for callable-value syntax that requires
+    /// grammar-specific structural validation.
+    pub callable_reference_extractor: Option<CallableReferenceExtractor>,
 
     // === Receiver / self handling ===
     /// For languages whose grammar represents a method receiver as an
@@ -1056,8 +1186,75 @@ pub struct GrammarHandler {
     pub void_return_type_names: &'static [&'static str],
 }
 
-/// A reasonable starter grammar handler covering node names most Tree-sitter
-/// grammars agree on. Adapters can override any field with their own slice.
+/// Empty compiler-syntax contract used as a struct-update base by language
+/// adapters. Every non-empty grammar inventory must be declared in the
+/// owning `lang_*` crate; shared lowering never substitutes source syntax.
+pub const EMPTY_HANDLER: GrammarHandler = GrammarHandler {
+    fn_kinds: &[],
+    class_kinds: &[],
+    class_decl_kinds: &[],
+    nested_type_ownership: true,
+    method_kinds: &[],
+    method_context_kinds: &[],
+    method_owner_barrier_kinds: &[],
+    constructor_method_kinds: &[],
+    constructor_names: &[],
+    if_kinds: &[],
+    for_kinds: &[],
+    foreach_kinds: &[],
+    while_kinds: &[],
+    do_kinds: &[],
+    loop_kinds: &[],
+    call_kinds: &[],
+    nested_call_component_kinds: &[],
+    pseudo_call_extractor: None,
+    syntax_event_extractor: None,
+    pseudo_call_receiver_extractor: None,
+    argument_passing_mode_extractor: None,
+    assignment_kinds: &[],
+    return_kinds: &[],
+    throw_kinds: &[],
+    lambda_kinds: &[],
+    try_kinds: &[],
+    catch_kinds: &[],
+    finally_kinds: &[],
+    break_kinds: &[],
+    continue_kinds: &[],
+    yield_kinds: &[],
+    await_kinds: &[],
+    defer_kinds: &[],
+    using_kinds: &[],
+    special_forms: &[],
+    runtime_type_guard_calls: &[],
+    runtime_type_guard_operators: &[],
+    runtime_typeof_operators: &[],
+    runtime_type_equality_operators: &[],
+    value_free_expression_kinds: &[],
+    value_free_call_names: &[],
+    value_free_unary_operators: &[],
+    call_ref_kinds: &[],
+    member_expression_kinds: &[],
+    subscript_expression_kinds: &[],
+    sigil_variable_kinds: &[],
+    global_variable_kinds: &[],
+    subscript_base_call_refs: false,
+    non_call_ref_names: &[],
+    synthetic_call_ref_names: &[],
+    call_name_suffix_tokens: &[],
+    syntax_error_tolerant_call_names: &[],
+    callable_reference_kinds: &[],
+    callable_reference_extractor: None,
+    method_receiver_param_index: None,
+    implicit_receiver_names: &[],
+    implicit_receiver_prefixes: &[],
+    tail_expression_returns: false,
+    void_return_type_names: &[],
+};
+
+/// Test-only cross-grammar fixture. Production adapters must declare every
+/// non-empty syntax category themselves and use [`EMPTY_HANDLER`] only as an
+/// empty struct-update base.
+#[cfg(test)]
 pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
     fn_kinds: &[
         "function_definition",
@@ -1196,6 +1393,11 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
     do_kinds: &["do_statement", "do_while_statement", "repeat_while_statement"],
     loop_kinds: &["loop_expression"],
     call_kinds: COMMON_CALL_KINDS,
+    nested_call_component_kinds: &[],
+    pseudo_call_extractor: None,
+    syntax_event_extractor: None,
+    pseudo_call_receiver_extractor: None,
+    argument_passing_mode_extractor: None,
     assignment_kinds: &[
         "assignment",
         "assignment_expression",
@@ -1350,6 +1552,25 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         "using_statement",
     ],
     special_forms: &[],
+    runtime_type_guard_calls: &[],
+    runtime_type_guard_operators: &[],
+    runtime_typeof_operators: &[],
+    runtime_type_equality_operators: &[],
+    value_free_expression_kinds: &[],
+    value_free_call_names: &[],
+    value_free_unary_operators: &[],
+    call_ref_kinds: &[],
+    member_expression_kinds: &[],
+    subscript_expression_kinds: &[],
+    sigil_variable_kinds: &[],
+    global_variable_kinds: &[],
+    subscript_base_call_refs: false,
+    non_call_ref_names: &[],
+    synthetic_call_ref_names: &[],
+    call_name_suffix_tokens: &[],
+    syntax_error_tolerant_call_names: &[],
+    callable_reference_kinds: &[],
+    callable_reference_extractor: None,
     method_receiver_param_index: None,
     implicit_receiver_names: &[],
     implicit_receiver_prefixes: &[],
@@ -1357,8 +1578,8 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
     void_return_type_names: &[],
 };
 
-/// Kinds of Tree-sitter nodes that represent a call-site across most
-/// grammars. Kept as a const for direct use by non-handler consumers.
+/// Test-only call inventory used by the cross-grammar kit fixtures.
+#[cfg(test)]
 pub const COMMON_CALL_KINDS: &[&str] = &[
     "call",
     "call_expression",
@@ -1402,86 +1623,77 @@ pub const COMMON_CALL_KINDS: &[&str] = &[
     // `call`. Without this entry top-level remote calls produce no
     // call ref and the resolver cannot link them.
     "remote",
-    // Java `String::valueOf` and Kotlin/Scala `String::length` —
-    // method references / bound function literals. The grammar
-    // exposes the receiver + method as separate fields, identical
-    // to a normal call site as far as resolution goes; emitting
-    // them as Call refs lets `stream.map(String::valueOf)`
-    // participate in the call graph and cross-file resolution.
-    "method_reference_expression",
-    "method_reference",
-    "double_colon_reference",
 ];
 
 impl GrammarHandler {
     fn is_fn(&self, k: &str) -> bool {
-        self.fn_kinds.contains(&k) || GENERIC_HANDLER.fn_kinds.contains(&k)
+        self.fn_kinds.contains(&k)
     }
     fn is_class(&self, k: &str) -> bool {
-        self.class_kinds.contains(&k) || GENERIC_HANDLER.class_kinds.contains(&k)
+        self.class_kinds.contains(&k)
     }
     fn is_if(&self, k: &str) -> bool {
-        self.if_kinds.contains(&k) || GENERIC_HANDLER.if_kinds.contains(&k)
+        self.if_kinds.contains(&k)
     }
     fn is_for(&self, k: &str) -> bool {
-        self.for_kinds.contains(&k) || GENERIC_HANDLER.for_kinds.contains(&k)
+        self.for_kinds.contains(&k)
     }
     fn is_foreach(&self, k: &str) -> bool {
-        self.foreach_kinds.contains(&k) || GENERIC_HANDLER.foreach_kinds.contains(&k)
+        self.foreach_kinds.contains(&k)
     }
     fn is_while(&self, k: &str) -> bool {
-        self.while_kinds.contains(&k) || GENERIC_HANDLER.while_kinds.contains(&k)
+        self.while_kinds.contains(&k)
     }
     fn is_do(&self, k: &str) -> bool {
-        self.do_kinds.contains(&k) || GENERIC_HANDLER.do_kinds.contains(&k)
+        self.do_kinds.contains(&k)
     }
     fn is_loop(&self, k: &str) -> bool {
-        self.loop_kinds.contains(&k) || GENERIC_HANDLER.loop_kinds.contains(&k)
+        self.loop_kinds.contains(&k)
     }
     fn is_call(&self, k: &str) -> bool {
-        self.call_kinds.contains(&k) || GENERIC_HANDLER.call_kinds.contains(&k)
+        self.call_kinds.contains(&k)
     }
     fn is_assignment(&self, k: &str) -> bool {
-        self.assignment_kinds.contains(&k) || GENERIC_HANDLER.assignment_kinds.contains(&k)
+        self.assignment_kinds.contains(&k)
     }
     fn is_return(&self, k: &str) -> bool {
-        self.return_kinds.contains(&k) || GENERIC_HANDLER.return_kinds.contains(&k)
+        self.return_kinds.contains(&k)
     }
     fn is_throw(&self, k: &str) -> bool {
-        self.throw_kinds.contains(&k) || GENERIC_HANDLER.throw_kinds.contains(&k)
+        self.throw_kinds.contains(&k)
     }
     fn is_lambda(&self, k: &str) -> bool {
-        self.lambda_kinds.contains(&k) || GENERIC_HANDLER.lambda_kinds.contains(&k)
+        self.lambda_kinds.contains(&k)
     }
     fn is_constructor_method(&self, name: &str) -> bool {
         self.constructor_names.contains(&name)
     }
     fn is_try(&self, k: &str) -> bool {
-        self.try_kinds.contains(&k) || GENERIC_HANDLER.try_kinds.contains(&k)
+        self.try_kinds.contains(&k)
     }
     fn is_catch(&self, k: &str) -> bool {
-        self.catch_kinds.contains(&k) || GENERIC_HANDLER.catch_kinds.contains(&k)
+        self.catch_kinds.contains(&k)
     }
     fn is_finally(&self, k: &str) -> bool {
-        self.finally_kinds.contains(&k) || GENERIC_HANDLER.finally_kinds.contains(&k)
+        self.finally_kinds.contains(&k)
     }
     fn is_break(&self, k: &str) -> bool {
-        self.break_kinds.contains(&k) || GENERIC_HANDLER.break_kinds.contains(&k)
+        self.break_kinds.contains(&k)
     }
     fn is_continue(&self, k: &str) -> bool {
-        self.continue_kinds.contains(&k) || GENERIC_HANDLER.continue_kinds.contains(&k)
+        self.continue_kinds.contains(&k)
     }
     fn is_yield(&self, k: &str) -> bool {
-        self.yield_kinds.contains(&k) || GENERIC_HANDLER.yield_kinds.contains(&k)
+        self.yield_kinds.contains(&k)
     }
     fn is_await(&self, k: &str) -> bool {
-        self.await_kinds.contains(&k) || GENERIC_HANDLER.await_kinds.contains(&k)
+        self.await_kinds.contains(&k)
     }
     fn is_defer(&self, k: &str) -> bool {
-        self.defer_kinds.contains(&k) || GENERIC_HANDLER.defer_kinds.contains(&k)
+        self.defer_kinds.contains(&k)
     }
     fn is_using(&self, k: &str) -> bool {
-        self.using_kinds.contains(&k) || GENERIC_HANDLER.using_kinds.contains(&k)
+        self.using_kinds.contains(&k)
     }
     fn has_special_form(&self, form: SyntaxSpecialForm) -> bool {
         self.special_forms.contains(&form)
@@ -1571,22 +1783,16 @@ fn has_direct_token(node: &Node<'_>, src: &[u8], expected: &str) -> bool {
 /// denotes a callable value rather than invoking it. Detection is based on
 /// Tree-sitter node kinds, fields, and operator terminals; it never scans the
 /// surrounding assignment statement.
-fn callable_reference_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
-    named_callable_reference(node, src)
-        .or_else(|| elixir_capture_reference(node, src))
-        .or_else(|| ruby_method_reference(node, src))
-        .or_else(|| php_first_class_callable(node, src))
+fn callable_reference_name(node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> Option<String> {
+    named_callable_reference(node, src, handler.callable_reference_kinds).or_else(|| {
+        handler
+            .callable_reference_extractor
+            .and_then(|extract| extract(*node, src))
+    })
 }
 
-fn named_callable_reference(node: &Node<'_>, src: &[u8]) -> Option<String> {
-    if !matches!(
-        node.kind(),
-        "method_reference"
-            | "method_reference_expression"
-            | "callable_reference"
-            | "callable_reference_expression"
-            | "function_reference"
-    ) {
+fn named_callable_reference(node: &Node<'_>, src: &[u8], kinds: &[&str]) -> Option<String> {
+    if !kinds.contains(&node.kind()) {
         return None;
     }
     let name = node
@@ -1595,73 +1801,6 @@ fn named_callable_reference(node: &Node<'_>, src: &[u8]) -> Option<String> {
         .or_else(|| node.child_by_field_name("function"))
         .or_else(|| last_non_comment_named_child(node))?;
     let name = node_text(&name, src).trim();
-    (!name.is_empty()).then(|| name.to_string())
-}
-
-fn elixir_capture_reference(node: &Node<'_>, src: &[u8]) -> Option<String> {
-    if node.kind() != "unary_operator" || !has_direct_token(node, src, "&") {
-        return None;
-    }
-    let operand = node
-        .child_by_field_name("operand")
-        .or_else(|| first_named_child(node))?;
-    if operand.kind() != "binary_operator" || !has_direct_token(&operand, src, "/") {
-        return None;
-    }
-    let function = operand
-        .child_by_field_name("left")
-        .or_else(|| first_named_child(&operand))?;
-    let arity = operand
-        .child_by_field_name("right")
-        .or_else(|| last_non_comment_named_child(&operand))?;
-    if arity.kind() != "integer" {
-        return None;
-    }
-    let function = node_text(&function, src).trim();
-    (!function.is_empty()).then(|| function.to_string())
-}
-
-fn ruby_method_reference(node: &Node<'_>, src: &[u8]) -> Option<String> {
-    if !COMMON_CALL_KINDS.contains(&node.kind()) {
-        return None;
-    }
-    let callee = node
-        .child_by_field_name("method")
-        .or_else(|| node.child_by_field_name("function"))
-        .or_else(|| node.child_by_field_name("name"))
-        .or_else(|| node.child_by_field_name("target"))?;
-    if node_text(&callee, src).trim() != "method" {
-        return None;
-    }
-    let arguments = node
-        .child_by_field_name("arguments")
-        .or_else(|| node.child_by_field_name("argument_list"))?;
-    let mut cursor = arguments.walk();
-    let children = arguments.named_children(&mut cursor).collect::<Vec<_>>();
-    if children.len() != 1 || !matches!(children[0].kind(), "simple_symbol" | "symbol" | "symbol_literal") {
-        return None;
-    }
-    let name = node_text(&children[0], src).trim().trim_start_matches(':');
-    looks_like_bare_identifier(name).then(|| name.to_string())
-}
-
-fn php_first_class_callable(node: &Node<'_>, src: &[u8]) -> Option<String> {
-    if !COMMON_CALL_KINDS.contains(&node.kind()) {
-        return None;
-    }
-    let callee = node
-        .child_by_field_name("function")
-        .or_else(|| node.child_by_field_name("name"))
-        .or_else(|| node.child_by_field_name("target"))?;
-    let arguments = node
-        .child_by_field_name("arguments")
-        .or_else(|| node.child_by_field_name("argument_list"))?;
-    let mut cursor = arguments.walk();
-    let children = arguments.named_children(&mut cursor).collect::<Vec<_>>();
-    if children.len() != 1 || children[0].kind() != "variadic_placeholder" {
-        return None;
-    }
-    let name = node_text(&callee, src).trim();
     (!name.is_empty()).then(|| name.to_string())
 }
 
@@ -1717,10 +1856,7 @@ fn walk_deep_sequence_executable_nodes(
         }
         if is_initializer_list_kind(kind)
             || kind == "comma_expression"
-            || !(handler.is_assignment(kind)
-                || handler.is_call(kind)
-                || COMMON_CALL_KINDS.contains(&kind)
-                || kind == "selector")
+            || !(handler.is_assignment(kind) || handler.is_call(kind) || kind == "selector")
         {
             let mut cursor = node.walk();
             let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
@@ -1984,7 +2120,8 @@ fn synthesize_assign_components_from_value(
             }
         }
         let mut source_names = vec![callee.clone()];
-        if let Some((_, tail)) = callee.rsplit_once(['.', ':']) {
+        let tail = bonsai_common::short_qualified_tail(&callee);
+        if tail != callee {
             let tail = tail.trim().to_string();
             if !tail.is_empty() && !source_names.contains(&tail) {
                 source_names.push(tail);
@@ -2060,11 +2197,17 @@ fn append_tail_expression_return(
         span,
         value_text: Some(text),
         value_name: tail_expression_value_name(&tail, src),
-        value_flow: expression_flow_from_node(tail, file, src),
+        value_flow: expression_flow::expression_flow_from_node_with_handler(tail, file, src, handler),
     });
 }
 
-fn append_expression_body_return(events: &mut Vec<FlowEvent>, body: &Node<'_>, file: FileId, src: &[u8]) {
+fn append_expression_body_return(
+    events: &mut Vec<FlowEvent>,
+    body: &Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) {
     let text = node_text(body, src).trim().to_string();
     if text.is_empty() || text.ends_with(';') {
         return;
@@ -2080,7 +2223,7 @@ fn append_expression_body_return(events: &mut Vec<FlowEvent>, body: &Node<'_>, f
         span,
         value_text: Some(text),
         value_name: tail_expression_value_name(body, src),
-        value_flow: expression_flow_from_node(*body, file, src),
+        value_flow: expression_flow::expression_flow_from_node_with_handler(*body, file, src, handler),
     });
 }
 
@@ -2604,14 +2747,12 @@ fn call_invokes_local_binding(name: &str, receiver: Option<&str>, binding: &str)
     if receiver.is_some_and(|receiver| same_identifier_name(receiver, binding)) {
         return true;
     }
-    let call = name.trim().trim_end_matches(['.', '(', ')']);
+    let call = name.trim().trim_end_matches(bonsai_common::is_name_punctuation);
     if same_identifier_name(call, binding) {
         return true;
     }
-    [".", "->", "::"].into_iter().any(|separator| {
-        call.strip_prefix(binding)
-            .is_some_and(|rest| rest.starts_with(separator))
-    })
+    bonsai_common::split_qualified_name_head_tail(call)
+        .is_some_and(|(head, _)| same_identifier_name(head, binding))
 }
 
 fn tail_expression_value_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
@@ -2642,13 +2783,10 @@ fn walk_method_chain_receivers(
     class_names: &[String],
     out: &mut Vec<FlowEvent>,
 ) {
-    // Erlang's `Mod:fn(args)` parses as an outer `call` whose
-    // `function` field is a `remote` node, and `remote` is also in
-    // `COMMON_CALL_KINDS` (so bare top-level remotes still surface
-    // a call ref). The outer call's `build_call_event` already
-    // captured `Mod:fn` as the qualified callee, so descending
-    // would push a duplicate Call event for the same site.
-    if node.kind() == "remote" {
+    // Some grammars expose a call-shaped component below the enclosing call.
+    // The adapter declares those exact component kinds because the outer
+    // event already owns the complete callee and argument list.
+    if handler.nested_call_component_kinds.contains(&node.kind()) {
         return;
     }
     // If this node IS a call, walk it so build_call_event fires.
@@ -2774,7 +2912,7 @@ fn build_call_event(
     let target = parsed_call_target(&node, src)?;
     let callee_node = target.node;
     let full_text = target.full_text;
-    let is_method = full_text.contains('.') || full_text.contains("->") || full_text.contains("::");
+    let is_method = bonsai_common::qualified_name_owner(&full_text).is_some();
     let short = short_name_of(&full_text);
     let is_ctor = class_names.iter().any(|c| c == &full_text || c == short);
     let call_kind = if is_ctor
@@ -2901,7 +3039,9 @@ fn build_call_event(
             } else {
                 (None, argument_value_node(arg))
             };
-            if let Some(argument) = call_arg_from_nodes(argument_node, value_node, file, src, name) {
+            if let Some(argument) =
+                call_arg_from_nodes_with_handler(argument_node, value_node, file, src, name, handler)
+            {
                 args.push(argument);
             }
         }
@@ -2911,7 +3051,7 @@ fn build_call_event(
     // Each call_argument contains an `expression` with the actual value.
     for arg in &solidity_args {
         let inner = first_named_child(arg).unwrap_or(*arg);
-        if let Some(argument) = call_arg_from_nodes(*arg, inner, file, src, None) {
+        if let Some(argument) = call_arg_from_nodes_with_handler(*arg, inner, file, src, None, handler) {
             args.push(argument);
         }
     }
@@ -2923,7 +3063,7 @@ fn build_call_event(
         if eargs.kind() == "expr_args" {
             let mut cursor = eargs.walk();
             for arg in eargs.named_children(&mut cursor) {
-                if let Some(argument) = call_arg_from_nodes(arg, arg, file, src, None) {
+                if let Some(argument) = call_arg_from_nodes_with_handler(arg, arg, file, src, None, handler) {
                     args.push(argument);
                 }
             }
@@ -2950,7 +3090,9 @@ fn build_call_event(
                     let field = cur.field_name();
                     let skip = matches!(field, Some("receiver" | "method"));
                     if !skip {
-                        if let Some(argument) = call_arg_from_nodes(child, child, file, src, None) {
+                        if let Some(argument) =
+                            call_arg_from_nodes_with_handler(child, child, file, src, None, handler)
+                        {
                             args.push(argument);
                         }
                     }
@@ -3046,28 +3188,16 @@ fn inline_constructed_receiver_type(node: &Node<'_>, src: &[u8]) -> Option<Strin
 /// nodes. The result is a language-neutral compiler fact consumed by the
 /// IDG; downstream engines never inspect `&`, `ref`, `out`, or `inout`
 /// source text.
-fn argument_passing_mode(argument: Node<'_>, value: Node<'_>) -> crate::ArgumentPassingMode {
-    let node_kind_proves_writeback = |node: Node<'_>| {
-        matches!(
-            node.kind(),
-            "reference_expression"
-                | "address_of_expression"
-                | "out_argument"
-                | "ref_expression"
-                | "inout_expression"
-        ) || {
-            let mut cursor = node.walk();
-            let has_writeback_token = node
-                .children(&mut cursor)
-                .any(|child| matches!(child.kind(), "&" | "ref" | "out" | "inout" | "ref_kind_keyword"));
-            has_writeback_token
-        }
-    };
-    if node_kind_proves_writeback(argument) || node_kind_proves_writeback(value) {
-        crate::ArgumentPassingMode::WriteBack
-    } else {
-        crate::ArgumentPassingMode::Value
-    }
+fn argument_passing_mode(
+    argument: Node<'_>,
+    value: Node<'_>,
+    handler: &GrammarHandler,
+) -> crate::ArgumentPassingMode {
+    handler
+        .argument_passing_mode_extractor
+        .map_or(crate::ArgumentPassingMode::Value, |extract| {
+            extract(argument, value)
+        })
 }
 
 fn writeback_argument_place(argument: Node<'_>, value: Node<'_>, src: &[u8]) -> Option<String> {
@@ -3095,12 +3225,29 @@ fn writeback_argument_place(argument: Node<'_>, value: Node<'_>, src: &[u8]) -> 
 /// Addressability and value operands are derived here from the parsed node
 /// structure.
 #[must_use]
+#[cfg(test)]
 pub fn call_arg_from_nodes(
     argument: Node<'_>,
     value: Node<'_>,
     file: FileId,
     src: &[u8],
     name: Option<String>,
+) -> Option<CallArg> {
+    call_arg_from_nodes_with_handler(argument, value, file, src, name, &GENERIC_HANDLER)
+}
+
+/// Build a [`CallArg`] using the active adapter's exact expression semantics.
+/// The test compatibility helper `call_arg_from_nodes` delegates here; the compiler
+/// walker always calls this variant so value-free language constructs are
+/// lowered from CST facts rather than repaired in the taint engine.
+#[must_use]
+pub fn call_arg_from_nodes_with_handler(
+    argument: Node<'_>,
+    value: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    name: Option<String>,
+    handler: &GrammarHandler,
 ) -> Option<CallArg> {
     if is_comment_node_kind(argument.kind()) || is_comment_node_kind(value.kind()) {
         return None;
@@ -3109,7 +3256,7 @@ pub fn call_arg_from_nodes(
     if value_text.is_empty() {
         return None;
     }
-    let passing_mode = argument_passing_mode(argument, value);
+    let passing_mode = argument_passing_mode(argument, value, handler);
     let place = if matches!(passing_mode, crate::ArgumentPassingMode::WriteBack) {
         writeback_argument_place(argument, value, src)
     } else {
@@ -3121,7 +3268,7 @@ pub fn call_arg_from_nodes(
         name,
         value_text,
         place,
-        source_names: extract_rhs_expr_operands(&value, src),
+        source_names: extract_rhs_expr_operands(&value, src, handler),
     })
 }
 
@@ -3130,6 +3277,7 @@ pub fn call_arg_from_nodes(
 /// lowerings that still have the original tree-sitter node but do not use the
 /// generic call walker.
 #[must_use]
+#[cfg(test)]
 pub fn call_arg_from_node(
     argument: Node<'_>,
     file: FileId,
@@ -3138,6 +3286,41 @@ pub fn call_arg_from_node(
 ) -> Option<CallArg> {
     let value = argument_value_node(argument);
     call_arg_from_nodes(argument, value, file, src, name)
+}
+
+/// Build a call argument using the active adapter's exact expression
+/// semantics. Adapter-specific lowerings must use this variant instead of the
+/// legacy generic helper.
+#[must_use]
+pub fn call_arg_from_node_with_handler(
+    argument: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    name: Option<String>,
+    handler: &GrammarHandler,
+) -> Option<CallArg> {
+    let value = argument_value_node(argument);
+    call_arg_from_nodes_with_handler(argument, value, file, src, name, handler)
+}
+
+/// Lower all named children of an adapter-classified construct into call
+/// arguments. Node selection and the synthetic callee identity remain in the
+/// adapter; this helper only performs canonical argument lowering.
+#[must_use]
+pub fn named_child_call_args_with_handler(
+    node: &Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<CallArg> {
+    let mut args = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(argument) = call_arg_from_node_with_handler(child, file, src, None, handler) {
+            args.push(argument);
+        }
+    }
+    args
 }
 
 fn argument_value_node(argument: Node<'_>) -> Node<'_> {
@@ -3335,7 +3518,7 @@ fn argumentless_dot_projection(node: &Node<'_>, src: &[u8]) -> Option<String> {
 /// and `obj->field`. Downstream taint propagation treats the qualified
 /// read as the value-bearing operand and ignores the carrier token when
 /// that token only appears as the base of a qualified access.
-fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
+fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> Vec<String> {
     const IDENT_KINDS: &[&str] = &[
         "identifier",
         "simple_identifier",
@@ -3351,7 +3534,9 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
         "identifier_dollar_escaped",
         "yul_identifier",
     ];
-    if is_large_literal_initializer_node(node.kind(), node) {
+    if is_large_literal_initializer_node(node.kind(), node)
+        || node_is_value_free_expression(*node, src, handler)
+    {
         return Vec::new();
     }
     if let Some(projection) = split_selector_projection(node, src) {
@@ -3360,7 +3545,7 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![*node];
     while let Some(n) = stack.pop() {
-        if is_large_literal_initializer_node(n.kind(), &n) {
+        if is_large_literal_initializer_node(n.kind(), &n) || node_is_value_free_expression(n, src, handler) {
             continue;
         }
         if n.kind() == "vararg_expression" {
@@ -3375,12 +3560,16 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
         if let Some((projections, _)) = &split_selector_children {
             out.extend(projections.iter().cloned());
         }
-        out.extend(call_receiver_source_names(&n, src));
+        out.extend(call_receiver_source_names(&n, src, handler));
         // Objective-C messages expose selector components and value
         // arguments as interleaved direct children. Walk only the actual
         // argument children selected by tree-sitter field metadata; method
         // selector identifiers are syntax, not value operands.
-        if n.kind() == "message_expression" {
+        if handler
+            .special_forms
+            .contains(&SyntaxSpecialForm::DirectCallArguments)
+            && handler.call_ref_kinds.contains(&n.kind())
+        {
             let mut cursor = n.walk();
             if cursor.goto_first_child() {
                 loop {
@@ -3399,19 +3588,19 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
         // parsed argument containers instead, so constructor initializers and
         // compound call arguments retain their value carriers without any
         // rendered-expression parsing.
-        if COMMON_CALL_KINDS.contains(&n.kind()) && n.id() != node.id() {
+        if handler.call_ref_kinds.contains(&n.kind()) {
             for args_node in call_argument_containers(n) {
                 let mut arg_cursor = args_node.walk();
                 for arg in args_node.named_children(&mut arg_cursor) {
-                    out.extend(extract_rhs_expr_operands(&arg, src));
+                    out.extend(extract_rhs_expr_operands(&arg, src, handler));
                 }
             }
             continue;
         }
-        if MEMBER_EXPR_KINDS.contains(&n.kind()) {
-            if let Some(name) = normalize_member_name(&n, src) {
+        if handler.member_expression_kinds.contains(&n.kind()) {
+            if let Some(name) = normalize_member_name(&n, src, handler) {
                 let bare = name
-                    .trim_start_matches(bonsai_common::IDENTIFIER_SIGILS)
+                    .trim_start_matches(bonsai_common::is_name_punctuation)
                     .to_string();
                 out.push(name);
                 if !bare.is_empty() {
@@ -3436,15 +3625,8 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
                 .or_else(|| n.child_by_field_name("property"))
                 .or_else(|| n.child_by_field_name("field"))
                 .or_else(|| {
-                    matches!(n.kind(), "navigation_expression" | "qualified_access_expression")
-                        .then(|| {
-                            let mut cursor = n.walk();
-                            let suffix = n.named_children(&mut cursor).find(|child| {
-                                matches!(child.kind(), "navigation_suffix" | "navigation_expression_suffix")
-                            });
-                            suffix
-                        })
-                        .flatten()
+                    let mut cursor = n.walk();
+                    n.named_children(&mut cursor).skip(1).last()
                 })
                 .map(|tail| tail.id());
             let mut member_cursor = n.walk();
@@ -3456,7 +3638,7 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
             continue;
         }
         if let Some(place) = argument_place(&n, src) {
-            if place.contains('.') || place.contains("->") || place.contains('[') {
+            if bonsai_common::qualified_name_owner(&place).is_some() {
                 out.push(place);
             }
         }
@@ -3488,14 +3670,53 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
             stack.push(child);
         }
     }
-    let value_bearing_text = strip_value_free_operator_operands(node_text(node, src));
-    out.retain(|operand| {
-        operand == SYNTHETIC_VARARGS_PARAM
-            || operand_occurs_in_value_bearing_text(&value_bearing_text, operand)
-    });
     out.sort();
     out.dedup();
     out
+}
+
+/// Return the exact value operands proved by one parsed expression.
+///
+/// This is an adapter-facing compiler primitive: the adapter decides that a
+/// grammar construct carries its expression operands (for example, an
+/// exception constructor's arguments), while this helper performs the
+/// vocabulary-free CST walk. Shared analyses consume the resulting typed
+/// event and never reinterpret rendered source text.
+#[must_use]
+pub fn expression_operand_names_with_handler(
+    node: &Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<String> {
+    extract_rhs_expr_operands(node, src, handler)
+}
+
+/// Whether the adapter's grammar proves that `node` computes metadata about
+/// an operand rather than reading its runtime value. This is deliberately a
+/// CST decision: the shared compiler never scans rendered source for operator
+/// keywords, and every exact spelling/kind comes from the active adapter.
+fn node_is_value_free_expression(node: Node<'_>, src: &[u8], handler: &GrammarHandler) -> bool {
+    if handler.value_free_expression_kinds.contains(&node.kind()) {
+        return true;
+    }
+    if !handler.value_free_unary_operators.is_empty() {
+        let mut cursor = node.walk();
+        if node
+            .children(&mut cursor)
+            .filter(|child| !child.is_named())
+            .any(|child| handler.value_free_unary_operators.contains(&child.kind()))
+        {
+            return true;
+        }
+    }
+    if handler.value_free_call_names.is_empty() || !handler.is_call(node.kind()) {
+        return false;
+    }
+    parsed_call_target(&node, src).is_some_and(|target| {
+        handler
+            .value_free_call_names
+            .contains(&short_name_of(&target.full_text))
+    })
 }
 
 fn identifier_parent_sigil(node: Node<'_>, src: &[u8]) -> Option<&'static str> {
@@ -3511,17 +3732,17 @@ fn identifier_parent_sigil(node: Node<'_>, src: &[u8]) -> Option<&'static str> {
         .find(|sigil| has_direct_token(&parent, src, sigil))
 }
 
-fn call_receiver_source_names(node: &Node<'_>, src: &[u8]) -> Vec<String> {
-    if !COMMON_CALL_KINDS.contains(&node.kind()) {
+fn call_receiver_source_names(node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> Vec<String> {
+    if !handler.call_ref_kinds.contains(&node.kind()) {
         return Vec::new();
     }
-    let Some(receiver) = call_receiver_node(node) else {
+    let Some(receiver) = call_receiver_node(node, handler) else {
         return Vec::new();
     };
-    receiver_value_bases(receiver, src)
+    receiver_value_bases(receiver, src, handler)
 }
 
-fn call_receiver_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
+fn call_receiver_node<'tree>(node: &Node<'tree>, handler: &GrammarHandler) -> Option<Node<'tree>> {
     node.child_by_field_name("receiver")
         .or_else(|| node.child_by_field_name("object"))
         .or_else(|| node.child_by_field_name("invocant"))
@@ -3532,20 +3753,20 @@ fn call_receiver_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
                 // Kotlin and Swift call expressions expose their callee as
                 // the first named child rather than through a field.
                 .or_else(|| first_named_child(node))?;
-            member_receiver_node(callee)
+            member_receiver_node(callee, handler)
         })
 }
 
 /// Select the value side of a member expression from grammar structure.
 /// Kotlin/Swift navigation expressions use positional children; the other
 /// supported grammars expose one of the named receiver fields below.
-fn member_receiver_node<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
+fn member_receiver_node<'tree>(node: Node<'tree>, handler: &GrammarHandler) -> Option<Node<'tree>> {
     let member = if node.kind() == "expression" {
         first_named_child(&node).unwrap_or(node)
     } else {
         node
     };
-    if !MEMBER_EXPR_KINDS.contains(&member.kind()) {
+    if !handler.member_expression_kinds.contains(&member.kind()) {
         return None;
     }
     member
@@ -3555,19 +3776,12 @@ fn member_receiver_node<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
         .or_else(|| member.child_by_field_name("expression"))
         // tree-sitter-rust field expressions use `value` for the receiver.
         .or_else(|| member.child_by_field_name("value"))
-        .or_else(|| {
-            matches!(
-                member.kind(),
-                "navigation_expression" | "qualified_access_expression"
-            )
-            .then(|| first_named_child(&member))
-            .flatten()
-        })
+        .or_else(|| first_named_child(&member))
 }
 
-fn receiver_value_bases(node: Node<'_>, src: &[u8]) -> Vec<String> {
+fn receiver_value_bases(node: Node<'_>, src: &[u8], handler: &GrammarHandler) -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(base) = leftmost_value_base(node, src) {
+    if let Some(base) = leftmost_value_base(node, src, handler) {
         push_receiver_base_variants(&mut out, &base);
     }
     if out.is_empty() {
@@ -3580,7 +3794,7 @@ fn receiver_value_bases(node: Node<'_>, src: &[u8]) -> Vec<String> {
     out
 }
 
-fn leftmost_value_base(node: Node<'_>, src: &[u8]) -> Option<String> {
+fn leftmost_value_base(node: Node<'_>, src: &[u8], handler: &GrammarHandler) -> Option<String> {
     let kind = node.kind();
     if matches!(
         kind,
@@ -3598,23 +3812,23 @@ fn leftmost_value_base(node: Node<'_>, src: &[u8]) -> Option<String> {
             return Some(text.to_string());
         }
     }
-    if COMMON_CALL_KINDS.contains(&kind) {
-        if let Some(receiver) = call_receiver_node(&node) {
-            return leftmost_value_base(receiver, src);
+    if handler.call_ref_kinds.contains(&kind) {
+        if let Some(receiver) = call_receiver_node(&node, handler) {
+            return leftmost_value_base(receiver, src, handler);
         }
     }
-    if MEMBER_EXPR_KINDS.contains(&kind) || matches!(kind, "element_reference" | "subscript_expression") {
+    if handler.member_expression_kinds.contains(&kind) || handler.subscript_expression_kinds.contains(&kind) {
         if let Some(object) = node
             .child_by_field_name("object")
             .or_else(|| node.child_by_field_name("receiver"))
             .or_else(|| node.child_by_field_name("value"))
         {
-            return leftmost_value_base(object, src);
+            return leftmost_value_base(object, src, handler);
         }
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        if let Some(base) = leftmost_value_base(child, src) {
+        if let Some(base) = leftmost_value_base(child, src, handler) {
             return Some(base);
         }
     }
@@ -3622,17 +3836,19 @@ fn leftmost_value_base(node: Node<'_>, src: &[u8]) -> Option<String> {
 }
 
 fn receiver_base_from_text(text: &str) -> Option<String> {
-    let trimmed = text.trim().trim_start_matches('&').trim_start_matches('*').trim();
+    let normalized = normalise_qualified_text(text);
+    let trimmed = normalized
+        .trim()
+        .trim_start_matches(bonsai_common::is_name_punctuation);
     if trimmed.is_empty() {
         return None;
     }
-    let mut end = trimmed.len();
-    for sep in [".", "->", "::", "[", "(", " "] {
-        if let Some(idx) = trimmed.find(sep) {
-            end = end.min(idx);
-        }
-    }
-    let candidate = trimmed[..end].trim().trim_start_matches('$');
+    let candidate = bonsai_common::qualified_name_segments(trimmed)
+        .first()
+        .copied()
+        .unwrap_or(trimmed)
+        .trim()
+        .trim_start_matches(bonsai_common::is_name_punctuation);
     looks_like_bare_identifier(candidate).then(|| candidate.to_string())
 }
 
@@ -3641,170 +3857,13 @@ fn push_receiver_base_variants(out: &mut Vec<String>, base: &str) {
     if base.is_empty() {
         return;
     }
-    let cleaned = base.trim_start_matches('$');
+    let cleaned = base.trim_start_matches(bonsai_common::is_name_punctuation);
     if looks_like_bare_identifier(cleaned) {
         out.push(cleaned.to_string());
         if cleaned != base {
             out.push(base.to_string());
         }
     }
-}
-
-fn strip_value_free_operator_operands(text: &str) -> String {
-    const PAREN_OPERATORS: &[&str] = &[
-        "sizeof",
-        "_Alignof",
-        "alignof",
-        "__alignof__",
-        "__typeof__",
-        "typeof",
-        "nameof",
-    ];
-    let mut out = String::with_capacity(text.len());
-    let mut cursor = 0usize;
-    while cursor < text.len() {
-        if let Some(operator) = value_free_operator_at(text, cursor, PAREN_OPERATORS) {
-            let mut after = cursor + operator.len();
-            if operator == "sizeof" && text[after..].starts_with("...") {
-                after += 3;
-            }
-            let after_ws = skip_ascii_ws(text, after);
-            if text[after_ws..].starts_with('(') {
-                out.push_str(operator);
-                out.push(' ');
-                cursor = skip_balanced_paren_text(text, after_ws);
-                continue;
-            }
-            if operator == "sizeof" || operator == "typeof" {
-                out.push_str(operator);
-                out.push(' ');
-                cursor = skip_unary_operand_text(text, after_ws);
-                continue;
-            }
-        }
-        let Some(ch) = text[cursor..].chars().next() else {
-            break;
-        };
-        out.push(ch);
-        cursor += ch.len_utf8();
-    }
-    out
-}
-
-fn operand_occurs_in_value_bearing_text(text: &str, operand: &str) -> bool {
-    let operand = operand.trim();
-    if operand.is_empty() {
-        return false;
-    }
-    contains_identifier_operand(text, operand)
-        || contains_identifier_operand(&normalise_qualified_text(text), operand)
-        || operand.trim_start_matches(['$', '@', '%']).ne(operand)
-            && contains_identifier_operand(text, operand.trim_start_matches(['$', '@', '%']))
-}
-
-fn contains_identifier_operand(text: &str, operand: &str) -> bool {
-    if operand.is_empty() {
-        return false;
-    }
-    let mut search_from = 0usize;
-    while let Some(relative) = text[search_from..].find(operand) {
-        let start = search_from + relative;
-        let end = start + operand.len();
-        let before_ok =
-            start == 0 || is_identifier_operand_left_boundary(text.as_bytes()[start - 1], operand);
-        let after_ok = text
-            .as_bytes()
-            .get(end)
-            .is_none_or(|byte| !is_ident_continue_byte(*byte));
-        if before_ok && after_ok {
-            return true;
-        }
-        search_from = end;
-    }
-    false
-}
-
-fn is_identifier_operand_left_boundary(byte: u8, operand: &str) -> bool {
-    if !is_ident_continue_byte(byte) {
-        return true;
-    }
-    // Parser-surfaced interpolation operands in languages such as
-    // Kotlin appear in source as `$name`, while the AST child text is
-    // `name`. The sigil is expression punctuation, not part of the
-    // runtime identifier value. Keep this adapter fact without opening
-    // substring matches inside normal identifier text.
-    matches!(byte, b'$' | b'@' | b'%') && !operand.as_bytes().starts_with(&[byte])
-}
-
-fn value_free_operator_at<'a>(text: &str, offset: usize, operators: &'a [&'a str]) -> Option<&'a str> {
-    operators.iter().copied().find(|operator| {
-        text[offset..].starts_with(operator)
-            && (offset == 0 || !is_ident_continue_byte(text.as_bytes()[offset - 1]))
-            && text
-                .as_bytes()
-                .get(offset + operator.len())
-                .is_none_or(|byte| !is_ident_continue_byte(*byte))
-    })
-}
-
-fn skip_ascii_ws(text: &str, mut offset: usize) -> usize {
-    while let Some(byte) = text.as_bytes().get(offset) {
-        if !byte.is_ascii_whitespace() {
-            break;
-        }
-        offset += 1;
-    }
-    offset
-}
-
-fn skip_balanced_paren_text(text: &str, open_pos: usize) -> usize {
-    let mut quote: Option<u8> = None;
-    let mut escaped = false;
-    let mut depth = 0isize;
-    let bytes = text.as_bytes();
-    let mut idx = open_pos;
-    while idx < bytes.len() {
-        let byte = bytes[idx];
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == q {
-                quote = None;
-            }
-            idx += 1;
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"' | b'`') {
-            quote = Some(byte);
-            idx += 1;
-            continue;
-        }
-        if byte == b'(' {
-            depth += 1;
-        } else if byte == b')' {
-            depth -= 1;
-            if depth == 0 {
-                return idx + 1;
-            }
-        }
-        idx += 1;
-    }
-    text.len()
-}
-
-fn skip_unary_operand_text(text: &str, offset: usize) -> usize {
-    let mut idx = offset;
-    while idx < text.len() {
-        let byte = text.as_bytes()[idx];
-        if byte.is_ascii_whitespace() || matches!(byte, b',' | b')' | b']' | b'}' | b'+' | b'-' | b'*' | b'/')
-        {
-            break;
-        }
-        idx += 1;
-    }
-    idx
 }
 
 /// Identifier-continue byte: `_`, `$`, or ASCII alphanumeric.
@@ -4130,9 +4189,15 @@ fn assignment_lhs_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
         .or_else(|| first_named_child_of_kind(node, "array_pattern"))
         .or_else(|| first_named_child_of_kind(node, "list_pattern"))
         .or_else(|| first_named_child_of_kind(node, "left_assignment_list"))
-        .or_else(|| first_named_child_of_kind(node, "expression_list"))
         .or_else(|| first_named_child_of_kind(node, "tuple"))
+        // A grammar-declared singular binding beats an unfielded expression
+        // list. Go `var_spec`, for example, has `name: identifier` and
+        // `value: expression_list`; selecting the latter as an LHS turns RHS
+        // identifiers into phantom destructured bindings. Real multi-target
+        // assignment grammars expose `left`/`lhs` or one of the aggregate
+        // binding containers above.
         .or_else(|| node.child_by_field_name("name"))
+        .or_else(|| first_named_child_of_kind(node, "expression_list"))
         .or_else(|| node.child_by_field_name("declarator"))
 }
 
@@ -4179,6 +4244,7 @@ fn ruby_append_mutation_assignment(
     node: &Node<'_>,
     file: FileId,
     src: &[u8],
+    handler: &GrammarHandler,
     out: &mut Vec<FlowEvent>,
 ) -> bool {
     if node.kind() != "binary" {
@@ -4203,7 +4269,7 @@ fn ruby_append_mutation_assignment(
     }
     let right_text = node_text(&right, src).trim();
     let source_name = looks_like_bare_identifier(right_text).then(|| right_text.to_string());
-    let mut source_names = extract_rhs_expr_operands(&right, src);
+    let mut source_names = extract_rhs_expr_operands(&right, src, handler);
     if source_names.is_empty() {
         if let Some(source_name) = source_name.as_ref() {
             source_names.push(source_name.clone());
@@ -4272,39 +4338,18 @@ pub fn normalize_call_name_whitespace(raw: &str) -> String {
     out
 }
 
-/// Strip common qualifier prefixes so `foo.bar.baz` / `Foo::bar` /
-/// `this->bar` / `module:fn` (Erlang) resolve to the bare name.
+/// Return the final identifier segment of an adapter-classified name.
+/// Shared lowering recognizes structural punctuation boundaries, not a union
+/// of source-language qualifier spellings.
 pub fn short_name_of(raw: &str) -> &str {
-    let trimmed = raw
-        .trim()
-        .trim_start_matches('&')
-        .trim_start_matches('*')
-        .trim_end_matches('!');
-    let mut best = trimmed;
-    // `::` must come before `:` so `Foo::bar` keeps `bar`, not `:bar`.
-    // `.` and `->` are unambiguous. Erlang's single `:` is the last
-    // fallback so we don't break the earlier matches.
-    for sep in ["::", "->", ".", ":"] {
-        if let Some(idx) = best.rfind(sep) {
-            best = &best[idx + sep.len()..];
-        }
-    }
-    best
+    let trimmed = raw.trim().trim_matches(bonsai_common::is_name_punctuation);
+    bonsai_common::short_qualified_tail(trimmed)
 }
 
-/// Build a [`GrammarHandler`] that uses the supplied function-kind
-/// list and inherits every other field from [`GENERIC_HANDLER`].
-/// `const` so adapters can stamp out their handler at compile time:
-///
-/// ```ignore
-/// const HANDLER: GrammarHandler = bonsai_lang_api::with_fn_kinds(&["function_definition"]);
-/// ```
-///
-/// Use this when the language's grammar uses common construct names
-/// for everything except the function-definition kind. Override the
-/// resulting handler manually when grammar-specific kinds need
-/// language-aware coverage.
+/// Test-fixture helper for varying only function kinds in cross-grammar kit
+/// tests. Production adapters use explicit local handlers.
 #[must_use]
+#[cfg(test)]
 pub const fn with_fn_kinds(fn_kinds: &'static [&'static str]) -> GrammarHandler {
     with_fn_kinds_and_implicit_receivers(
         fn_kinds,
@@ -4313,8 +4358,8 @@ pub const fn with_fn_kinds(fn_kinds: &'static [&'static str]) -> GrammarHandler 
     )
 }
 
-/// Convenience for adapters whose methods have implicit receiver syntax
-/// rather than an explicit receiver parameter.
+/// Test-fixture variant with explicit receiver spellings.
+#[cfg(test)]
 pub const fn with_fn_kinds_and_implicit_receivers(
     fn_kinds: &'static [&'static str],
     implicit_receiver_names: &'static [&'static str],
@@ -4337,6 +4382,11 @@ pub const fn with_fn_kinds_and_implicit_receivers(
         do_kinds: GENERIC_HANDLER.do_kinds,
         loop_kinds: GENERIC_HANDLER.loop_kinds,
         call_kinds: GENERIC_HANDLER.call_kinds,
+        nested_call_component_kinds: GENERIC_HANDLER.nested_call_component_kinds,
+        pseudo_call_extractor: GENERIC_HANDLER.pseudo_call_extractor,
+        syntax_event_extractor: GENERIC_HANDLER.syntax_event_extractor,
+        pseudo_call_receiver_extractor: GENERIC_HANDLER.pseudo_call_receiver_extractor,
+        argument_passing_mode_extractor: GENERIC_HANDLER.argument_passing_mode_extractor,
         assignment_kinds: GENERIC_HANDLER.assignment_kinds,
         return_kinds: GENERIC_HANDLER.return_kinds,
         throw_kinds: GENERIC_HANDLER.throw_kinds,
@@ -4351,6 +4401,25 @@ pub const fn with_fn_kinds_and_implicit_receivers(
         defer_kinds: GENERIC_HANDLER.defer_kinds,
         using_kinds: GENERIC_HANDLER.using_kinds,
         special_forms: GENERIC_HANDLER.special_forms,
+        runtime_type_guard_calls: GENERIC_HANDLER.runtime_type_guard_calls,
+        runtime_type_guard_operators: GENERIC_HANDLER.runtime_type_guard_operators,
+        runtime_typeof_operators: GENERIC_HANDLER.runtime_typeof_operators,
+        runtime_type_equality_operators: GENERIC_HANDLER.runtime_type_equality_operators,
+        value_free_expression_kinds: GENERIC_HANDLER.value_free_expression_kinds,
+        value_free_call_names: GENERIC_HANDLER.value_free_call_names,
+        value_free_unary_operators: GENERIC_HANDLER.value_free_unary_operators,
+        call_ref_kinds: GENERIC_HANDLER.call_ref_kinds,
+        member_expression_kinds: GENERIC_HANDLER.member_expression_kinds,
+        subscript_expression_kinds: GENERIC_HANDLER.subscript_expression_kinds,
+        sigil_variable_kinds: GENERIC_HANDLER.sigil_variable_kinds,
+        global_variable_kinds: GENERIC_HANDLER.global_variable_kinds,
+        subscript_base_call_refs: GENERIC_HANDLER.subscript_base_call_refs,
+        non_call_ref_names: GENERIC_HANDLER.non_call_ref_names,
+        synthetic_call_ref_names: GENERIC_HANDLER.synthetic_call_ref_names,
+        call_name_suffix_tokens: GENERIC_HANDLER.call_name_suffix_tokens,
+        syntax_error_tolerant_call_names: GENERIC_HANDLER.syntax_error_tolerant_call_names,
+        callable_reference_kinds: GENERIC_HANDLER.callable_reference_kinds,
+        callable_reference_extractor: GENERIC_HANDLER.callable_reference_extractor,
         method_receiver_param_index: GENERIC_HANDLER.method_receiver_param_index,
         implicit_receiver_names,
         implicit_receiver_prefixes,
@@ -4415,10 +4484,10 @@ pub fn extract_assignment_value_facts(
                     && value_span.end <= span.end
                     && value_span.start < value_span.end
                 {
-                    let direct_call_name = if callable_reference_name(&value, src).is_some() {
+                    let direct_call_name = if callable_reference_name(&value, src, handler).is_some() {
                         None
                     } else {
-                        extract_direct_call_info(&value, src)
+                        extract_direct_call_info(&value, src, handler)
                             .and_then(|(name, _)| name)
                             .or_else(|| {
                                 handler
@@ -4429,10 +4498,10 @@ pub fn extract_assignment_value_facts(
                             })
                     };
                     let direct_call_receiver = direct_call_name.as_deref().and_then(call_receiver_from_name);
-                    let call_sites = if callable_reference_name(&value, src).is_some() {
+                    let call_sites = if callable_reference_name(&value, src, handler).is_some() {
                         Vec::new()
                     } else {
-                        expression_flow::expression_call_spans(value, file)
+                        expression_flow::expression_call_spans(value, file, handler)
                     };
                     facts.push(crate::AssignmentValueFact {
                         assignment_span: span,
@@ -4443,7 +4512,9 @@ pub fn extract_assignment_value_facts(
                         target_span,
                         value_span,
                         call_sites,
-                        value_flow: expression_flow_from_node(value, file, src),
+                        value_flow: expression_flow::expression_flow_from_node_with_handler(
+                            value, file, src, handler,
+                        ),
                         exact_callable_return: None,
                         exact_static_call_args: None,
                         direct_call_name,
@@ -4483,20 +4554,18 @@ pub fn extract_call_receiver_facts(
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
         let receiver_and_span = if handler.is_call(node.kind()) {
-            call_receiver_node(&node)
+            call_receiver_node(&node, handler)
                 .zip(parsed_call_target(&node, src))
                 .map(|(receiver, target)| (receiver, span_of(file, &target.node)))
-        } else if node.kind() == "field_expression" && is_scala_operator_method_call(&node) {
-            node.child_by_field_name("value")
-                .or_else(|| first_named_child(&node))
-                .map(|receiver| (receiver, span_of(file, &node)))
-        } else if node.kind() == "infix_expression" {
-            infix_method_receiver(&node, src).map(|(receiver, _)| (receiver, span_of(file, &node)))
         } else {
-            None
+            handler
+                .pseudo_call_receiver_extractor
+                .and_then(|extract| extract(node, src))
+                .map(|receiver| (receiver, span_of(file, &node)))
         };
         if let Some((receiver, call_span)) = receiver_and_span {
-            let value_flow = expression_flow_from_node(receiver, file, src);
+            let value_flow =
+                expression_flow::expression_flow_from_node_with_handler(receiver, file, src, handler);
             facts.push(crate::CallReceiverFact {
                 call_span,
                 receiver_span: span_of(file, &receiver),
@@ -4526,17 +4595,19 @@ pub fn extract_call_argument_value_facts(
     file: FileId,
     defs: &[crate::Decl],
     src: &[u8],
+    handler: &GrammarHandler,
 ) -> Vec<crate::CallArgumentValueFact> {
-    fn direct_call_callee_span(node: Node<'_>, file: FileId, src: &[u8]) -> Option<Span> {
-        if COMMON_CALL_KINDS.contains(&node.kind()) {
+    fn direct_call_callee_span(
+        node: Node<'_>,
+        file: FileId,
+        src: &[u8],
+        handler: &GrammarHandler,
+    ) -> Option<Span> {
+        if handler.call_ref_kinds.contains(&node.kind()) {
             return parsed_call_target(&node, src).map(|target| span_of(file, &target.node));
         }
-        let single_expr_grouping = grouping_list_kind(node.kind()) && node.named_child_count() == 1;
-        if !direct_call_wrapper_kind(node.kind()) && !single_expr_grouping {
-            return None;
-        }
-        let child = first_named_child(&node)?;
-        direct_call_callee_span(child, file, src)
+        let child = transparent_direct_call_child(&node, handler)?;
+        direct_call_callee_span(child, file, src, handler)
     }
 
     fn collect_requests(events: &[FlowEvent], out: &mut Vec<(Span, usize, Span)>) {
@@ -4608,8 +4679,10 @@ pub fn extract_call_argument_value_facts(
                     .map(|node| {
                         let value = argument_value_node(*node);
                         (
-                            expression_flow_from_node(value, file, src),
-                            direct_call_callee_span(value, file, src),
+                            expression_flow::expression_flow_from_node_with_handler(
+                                value, file, src, handler,
+                            ),
+                            direct_call_callee_span(value, file, src, handler),
                         )
                     })
                     .max_by_key(|(flow, _)| {
@@ -4655,6 +4728,7 @@ pub fn populate_call_argument_static_values(
     tree: &Tree,
     file: FileId,
     src: &[u8],
+    handler: &GrammarHandler,
     decode: fn(Node<'_>, &[u8]) -> Option<crate::StaticScalarValue>,
 ) {
     fn collect_requests(events: &[FlowEvent], out: &mut Vec<(Span, usize, Span)>) {
@@ -4747,7 +4821,7 @@ pub fn populate_call_argument_static_values(
                 call_span,
                 argument_index,
                 argument_span,
-                direct_call_span: if COMMON_CALL_KINDS.contains(&value_node.kind()) {
+                direct_call_span: if handler.call_ref_kinds.contains(&value_node.kind()) {
                     parsed_call_target(&value_node, src).map(|target| span_of(file, &target.node))
                 } else {
                     None
@@ -4868,7 +4942,13 @@ fn lower_lambda_declarations(lowering: &CallableLowering<'_>, defs: &mut Vec<cra
                 lowering.class_names,
             );
             if let Some(return_node) = implicit_return_node {
-                append_expression_body_return(&mut events, &return_node, lowering.file, lowering.src);
+                append_expression_body_return(
+                    &mut events,
+                    &return_node,
+                    lowering.file,
+                    lowering.src,
+                    lowering.handler,
+                );
             } else if lowering.handler.tail_expression_returns {
                 append_tail_expression_return(
                     &mut events,
@@ -4883,7 +4963,11 @@ fn lower_lambda_declarations(lowering: &CallableLowering<'_>, defs: &mut Vec<cra
             Vec::new()
         };
         if syntax_broken {
-            retain_flow_events_outside_errors(&mut flow_events, lowering.error_spans);
+            retain_flow_events_outside_errors(
+                &mut flow_events,
+                lowering.error_spans,
+                lowering.handler.syntax_error_tolerant_call_names,
+            );
         }
         annotate_tuple_call_result_bindings(&mut flow_events, lowering.tree, lowering.src);
         if params.is_empty() && flow_events.is_empty() {
@@ -5091,7 +5175,11 @@ fn lower_module_declaration(lowering: &CallableLowering<'_>, defs: &mut Vec<crat
         lowering.class_names,
     );
     if module_syntax_broken {
-        retain_flow_events_outside_errors(&mut root_events, lowering.error_spans);
+        retain_flow_events_outside_errors(
+            &mut root_events,
+            lowering.error_spans,
+            lowering.handler.syntax_error_tolerant_call_names,
+        );
     }
     let has_actionable_event = root_events.iter().any(|event| {
         matches!(
@@ -5313,7 +5401,7 @@ pub fn decl_index_with_handler(
             if returns_void {
                 // no synthetic return for a void/unit function
             } else if let Some(return_node) = implicit_return_node {
-                append_expression_body_return(&mut events, &return_node, file, src);
+                append_expression_body_return(&mut events, &return_node, file, src, handler);
             } else if handler.tail_expression_returns {
                 append_tail_expression_return(&mut events, &b, file, src, handler);
             }
@@ -5329,7 +5417,11 @@ pub fn decl_index_with_handler(
         // Narrow syntax-error gating: keep flows from the cleanly-parsed
         // statements, drop only the events inside a recovered error span.
         if syntax_broken {
-            retain_flow_events_outside_errors(&mut flow_events, &error_spans);
+            retain_flow_events_outside_errors(
+                &mut flow_events,
+                &error_spans,
+                handler.syntax_error_tolerant_call_names,
+            );
         }
         annotate_tuple_call_result_bindings(&mut flow_events, &tree, src);
 
@@ -5346,7 +5438,7 @@ pub fn decl_index_with_handler(
         // the name alone.
         let is_variadic = parameter_list_is_variadic(&param_source)
             || params.last().is_some_and(|p| p == SYNTHETIC_VARARGS_PARAM);
-        let param_annotations = extract_param_annotations(&param_source, src);
+        let param_annotations = extract_param_annotations(&param_source, src, handler);
         let receiver_param_index =
             if matches!(decl_kind, crate::DeclKind::Method | crate::DeclKind::Constructor)
                 || has_ancestor_kind(&node, handler.method_context_kinds)
@@ -5455,14 +5547,14 @@ pub fn decl_index_with_handler(
     // handled by that callable's own gate above.
     lower_module_declaration(&lowering, &mut defs, &mut next);
 
-    let mut refs = extract_call_refs(&tree, file, src);
+    let mut refs = extract_call_refs(&tree, file, src, handler);
     refs.extend(extract_decorators(&tree, file, src));
-    refs.extend(extract_read_write_refs(&tree, file, src));
+    refs.extend(extract_read_write_refs(&tree, file, src, handler));
     let strings = extract_string_literals(&tree, file, src);
     let comments = extract_comments(&tree, file, src);
     let assignment_values = extract_assignment_value_facts(&tree, file, handler, src);
     let call_receivers = extract_call_receiver_facts(&tree, file, handler, src);
-    let call_argument_values = extract_call_argument_value_facts(&tree, file, &defs, src);
+    let call_argument_values = extract_call_argument_value_facts(&tree, file, &defs, src, handler);
     let runtime_type_narrowings = extract_runtime_type_narrowing_facts(&tree, file, handler, src);
     let branch_conditions = extract_branch_condition_facts(&tree, file, handler, src);
     crate::DeclIndex {
@@ -5477,6 +5569,7 @@ pub fn decl_index_with_handler(
         finite_literal_selections: Vec::new(),
         character_substitutions: Vec::new(),
         character_constraints: Vec::new(),
+        guarded_value_filters: Vec::new(),
         same_origin_path_constraints: Vec::new(),
         compiler_guards: Vec::new(),
         dynamic_key_filters: Vec::new(),
@@ -5726,17 +5819,17 @@ fn call_receiver_from_name(name: &str) -> Option<String> {
     if let Some(receiver) = rust_value_receiver_from_scoped_name(name) {
         return Some(receiver);
     }
-    let normalised = normalise_qualified_text(&name.replace("->", "."));
+    let normalised = normalise_qualified_text(name);
     let (receiver, _) = normalised.rsplit_once('.')?;
     let receiver = receiver.trim();
     (!receiver.is_empty()).then(|| receiver.to_string())
 }
 
 fn rust_value_receiver_from_scoped_name(name: &str) -> Option<String> {
-    let (head, tail) = name.split_once("::")?;
-    if tail.contains("::") {
+    let segments = bonsai_common::qualified_name_segments(name);
+    let [head, tail] = segments.as_slice() else {
         return None;
-    }
+    };
     let head = head.trim();
     let tail = tail.trim();
     if head.is_empty() || tail.is_empty() {
@@ -5822,15 +5915,14 @@ pub fn inject_lifecycle_events(events: &mut Vec<crate::FlowEvent>, transitions: 
             if !lifecycle_call_matches(name, row.call_match) {
                 continue;
             }
-            // Bare row keys (`close`) target method-style calls —
-            // the binding is the receiver. Dotted row keys
-            // (`:gen_server.stop`, `os.close`) target namespaced
+            // Bare row keys target method-style calls — the binding is the
+            // receiver. Qualified row keys target namespaced
             // free functions — the binding is the indexed arg.
-            // The dotted-name fallback only fires for adapters
+            // The qualified-name fallback only fires for adapters
             // that fold receiver and method into the call name
             // and emit no args.
-            let row_is_dotted = row.call_match.contains(['.', ':', '>']);
-            let raw = if !row_is_dotted {
+            let row_is_qualified = bonsai_common::qualified_name_owner(row.call_match).is_some();
+            let raw = if !row_is_qualified {
                 if let Some(rx) = receiver.as_deref() {
                     rx.trim().to_string()
                 } else if let Some(arg) = args.get(row.arg_index) {
@@ -5838,7 +5930,7 @@ pub fn inject_lifecycle_events(events: &mut Vec<crate::FlowEvent>, transitions: 
                         continue;
                     };
                     place.trim().to_string()
-                } else if let Some((head, _)) = name.rsplit_once(['.', ':', '>']) {
+                } else if let Some(head) = bonsai_common::qualified_name_owner(name) {
                     head.trim().to_string()
                 } else {
                     continue;
@@ -5871,33 +5963,28 @@ pub fn inject_lifecycle_events(events: &mut Vec<crate::FlowEvent>, transitions: 
     }
 }
 
-/// Bare row keys (`close`) match the call's trailing segment;
-/// dotted keys (`os.close`, `std::move`) require an exact match.
+/// Bare row keys match the call's trailing segment; qualified keys require an
+/// exact match. Separator syntax remains adapter-owned.
 fn lifecycle_call_matches(call_name: &str, row_match: &str) -> bool {
     let call = call_name.trim();
     if call == row_match {
         return true;
     }
-    if row_match.contains(['.', ':', '>']) {
+    if bonsai_common::qualified_name_owner(row_match).is_some() {
         return false;
     }
-    let tail = call.rsplit_once(['.', ':', '>']).map(|(_, t)| t).unwrap_or(call);
-    tail == row_match
+    bonsai_common::short_qualified_tail(call) == row_match
 }
 
 /// Bare-identifier binding name for the lifecycle lattice.
-/// Strips `&` / `*` (C address-of/deref), `$` / `@` / `%`
-/// (PHP/Perl sigils), and folds `obj.fd` → `fd`.
+/// Source punctuation is stripped structurally from an adapter-classified
+/// place, and a qualified place is folded to its trailing identifier.
 fn lifecycle_binding_name(raw: &str) -> String {
-    let trimmed = raw.trim_start_matches(['&', '*', '$', '@', '%']).trim();
+    let trimmed = bonsai_common::trim_leading_name_punctuation(raw.trim()).trim();
     if trimmed.is_empty() {
         return String::new();
     }
-    let tail = trimmed
-        .rsplit_once(['.', ':', '>'])
-        .map(|(_, t)| t)
-        .unwrap_or(trimmed)
-        .trim();
+    let tail = bonsai_common::short_qualified_tail(trimmed).trim();
     if tail.is_empty() {
         return String::new();
     }
@@ -5976,41 +6063,32 @@ pub fn extract_string_literals(
 /// Scan the tree for call-site nodes and return them as flat [`crate::Ref`]
 /// entries. Kept for legacy consumers; prefer `flow_events` for rich flow.
 ///
-/// Elixir-style macro-syntactic definitions (`def`, `defp`, `defmodule`,
-/// `defmacro`, …) parse as `call` nodes whose target identifier is the
-/// keyword — semantically they're definitions, not function calls, so
-/// emitting them in the ref index as `RefKind::Call` produces noise in
-/// the `calls` / `refs` browse output and creates spurious edges in the
-/// callgraph. We filter them here at the language-agnostic layer.
-///
-/// The list is deliberately Elixir-unique: `def`, `defp`, `defmodule`,
-/// `defmacro`, `defmacrop`, `defprotocol`, `defimpl`, `defdelegate`,
-/// `defstruct`, `defexception`. These identifiers aren't callable
-/// functions in any supported language. `alias` / `import` / `require`
-/// / `use` deliberately stay OUT of the list — JavaScript / Node uses
-/// `require()` as a legitimate function (`const x = require("mod")`);
-/// the Elixir import macro-calls are filtered by the Elixir-specific
-/// `parse_imports` path, not here.
-const MACRO_DEFINITION_NAMES: &[&str] = &[
-    "def",
-    "defp",
-    "defmodule",
-    "defmacro",
-    "defmacrop",
-    "defprotocol",
-    "defimpl",
-    "defdelegate",
-    "defstruct",
-    "defexception",
-];
-pub fn extract_call_refs(tree: &tree_sitter::Tree, file: FileId, src: &[u8]) -> Vec<crate::Ref> {
+pub fn extract_call_refs(
+    tree: &tree_sitter::Tree,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<crate::Ref> {
     let mut out = Vec::new();
-    for node in collect_kinds(tree, COMMON_CALL_KINDS) {
-        if erlang_remote_is_call_expr(&node) {
+    let mut call_ref_kinds = handler.call_ref_kinds.to_vec();
+    for (kind, _) in handler.synthetic_call_ref_names {
+        if !call_ref_kinds.contains(kind) {
+            call_ref_kinds.push(kind);
+        }
+    }
+    let remote_call_syntax = handler
+        .special_forms
+        .contains(&SyntaxSpecialForm::RemoteCallExpression);
+    for node in collect_kinds(tree, &call_ref_kinds) {
+        if remote_call_syntax && erlang_remote_is_call_expr(&node) {
             continue;
         }
-        let erlang_call = erlang_call_callee(&node, src);
-        let erlang_remote = erlang_remote_callee(&node, src);
+        let erlang_call = remote_call_syntax
+            .then(|| erlang_call_callee(&node, src))
+            .flatten();
+        let erlang_remote = remote_call_syntax
+            .then(|| erlang_remote_callee(&node, src))
+            .flatten();
         // Prefer the named expression-like child that names the callee.
         // For dotted calls (`req.getParameter(...)`, `foo.bar.baz(...)`)
         // the callee is a `navigation_expression` / `member_expression`
@@ -6043,39 +6121,34 @@ pub fn extract_call_refs(tree: &tree_sitter::Tree, file: FileId, src: &[u8]) -> 
             .or(erlang_call.as_ref())
             .map(|(_, name)| normalize_call_name_whitespace(name))
             .unwrap_or_else(|| normalize_call_name_whitespace(node_text(&callee, src)));
-        if node.kind() == "macro_invocation" && !inner_name.ends_with('!') {
+        for suffix in handler.call_name_suffix_tokens {
+            if inner_name.ends_with(suffix) {
+                continue;
+            }
             let node_src = node_text(&node, src);
             let rest = node_src
                 .trim_start()
                 .strip_prefix(&inner_name)
                 .unwrap_or_default();
-            if rest.trim_start().starts_with('!') {
-                inner_name.push('!');
+            if rest.trim_start().starts_with(suffix) {
+                inner_name.push_str(suffix);
+                break;
             }
         }
         if inner_name.is_empty() {
             continue;
         }
-        // Skip Elixir-style macro-syntactic definition / import calls
-        // (`def foo do …`, `alias MyApp.X`, …). These parse as `call`
-        // nodes but semantically aren't function calls — see
-        // `MACRO_DEFINITION_NAMES` for rationale.
-        if MACRO_DEFINITION_NAMES.contains(&inner_name.as_str()) {
+        if handler.non_call_ref_names.contains(&inner_name.as_str()) {
             continue;
         }
-        // Push the synthetic node-kind keyword ref first.
-        if node.kind() == "emit_statement" {
+        if let Some((_, synthetic_name)) = handler
+            .synthetic_call_ref_names
+            .iter()
+            .find(|(kind, _)| *kind == node.kind())
+        {
             out.push(crate::Ref {
                 span: span_of(file, &node),
-                name: "emit".to_string(),
-                kind: crate::RefKind::Call,
-                scope: None,
-                resolved: None,
-            });
-        } else if node.kind() == "revert_statement" {
-            out.push(crate::Ref {
-                span: span_of(file, &node),
-                name: "revert".to_string(),
+                name: (*synthetic_name).to_string(),
                 kind: crate::RefKind::Call,
                 scope: None,
                 resolved: None,
@@ -6093,27 +6166,26 @@ pub fn extract_call_refs(tree: &tree_sitter::Tree, file: FileId, src: &[u8]) -> 
             resolved: None,
         });
     }
-    // Dart-specific: tree-sitter-dart models calls as
-    // `identifier selector(argument_part)` rather than a unified
-    // call-kind node, so the loop above misses them. Walk
-    // `selector` nodes whose first named child is an
-    // `argument_part` (confirming the selector is the
-    // call-application, not a `.method` access), and reuse the
-    // existing Dart selector→callee walker used by the flow-event
-    // pass so resolved names match what `calls` shows.
-    for node in collect_kinds(tree, &["selector"]) {
-        let has_argument_part = first_named_child_of_kind(&node, "argument_part").is_some();
-        if !has_argument_part {
-            continue;
-        }
-        if let Some(FlowEvent::Call { name, span, .. }) = build_dart_selector_call_event(node, file, src) {
-            out.push(crate::Ref {
-                span,
-                name: normalize_call_name_whitespace(&name),
-                kind: crate::RefKind::Call,
-                scope: None,
-                resolved: None,
-            });
+    if handler
+        .special_forms
+        .contains(&SyntaxSpecialForm::SplitSelectorCall)
+    {
+        for node in collect_kinds(tree, &["selector"]) {
+            let has_argument_part = first_named_child_of_kind(&node, "argument_part").is_some();
+            if !has_argument_part {
+                continue;
+            }
+            if let Some(FlowEvent::Call { name, span, .. }) =
+                build_dart_selector_call_event(node, file, src, handler)
+            {
+                out.push(crate::Ref {
+                    span,
+                    name: normalize_call_name_whitespace(&name),
+                    kind: crate::RefKind::Call,
+                    scope: None,
+                    resolved: None,
+                });
+            }
         }
     }
     out
@@ -6507,15 +6579,7 @@ pub fn module_local_binding(module: &str) -> Option<String> {
     if trimmed.contains('/') || trimmed.contains('\\') || trimmed.starts_with('.') {
         return None;
     }
-    let mut candidate = if let Some((_, tail)) = trimmed.rsplit_once("::") {
-        tail
-    } else if let Some((_, tail)) = trimmed.rsplit_once(':') {
-        tail
-    } else if let Some((_, tail)) = trimmed.rsplit_once('.') {
-        tail
-    } else {
-        trimmed
-    };
+    let mut candidate = bonsai_common::short_qualified_tail(trimmed);
     candidate = candidate.trim();
     let mut chars = candidate.chars();
     let first = chars.next()?;
@@ -6536,82 +6600,20 @@ pub fn module_local_binding(module: &str) -> Option<String> {
 // `RefKind::Write` facts for attribute chains, subscript access, and
 // sigil'd variable reads. Adapter crates should not depend on them.
 
-/// Member / field / attribute expression kinds across every supported
-/// grammar — `obj.prop`, `ns::name`, `struct.field`, `request.args`. The
-/// full dotted text is what the security matcher looks for; nested chains
-/// emit one Ref per level so both `[req, query]` and `[req, query, token]`
-/// rule shapes can match.
-const MEMBER_EXPR_KINDS: &[&str] = &[
-    "member_expression",                 // javascript, typescript, php, solidity
-    "nullsafe_member_access_expression", // php `$obj?->prop` (H13)
-    "member_access_expression",          // c#
-    "field_access",                      // java
-    "field_expression",                  // rust, c, c++, objc, scala, go (some grammars)
-    "selector_expression",               // go
-    "navigation_expression",             // kotlin, swift
-    "attribute",                         // python
-    "dot_index_expression",              // lua
-    "qualified_access_expression",       // swift (newer grammar variants)
-    "qualified_identifier",              // dart / c++ rare forms
-    "scoped_identifier",                 // rust ns::name (optional)
-    "property_access_expression",        // c# / typescript (older grammar)
-    "assignable_expression",             // dart `target.innerHtml = x` LHS
-    "assignable_selector",               // dart selector piece `.innerHtml`
-    "unconditional_assignable_selector", // dart `.innerHtml` non-null form
-    "conditional_assignable_selector",   // dart `?.innerHtml` null-aware form
-];
-
-/// Subscript / index-access expression kinds — `arr[i]`, `$_GET['x']`,
-/// `map["key"]`. Normalised to the bare base expression text (the object
-/// being indexed), stripped of any `$` sigil. Supplies the PHP
-/// `_GET`/`_POST`-style rule surface and the Ruby/Python `params[:x]`
-/// controller DSL surface.
-const SUBSCRIPT_KINDS: &[&str] = &[
-    "subscript_expression",      // javascript, typescript, php, swift, c, cpp
-    "subscript",                 // python
-    "element_reference",         // ruby
-    "array_access",              // java
-    "element_access_expression", // c#
-    "bracket_index_expression",  // lua
-    "index_expression",          // go, rust, elixir
-    "indexing_expression",       // kotlin
-    "indexing_suffix",           // kotlin (selector form)
-];
-
-/// PHP-style sigil'd variables (`$_GET`, `$argv`). Surfaced as bare-name
-/// reads stripped of the leading `$` so rules written as `name: _GET`
-/// match the source.
-const SIGIL_VARIABLE_KINDS: &[&str] = &["variable_name"];
-
-/// Global / special-variable forms that some grammars surface as their own
-/// kind rather than as an identifier (e.g. Ruby's `$stdin`).
-const GLOBAL_VARIABLE_KINDS: &[&str] = &["global_variable"];
+// All grammar node-kind sets used by the reference index come from the active
+// adapter's `GrammarHandler`; this shared lowering code owns no language
+// union.
 
 /// True when `node` is the callee of an enclosing call expression. The
 /// callee slot is a `Call` ref already (emitted by `extract_call_refs`),
 /// so we skip it here to avoid emitting a duplicate `Read` at the same
 /// span that would wrongly satisfy a `kind: read` rule against a
 /// callee's dotted name.
-fn is_call_callee(node: &Node<'_>) -> bool {
+fn is_call_callee(node: &Node<'_>, handler: &GrammarHandler) -> bool {
     let Some(parent) = node.parent() else {
         return false;
     };
-    const CALL_PARENTS: &[&str] = &[
-        "call_expression",
-        "call",
-        "method_invocation",
-        "method_call",
-        "method_call_expression",
-        "member_call_expression",
-        "nullsafe_member_call_expression",
-        "invocation_expression",
-        "function_call",
-        "function_call_expression",
-        "new_expression",
-        "constructor_invocation",
-        "object_creation_expression",
-    ];
-    if !CALL_PARENTS.contains(&parent.kind()) {
+    if !handler.call_ref_kinds.contains(&parent.kind()) {
         return false;
     }
     for field in ["function", "callee", "name", "target", "method", "invocation"] {
@@ -6630,19 +6632,11 @@ fn is_call_callee(node: &Node<'_>) -> bool {
 /// In that position the ref is a write, not a read. Nested receivers
 /// still count as reads (handled by the outer walk emitting per-level
 /// reads).
-fn is_write_target(node: &Node<'_>) -> bool {
+fn is_write_target(node: &Node<'_>, handler: &GrammarHandler) -> bool {
     let Some(parent) = node.parent() else {
         return false;
     };
-    const ASSIGN_PARENTS: &[&str] = &[
-        "assignment_expression",
-        "assignment",
-        "augmented_assignment_expression",
-        "augmented_assignment",
-        "compound_assignment_expr",
-        "simple_assignment_expression",
-    ];
-    if !ASSIGN_PARENTS.contains(&parent.kind()) {
+    if !handler.assignment_kinds.contains(&parent.kind()) {
         return false;
     }
     for field in ["left", "target", "name"] {
@@ -6667,11 +6661,11 @@ fn is_write_target(node: &Node<'_>) -> bool {
 /// joins every property with '.'. Returns `None` if the chain can't be
 /// reduced to a single meaningful dotted string (e.g. parenthesised
 /// subexpressions, call returns, computed property access).
-fn normalize_member_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
+fn normalize_member_name(node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     let mut cur = Some(*node);
     while let Some(n) = cur {
-        if !MEMBER_EXPR_KINDS.contains(&n.kind()) {
+        if !handler.member_expression_kinds.contains(&n.kind()) {
             // Base of the chain — include its text and stop.
             let text = node_text(&n, src).trim().to_string();
             if !text.is_empty() {
@@ -6697,18 +6691,11 @@ fn normalize_member_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
                     .and_then(|suffix| first_identifier_descendant(suffix))
             })
             .or_else(|| {
-                if matches!(n.kind(), "navigation_expression" | "qualified_access_expression") {
-                    let mut cursor = n.walk();
-                    let field = n
-                        .named_children(&mut cursor)
-                        .find(|child| {
-                            matches!(child.kind(), "navigation_suffix" | "navigation_expression_suffix")
-                        })
-                        .and_then(first_identifier_descendant);
-                    field
-                } else {
-                    None
-                }
+                let mut cursor = n.walk();
+                n.named_children(&mut cursor)
+                    .skip(1)
+                    .last()
+                    .and_then(first_identifier_descendant)
             });
         if let Some(f) = field {
             let text = node_text(&f, src).trim().to_string();
@@ -6726,15 +6713,7 @@ fn normalize_member_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
             .or_else(|| n.child_by_field_name("target"))
             .or_else(|| n.child_by_field_name("table"))
             .or_else(|| n.child_by_field_name("receiver"))
-            .or_else(|| {
-                if matches!(n.kind(), "navigation_expression" | "qualified_access_expression") {
-                    let mut cursor = n.walk();
-                    let first = n.named_children(&mut cursor).next();
-                    first
-                } else {
-                    None
-                }
-            });
+            .or_else(|| first_named_child(&n));
         // Guard: if the object field is missing or already non-member with
         // no readable text, stop.
         if cur.is_none() {
@@ -6792,7 +6771,7 @@ fn normalize_subscript_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
     if text.is_empty() {
         return None;
     }
-    let cleaned = text.trim_start_matches('$').to_string();
+    let cleaned = bonsai_common::trim_leading_name_punctuation(&text).to_string();
     if cleaned.is_empty() {
         return None;
     }
@@ -6815,18 +6794,23 @@ fn normalize_subscript_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
 /// `kind: read target.attribute: [...]` rule in the pack (Express
 /// `req.query`, Flask `request.args`, PHP `_GET`, Rails `params`, …)
 /// would silently never match, regardless of what the rulepack says.
-pub fn extract_read_write_refs(tree: &tree_sitter::Tree, file: FileId, src: &[u8]) -> Vec<crate::Ref> {
+pub fn extract_read_write_refs(
+    tree: &tree_sitter::Tree,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<crate::Ref> {
     let mut out = Vec::new();
 
     // Attribute chains — `req.query`, `request.args`, `Runtime.getRuntime`…
-    for node in collect_kinds(tree, MEMBER_EXPR_KINDS) {
-        if is_call_callee(&node) {
+    for node in collect_kinds(tree, handler.member_expression_kinds) {
+        if is_call_callee(&node, handler) {
             continue;
         }
-        let Some(name) = normalize_member_name(&node, src) else {
+        let Some(name) = normalize_member_name(&node, src, handler) else {
             continue;
         };
-        let kind = if is_write_target(&node) {
+        let kind = if is_write_target(&node, handler) {
             crate::RefKind::Write
         } else {
             crate::RefKind::Read
@@ -6841,14 +6825,14 @@ pub fn extract_read_write_refs(tree: &tree_sitter::Tree, file: FileId, src: &[u8
     }
 
     // Subscript reads — `$_GET['x']`, `arr[i]`, `params[:token]`.
-    for node in collect_kinds(tree, SUBSCRIPT_KINDS) {
-        if is_call_callee(&node) {
+    for node in collect_kinds(tree, handler.subscript_expression_kinds) {
+        if is_call_callee(&node, handler) {
             continue;
         }
         let Some(name) = normalize_subscript_name(&node, src) else {
             continue;
         };
-        let kind = if is_write_target(&node) {
+        let kind = if is_write_target(&node, handler) {
             crate::RefKind::Write
         } else {
             crate::RefKind::Read
@@ -6868,7 +6852,10 @@ pub fn extract_read_write_refs(tree: &tree_sitter::Tree, file: FileId, src: &[u8
         // `kind: call callee.name: params` fire — without this, rules
         // that target Rack/Sinatra/Rails/Flask controller params never
         // see the access at all.
-        if !name.contains('.') && !name.contains("::") && is_bare_identifier_base(&node) {
+        if handler.subscript_base_call_refs
+            && bonsai_common::qualified_name_owner(&name).is_none()
+            && is_bare_identifier_base(&node)
+        {
             out.push(crate::Ref {
                 span: span_of(file, &node),
                 name,
@@ -6881,16 +6868,16 @@ pub fn extract_read_write_refs(tree: &tree_sitter::Tree, file: FileId, src: &[u8
 
     // PHP `$_GET` / `$argv` style superglobals: surface the bare name
     // (minus leading `$`) so rules like `name: _GET` match.
-    for node in collect_kinds(tree, SIGIL_VARIABLE_KINDS) {
-        if is_call_callee(&node) {
+    for node in collect_kinds(tree, handler.sigil_variable_kinds) {
+        if is_call_callee(&node, handler) {
             continue;
         }
         let raw = node_text(&node, src).trim().to_string();
-        let name = raw.trim_start_matches('$').to_string();
+        let name = bonsai_common::trim_leading_name_punctuation(&raw).to_string();
         if name.is_empty() {
             continue;
         }
-        let kind = if is_write_target(&node) {
+        let kind = if is_write_target(&node, handler) {
             crate::RefKind::Write
         } else {
             crate::RefKind::Read
@@ -6905,9 +6892,9 @@ pub fn extract_read_write_refs(tree: &tree_sitter::Tree, file: FileId, src: &[u8
     }
 
     // Ruby-style `$stdin` / `$stdout` globals.
-    for node in collect_kinds(tree, GLOBAL_VARIABLE_KINDS) {
+    for node in collect_kinds(tree, handler.global_variable_kinds) {
         let raw = node_text(&node, src).trim().to_string();
-        let name = raw.trim_start_matches('$').to_string();
+        let name = bonsai_common::trim_leading_name_punctuation(&raw).to_string();
         if name.is_empty() {
             continue;
         }
@@ -6931,15 +6918,7 @@ pub fn extract_read_write_refs(tree: &tree_sitter::Tree, file: FileId, src: &[u8
     // dotted segment so rules shaped as `kind: write target.name = X`
     // fire on the canonical `<recv>.<X> = ...` idiom regardless of
     // grammar-specific LHS encoding.
-    const ASSIGN_KINDS: &[&str] = &[
-        "assignment_expression",
-        "assignment",
-        "augmented_assignment_expression",
-        "augmented_assignment",
-        "compound_assignment_expr",
-        "simple_assignment_expression",
-    ];
-    for node in collect_kinds(tree, ASSIGN_KINDS) {
+    for node in collect_kinds(tree, handler.assignment_kinds) {
         let lhs = node
             .child_by_field_name("left")
             .or_else(|| node.child_by_field_name("target"))
@@ -6949,22 +6928,19 @@ pub fn extract_read_write_refs(tree: &tree_sitter::Tree, file: FileId, src: &[u8
         // Only fire on dotted member writes; bare-identifier writes
         // (`x = y`) are already covered by the Assign FlowEvent's
         // target field and don't need a separate Write ref.
-        if !lhs_text.contains('.') && !lhs_text.contains("->") {
+        let canonical_lhs = normalise_qualified_text(&lhs_text);
+        if bonsai_common::qualified_name_owner(&canonical_lhs).is_none() {
             continue;
         }
-        // Take the last dotted/arrow segment as the canonical write name.
-        let last = lhs_text
-            .rsplit(['.', '>'])
-            .next()
-            .unwrap_or(&lhs_text)
-            .trim_matches(|c: char| matches!(c, '-' | ' ' | '\t'))
+        let last = bonsai_common::short_qualified_tail(&canonical_lhs)
+            .trim_matches(bonsai_common::is_name_punctuation)
             .to_string();
         if last.is_empty() {
             continue;
         }
-        // Skip subscript-shape last-segments like `arr[0]` — the
-        // SUBSCRIPT_KINDS walker already covers those.
-        if last.contains('[') || last.contains(']') {
+        // The adapter's subscript walker already covers direct indexed LHS
+        // nodes; do not duplicate them as field writes.
+        if handler.subscript_expression_kinds.contains(&lhs.kind()) {
             continue;
         }
         out.push(crate::Ref {
@@ -7114,7 +7090,12 @@ fn method_receiver_name<'tree>(node: &Node<'tree>, src: &[u8]) -> Option<(Node<'
 /// dot-separated identifiers into a qualified callee. Returns `None`
 /// if no identifier-like prev sibling exists (selector appearing in
 /// an unexpected position).
-fn build_dart_selector_call_event(node: Node<'_>, file: FileId, src: &[u8]) -> Option<FlowEvent> {
+fn build_dart_selector_call_event(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<FlowEvent> {
     first_named_child_of_kind(&node, "argument_part")?;
     // Walk back through named siblings to assemble the dotted callee.
     // Shape in the Dart grammar:
@@ -7172,7 +7153,7 @@ fn build_dart_selector_call_event(node: Node<'_>, file: FileId, src: &[u8]) -> O
     let mut args: Vec<CallArg> = Vec::new();
     if let Some(arg_part) = first_named_child_of_kind(&node, "argument_part") {
         if let Some(arg_list) = first_named_child_of_kind(&arg_part, "arguments") {
-            args = dart_call_args_from_arguments(&arg_list, file, src);
+            args = dart_call_args_from_arguments(&arg_list, file, src, handler);
         }
     }
 
@@ -7194,7 +7175,12 @@ fn build_dart_selector_call_event(node: Node<'_>, file: FileId, src: &[u8]) -> O
 /// args (`runInShell: true`) into a `named_argument` node with a `label`
 /// child; those surface with `name` populated so `keyword_arg_equals`
 /// constraints fire.
-fn dart_call_args_from_arguments(arg_list: &Node<'_>, file: FileId, src: &[u8]) -> Vec<CallArg> {
+fn dart_call_args_from_arguments(
+    arg_list: &Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<CallArg> {
     let mut args: Vec<CallArg> = Vec::new();
     let mut cursor = arg_list.walk();
     for arg in arg_list.named_children(&mut cursor) {
@@ -7246,12 +7232,12 @@ fn dart_call_args_from_arguments(arg_list: &Node<'_>, file: FileId, src: &[u8]) 
                 span: span_of(file, &arg),
                 name,
                 place: argument_place(&value_node, src),
-                source_names: extract_rhs_expr_operands(&value_node, src),
+                source_names: extract_rhs_expr_operands(&value_node, src, handler),
                 value_text,
             });
             continue;
         }
-        if let Some(argument) = call_arg_from_node(arg, file, src, None) {
+        if let Some(argument) = call_arg_from_node_with_handler(arg, file, src, None, handler) {
             args.push(argument);
         }
     }
@@ -7306,7 +7292,12 @@ fn dart_cascade_receiver(node: &Node<'_>, src: &[u8]) -> Option<String> {
 ///   cascade receiver.
 /// - `..field = value` (selector + trailing value expression) → an
 ///   `Assign` to `receiver.field` carrying the value's operands.
-fn build_dart_cascade_events(node: Node<'_>, file: FileId, src: &[u8]) -> Option<Vec<FlowEvent>> {
+fn build_dart_cascade_events(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<Vec<FlowEvent>> {
     let selector = first_named_child_of_kind(&node, "cascade_selector")?;
     let member = first_identifier_like_child(&selector)
         .map(|id| node_text(&id, src).trim().to_string())
@@ -7314,7 +7305,7 @@ fn build_dart_cascade_events(node: Node<'_>, file: FileId, src: &[u8]) -> Option
     let receiver = dart_cascade_receiver(&node, src);
     if let Some(arg_part) = first_named_child_of_kind(&node, "argument_part") {
         let args = first_named_child_of_kind(&arg_part, "arguments")
-            .map(|list| dart_call_args_from_arguments(&list, file, src))
+            .map(|list| dart_call_args_from_arguments(&list, file, src, handler))
             .unwrap_or_default();
         let name = match receiver.as_deref() {
             Some(recv) => format!("{recv}.{member}"),
@@ -7346,7 +7337,7 @@ fn build_dart_cascade_events(node: Node<'_>, file: FileId, src: &[u8]) -> Option
         source_name: looks_like_bare_identifier(value_text).then(|| value_text.to_string()),
         source_call: None,
         source_call_args: Vec::new(),
-        source_names: extract_rhs_expr_operands(&value, src),
+        source_names: extract_rhs_expr_operands(&value, src, handler),
         declares_new_binding: false,
         value_kind: None,
     }])
@@ -7360,7 +7351,12 @@ fn build_dart_cascade_events(node: Node<'_>, file: FileId, src: &[u8]) -> Option
 /// whose args live in an `argument_list` child and which the generic
 /// walker already handles correctly. Require the Dart-specific
 /// `arguments`-kind child so C++ new-expressions fall through untouched.
-fn build_dart_object_expression_call(node: Node<'_>, file: FileId, src: &[u8]) -> Option<FlowEvent> {
+fn build_dart_object_expression_call(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<FlowEvent> {
     let arguments = first_named_child_of_kind(&node, "arguments")?;
     let type_node =
         first_named_child_of_kind(&node, "type_identifier").or_else(|| first_identifier_like_child(&node))?;
@@ -7368,7 +7364,7 @@ fn build_dart_object_expression_call(node: Node<'_>, file: FileId, src: &[u8]) -
     if name.is_empty() {
         return None;
     }
-    let args = dart_call_args_from_arguments(&arguments, file, src);
+    let args = dart_call_args_from_arguments(&arguments, file, src, handler);
     Some(FlowEvent::Call {
         span: span_of(file, &node),
         receiver: None,
@@ -7377,18 +7373,6 @@ fn build_dart_object_expression_call(node: Node<'_>, file: FileId, src: &[u8]) -
         call_kind: CallKind::Constructor,
         args,
     })
-}
-
-fn is_scala_operator_method_call(node: &Node<'_>) -> bool {
-    let mut cursor = node.walk();
-    let mut has_op = false;
-    for child in node.named_children(&mut cursor) {
-        if child.kind() == "operator_identifier" {
-            has_op = true;
-            break;
-        }
-    }
-    has_op
 }
 
 /// True when a Swift `call_expression` looks like the `defer {...}`
@@ -7472,9 +7456,10 @@ fn prepend_pipe_arg_to_call(
     left: &Node<'_>,
     file: FileId,
     src: &[u8],
+    handler: &GrammarHandler,
 ) {
     let right_span = span_of(file, right);
-    let Some(piped_arg) = call_arg_from_node(*left, file, src, None) else {
+    let Some(piped_arg) = call_arg_from_node_with_handler(*left, file, src, None, handler) else {
         return;
     };
     // Prefer the outermost call at the RHS span (the pipe targets the
@@ -7594,12 +7579,17 @@ fn is_transparent_lambda_callee_wrapper(kind: &str) -> bool {
     )
 }
 
-fn non_closure_arg_source_names(node: &Node<'_>, src: &[u8], arg_container_kinds: &[&str]) -> Vec<String> {
+fn non_closure_arg_source_names(
+    node: &Node<'_>,
+    src: &[u8],
+    arg_container_kinds: &[&str],
+    handler: &GrammarHandler,
+) -> Vec<String> {
     let mut out = Vec::new();
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if arg_container_kinds.contains(&child.kind()) {
-            out.extend(non_closure_arg_source_names_from_container(child, src));
+            out.extend(non_closure_arg_source_names_from_container(child, src, handler));
         }
     }
     out.sort();
@@ -7607,7 +7597,11 @@ fn non_closure_arg_source_names(node: &Node<'_>, src: &[u8], arg_container_kinds
     out
 }
 
-fn non_closure_arg_source_names_from_container(container: Node<'_>, src: &[u8]) -> Vec<String> {
+fn non_closure_arg_source_names_from_container(
+    container: Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<String> {
     let mut out = Vec::new();
     let mut cursor = container.walk();
     for arg in container.named_children(&mut cursor) {
@@ -7619,7 +7613,7 @@ fn non_closure_arg_source_names_from_container(container: Node<'_>, src: &[u8]) 
         {
             continue;
         }
-        out.extend(extract_rhs_expr_operands(&arg, src));
+        out.extend(extract_rhs_expr_operands(&arg, src, handler));
         if let Some(place) = argument_place(&arg, src) {
             push_value_text_source_name(&mut out, &place);
         }
@@ -8179,16 +8173,16 @@ pub fn apply_file_stem_semantic_identity(idx: &mut crate::DeclIndex, ctx: &Adapt
         return;
     };
     let module_path = crate::ModulePath::from_segments(module_segments.iter().cloned());
-    let prefix = module_segments.join("::");
+    let prefix = module_segments.join(".");
     for decl in &mut idx.defs {
         if decl.qualified_name.is_none() {
-            decl.qualified_name = Some(format!("{prefix}::{}", decl.name));
+            decl.qualified_name = Some(format!("{prefix}.{}", decl.name));
         }
         if decl.module_path.is_empty() {
             decl.module_path = module_path.clone();
         }
     }
-    apply_lexical_member_qualified_names(idx, "::");
+    apply_lexical_member_qualified_names(idx, ".");
 }
 
 fn file_module_segments(file: FileId, ctx: &AdapterContext<'_>) -> Option<Vec<String>> {
@@ -8705,7 +8699,7 @@ pub fn populate_decl_return_types(
     let mut by_span: std::collections::HashMap<bonsai_common::Span, String> =
         std::collections::HashMap::new();
     let mut stack = vec![tree.root_node()];
-    let is_fn_kind = |k: &str| handler.fn_kinds.contains(&k) || GENERIC_HANDLER.fn_kinds.contains(&k);
+    let is_fn_kind = |k: &str| handler.fn_kinds.contains(&k);
     while let Some(node) = stack.pop() {
         if is_fn_kind(node.kind()) {
             if let Some(ty_node) = node
@@ -8748,21 +8742,7 @@ pub fn populate_decl_return_types(
 /// constructor by adapter `CallKind` or declaration resolution. Spelling and
 /// casing are normalization only; they never prove constructor semantics.
 fn proven_constructor_type_name(callee: &str) -> Option<String> {
-    let expr = callee.trim().strip_prefix("new ").unwrap_or(callee.trim());
-    let without_generics = expr.split('<').next().unwrap_or(expr);
-    // Ruby / Crystal / Smalltalk-family `Type.new` constructors name the
-    // type in the qualifier rather than the call tail.
-    let constructor_target = without_generics
-        .strip_suffix(".new")
-        .or_else(|| without_generics.strip_suffix("::new"))
-        .or_else(|| without_generics.strip_suffix("->new"))
-        .filter(|head| !head.is_empty())
-        .unwrap_or(without_generics);
-    let bare = constructor_target
-        .rsplit(['.', ':'])
-        .next()
-        .unwrap_or(constructor_target)
-        .trim();
+    let bare = bonsai_common::short_qualified_tail(callee.trim()).trim();
     if bare.is_empty() {
         return None;
     }
@@ -8771,13 +8751,19 @@ fn proven_constructor_type_name(callee: &str) -> Option<String> {
 
 /// Result type carried by a compiler-classified constructor call. Adapters
 /// attach the declared owner as the first receiver type for factory-shaped
-/// constructors such as Rust `Type::assemble(...)`; direct constructor syntax
-/// falls back to the normalized callee spelling.
-fn proven_constructor_result_type_name(callee: &str, receiver_types: &[String]) -> Option<String> {
+/// constructors. Before receiver typing runs, a qualified constructor syntax
+/// such as `Type.new(...)` or `Type->new(...)` still carries its AST-proven
+/// receiver; that owner is the constructed type, not the selector tail.
+fn proven_constructor_result_type_name(
+    callee: &str,
+    receiver: Option<&str>,
+    receiver_types: &[String],
+) -> Option<String> {
     receiver_types
         .first()
         .filter(|type_name| !type_name.trim().is_empty())
         .cloned()
+        .or_else(|| receiver.and_then(proven_constructor_type_name))
         .or_else(|| proven_constructor_type_name(callee))
 }
 
@@ -8785,18 +8771,14 @@ fn resolved_declared_constructor_type(
     callee: &str,
     declared_types: &ahash::AHashSet<String>,
 ) -> Option<String> {
-    let candidate = proven_constructor_type_name(callee)?;
-    let mut matches = declared_types
-        .iter()
-        .filter(|name| {
-            name.as_str() == candidate
-                || name
-                    .rsplit(['.', ':', '\\'])
-                    .next()
-                    .is_some_and(|tail| tail == candidate)
-        })
-        .cloned();
-    let resolved = matches.next()?;
+    let candidates = callee
+        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+        .filter(|candidate| !candidate.is_empty())
+        .collect::<ahash::AHashSet<_>>();
+    let mut matches = declared_types.iter().filter(|name| {
+        candidates.contains(name.as_str()) || candidates.contains(bonsai_common::short_qualified_tail(name))
+    });
+    let resolved = matches.next()?.clone();
     matches.next().is_none().then_some(resolved)
 }
 
@@ -8826,12 +8808,12 @@ fn collect_constructor_result_type_aliases_with_declared_types(
             FlowEvent::Call {
                 name,
                 span,
+                receiver,
                 receiver_types,
                 call_kind: CallKind::Constructor,
                 ..
-            } => {
-                proven_constructor_result_type_name(name, receiver_types).map(|type_name| (*span, type_name))
-            }
+            } => proven_constructor_result_type_name(name, receiver.as_deref(), receiver_types)
+                .map(|type_name| (*span, type_name)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -9153,14 +9135,20 @@ fn classify_assign_value_kinds(events: &mut [FlowEvent], call_bearing_assignment
 /// security matching, inspect, and export consume the same receiver
 /// type evidence without receiver-name allowlists.
 pub fn apply_call_receiver_types(idx: &mut crate::DeclIndex) {
-    apply_call_receiver_types_with_language_syntax(idx, &[], &[]);
+    apply_call_receiver_types_with_language_syntax(idx, &[], &[], &[], crate::ReceiverTypeSyntax::none());
 }
 
 pub fn apply_call_receiver_types_with_super_tokens(
     idx: &mut crate::DeclIndex,
     super_receiver_tokens: &[&str],
 ) {
-    apply_call_receiver_types_with_language_syntax(idx, super_receiver_tokens, &[]);
+    apply_call_receiver_types_with_language_syntax(
+        idx,
+        super_receiver_tokens,
+        &[],
+        &[],
+        crate::ReceiverTypeSyntax::none(),
+    );
 }
 
 /// Adapter-aware receiver typing. Constructor method spellings are syntax
@@ -9169,8 +9157,17 @@ pub fn apply_call_receiver_types_with_super_tokens(
 pub fn apply_call_receiver_types_with_language_syntax(
     idx: &mut crate::DeclIndex,
     super_receiver_tokens: &[&str],
+    implicit_receiver_tokens: &[&str],
     constructor_method_names: &[&str],
+    receiver_type_syntax: crate::ReceiverTypeSyntax,
 ) {
+    let syntax = ReceiverTypingSyntax {
+        super_receiver_tokens,
+        implicit_receiver_tokens,
+        constructor_method_names,
+        receiver_type_syntax,
+        explicit_receiver_name: None,
+    };
     // Two parallel indexes over the file's class-like decls:
     //
     //   * `by_symbol` keys on the SymbolId so the implicit-receiver
@@ -9226,13 +9223,19 @@ pub fn apply_call_receiver_types_with_language_syntax(
                 types
             })
         });
+        let syntax = ReceiverTypingSyntax {
+            explicit_receiver_name: decl
+                .receiver_param_index
+                .and_then(|index| decl.params.get(index))
+                .map(String::as_str),
+            ..syntax
+        };
         apply_call_receiver_types_to_events(
             &mut decl.flow_events,
             &decl.type_aliases,
             implicit_receiver_types.as_deref(),
             &class_facts,
-            super_receiver_tokens,
-            constructor_method_names,
+            syntax,
         );
     }
 }
@@ -9247,13 +9250,24 @@ struct ClassFactsIndex<'a> {
     by_canonical_name: &'a ahash::AHashMap<String, (String, Vec<String>)>,
 }
 
+#[derive(Copy, Clone)]
+struct ReceiverTypingSyntax<'a> {
+    super_receiver_tokens: &'a [&'a str],
+    implicit_receiver_tokens: &'a [&'a str],
+    constructor_method_names: &'a [&'a str],
+    receiver_type_syntax: crate::ReceiverTypeSyntax,
+    /// Exact adapter-lowered receiver parameter for this declaration. This
+    /// carries grammar evidence such as Python's first method parameter or
+    /// Rust's `self` without teaching the shared pass either spelling.
+    explicit_receiver_name: Option<&'a str>,
+}
+
 fn apply_call_receiver_types_to_events(
     events: &mut [FlowEvent],
     aliases: &[crate::TypeAliasBinding],
     implicit_receiver_types: Option<&[String]>,
     class_facts: &ClassFactsIndex<'_>,
-    super_receiver_tokens: &[&str],
-    constructor_method_names: &[&str],
+    syntax: ReceiverTypingSyntax<'_>,
 ) {
     for event in events {
         match event {
@@ -9270,12 +9284,12 @@ fn apply_call_receiver_types_to_events(
                         aliases,
                         implicit_receiver_types,
                         class_facts,
-                        super_receiver_tokens,
+                        syntax,
                     ) {
                         push_unique_receiver_type(receiver_types, ty);
                     }
                 } else if matches!(call_kind, crate::CallKind::Constructor) {
-                    if constructor_method_names.contains(&short_name_of(name)) {
+                    if syntax.constructor_method_names.contains(&short_name_of(name)) {
                         // A bare constructor call inside a class-like
                         // declaration (`new(...)`, `Self(...)`) constructs
                         // the AST-declared enclosing type only when the
@@ -9324,16 +9338,14 @@ fn apply_call_receiver_types_to_events(
                     aliases,
                     implicit_receiver_types,
                     class_facts,
-                    super_receiver_tokens,
-                    constructor_method_names,
+                    syntax,
                 );
                 apply_call_receiver_types_to_events(
                     else_events,
                     aliases,
                     implicit_receiver_types,
                     class_facts,
-                    super_receiver_tokens,
-                    constructor_method_names,
+                    syntax,
                 );
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
@@ -9342,8 +9354,7 @@ fn apply_call_receiver_types_to_events(
                     aliases,
                     implicit_receiver_types,
                     class_facts,
-                    super_receiver_tokens,
-                    constructor_method_names,
+                    syntax,
                 );
             }
             FlowEvent::Try {
@@ -9357,24 +9368,21 @@ fn apply_call_receiver_types_to_events(
                     aliases,
                     implicit_receiver_types,
                     class_facts,
-                    super_receiver_tokens,
-                    constructor_method_names,
+                    syntax,
                 );
                 apply_call_receiver_types_to_events(
                     catch_events,
                     aliases,
                     implicit_receiver_types,
                     class_facts,
-                    super_receiver_tokens,
-                    constructor_method_names,
+                    syntax,
                 );
                 apply_call_receiver_types_to_events(
                     finally_events,
                     aliases,
                     implicit_receiver_types,
                     class_facts,
-                    super_receiver_tokens,
-                    constructor_method_names,
+                    syntax,
                 );
             }
             FlowEvent::Assign { .. }
@@ -9394,25 +9402,23 @@ fn receiver_types_for_expr(
     aliases: &[crate::TypeAliasBinding],
     implicit_receiver_types: Option<&[String]>,
     class_facts: &ClassFactsIndex<'_>,
-    super_receiver_tokens: &[&str],
+    syntax: ReceiverTypingSyntax<'_>,
 ) -> Vec<String> {
-    let normalized = normalize_receiver_type_expr(receiver);
-    let tail = short_name_of(&normalized);
     let mut out = Vec::new();
-    if let Some(inner) = receiver_class_object_inner_expr(&normalized) {
-        for ty in receiver_types_for_expr(
-            inner,
-            aliases,
-            implicit_receiver_types,
-            class_facts,
-            super_receiver_tokens,
-        ) {
+    // Wrapper delimiters are semantic syntax owned by the adapter. Inspect
+    // them before generic name normalization trims leading/trailing
+    // punctuation; otherwise `type(self)` becomes `type(self` and the exact
+    // wrapper fact is lost.
+    if let Some(inner) = receiver_class_object_inner_expr(receiver.trim(), syntax.receiver_type_syntax) {
+        for ty in receiver_types_for_expr(inner, aliases, implicit_receiver_types, class_facts, syntax) {
             push_unique_receiver_type(&mut out, ty);
         }
         if !out.is_empty() {
             return out;
         }
     }
+    let normalized = normalize_receiver_type_expr(receiver);
+    let tail = short_name_of(&normalized);
     if let Some(projected_type) = receiver_projected_type_name(&normalized, class_facts) {
         push_receiver_type_and_bases(&mut out, projected_type, class_facts);
         return out;
@@ -9421,16 +9427,13 @@ fn receiver_types_for_expr(
         push_receiver_type_and_bases(&mut out, declared_type, class_facts);
         return out;
     }
-    if let Some(type_name) = receiver_type_from_constructor_expr(&normalized) {
-        push_receiver_type_and_bases(&mut out, type_name, class_facts);
-    }
-    let has_member_projection = normalized.contains('.')
-        || normalized.contains("->")
-        || normalized.contains("::")
-        || normalized.contains('\\');
+    let has_member_projection = bonsai_common::qualified_name_segments(&normalized).len() > 1;
     let projection_base = receiver_projection_base(&normalized);
-    let base_is_implicit = matches!(projection_base, "this" | "self" | "super")
-        || super_receiver_tokens.contains(&projection_base);
+    let base_is_implicit = receiver_matches_syntax_token(projection_base, syntax.implicit_receiver_tokens)
+        || syntax
+            .explicit_receiver_name
+            .is_some_and(|name| normalize_receiver_type_expr(name) == projection_base)
+        || receiver_matches_syntax_token(projection_base, syntax.super_receiver_tokens);
     // H7: an unguarded `alias.name == tail` types `pool.conn` (tail `conn`)
     // as whatever an unrelated local/param named `conn` is, a name-only FP.
     // Only fall back to the bare tail when there is no member projection, OR
@@ -9449,13 +9452,17 @@ fn receiver_types_for_expr(
             push_receiver_type_and_bases(&mut out, alias.type_name.clone(), class_facts);
         }
     }
-    if matches!(tail, "self" | "this") {
+    if receiver_matches_syntax_token(tail, syntax.implicit_receiver_tokens)
+        || syntax
+            .explicit_receiver_name
+            .is_some_and(|name| normalize_receiver_type_expr(name) == tail)
+    {
         if let Some(types) = implicit_receiver_types {
             for ty in types {
                 push_receiver_type_and_bases(&mut out, ty.clone(), class_facts);
             }
         }
-    } else if super_receiver_tokens.contains(&tail) {
+    } else if receiver_matches_syntax_token(tail, syntax.super_receiver_tokens) {
         if let Some(types) = implicit_receiver_types {
             for ty in types.iter().skip(1) {
                 push_receiver_type_and_bases(&mut out, ty.clone(), class_facts);
@@ -9465,15 +9472,27 @@ fn receiver_types_for_expr(
     out
 }
 
-fn receiver_class_object_inner_expr(receiver: &str) -> Option<&str> {
+fn receiver_matches_syntax_token(receiver: &str, syntax_tokens: &[&str]) -> bool {
+    syntax_tokens
+        .iter()
+        .any(|token| token.trim().trim_matches(bonsai_common::is_name_punctuation) == receiver)
+}
+
+fn receiver_class_object_inner_expr(receiver: &str, syntax: crate::ReceiverTypeSyntax) -> Option<&str> {
     let expr = receiver.trim();
-    if let Some(inner) = expr.strip_prefix("type(").and_then(|rest| rest.strip_suffix(')')) {
-        let inner = inner.trim();
-        if !inner.is_empty() {
-            return Some(inner);
+    for wrapper in syntax.wrapper_calls {
+        if let Some(inner) = expr
+            .strip_prefix(wrapper)
+            .and_then(|rest| rest.strip_prefix('('))
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
+            let inner = inner.trim();
+            if !inner.is_empty() {
+                return Some(inner);
+            }
         }
     }
-    for suffix in [".__class__", ".class", ".constructor"] {
+    for suffix in syntax.class_object_suffixes {
         if let Some(inner) = expr.strip_suffix(suffix) {
             let inner = inner.trim();
             if !inner.is_empty() {
@@ -9490,13 +9509,11 @@ fn receiver_class_object_inner_expr(receiver: &str) -> Option<&str> {
 /// alias fallback stays available for `this.field` / `self.field`.
 fn receiver_projection_base(receiver: &str) -> &str {
     let receiver = receiver.trim();
-    let mut end = receiver.len();
-    for sep in [".", "->", "::", "\\"] {
-        if let Some(idx) = receiver.find(sep) {
-            end = end.min(idx);
-        }
-    }
-    receiver[..end].trim()
+    bonsai_common::qualified_name_segments(receiver)
+        .into_iter()
+        .next()
+        .unwrap_or(receiver)
+        .trim()
 }
 
 fn receiver_projected_alias_matches(receiver: &str, alias_name: &str) -> bool {
@@ -9516,16 +9533,12 @@ fn receiver_projected_alias_matches(receiver: &str, alias_name: &str) -> bool {
 }
 
 fn receiver_projected_type_name(receiver: &str, class_facts: &ClassFactsIndex<'_>) -> Option<String> {
-    let has_member_projection = receiver.contains('.')
-        || receiver.contains("->")
-        || receiver.contains("::")
-        || receiver.contains('\\');
+    let has_member_projection = bonsai_common::qualified_name_segments(receiver).len() > 1;
     if !has_member_projection {
         return None;
     }
     let tail = short_name_of(receiver)
-        .trim_end_matches("()")
-        .trim_matches(['&', '*', '$', '@', '%'])
+        .trim_matches(bonsai_common::is_name_punctuation)
         .to_string();
     if tail.is_empty() {
         return None;
@@ -9590,43 +9603,18 @@ fn push_receiver_type_and_bases_inner(
 }
 
 fn qualified_receiver_type_evidence(raw: &str, canonical: &str) -> Option<String> {
-    let qualified = raw
-        .trim()
-        .trim_start_matches(['&', '*', '$', '@', '%'])
-        .trim_end_matches("()")
-        .trim();
+    let qualified = raw.trim().trim_matches(bonsai_common::is_name_punctuation).trim();
     if qualified.is_empty() || qualified == canonical {
         return None;
     }
-    let has_qualifier = qualified.contains('.')
-        || qualified.contains("::")
-        || qualified.contains('\\')
-        || qualified.contains('/');
+    let has_qualifier = bonsai_common::qualified_name_segments(qualified).len() > 1;
     has_qualifier.then(|| qualified.to_string())
-}
-
-fn receiver_type_from_constructor_expr(receiver: &str) -> Option<String> {
-    let expr = receiver.trim();
-    let rest = expr.strip_prefix("new ")?;
-    let without_args = rest.split('(').next().unwrap_or(rest);
-    let without_generics = without_args.split('<').next().unwrap_or(without_args);
-    let bare = without_generics
-        .rsplit('.')
-        .next()
-        .unwrap_or(without_generics)
-        .trim();
-    if bare.is_empty() || !bare.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-        return None;
-    }
-    Some(without_generics.trim().to_string())
 }
 
 fn normalize_receiver_type_expr(receiver: &str) -> String {
     normalise_qualified_text(receiver)
         .trim()
-        .trim_start_matches(['&', '*', '$', '@', '%'])
-        .trim_end_matches("()")
-        .trim_matches('.')
+        .trim_matches(bonsai_common::is_name_punctuation)
         .to_string()
 }
 

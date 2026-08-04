@@ -401,98 +401,27 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
-/// True when `path` looks like a test-convention file. Centralised
-/// across the codebase so security findings, rule classification, and
-/// the CLI's `--exclude-tests` filter all agree.
-///
-/// The pattern set is kept in lockstep with the test-related entries
-/// in `crates/cli/src/commands/security.rs::PRODUCTION_EXCLUDES` so
-/// `--exclude-tests` and `--profile production` classify the same
-/// files as test code. PRODUCTION_EXCLUDES is broader (it also
-/// excludes vendored deps, build outputs, generated code, etc.); this
-/// helper is the test-only subset.
+/// True when normalized `path` matches a rulepack-declared test convention.
+/// The matcher owns only path normalization; every language/ecosystem value
+/// comes from `metadata.yml::test_path_patterns`.
 #[must_use]
-#[allow(clippy::case_sensitive_file_extension_comparisons)] // input is pre-lowercased
-pub(crate) fn path_is_test_file(path: &str) -> bool {
-    let lowercase = path.to_ascii_lowercase();
-    // Normalise Windows-emitted backslash separators so segment
-    // matching works regardless of the adapter's path encoding.
-    let lowercase = lowercase.replace('\\', "/");
-    // Explicit segment match: cross-language test/fixture/mock
-    // directory conventions (kept in lockstep with PRODUCTION_EXCLUDES).
-    let test_segments = [
-        "/test/",
-        "/tests/",
-        "/__tests__/",
-        "/__mocks__/",
-        "/spec/",
-        "/specs/",
-        "/testing/",
-        "/testsuite/",
-        "/fixture/",
-        "/fixtures/",
-        "/mock/",
-        "/mocks/",
-        "/e2e/",
-        "/integration/",
-        "/acceptance/",
-        // JVM Maven/Gradle layout.
-        "/src/test/",
-        "/src/it/",
-        "/androidtest/",
-        // JS/TS test runners.
-        "/cypress/",
-        "/playwright/",
-        "/storybook/",
-        "/.storybook/",
-        // Python conventional pytest fixture directory.
-        "/conftest/",
-    ];
-    if test_segments.iter().any(|segment| lowercase.contains(segment)) {
-        return true;
+pub(crate) fn path_is_test_file(path: &str, patterns: &[String]) -> bool {
+    let mut normalized = path.replace('\\', "/").to_ascii_lowercase();
+    if !normalized.starts_with('/') {
+        normalized.insert(0, '/');
     }
-    // Suffix conventions per language. Strip directory prefix so the
-    // basename checks below match regardless of where the file lives.
-    let basename = lowercase
-        .rsplit_once('/')
-        .map(|(_, name)| name)
-        .unwrap_or(lowercase.as_str());
-    if basename == "conftest.py" {
-        return true;
-    }
-    if basename.ends_with("_test.go")
-        || basename.ends_with("_test.py")
-        || basename.ends_with(".test.ts")
-        || basename.ends_with(".test.js")
-        || basename.ends_with(".test.tsx")
-        || basename.ends_with(".test.jsx")
-        || basename.ends_with(".spec.ts")
-        || basename.ends_with(".spec.js")
-        || basename.ends_with(".spec.tsx")
-        || basename.ends_with(".spec.jsx")
-        || basename.ends_with(".spec.rb")
-        || basename.ends_with("test.java")
-        || basename.ends_with("tests.java")
-        || basename.ends_with("it.java")
-        || basename.ends_with("integrationtest.java")
-        || basename.ends_with("spec.scala")
-        || basename.ends_with("test.scala")
-        || basename.ends_with("tests.scala")
-        || basename.ends_with("test.kt")
-        || basename.ends_with("tests.kt")
-        || basename.ends_with("it.kt")
-        || basename.ends_with("tests.cs")
-        || basename.ends_with("test.cs")
-        || basename.ends_with("_spec.rb")
-        || basename.ends_with("_test.rb")
-        || basename.ends_with("_test.exs")
-        || basename.ends_with("_test.ex")
-        || basename.ends_with(".t")
-    // Perl test convention
-    {
-        return true;
-    }
-    false
+    let basename = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
+    patterns.iter().any(|pattern| {
+        let pattern = pattern.replace('\\', "/").to_ascii_lowercase();
+        if pattern.is_empty() {
+            return false;
+        }
+        if pattern.starts_with('/') && pattern.ends_with('/') {
+            normalized.contains(&pattern)
+        } else {
+            basename.ends_with(&pattern)
+        }
+    })
 }
 
 /// Compute the stable `S:` finding id.

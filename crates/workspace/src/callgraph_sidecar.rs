@@ -22,6 +22,14 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+// v28 (2026-08-03): local callable and alias candidates consume typed adapter
+// facts plus canonical structural compiler names; rebuild graphs that used the
+// former shared quoted-callable/separator interpretation.
+// v27 (2026-08-03): relative nested type paths resolve by exact compiler-name
+// segment suffix inside lexical/module scope, without leaf-name fan-out.
+// v26 (2026-08-03): callable-reference source syntax moved from a shared
+// spelling union to adapter capabilities; invalidate graphs resolved under
+// the old cross-language candidate expansion.
 // v25 (2026-07-31): rebuild callable identities and scope attribution after
 // standalone lambdas/local functions gained exact lexical parents, Perl
 // package calls became static functions, and adapter-declared implicit class
@@ -62,7 +70,7 @@ use std::sync::Arc;
 // v13 (2026-07-18): metadata and graph payloads are independent factstore
 // entries, so freshness checks do not recursively decode millions of edges.
 // v12 (2026-07-16): MessagePack replaced the retired binary codec.
-pub const CALLGRAPH_CACHE_VERSION: u32 = 25;
+pub const CALLGRAPH_CACHE_VERSION: u32 = 28;
 
 const CALLGRAPH_TABLE_ID: u32 = 102;
 const METADATA_KEY: u64 = 0;

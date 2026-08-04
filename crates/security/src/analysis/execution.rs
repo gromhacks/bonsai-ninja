@@ -1913,49 +1913,6 @@ pub(super) fn source_can_precede_sink(
         || spans_share_enclosing_loop(ws, sink_func, src.span, snk.span)
 }
 
-pub(super) fn identifier_tokens_outside_strings(text: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for ch in text.chars() {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            push_identifier_token(&mut tokens, &mut current);
-            quote = Some(ch);
-            continue;
-        }
-        if ch == '_' || ch.is_ascii_alphanumeric() {
-            current.push(ch);
-        } else {
-            push_identifier_token(&mut tokens, &mut current);
-        }
-    }
-    push_identifier_token(&mut tokens, &mut current);
-    tokens
-}
-
-fn push_identifier_token(tokens: &mut Vec<String>, current: &mut String) {
-    if current
-        .chars()
-        .next()
-        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
-    {
-        tokens.push(std::mem::take(current));
-    } else {
-        current.clear();
-    }
-}
-
 fn source_is_sink_call_argument(
     ws: &Workspace,
     sink_func: FuncId,

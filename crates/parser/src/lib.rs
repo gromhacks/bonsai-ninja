@@ -3,8 +3,9 @@
 //! Handles the "parse this file with the right grammar, incrementally if we
 //! can" side of the pipeline. Parsing is not quite free — we keep the
 //! previous [`tree_sitter::Tree`] around so the next reparse can use it as a
-//! hint. Cache identity includes the VFS instance, file, and language; each
-//! entry retains the newest immutable source version it has parsed.
+//! hint. Cache identity includes the VFS instance, file, adapter, and exact
+//! grammar variant; each entry retains the newest immutable source version it
+//! has parsed.
 
 use ahash::AHashMap;
 use bonsai_common::FileId;
@@ -20,7 +21,7 @@ use std::{
 use thiserror::Error;
 use tree_sitter::{InputEdit, Node, ParseOptions, Parser, Point, Tree};
 
-type ParseKey = (u64, FileId, LanguageId);
+type ParseKey = (u64, FileId, LanguageId, &'static str);
 type ParserPool = Arc<Mutex<Vec<Parser>>>;
 
 /// Exclusive checkout from a language parser pool. The pool lock is held only
@@ -70,6 +71,8 @@ pub struct ParsedFile {
     pub tree: Arc<Tree>,
     pub diagnostics: Vec<Diagnostic>,
     pub adapter_id: bonsai_lang_api::LanguageId,
+    /// Exact adapter-selected grammar variant used for this source path.
+    pub grammar_name: &'static str,
     source: Arc<str>,
     used_recovery: bool,
 }
@@ -80,6 +83,7 @@ impl std::fmt::Debug for ParsedFile {
             .field("file", &self.file)
             .field("version", &self.version)
             .field("adapter_id", &self.adapter_id)
+            .field("grammar_name", &self.grammar_name)
             .field("diagnostics", &self.diagnostics.len())
             .field("used_recovery", &self.used_recovery)
             .finish()
@@ -127,16 +131,16 @@ impl ParserOptions {
 }
 
 /// Concurrent parse cache. Cheap to clone; parser instances are pooled by
-/// language while parsed tree cache reads use an `RwLock`.
+/// exact grammar variant while parsed tree cache reads use an `RwLock`.
 ///
 /// A checkout removes one parser from its pool (or creates one if every parser
 /// is busy), then releases the pool lock before parsing. Concurrent files in
-/// the same language therefore do not serialize behind one mutable parser,
+/// the same grammar therefore do not serialize behind one mutable parser,
 /// while completed workers still make their parser reusable. The tree cache
-/// is logically keyed by `(VFS instance, FileId, language, version)`.
+/// is logically keyed by `(VFS instance, FileId, adapter, grammar, version)`.
 #[derive(Clone)]
 pub struct ParserCache {
-    parsers: Arc<Mutex<AHashMap<LanguageId, ParserPool>>>,
+    parsers: Arc<Mutex<AHashMap<&'static str, ParserPool>>>,
     cache: Arc<RwLock<AHashMap<ParseKey, Arc<ParsedFile>>>>,
     options: ParserOptions,
 }
@@ -159,7 +163,7 @@ impl std::fmt::Debug for ParserCache {
         let idle_parsers = pools.iter().map(|pool| pool.lock().len()).sum::<usize>();
         f.debug_struct("ParserCache")
             .field("cached_files", &cached_files)
-            .field("parser_languages", &pools.len())
+            .field("parser_grammars", &pools.len())
             .field("idle_parsers", &idle_parsers)
             .field("parse_timeout", &self.options.parse_timeout)
             .finish()
@@ -209,15 +213,17 @@ impl ParserCache {
         vfs: &Vfs,
     ) -> Result<Arc<ParsedFile>, ParseError> {
         let file = snapshot.file_id;
-        let key = (vfs.instance_id(), file, adapter.language_id());
+        let path = vfs.path(file)?;
+        let grammar_name = adapter.grammar_name_for_path(&path);
+        let key = (vfs.instance_id(), file, adapter.language_id(), grammar_name);
         if let Some(entry) = self.cache.read().get(&key).cloned() {
             if parsed_matches_snapshot(&entry, snapshot) {
                 return Ok(entry);
             }
         }
 
-        let language = adapter.tree_sitter_language()?;
-        let mut parser = self.checkout_parser(adapter.language_id());
+        let language = adapter.tree_sitter_language_for_path(&path)?;
+        let mut parser = self.checkout_parser(grammar_name);
         // Re-check after checkout. A peer may have finished this exact
         // snapshot between the initial cache read and parser lookup.
         if let Some(entry) = self.cache.read().get(&key).cloned() {
@@ -273,6 +279,7 @@ impl ParserCache {
             tree: Arc::new(tree),
             diagnostics,
             adapter_id: adapter.language_id(),
+            grammar_name,
             source: Arc::clone(&snapshot.text),
             used_recovery,
         });
@@ -300,23 +307,29 @@ impl ParserCache {
     /// invalidation remains broader because a file may have been parsed by
     /// more than one adapter over the cache's lifetime.
     pub fn release(&self, file: FileId, adapter: &AdapterArc, vfs: &Vfs) {
-        self.cache
-            .write()
-            .remove(&(vfs.instance_id(), file, adapter.language_id()));
+        let Ok(path) = vfs.path(file) else {
+            return;
+        };
+        self.cache.write().remove(&(
+            vfs.instance_id(),
+            file,
+            adapter.language_id(),
+            adapter.grammar_name_for_path(&path),
+        ));
     }
 
     /// Invalidate every cached language interpretation of a single file.
     pub fn invalidate(&self, file: FileId) {
         self.cache
             .write()
-            .retain(|(_, cached_file, _), _| *cached_file != file);
+            .retain(|(_, cached_file, _, _), _| *cached_file != file);
     }
 
-    fn checkout_parser(&self, language: LanguageId) -> ParserLease {
+    fn checkout_parser(&self, grammar_name: &'static str) -> ParserLease {
         let pool = self
             .parsers
             .lock()
-            .entry(language)
+            .entry(grammar_name)
             .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
             .clone();
         let parser = pool.lock().pop().unwrap_or_default();

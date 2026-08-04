@@ -1,4 +1,34 @@
 # Lua file-upload sinks (OpenResty lua-resty-upload).
+- id: lua.upload.io_open_tainted_destination
+  enabled: true
+  language: lua
+  tag: file-upload
+  severity: high
+  packages: [lua-resty-upload]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [io, open]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua-resty-upload tainted destination
+    code: |
+      local upload = require("lua-resty-upload")
+      function example(input)
+        io.open(input, "wb")
+      end
+  - name: lua-resty-upload literal destination negative
+    code: |
+      local upload = require("lua-resty-upload")
+      function example(input)
+        io.open("var/uploads/avatar.bin", "wb")
+      end
+    expect_no_match: true
+  description: "Writing an upload to an attacker-controlled destination path can store executable or otherwise dangerous content outside the intended upload location. The lua-resty-upload package gate keeps this upload-specific classification off ordinary filesystem operations."
+
 - id: lua.upload.resty_upload_filename
   enabled: false
   disabled_reason:

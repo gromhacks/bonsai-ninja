@@ -170,7 +170,7 @@ fn place_matches_receiver(place: &str, receiver_names: &[&str], receiver_prefixe
         || receiver_prefixes.iter().any(|prefix| trimmed.starts_with(prefix))
 }
 
-pub(super) fn collect_receiver_state_sources(
+pub fn collect_receiver_state_sources(
     events: &[crate::FlowEvent],
     params: &[String],
     implicit_receiver_names: &[&str],
@@ -442,7 +442,7 @@ fn collect_receiver_state_source_name(
     if implicit_receiver_names
         .iter()
         .any(|name| place_base_matches(source, name))
-        || !source.contains('.')
+        || bonsai_common::qualified_name_owner(source).is_none()
         || !base_is_local
     {
         out.insert(source.to_string());
@@ -474,12 +474,17 @@ pub(crate) fn argument_place(node: &Node<'_>, src: &[u8]) -> Option<String> {
 
 fn canonical_argument_place(text: &str) -> Option<String> {
     let place = normalise_qualified_text(text);
-    let place = place.trim_start_matches(bonsai_common::REFERENCE_SIGILS).trim();
+    // Preserve the adapter-emitted place exactly, including language-owned
+    // identifier sigils. Shared consumers compare compiler places through
+    // vocabulary-free name normalization when tolerant matching is needed;
+    // stripping arbitrary leading punctuation here destroys exact identities
+    // such as PHP `$value` and Perl `@items`.
+    let place = place.trim();
     (!place.is_empty()).then(|| place.to_string())
 }
 
 fn qualified_place_text(text: &str) -> bool {
-    text.contains('.') || text.contains("->") || text.contains('[')
+    bonsai_common::qualified_name_owner(text).is_some()
 }
 
 fn argument_node_is_place(node: &Node<'_>, text: &str) -> bool {
@@ -545,7 +550,7 @@ fn name_variants(name: &str) -> Vec<String> {
     if trimmed.is_empty() {
         return Vec::new();
     }
-    let stripped = trimmed.trim_start_matches(['$', '@', '&']);
+    let stripped = bonsai_common::trim_leading_name_punctuation(trimmed);
     if stripped == trimmed || stripped.is_empty() {
         vec![trimmed.to_string()]
     } else {
@@ -567,7 +572,7 @@ fn normalised_place_base(place: &str) -> Option<String> {
     if place.is_empty() {
         return None;
     }
-    let normalised = normalise_qualified_text(&place.replace("->", "."));
+    let normalised = normalise_qualified_text(place);
     let base = normalised
         .split('.')
         .next()

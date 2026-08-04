@@ -10,7 +10,7 @@ use crate::finding::{
     compute_finding_id, AlternateTaintFlow, Finding, FindingMatch, FindingStatus, TaintPropagationArg,
     TaintPropagationStep, TaintedArgInfo,
 };
-use crate::loader::Rulepack;
+use crate::loader::{Rulepack, RulepackMetadata};
 use crate::matcher::{
     callback_extension_attribution_match, infer_entry_point_sources_for_files_with_progress,
     match_rules_against_facts_for_inventory_with_progress_on_files,
@@ -21,9 +21,9 @@ use crate::matcher::{
     rule_target_matches_call, InterTaintView, RuleConstraintTaintContext, RuleMatch, RuntimeDisabledRule,
 };
 use crate::rule::{
-    ConstraintKind, ContextFlowRole, FlowClass, GuardProfile, MatchKind, MatchOrigin,
+    ConstraintKind, ContextFlowRole, FlowClass, GuardProfile, MatchKind, MatchOrigin, NonTaintEvaluation,
     PathContainmentGuardSemantics, PostSinkPolicy, RelativePathContainmentGuardSemantics, Rule, RuleKind,
-    RuleTarget, Severity, SourceCallbackArgSemantics,
+    RuleTarget, SanitizerAttachmentPolicy, SanitizerGuardSemantics, Severity, SourceCallbackArgSemantics,
 };
 use crate::sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recognized_non_crediting};
 use ahash::{AHashMap, AHashSet};
@@ -58,40 +58,30 @@ mod source_seeds;
 mod taint_cache;
 mod validation;
 use clean_overwrite::{
-    call_arg_target_keys, clean_conditional_helper_identifier, clean_overwrite_callee_tail,
-    clean_overwrite_target_key, interprocedural_clean_overwrite_kills_lineage_arg, looks_like_clean_constant,
-    numeric_literal, quoted_literal, same_function_clean_overwrite_kills_sink_arg,
-    tainted_arg_info_from_events, tainted_arg_target_keys, CleanOverwritePolicy,
+    call_arg_target_keys, clean_overwrite_callee_tail, clean_overwrite_target_key,
+    interprocedural_clean_overwrite_kills_lineage_arg, looks_like_clean_constant,
+    same_function_clean_overwrite_kills_sink_arg, tainted_arg_info_from_events, tainted_arg_target_keys,
+    CleanOverwritePolicy,
 };
 #[cfg(test)]
-use clean_overwrite::{
-    clean_conditional_value_part, clean_output_call_overwrites_target, try_region_clean_overwrites_target,
-    value_part_contains_only_clean_literals,
-};
+use clean_overwrite::{clean_output_call_overwrites_target, try_region_clean_overwrites_target};
 use execution::{
     append_taint_target_key, append_taint_target_node_key, build_findings_chain_aware,
-    effective_source_seed_key, identifier_tokens_outside_strings, sorted_seed_key_with_anchor,
-    source_analysis_lineage_func_scope, source_analysis_worker_count, source_can_precede_sink,
-    ChainAnalysisRequest, ScheduledSourceGroup, SourceGroupExecutor, SourceWorkItem,
+    effective_source_seed_key, sorted_seed_key_with_anchor, source_analysis_lineage_func_scope,
+    source_analysis_worker_count, source_can_precede_sink, ChainAnalysisRequest, ScheduledSourceGroup,
+    SourceGroupExecutor, SourceWorkItem,
 };
 use findings_build::{
     build_pattern_only_findings, make_finding, rule_has_taint_predicate, rule_is_non_taint_sink,
     rule_is_pattern_only_finding, FindingBuildContext,
 };
-#[cfg(test)]
-use guard_sanitizers::header_char_allowlist_condition;
 use guard_sanitizers::{
     character_constraint_sanitizer, character_escape_sanitizer, collect_compiler_call_sites_reaching_value,
-    configured_argument_factory_guard_sanitizer, configured_argument_receiver_guard_sanitizer,
-    configured_call_argument_guard_sanitizer, dev_only_environment_guard_sanitizer,
-    finite_literal_map_lookup_allowlist_sanitizer, finite_literal_selection_sanitizer,
-    go_jwt_inline_keyfunc_algorithm_guard_sanitizer, go_same_origin_redirect_helper_guard_sanitizer,
-    go_xml_decoder_hardening_sanitizer, guarded_char_append_allowlist_sanitizer,
-    java_local_html_escape_helper_return_sanitizer, js_ts_local_html_escape_helper_sanitizer,
-    local_ldap_escape_helper_sanitizer, nosql_eq_filter_wrapper_sanitizer,
+    compiler_guard_sanitizer, configured_argument_factory_guard_sanitizer,
+    configured_argument_receiver_guard_sanitizer, configured_call_argument_guard_sanitizer,
+    finite_literal_selection_sanitizer, nosql_eq_filter_wrapper_sanitizer,
     parameterized_query_guard_sanitizer, path_consumer_containment_guard_sanitizer,
-    path_containment_guard_sanitizer, place_is_assigned_between, python_compiled_regex_guard_sanitizer,
-    python_url_ssrf_guard_sanitizer, receiver_configuration_guard_sanitizer,
+    path_containment_guard_sanitizer, place_is_assigned_between, receiver_configuration_guard_sanitizer,
     receiver_factory_guard_sanitizer, relative_path_containment_guard_sanitizer,
     runtime_type_rejection_guard_sanitizer, same_origin_path_constraint_sanitizer,
     sanitized_context_rewrite_covers_consumer, source_sink_pair_is_low_signal,
@@ -107,9 +97,7 @@ use source_seeds::{
 };
 pub use validation::validate_pack;
 #[cfg(test)]
-use validation::{
-    lowercase_receiver_token_from_regex, package_signal_distro_smell, regex_prefix_is_receiver_agnostic,
-};
+use validation::{lowercase_receiver_token_from_regex, regex_prefix_is_receiver_agnostic};
 
 type InventoryMatchIdentity = (String, String, u32, u32, String, Option<String>);
 type SourceMatchDedupeKey = (String, String, u64, u64, String);
@@ -374,6 +362,8 @@ pub struct PackRuleRow {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct PackAuditReport {
+    pub canonical_sink_families: Vec<String>,
+    pub sink_family_short_labels: AHashMap<String, String>,
     pub languages: Vec<PackAuditLanguage>,
 }
 
@@ -456,43 +446,6 @@ pub struct PackValidationIssue {
     pub path: Option<String>,
     pub message: String,
 }
-
-pub const CANONICAL_SINK_FAMILIES: &[&str] = &[
-    "cmdi",
-    "sqli",
-    "nosql",
-    "path",
-    "ssrf",
-    "xss",
-    "eval",
-    "deserialization",
-    "xxe",
-    "ldap",
-    "jwt",
-    "crypto",
-    "tls",
-    "template",
-    "open_redirect",
-    "file_upload",
-    "header_injection",
-];
-
-/// Languages whose sink taxonomy is intentionally ecosystem-specific,
-/// so the canonical app/web-family audit matrix should render as not
-/// applicable rather than as a wall of false coverage gaps.
-pub const ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS: &[&str] = &["solidity"];
-
-pub fn security_model_for_lang(lang: &str) -> &'static str {
-    if ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS.contains(&lang) {
-        "smart-contract"
-    } else {
-        "app-web-taint"
-    }
-}
-
-/// Specific `(language, family)` cells where the empty state is a
-/// deliberate design choice, not missing coverage.
-pub const FAMILY_NOT_APPLICABLE: &[(&str, &str)] = &[("c", "deserialization")];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FindingWithChain {
@@ -905,7 +858,13 @@ where
     }
     if !options.exclude_files.is_empty() || options.exclude_tests {
         findings_raw.retain(|item| {
-            !finding_has_excluded_path(ws, &item.finding, &options.exclude_files, options.exclude_tests)
+            !finding_has_excluded_path(
+                ws,
+                &item.finding,
+                &options.exclude_files,
+                options.exclude_tests,
+                &pack.metadata.test_path_patterns,
+            )
         });
     }
     if !options.show_sanitized {
@@ -920,7 +879,7 @@ where
         .map(combined_from_raw_finding)
         .collect::<Vec<_>>();
     drop_rulepack_terminal_dominated_findings(&mut route_findings, pack, Some(ws));
-    drop_dominated_wrapper_findings(&mut route_findings);
+    drop_dominated_wrapper_findings(&mut route_findings, ws);
     drop_dominated_receiver_projection_findings(&mut route_findings);
     // §C cleanup pass: when `--inferred-sources` synthesizes
     // `entry-point.class_field.inherited` sources for every record/
@@ -1060,6 +1019,21 @@ where
     });
 }
 
+/// Hold one immutable, language-scoped dependency-manifest snapshot for the
+/// entire public analysis operation. Match planning may stream and release
+/// compiler bodies, but every file in the operation must see the same package
+/// evidence. Inventory commands need the same lifecycle as full taint/source
+/// analysis because template files commonly inherit their runtime package
+/// from a workspace manifest rather than a file-local import.
+fn begin_dependency_package_snapshot(
+    ws: &Workspace,
+    pack: &Rulepack,
+) -> Option<crate::deps::WorkspaceDependencyPackageSnapshot> {
+    ws.db().workspace_root().map(|root| {
+        crate::deps::begin_workspace_dependency_package_snapshot(&root, ws.db().vfs().instance_id(), pack)
+    })
+}
+
 /// Top-level taint analysis entry point. Combines source / sink /
 /// sanitizer matching with interprocedural taint propagation and
 /// returns the assembled findings. No progress reporting — see the
@@ -1116,9 +1090,7 @@ where
     F: FnMut(AnalysisProgress),
 {
     let _taint_analysis_guard = ws.lock_taint_analysis();
-    let _dependency_package_snapshot = ws.db().workspace_root().map(|root| {
-        crate::deps::begin_workspace_dependency_package_snapshot(&root, ws.db().vfs().instance_id())
-    });
+    let _dependency_package_snapshot = begin_dependency_package_snapshot(ws, pack);
     let _ = crate::matcher::drain_runtime_disabled_rules();
     // The SDK may have opened the complete canonical graph while refreshing
     // warm sidecars. Endpoint discovery is a separate Tree-sitter compiler
@@ -1140,7 +1112,13 @@ where
         factory_returns,
     } = select_taint_analysis_rules(ws, pack, &options)?;
 
-    let scan_files = security_scan_files(ws, &options.files, &options.exclude_files, options.exclude_tests);
+    let scan_files = security_scan_files(
+        ws,
+        &options.files,
+        &options.exclude_files,
+        options.exclude_tests,
+        &pack.metadata.test_path_patterns,
+    );
     let total_files = scan_files.len() as u64;
     on_progress(AnalysisProgress::Note {
         label: "scope",
@@ -1314,9 +1292,12 @@ where
     // edge cases (cross-file flows where one side is a test path).
     if options.exclude_tests {
         let root = ws.db().workspace_root();
-        source_hits.retain(|m| !path_is_excluded_with_root(root.as_deref(), &m.file, &[], true));
-        sink_hits.retain(|m| !path_is_excluded_with_root(root.as_deref(), &m.file, &[], true));
-        pattern_sink_hits.retain(|m| !path_is_excluded_with_root(root.as_deref(), &m.file, &[], true));
+        let test_patterns = &pack.metadata.test_path_patterns;
+        source_hits
+            .retain(|m| !path_is_excluded_with_root(root.as_deref(), &m.file, &[], true, test_patterns));
+        sink_hits.retain(|m| !path_is_excluded_with_root(root.as_deref(), &m.file, &[], true, test_patterns));
+        pattern_sink_hits
+            .retain(|m| !path_is_excluded_with_root(root.as_deref(), &m.file, &[], true, test_patterns));
     }
 
     // Sort matches so the chain-aware engine sees a deterministic
@@ -1940,9 +1921,7 @@ where
     F: FnMut(AnalysisProgress),
 {
     let _taint_analysis_guard = ws.lock_taint_analysis();
-    let _dependency_package_snapshot = ws.db().workspace_root().map(|root| {
-        crate::deps::begin_workspace_dependency_package_snapshot(&root, ws.db().vfs().instance_id())
-    });
+    let _dependency_package_snapshot = begin_dependency_package_snapshot(ws, pack);
     let _ = crate::matcher::drain_runtime_disabled_rules();
     let mut sources = select_rules(pack, RuleKind::Source, None, options.source.as_deref(), |r| {
         source_rule_matches_filters(
@@ -1955,7 +1934,13 @@ where
     filter_rules_to_workspace_languages(ws, &mut sources);
     let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
 
-    let scan_files = security_scan_files(ws, &options.files, &options.exclude_files, options.exclude_tests);
+    let scan_files = security_scan_files(
+        ws,
+        &options.files,
+        &options.exclude_files,
+        options.exclude_tests,
+        &pack.metadata.test_path_patterns,
+    );
     let total_files = scan_files.len() as u64;
     on_progress(AnalysisProgress::Note {
         label: "scope",
@@ -2026,7 +2011,9 @@ where
     filter_by_path(ws, &mut source_hits, &options.files, &options.exclude_files);
     if options.exclude_tests {
         let root = ws.db().workspace_root();
-        source_hits.retain(|m| !path_is_test_file_with_root(root.as_deref(), &m.file));
+        source_hits.retain(|m| {
+            !path_is_test_file_with_root(root.as_deref(), &m.file, &pack.metadata.test_path_patterns)
+        });
     }
     sort_matches(&mut source_hits);
     let unattributed_source_matches = source_hits
@@ -2128,7 +2115,13 @@ where
 
     if !options.exclude_files.is_empty() || options.exclude_tests {
         candidates.retain(|candidate| {
-            !source_candidate_has_excluded_path(ws, candidate, &options.exclude_files, options.exclude_tests)
+            !source_candidate_has_excluded_path(
+                ws,
+                candidate,
+                &options.exclude_files,
+                options.exclude_tests,
+                &pack.metadata.test_path_patterns,
+            )
         });
     }
     let candidates = combine_source_analysis_candidates(candidates);
@@ -2255,6 +2248,7 @@ pub fn source_inventory_with_progress<F>(
 where
     F: FnMut(AnalysisProgress),
 {
+    let _dependency_package_snapshot = begin_dependency_package_snapshot(ws, pack);
     let mut selected = select_rules(
         pack,
         RuleKind::Source,
@@ -2272,7 +2266,13 @@ where
         },
     )?;
     filter_rules_to_workspace_languages(ws, &mut selected);
-    let scan_files = security_scan_files(ws, &options.files, &options.exclude_files, false);
+    let scan_files = security_scan_files(
+        ws,
+        &options.files,
+        &options.exclude_files,
+        false,
+        &pack.metadata.test_path_patterns,
+    );
     let total_files = scan_files.len() as u64;
     let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
     let mut matches = gather_inventory_matches_phased(
@@ -2312,6 +2312,7 @@ pub fn sink_inventory_with_progress<F>(
 where
     F: FnMut(AnalysisProgress),
 {
+    let _dependency_package_snapshot = begin_dependency_package_snapshot(ws, pack);
     let mut selected = select_rules(
         pack,
         RuleKind::Sink,
@@ -2332,11 +2333,17 @@ where
                 && options
                     .category
                     .as_deref()
-                    .is_none_or(|category| rule_matches_category(rule, category))
+                    .is_none_or(|category| rule_matches_category(pack, rule, category))
         },
     )?;
     filter_rules_to_workspace_languages(ws, &mut selected);
-    let scan_files = security_scan_files(ws, &options.files, &options.exclude_files, false);
+    let scan_files = security_scan_files(
+        ws,
+        &options.files,
+        &options.exclude_files,
+        false,
+        &pack.metadata.test_path_patterns,
+    );
     let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
     on_progress(AnalysisProgress::PhaseStarted {
         label: "matching sink rules",
@@ -2378,13 +2385,21 @@ pub fn sanitizer_inventory_with_progress<F>(
 where
     F: FnMut(AnalysisProgress),
 {
+    let _dependency_package_snapshot = begin_dependency_package_snapshot(ws, pack);
     let mut selected = select_rules(
         pack,
         RuleKind::Sanitizer,
         options.rule.as_deref(),
         options.rule_regex.as_deref(),
         |rule| {
-            options
+            // Passthrough declarations share the sanitizer rule directory for
+            // pack compatibility, but they preserve attacker control and are
+            // rendered as taint transforms. A command named `sanitizers` must
+            // inventory only rules that can make a sanitizer claim; the
+            // rulepack metadata is the authoritative classification.
+            rule.tag.as_deref().is_none_or(|tag| {
+                !sanitizer_tag_is_recognized_non_crediting(&pack.metadata, tag)
+            }) && options
                 .tag
                 .as_deref()
                 .is_none_or(|tag| rule.tag.as_deref() == Some(tag))
@@ -2398,11 +2413,17 @@ where
                 && options
                     .category
                     .as_deref()
-                    .is_none_or(|category| rule_matches_category(rule, category))
+                    .is_none_or(|category| rule_matches_category(pack, rule, category))
         },
     )?;
     filter_rules_to_workspace_languages(ws, &mut selected);
-    let scan_files = security_scan_files(ws, &options.files, &options.exclude_files, false);
+    let scan_files = security_scan_files(
+        ws,
+        &options.files,
+        &options.exclude_files,
+        false,
+        &pack.metadata.test_path_patterns,
+    );
     let total_files = scan_files.len() as u64;
     let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
     let mut matches = gather_inventory_matches_phased(
@@ -2506,7 +2527,7 @@ pub fn pack_inventory(pack: &Rulepack, options: PackInventoryOptions) -> Vec<Pac
             rule_id: rule.id.clone(),
             language: rule.language.clone(),
             kind: rule_kind_str(rule.kind).to_string(),
-            family: rule_family(&rule.id).to_string(),
+            family: pack.normalized_sink_family(rule_family(&rule.id)).to_string(),
             tag: rule.tag.clone(),
             severity: rule.severity.map(|severity| severity.as_str().to_string()),
             enabled: rule.enabled,
@@ -2532,9 +2553,9 @@ pub fn pack_audit(pack: &Rulepack, lang_filter: Option<&str>) -> PackAuditReport
         match rule.kind {
             RuleKind::Sink => {
                 let mut families: BTreeSet<String> = BTreeSet::new();
-                families.insert(rule_family(&rule.id).to_string());
+                families.insert(pack.normalized_sink_family(rule_family(&rule.id)).to_string());
                 for alias in &rule.aliases {
-                    families.insert(rule_family(alias).to_string());
+                    families.insert(pack.normalized_sink_family(rule_family(alias)).to_string());
                 }
                 for family in families {
                     let entry = sink_counts
@@ -2574,20 +2595,30 @@ pub fn pack_audit(pack: &Rulepack, lang_filter: Option<&str>) -> PackAuditReport
     let languages = languages
         .into_iter()
         .map(|language| {
-            let canonical_sink_families_applicable = canonical_sink_audit_applies(&language);
-            let sinks = CANONICAL_SINK_FAMILIES
+            let metadata = pack.metadata.languages.get(&language);
+            let canonical_sink_families_applicable = metadata
+                .and_then(|metadata| metadata.canonical_sink_families_applicable)
+                .unwrap_or(true);
+            let sinks = pack
+                .metadata
+                .canonical_sink_families
                 .iter()
                 .map(|family| {
                     let (enabled, disabled) = sink_counts
-                        .get(&(language.clone(), (*family).to_string()))
+                        .get(&(language.clone(), family.clone()))
                         .copied()
                         .unwrap_or((0, 0));
                     (
-                        (*family).to_string(),
+                        family.clone(),
                         PackAuditFamilyCount {
                             enabled,
                             disabled,
-                            not_applicable: FAMILY_NOT_APPLICABLE.contains(&(language.as_str(), *family)),
+                            not_applicable: metadata.is_some_and(|metadata| {
+                                metadata
+                                    .not_applicable_sink_families
+                                    .iter()
+                                    .any(|not_applicable| not_applicable == family)
+                            }),
                         },
                     )
                 })
@@ -2595,7 +2626,9 @@ pub fn pack_audit(pack: &Rulepack, lang_filter: Option<&str>) -> PackAuditReport
             let (source_enabled, source_disabled) = source_counts.get(&language).copied().unwrap_or((0, 0));
             let (sanitizer_enabled, sanitizer_disabled) =
                 sanitizer_counts.get(&language).copied().unwrap_or((0, 0));
-            let security_model = security_model_for_lang(&language).to_string();
+            let security_model = metadata
+                .and_then(|metadata| metadata.security_model.clone())
+                .unwrap_or_else(|| "app-web-taint".to_string());
             PackAuditLanguage {
                 language,
                 security_model,
@@ -2612,7 +2645,11 @@ pub fn pack_audit(pack: &Rulepack, lang_filter: Option<&str>) -> PackAuditReport
             }
         })
         .collect();
-    PackAuditReport { languages }
+    PackAuditReport {
+        canonical_sink_families: pack.metadata.canonical_sink_families.clone(),
+        sink_family_short_labels: pack.metadata.sink_family_short_labels.clone(),
+        languages,
+    }
 }
 
 pub fn pack_tree(pack: &Rulepack, options: PackInventoryOptions) -> PackTreeReport {
@@ -3828,6 +3865,7 @@ fn security_scan_files(
     files: &[String],
     exclude_files: &[String],
     exclude_tests: bool,
+    test_path_patterns: &[String],
 ) -> Vec<FileId> {
     let root = ws.db().workspace_root();
     ws.db()
@@ -3845,7 +3883,13 @@ fn security_scan_files(
                 || files
                     .iter()
                     .any(|filter| path_filter_matches_with_root(root.as_deref(), &path, filter)))
-                && !path_is_excluded_with_root(root.as_deref(), &path, exclude_files, exclude_tests)
+                && !path_is_excluded_with_root(
+                    root.as_deref(),
+                    &path,
+                    exclude_files,
+                    exclude_tests,
+                    test_path_patterns,
+                )
         })
         .collect()
 }
@@ -3863,19 +3907,17 @@ fn path_is_excluded_with_root(
     path: &str,
     exclude_files: &[String],
     exclude_tests: bool,
+    test_path_patterns: &[String],
 ) -> bool {
-    (exclude_tests && path_is_test_file_with_root(root, path))
+    (exclude_tests && path_is_test_file_with_root(root, path, test_path_patterns))
         || exclude_files
             .iter()
             .any(|filter| path_filter_matches_with_root(root, path, filter))
 }
 
-fn path_is_test_file_with_root(root: Option<&Path>, path: &str) -> bool {
+fn path_is_test_file_with_root(root: Option<&Path>, path: &str, test_path_patterns: &[String]) -> bool {
     let relative = workspace_relative_filter_path(root, path);
-    if relative.starts_with('/') {
-        return crate::finding::path_is_test_file(&relative);
-    }
-    crate::finding::path_is_test_file(&format!("/{relative}"))
+    crate::finding::path_is_test_file(&relative, test_path_patterns)
 }
 
 fn taint_path_has_excluded_file(
@@ -3883,11 +3925,18 @@ fn taint_path_has_excluded_file(
     taint_path: &[TaintPropagationStep],
     exclude_files: &[String],
     exclude_tests: bool,
+    test_path_patterns: &[String],
 ) -> bool {
     let root = ws.db().workspace_root();
-    taint_path
-        .iter()
-        .any(|step| path_is_excluded_with_root(root.as_deref(), &step.file, exclude_files, exclude_tests))
+    taint_path.iter().any(|step| {
+        path_is_excluded_with_root(
+            root.as_deref(),
+            &step.file,
+            exclude_files,
+            exclude_tests,
+            test_path_patterns,
+        )
+    })
 }
 
 fn func_file_path(ws: &Workspace, func: FuncId) -> Option<String> {
@@ -3904,6 +3953,7 @@ fn source_candidate_has_excluded_path(
     candidate: &SourceAnalysisCandidate,
     exclude_files: &[String],
     exclude_tests: bool,
+    test_path_patterns: &[String],
 ) -> bool {
     let root = ws.db().workspace_root();
     path_is_excluded_with_root(
@@ -3911,12 +3961,24 @@ fn source_candidate_has_excluded_path(
         &candidate.source.file,
         exclude_files,
         exclude_tests,
-    ) || taint_path_has_excluded_file(ws, &candidate.taint_path, exclude_files, exclude_tests)
-        || candidate.path.iter().any(|&func| {
-            func_file_path(ws, func).as_deref().is_some_and(|path| {
-                path_is_excluded_with_root(root.as_deref(), path, exclude_files, exclude_tests)
-            })
+        test_path_patterns,
+    ) || taint_path_has_excluded_file(
+        ws,
+        &candidate.taint_path,
+        exclude_files,
+        exclude_tests,
+        test_path_patterns,
+    ) || candidate.path.iter().any(|&func| {
+        func_file_path(ws, func).as_deref().is_some_and(|path| {
+            path_is_excluded_with_root(
+                root.as_deref(),
+                path,
+                exclude_files,
+                exclude_tests,
+                test_path_patterns,
+            )
         })
+    })
 }
 
 fn finding_has_excluded_path(
@@ -3924,6 +3986,7 @@ fn finding_has_excluded_path(
     finding: &Finding,
     exclude_files: &[String],
     exclude_tests: bool,
+    test_path_patterns: &[String],
 ) -> bool {
     let root = ws.db().workspace_root();
     path_is_excluded_with_root(
@@ -3931,14 +3994,36 @@ fn finding_has_excluded_path(
         &finding.source.file,
         exclude_files,
         exclude_tests,
-    ) || path_is_excluded_with_root(root.as_deref(), &finding.sink.file, exclude_files, exclude_tests)
-        || taint_path_has_excluded_file(ws, &finding.taint_path, exclude_files, exclude_tests)
-        || finding.sanitizers_seen.iter().any(|sanitizer| {
-            path_is_excluded_with_root(root.as_deref(), &sanitizer.file, exclude_files, exclude_tests)
-        })
-        || finding.taint_transforms_seen.iter().any(|transform| {
-            path_is_excluded_with_root(root.as_deref(), &transform.file, exclude_files, exclude_tests)
-        })
+        test_path_patterns,
+    ) || path_is_excluded_with_root(
+        root.as_deref(),
+        &finding.sink.file,
+        exclude_files,
+        exclude_tests,
+        test_path_patterns,
+    ) || taint_path_has_excluded_file(
+        ws,
+        &finding.taint_path,
+        exclude_files,
+        exclude_tests,
+        test_path_patterns,
+    ) || finding.sanitizers_seen.iter().any(|sanitizer| {
+        path_is_excluded_with_root(
+            root.as_deref(),
+            &sanitizer.file,
+            exclude_files,
+            exclude_tests,
+            test_path_patterns,
+        )
+    }) || finding.taint_transforms_seen.iter().any(|transform| {
+        path_is_excluded_with_root(
+            root.as_deref(),
+            &transform.file,
+            exclude_files,
+            exclude_tests,
+            test_path_patterns,
+        )
+    })
 }
 
 fn workspace_relative_filter_path(root: Option<&Path>, path: &str) -> String {
@@ -4865,11 +4950,16 @@ fn extend_implicit_context_findings(
             }
 
             let root = ws.db().workspace_root();
-            let from_test = path_is_test_file_with_root(root.as_deref(), &producer_flow.finding.source.file)
-                || path_is_test_file_with_root(root.as_deref(), &sink_match.file)
-                || taint_path
-                    .iter()
-                    .any(|step| path_is_test_file_with_root(root.as_deref(), &step.file));
+            let test_patterns = &pack.metadata.test_path_patterns;
+            let from_test =
+                path_is_test_file_with_root(
+                    root.as_deref(),
+                    &producer_flow.finding.source.file,
+                    test_patterns,
+                ) || path_is_test_file_with_root(root.as_deref(), &sink_match.file, test_patterns)
+                    || taint_path
+                        .iter()
+                        .any(|step| path_is_test_file_with_root(root.as_deref(), &step.file, test_patterns));
 
             findings.push(FindingWithChain {
                 finding: Finding {
@@ -5497,7 +5587,7 @@ fn function_chain_is_strict_prefix(prefix: &[FuncId], chain: &[FuncId]) -> bool 
 /// truncated when rankers read the first result. Drop the wrapper only
 /// when a same-source, same-class deeper flow starts at the nested
 /// callee on the same call-site line.
-fn drop_dominated_wrapper_findings(findings: &mut Vec<CombinedFindingWithChain>) {
+fn drop_dominated_wrapper_findings(findings: &mut Vec<CombinedFindingWithChain>, ws: &Workspace) {
     if findings.len() < 2 {
         return;
     }
@@ -5506,7 +5596,7 @@ fn drop_dominated_wrapper_findings(findings: &mut Vec<CombinedFindingWithChain>)
         if findings
             .iter()
             .enumerate()
-            .any(|(other_idx, other)| other_idx != idx && wrapper_finding_is_dominated(candidate, other))
+            .any(|(other_idx, other)| other_idx != idx && wrapper_finding_is_dominated(candidate, other, ws))
         {
             dominated.insert(idx);
         }
@@ -5572,6 +5662,7 @@ fn sink_args_include_direct_argument(args: &[TaintedArgInfo]) -> bool {
 fn wrapper_finding_is_dominated(
     wrapper: &CombinedFindingWithChain,
     deeper: &CombinedFindingWithChain,
+    ws: &Workspace,
 ) -> bool {
     let wrapper_finding = &wrapper.finding;
     let deeper_finding = &deeper.finding;
@@ -5601,15 +5692,229 @@ fn wrapper_finding_is_dominated(
     if nested_callee.is_empty() {
         return false;
     }
-    wrapper_finding
+    let tainted_indices = wrapper_finding
         .sink
         .tainted_args
         .iter()
-        .any(|arg| argument_text_calls(&arg.value_text, &nested_callee))
-        || wrapper_step
-            .tainted_args
-            .iter()
-            .any(|arg| argument_text_calls(&arg.value_text, &nested_callee))
+        .map(|arg| arg.index)
+        .chain(wrapper_step.tainted_args.iter().map(|arg| arg.index))
+        .filter(|index| *index != usize::MAX)
+        .collect::<AHashSet<_>>();
+    if tainted_indices.is_empty() {
+        return false;
+    }
+    let Some(&wrapper_func) = wrapper.chain_funcs.last() else {
+        return false;
+    };
+    let Some(decl) = ws.exact_decl(SymbolId::new(wrapper_func.raw())) else {
+        return false;
+    };
+    let Some(file_index) = ws.db().decl_index(decl.span.file) else {
+        return false;
+    };
+    let Ok(snapshot) = ws.vfs().snapshot(decl.span.file) else {
+        return false;
+    };
+    let span_map = bonsai_common::cached_span_map_arc(decl.span.file, snapshot.version, &snapshot.text);
+    let outer_span = flow_call_span_at_location(
+        &decl.flow_events,
+        wrapper_finding.sink.line,
+        wrapper_finding.sink.column,
+        &span_map,
+    )
+    .or_else(|| {
+        flow_call_span_at_location(
+            &decl.flow_events,
+            wrapper_step.line,
+            wrapper_step.column,
+            &span_map,
+        )
+    });
+    outer_span.is_some_and(|outer_span| {
+        flow_argument_calls_named_callee(
+            &decl.flow_events,
+            &file_index.call_argument_values,
+            outer_span,
+            &tainted_indices,
+            &nested_callee,
+        )
+    })
+}
+
+fn flow_call_span_at_location(
+    events: &[FlowEvent],
+    line: u32,
+    column: u32,
+    span_map: &bonsai_common::SpanMap,
+) -> Option<Span> {
+    for event in events {
+        match event {
+            FlowEvent::Call { span, .. } => {
+                let location = span_map.line_col(span.start);
+                if location.line == line && (column == 0 || location.column == column) {
+                    return Some(*span);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(span) = flow_call_span_at_location(then_events, line, column, span_map)
+                    .or_else(|| flow_call_span_at_location(else_events, line, column, span_map))
+                {
+                    return Some(span);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(span) = flow_call_span_at_location(body, line, column, span_map) {
+                    return Some(span);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(span) = flow_call_span_at_location(body, line, column, span_map)
+                    .or_else(|| flow_call_span_at_location(catch_events, line, column, span_map))
+                    .or_else(|| flow_call_span_at_location(finally_events, line, column, span_map))
+                {
+                    return Some(span);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn flow_argument_calls_named_callee(
+    events: &[FlowEvent],
+    argument_values: &[bonsai_lang_api::CallArgumentValueFact],
+    outer_span: Span,
+    tainted_indices: &AHashSet<usize>,
+    nested_callee: &str,
+) -> bool {
+    fn collect_nested_spans(
+        argument_values: &[bonsai_lang_api::CallArgumentValueFact],
+        outer_span: Span,
+        tainted_indices: &AHashSet<usize>,
+        out: &mut AHashSet<Span>,
+    ) {
+        for argument in argument_values {
+            if argument.call_span == outer_span && tainted_indices.contains(&argument.argument_index) {
+                out.extend(argument.value_flow.call_sites.iter().copied());
+                if let Some(span) = argument.direct_call_span {
+                    out.insert(span);
+                }
+            }
+        }
+    }
+
+    fn contains_named_call(events: &[FlowEvent], spans: &AHashSet<Span>, nested_callee: &str) -> bool {
+        events.iter().any(|event| match event {
+            FlowEvent::Call { span, name, .. } => {
+                spans.contains(span) && bonsai_common::qualified_names_match(name, nested_callee)
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                contains_named_call(then_events, spans, nested_callee)
+                    || contains_named_call(else_events, spans, nested_callee)
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                contains_named_call(body, spans, nested_callee)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                contains_named_call(body, spans, nested_callee)
+                    || contains_named_call(catch_events, spans, nested_callee)
+                    || contains_named_call(finally_events, spans, nested_callee)
+            }
+            _ => false,
+        })
+    }
+
+    let mut nested_spans = AHashSet::new();
+    collect_nested_spans(argument_values, outer_span, tainted_indices, &mut nested_spans);
+    !nested_spans.is_empty() && contains_named_call(events, &nested_spans, nested_callee)
+}
+
+#[cfg(test)]
+mod wrapper_dedup_tests {
+    use super::*;
+
+    fn call(span: Span, name: &str) -> FlowEvent {
+        FlowEvent::Call {
+            span,
+            name: name.to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: Vec::new(),
+        }
+    }
+
+    fn argument_fact(
+        outer_span: Span,
+        nested_span: Span,
+        argument_index: usize,
+    ) -> bonsai_lang_api::CallArgumentValueFact {
+        bonsai_lang_api::CallArgumentValueFact {
+            call_span: outer_span,
+            argument_index,
+            argument_span: nested_span,
+            direct_call_span: Some(nested_span),
+            value_flow: bonsai_lang_api::ExpressionFlow {
+                call_sites: vec![nested_span],
+                ..bonsai_lang_api::ExpressionFlow::default()
+            },
+            static_value: None,
+            exact_static_aggregate_fields: Vec::new(),
+            exact_static_sequence_values: None,
+        }
+    }
+
+    #[test]
+    fn wrapper_dedup_uses_compiler_argument_call_identity() {
+        let file = FileId::new(0);
+        let outer = Span::new(file, 10, 40);
+        let nested = Span::new(file, 18, 32);
+        let events = vec![call(outer, "send"), call(nested, "render")];
+        let facts = vec![argument_fact(outer, nested, 0)];
+        let tainted = AHashSet::from_iter([0]);
+
+        assert!(flow_argument_calls_named_callee(
+            &events, &facts, outer, &tainted, "render"
+        ));
+        assert!(
+            !flow_argument_calls_named_callee(&events, &facts, outer, &tainted, "escape"),
+            "a different nested callee must not be inferred from rendered argument text"
+        );
+    }
+
+    #[test]
+    fn wrapper_dedup_requires_the_tainted_argument_slot() {
+        let file = FileId::new(0);
+        let outer = Span::new(file, 10, 40);
+        let nested = Span::new(file, 18, 32);
+        let events = vec![call(outer, "send"), call(nested, "render")];
+        let facts = vec![argument_fact(outer, nested, 1)];
+        let tainted = AHashSet::from_iter([0]);
+
+        assert!(
+            !flow_argument_calls_named_callee(&events, &facts, outer, &tainted, "render"),
+            "an untainted sibling argument must not dominate the wrapper finding"
+        );
+    }
 }
 
 fn chain_has_prefix(chain: &[String], prefix: &[String]) -> bool {
@@ -5622,23 +5927,10 @@ fn cwe_sets_overlap_or_unknown(left: &[String], right: &[String]) -> bool {
 
 fn display_callee_tail(name: &str) -> String {
     let without_site = name.split('@').next().unwrap_or(name);
-    without_site
-        .rsplit(['.', ':'])
-        .find(|part| !part.is_empty())
-        .unwrap_or(without_site)
+    bonsai_common::short_qualified_tail(without_site)
         .trim()
         .trim_end_matches("()")
         .to_string()
-}
-
-fn argument_text_calls(argument: &str, callee: &str) -> bool {
-    let callee = callee.trim();
-    if callee.is_empty() {
-        return false;
-    }
-    let compact_arg: String = argument.chars().filter(|ch| !ch.is_whitespace()).collect();
-    let compact_callee: String = callee.chars().filter(|ch| !ch.is_whitespace()).collect();
-    compact_arg.contains(&format!("{compact_callee}("))
 }
 
 /// Pick the higher severity from two optionals, or the only present
@@ -5759,21 +6051,6 @@ fn sanitizer_call_overlaps_tainted_call(san: &RuleMatch, tainted_call_spans: &AH
     tainted_call_spans
         .iter()
         .any(|span| spans_overlap(*span, san.span))
-}
-
-fn sanitizer_char_allowlist_guards_tainted_call(
-    sanitizer_rule: Option<&Rule>,
-    san: &RuleMatch,
-    tainted_call_spans: &AHashSet<Span>,
-) -> bool {
-    if sanitizer_rule.and_then(|rule| rule.tag.as_deref()) != Some("char-allowlist") {
-        return false;
-    }
-    tainted_call_spans.iter().any(|span| {
-        span.file == san.span.file
-            && san.span.end <= span.start
-            && span.start.saturating_sub(san.span.end) <= 128
-    })
 }
 
 /// M4: a sanitizer is only "nested in a tainted sink arg" when the
@@ -5962,12 +6239,46 @@ fn sanitizer_is_helper_return_reaching_tainted_sink_arg(context: HelperSanitizer
     let [(_, return_flow)] = returns.as_slice() else {
         return false;
     };
-    if !return_flow.source_names.is_empty()
-        || !return_flow.aggregate_fields.is_empty()
-        || !return_flow.tuple_items.is_empty()
-        || !return_flow.spreads.is_empty()
-        || !matches!(return_flow.call_sites.as_slice(), [call_site] if spans_overlap(*call_site, *sanitizer_span))
-    {
+    let direct_sanitizer_return = return_flow.source_names.is_empty()
+        && return_flow.aggregate_fields.is_empty()
+        && return_flow.tuple_items.is_empty()
+        && return_flow.spreads.is_empty()
+        && matches!(return_flow.call_sites.as_slice(), [call_site] if spans_overlap(*call_site, *sanitizer_span));
+    let assigned_sanitizer_return = || {
+        let place = return_flow.place.as_deref()?.trim();
+        if place.is_empty()
+            || !return_flow.aggregate_fields.is_empty()
+            || !return_flow.tuple_items.is_empty()
+            || !return_flow.spreads.is_empty()
+        {
+            return None;
+        }
+        let file_index = ws.exact_decl_index_shared(helper.span.file)?;
+        let assignment = file_index
+            .assignment_values
+            .iter()
+            .filter(|fact| {
+                fact.target.as_deref() == Some(place)
+                    && helper.span.start <= fact.assignment_span.start
+                    && fact.assignment_span.end <= helper.span.end
+            })
+            .max_by_key(|fact| fact.assignment_span.end)?;
+        let value = &assignment.value_flow;
+        if !value.source_names.is_empty()
+            || !value.aggregate_fields.is_empty()
+            || !value.tuple_items.is_empty()
+            || !value.spreads.is_empty()
+        {
+            return None;
+        }
+        let mut call_sites = assignment.call_sites.clone();
+        call_sites.extend(value.call_sites.iter().copied());
+        call_sites.sort_by_key(|span| (span.start, span.end));
+        call_sites.dedup();
+        matches!(call_sites.as_slice(), [call_site] if spans_overlap(*call_site, *sanitizer_span))
+            .then_some(())
+    };
+    if !direct_sanitizer_return && assigned_sanitizer_return().is_none() {
         bonsai_diagnostics::debug_log!(
             "security-taint",
             "helper_sanitizer_return_rejected helper={} flow={:?}",
@@ -6212,13 +6523,21 @@ fn call_arg_value_keys(args: &[bonsai_lang_api::CallArg]) -> AHashSet<String> {
 fn xxe_factory_hardening_sanitizes_sink(
     ws: &Workspace,
     sink_func: FuncId,
+    metadata: &RulepackMetadata,
     sanitizer_rule: Option<&Rule>,
     sink_rule: &Rule,
     san: &RuleMatch,
     snk: &RuleMatch,
 ) -> bool {
-    if sanitizer_rule.and_then(|rule| rule.tag.as_deref()) != Some("xxe-sanitizer")
-        || sink_rule.tag.as_deref() != Some("xxe")
+    if !sanitizer_credits_sink_tag(
+        metadata,
+        sanitizer_rule.and_then(|rule| rule.tag.as_deref()),
+        sink_rule.tag.as_deref(),
+    ) || sink_rule
+        .analysis_semantics
+        .as_ref()
+        .and_then(|semantics| semantics.sanitizer_attachment_policy)
+        != Some(SanitizerAttachmentPolicy::ReceiverFactoryLineage)
         || san.span.file != snk.span.file
         || !match_precedes_or_same(san, snk)
     {
@@ -6436,33 +6755,6 @@ fn assignment_uses_factory_builder(
     false
 }
 
-/// True when `token` appears in one adapter-selected expression as a whole
-/// identifier. This is used only by the small guard-condition evaluator.
-fn text_mentions_token(text: &str, token: &str) -> bool {
-    if token.is_empty() {
-        return false;
-    }
-    let bytes = text.as_bytes();
-    let mut search_from = 0;
-    while let Some(rel) = text[search_from..].find(token) {
-        let start = search_from + rel;
-        let end = start + token.len();
-        search_from = start + 1;
-        let before_ok = start == 0 || {
-            let byte = bytes[start - 1];
-            !(byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric())
-        };
-        let after_ok = end >= bytes.len() || {
-            let byte = bytes[end];
-            !(byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric())
-        };
-        if before_ok && after_ok {
-            return true;
-        }
-    }
-    false
-}
-
 /// True when a sanitizer match could plausibly attach to the
 /// source→sink chain — must come AFTER the source within the
 /// source's enclosing fn, and BEFORE the sink within the sink's
@@ -6519,6 +6811,42 @@ fn sanitizer_assignment_output_feeds_sink_arg(
         return false;
     };
     sanitizer_assignment_output_feeds_sink_arg_in_events(&decl.flow_events, san, &target_keys)
+}
+
+/// Attach a rule-selected sanitizer predicate only when the owning frontend
+/// proved that it guards the sole dynamic element-copy into the sink value.
+/// The compiler fact contains no provider names or security policy: the
+/// `RuleMatch` at `predicate_call_span` supplies that meaning.
+fn sanitizer_guarded_value_filter_output_feeds_sink_arg(
+    ws: &Workspace,
+    sanitizer_func: FuncId,
+    san: &RuleMatch,
+    snk: &RuleMatch,
+    sink_rule: &Rule,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> bool {
+    if san.span.file != snk.span.file || !match_precedes_or_same(san, snk) {
+        return false;
+    }
+    let target_keys = sanitizer_assignment_sink_target_keys(snk, sink_rule, sink_tainted_args);
+    if target_keys.is_empty() {
+        return false;
+    }
+    let Some(decl) = ws.exact_decl(SymbolId::new(sanitizer_func.raw())) else {
+        return false;
+    };
+    let Some(file_index) = ws.exact_decl_index_shared(decl.span.file) else {
+        return false;
+    };
+    file_index.guarded_value_filters.iter().any(|fact| {
+        fact.function_span == decl.span
+            && fact.write_span.start < snk.span.start
+            && (spans_overlap(fact.predicate_call_span, san.span)
+                || span_contains(fact.predicate_call_span, san.span)
+                || span_contains(san.span, fact.predicate_call_span))
+            && clean_overwrite_target_key(&fact.output_place)
+                .is_some_and(|output| target_keys.contains(&output))
+    })
 }
 
 fn sanitizer_assignment_sink_target_keys(
@@ -6696,15 +7024,17 @@ fn sanitizer_guard_feeds_sink_arg(
     sanitizer_hits: &[&RuleMatch],
     snk: &RuleMatch,
 ) -> bool {
-    let Some(tag) = sanitizer_rule.and_then(|rule| rule.tag.as_deref()) else {
+    let Some(sanitizer_rule) = sanitizer_rule else {
         return false;
     };
-    if !matches!(
-        tag,
-        "same-origin-path" | "ssrf-sanitize" | "allowlist-validate" | "nosql-sanitize"
-    ) || san.span.file != snk.span.file
-        || !match_precedes_or_same(san, snk)
-    {
+    let Some(guard) = sanitizer_rule
+        .analysis_semantics
+        .as_ref()
+        .and_then(|semantics| semantics.sanitizer_guard.as_ref())
+    else {
+        return false;
+    };
+    if san.span.file != snk.span.file || !match_precedes_or_same(san, snk) {
         return false;
     }
     let target_keys: AHashSet<String> = context
@@ -6719,17 +7049,18 @@ fn sanitizer_guard_feeds_sink_arg(
     let Some(decl) = context.ws.exact_decl(SymbolId::new(sanitizer_func.raw())) else {
         return false;
     };
-    if tag == "nosql-sanitize" {
+    if guard.require_terminal_rejection {
         return terminal_type_guards_cover_sink_targets(
             context.ws,
             &decl,
-            sanitizer_rule.expect("tag came from a sanitizer rule"),
+            sanitizer_rule,
+            guard,
             sanitizer_hits,
             snk,
             &target_keys,
         );
     }
-    let mut guarded = sanitizer_guard_variables_in_events(&decl.flow_events, san, tag);
+    let mut guarded = sanitizer_guard_variables_in_events(&decl.flow_events, san, guard);
     guarded.retain(|var| !looks_like_clean_constant(var));
     if guarded.is_empty() {
         return false;
@@ -6759,6 +7090,7 @@ fn terminal_type_guards_cover_sink_targets(
     ws: &Workspace,
     decl: &bonsai_lang_api::Decl,
     sanitizer_rule: &Rule,
+    guard: &SanitizerGuardSemantics,
     sanitizer_hits: &[&RuleMatch],
     sink: &RuleMatch,
     sink_targets: &AHashSet<String>,
@@ -6772,8 +7104,7 @@ fn terminal_type_guards_cover_sink_targets(
                     && match_precedes_or_same(candidate, sink)
             })
             .any(|candidate| {
-                let guarded =
-                    sanitizer_guard_variables_in_events(&decl.flow_events, candidate, "nosql-sanitize");
+                let guarded = sanitizer_guard_variables_in_events(&decl.flow_events, candidate, guard);
                 if !guarded.iter().any(|place| place == target) {
                     return false;
                 }
@@ -6787,9 +7118,13 @@ fn terminal_type_guards_cover_sink_targets(
     })
 }
 
-fn sanitizer_guard_variables_in_events(events: &[FlowEvent], san: &RuleMatch, tag: &str) -> Vec<String> {
+fn sanitizer_guard_variables_in_events(
+    events: &[FlowEvent],
+    san: &RuleMatch,
+    guard: &SanitizerGuardSemantics,
+) -> Vec<String> {
     let mut vars = Vec::new();
-    collect_sanitizer_guard_variables(events, san, tag, &mut vars);
+    collect_sanitizer_guard_variables(events, san, guard, &mut vars);
     vars.sort();
     vars.dedup();
     vars
@@ -6798,7 +7133,7 @@ fn sanitizer_guard_variables_in_events(events: &[FlowEvent], san: &RuleMatch, ta
 fn collect_sanitizer_guard_variables(
     events: &[FlowEvent],
     san: &RuleMatch,
-    tag: &str,
+    guard: &SanitizerGuardSemantics,
     vars: &mut Vec<String>,
 ) {
     for event in events {
@@ -6806,40 +7141,18 @@ fn collect_sanitizer_guard_variables(
             FlowEvent::Call {
                 span, receiver, args, ..
             } if spans_overlap(*span, san.span) || span_contains(*span, san.span) => {
-                if matches!(tag, "same-origin-path") {
+                if guard.use_receiver {
                     if let Some(receiver) = receiver.as_deref().and_then(clean_overwrite_target_key) {
                         vars.push(receiver);
                     }
                 }
-                if matches!(tag, "ssrf-sanitize" | "allowlist-validate") {
-                    for arg in args {
-                        if let Some(place) = arg.place.as_deref().and_then(clean_overwrite_target_key) {
-                            vars.push(place);
-                        }
-                        if let Some(value) = clean_overwrite_target_key(&arg.value_text) {
-                            vars.push(value);
-                        }
-                        for source in &arg.source_names {
-                            if let Some(value) = clean_overwrite_target_key(source) {
-                                vars.push(value);
-                            }
-                        }
-                    }
-                }
-                if tag == "nosql-sanitize" {
-                    if let Some(arg) = args.first() {
-                        if let Some(place) = arg.place.as_deref().and_then(clean_overwrite_target_key) {
-                            vars.push(place);
-                        }
-                        if let Some(value) = clean_overwrite_target_key(&arg.value_text) {
-                            vars.push(value);
-                        }
-                        for source in &arg.source_names {
-                            if let Some(value) = clean_overwrite_target_key(source) {
-                                vars.push(value);
-                            }
-                        }
-                    }
+                if guard.all_arguments {
+                    collect_guard_argument_places(args.iter(), vars);
+                } else {
+                    collect_guard_argument_places(
+                        guard.argument_indices.iter().filter_map(|index| args.get(*index)),
+                        vars,
+                    );
                 }
             }
             FlowEvent::Branch {
@@ -6847,11 +7160,11 @@ fn collect_sanitizer_guard_variables(
                 else_events,
                 ..
             } => {
-                collect_sanitizer_guard_variables(then_events, san, tag, vars);
-                collect_sanitizer_guard_variables(else_events, san, tag, vars);
+                collect_sanitizer_guard_variables(then_events, san, guard, vars);
+                collect_sanitizer_guard_variables(else_events, san, guard, vars);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_sanitizer_guard_variables(body, san, tag, vars);
+                collect_sanitizer_guard_variables(body, san, guard, vars);
             }
             FlowEvent::Try {
                 body,
@@ -6859,11 +7172,30 @@ fn collect_sanitizer_guard_variables(
                 finally_events,
                 ..
             } => {
-                collect_sanitizer_guard_variables(body, san, tag, vars);
-                collect_sanitizer_guard_variables(catch_events, san, tag, vars);
-                collect_sanitizer_guard_variables(finally_events, san, tag, vars);
+                collect_sanitizer_guard_variables(body, san, guard, vars);
+                collect_sanitizer_guard_variables(catch_events, san, guard, vars);
+                collect_sanitizer_guard_variables(finally_events, san, guard, vars);
             }
             _ => {}
+        }
+    }
+}
+
+fn collect_guard_argument_places<'a>(
+    arguments: impl Iterator<Item = &'a bonsai_lang_api::CallArg>,
+    vars: &mut Vec<String>,
+) {
+    for argument in arguments {
+        if let Some(place) = argument.place.as_deref().and_then(clean_overwrite_target_key) {
+            vars.push(place);
+        }
+        if let Some(value) = clean_overwrite_target_key(&argument.value_text) {
+            vars.push(value);
+        }
+        for source in &argument.source_names {
+            if let Some(value) = clean_overwrite_target_key(source) {
+                vars.push(value);
+            }
         }
     }
 }
@@ -7080,14 +7412,17 @@ fn guarded_variable_flows_into_receiver_before_sink(
 }
 
 fn post_sink_path_construction_containment_allowed(
+    metadata: &RulepackMetadata,
     sanitizer_rule: Option<&Rule>,
     sink_rule: &Rule,
     san: &RuleMatch,
     snk: &RuleMatch,
 ) -> bool {
-    if sanitizer_rule.and_then(|rule| rule.tag.as_deref()) != Some("path-sanitize")
-        || sink_rule.tag.as_deref() != Some("path-traversal")
-        || san.span.file != snk.span.file
+    if !sanitizer_credits_sink_tag(
+        metadata,
+        sanitizer_rule.and_then(|rule| rule.tag.as_deref()),
+        sink_rule.tag.as_deref(),
+    ) || san.span.file != snk.span.file
         || match_precedes_or_same(san, snk)
     {
         return false;
@@ -7115,13 +7450,6 @@ fn tainted_call_matches_sink(call: &TaintedCall, sink: &RuleMatch) -> bool {
     // happen to share a method name. See
     // `docs/contributing/design-patterns.mdx::Semantic Resolution Always`.
     spans_overlap(call.call_span, sink.span)
-}
-
-/// Normalize one adapter-selected compiler fact for small static evaluators.
-/// Callers pass branch conditions, arguments, or assignment renderings—not
-/// an enclosing source region.
-fn compact_guard_text(text: &str) -> String {
-    text.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
 
 /// True iff `rule_id` resolves to a rule whose match kind binds to
@@ -7426,7 +7754,7 @@ fn taint_path_identity_tokens(chain_names: &[String], taint_path: &[TaintPropaga
 ///
 /// Three branches:
 /// - **Sanitized**: any sanitizer in the chain credits the sink
-///   tag (same-tag credit OR cross-tag entry in `MAPPING`).
+///   tag (same-tag credit or a rulepack metadata cross-tag entry).
 /// - **WrongContext**: at least one sanitizer in the chain has a
 ///   real credit-bearing tag but none credit THIS sink — the
 ///   developer attempted to filter for a different sink family.
@@ -7439,25 +7767,26 @@ fn taint_path_identity_tokens(chain_names: &[String], taint_path: &[TaintPropaga
 /// claim" — they neither credit the sink nor push the status to
 /// WrongContext. A future change here would silently re-introduce
 /// the pre-fix behaviour, so be deliberate.
-fn compute_status(sanitizers: &[FindingMatch], sink_tag: Option<&str>) -> FindingStatus {
+fn compute_status(
+    metadata: &RulepackMetadata,
+    sanitizers: &[FindingMatch],
+    sink_tag: Option<&str>,
+) -> FindingStatus {
     if sanitizers.is_empty() {
         return FindingStatus::Unsanitized;
     }
     let mut any_credit = false;
     let mut any_real_sanitizer_fired = false;
     for sanitizer in sanitizers {
-        if sanitizer_credits_sink_tag(sanitizer.tag.as_deref(), sink_tag) {
+        if sanitizer_credits_sink_tag(metadata, sanitizer.tag.as_deref(), sink_tag) {
             any_credit = true;
             break;
         }
-        // Passthrough markers and inventory-only tags (`validation`,
-        // `schema-validate`, `hash`, `url-decode`, `base64-encode`,
-        // `non-sanitizer`, `passthrough-*`) make no claim of clearing
-        // taint for any sink class. They should NOT push status to
-        // WrongContext — that label is reserved for sanitizers that
-        // tried to filter for the wrong sink family.
+        // Rulepack-declared passthrough and inventory-only tags make no claim
+        // of clearing taint for any sink class. They should not push status to
+        // WrongContext, which is reserved for a real wrong-family sanitizer.
         if let Some(tag) = sanitizer.tag.as_deref() {
-            if !sanitizer_tag_is_recognized_non_crediting(tag) {
+            if !sanitizer_tag_is_recognized_non_crediting(metadata, tag) {
                 any_real_sanitizer_fired = true;
             }
         }
@@ -7482,48 +7811,38 @@ fn rule_kind_str(kind: RuleKind) -> &'static str {
     }
 }
 
-/// Extract the canonical family segment from a rule id of the shape
+/// Extract the raw family segment from a rule id of the shape
 /// `<lang>.<family>.<name>`. `python.cmdi.os_system` → `cmdi`,
 /// `python.deser.pickle_loads` → `deser`. Falls back to the first
-/// non-language segment, then to `id`. The result is run through
-/// [`normalise_family`] so callers (audit, JSON, CLI) all key on the
-/// same canonical string set as `CANONICAL_SINK_FAMILIES`.
+/// non-language segment, then to `id`. Canonical taxonomy aliases are
+/// rulepack-owned metadata and are applied by pack-aware callers.
 #[must_use]
 pub fn rule_family(id: &str) -> &str {
     let mut it = id.splitn(3, '.');
     let _lang = it.next();
     match (it.next(), it.next()) {
-        (Some(fam), _) => normalise_family(fam),
+        (Some(fam), _) => fam,
         _ => id,
     }
 }
 
 /// True when a rule matches a `--category` filter. Accepts:
 ///   - exact match against the rule's tag (e.g. `command-injection`),
-///   - exact match against the canonical family
-///     (`rule_family(id)` runs `normalise_family`, so
-///     `--category deserialization` matches `python.deser.*`),
+///   - exact match against the rulepack-normalized family,
 ///   - exact match against the raw family abbreviation
 ///     (`--category deser` ALSO matches `python.deser.*` so the
 ///     short form documented in `args.rs` keeps working). Used by
 ///     `select_pack_rules`, `sink_inventory`, `sanitizer_inventory`.
 #[must_use]
-fn rule_matches_category(rule: &Rule, category: &str) -> bool {
+fn rule_matches_category(pack: &Rulepack, rule: &Rule, category: &str) -> bool {
     if rule.tag.as_deref() == Some(category) {
         return true;
     }
-    if rule_family(&rule.id) == category {
+    let raw_family = rule_family(&rule.id);
+    if pack.normalized_sink_family(raw_family) == category {
         return true;
     }
-    // Raw (pre-normalised) family segment match. We re-split rather
-    // than expose a public helper because callers should keep
-    // routing through `rule_family` for canonical-only comparisons.
-    let raw_family = {
-        let mut it = rule.id.splitn(3, '.');
-        let _lang = it.next();
-        it.next()
-    };
-    raw_family == Some(category)
+    raw_family == category
 }
 
 fn clean_output_overwrites_from_rulepack_for_languages(
@@ -8022,28 +8341,6 @@ fn receiver_state_propagation_from_rule(rule: &Rule) -> Option<ReceiverStateProp
     })
 }
 
-/// Map common per-language family abbreviations to their canonical
-/// name (matches [`CANONICAL_SINK_FAMILIES`]). Only sink-side
-/// abbreviations belong here — sanitizer-only families like CSRF
-/// (which is the *protection* surface, not a sink class) must NOT
-/// be remapped, since doing so would funnel sink rules with a
-/// `.csrf.` segment into a non-canonical bucket and silently drop
-/// them from `pack_audit`.
-#[must_use]
-pub fn normalise_family(fam: &str) -> &str {
-    match fam {
-        "deser" => "deserialization",
-        "ssti" => "template",
-        "code" => "eval",
-        "header" | "host_header" => "header_injection",
-        "file" | "path_traversal" => "path",
-        "open" => "open_redirect",
-        "upload" => "file_upload",
-        legacy if legacy.starts_with("upload_") => "file_upload",
-        other => other,
-    }
-}
-
 pub fn select_pack_rules<'a>(pack: &'a Rulepack, options: &PackInventoryOptions) -> Vec<&'a Rule> {
     let mut rules: Vec<&Rule> = pack
         .all_rules()
@@ -8059,22 +8356,24 @@ pub fn select_pack_rules<'a>(pack: &'a Rulepack, options: &PackInventoryOptions)
             options
                 .category
                 .as_deref()
-                .is_none_or(|category| rule_matches_category(rule, category))
+                .is_none_or(|category| rule_matches_category(pack, rule, category))
         })
         .collect();
     rules.sort_by(|a, b| {
-        (a.language.as_str(), a.kind, rule_family(&a.id), a.id.as_str()).cmp(&(
-            b.language.as_str(),
-            b.kind,
-            rule_family(&b.id),
-            b.id.as_str(),
-        ))
+        (
+            a.language.as_str(),
+            a.kind,
+            pack.normalized_sink_family(rule_family(&a.id)),
+            a.id.as_str(),
+        )
+            .cmp(&(
+                b.language.as_str(),
+                b.kind,
+                pack.normalized_sink_family(rule_family(&b.id)),
+                b.id.as_str(),
+            ))
     });
     rules
-}
-
-pub fn canonical_sink_audit_applies(lang: &str) -> bool {
-    !ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS.contains(&lang)
 }
 
 #[cfg(test)]

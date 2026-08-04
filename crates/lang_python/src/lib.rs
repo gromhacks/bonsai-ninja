@@ -3,15 +3,16 @@ use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{
-        call_arg_from_nodes, collect_kinds, language_from_pack, node_text, normalize_call_name_whitespace,
-        parse_with, span_of, GENERIC_HANDLER,
+        call_arg_from_nodes_with_handler, collect_kinds, language_from_pack, node_text,
+        normalize_call_name_whitespace, parse_with, span_of,
     },
     AdapterContext, AdapterError, AssignmentValueIndex, CallArg, CallKind, CharacterClass,
-    CharacterConstraintDomain, CharacterConstraintFact, CharacterConstraintOutput, ConditionEquality,
-    ConditionExpressionFact, ConditionOperandFact, DeclIndex, DeclKind, FiniteLiteralSelectionFact,
-    FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
-    LanguageId, SameOriginPathConstraintFact, StaticScalarValue, StringCompositionFact,
-    StringCompositionPart, TypeAliasBinding, Visibility,
+    CharacterConstraintDomain, CharacterConstraintFact, CharacterConstraintOutput,
+    CharacterSubstitutionDomain, CharacterSubstitutionFact, ConditionEquality, ConditionExpressionFact,
+    ConditionOperandFact, DeclIndex, DeclKind, FiniteLiteralSelectionFact, FlowEvent, GrammarHandler,
+    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    SameOriginPathConstraintFact, StaticScalarValue, StaticStringMapEntry, StringCompositionFact,
+    StringCompositionPart, TypeAliasBinding, Visibility, EMPTY_HANDLER,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -61,42 +62,71 @@ const HANDLER: GrammarHandler = GrammarHandler {
     nested_type_ownership: true,
     fn_kinds: &["function_definition"],
     class_kinds: &["class_definition"],
-    class_decl_kinds: GENERIC_HANDLER.class_decl_kinds,
-    method_kinds: GENERIC_HANDLER.method_kinds,
+    class_decl_kinds: &[("class_definition", DeclKind::Class)],
+    method_kinds: &[],
     method_context_kinds: &["class_definition"],
-    method_owner_barrier_kinds: GENERIC_HANDLER.method_owner_barrier_kinds,
-    constructor_method_kinds: GENERIC_HANDLER.constructor_method_kinds,
+    method_owner_barrier_kinds: &[],
+    constructor_method_kinds: &[],
     constructor_names: &["__init__"],
-    if_kinds: GENERIC_HANDLER.if_kinds,
-    for_kinds: GENERIC_HANDLER.for_kinds,
-    foreach_kinds: GENERIC_HANDLER.foreach_kinds,
-    while_kinds: GENERIC_HANDLER.while_kinds,
-    do_kinds: GENERIC_HANDLER.do_kinds,
-    loop_kinds: GENERIC_HANDLER.loop_kinds,
-    call_kinds: GENERIC_HANDLER.call_kinds,
-    assignment_kinds: GENERIC_HANDLER.assignment_kinds,
-    return_kinds: GENERIC_HANDLER.return_kinds,
-    throw_kinds: GENERIC_HANDLER.throw_kinds,
-    lambda_kinds: GENERIC_HANDLER.lambda_kinds,
-    try_kinds: GENERIC_HANDLER.try_kinds,
-    catch_kinds: GENERIC_HANDLER.catch_kinds,
-    finally_kinds: GENERIC_HANDLER.finally_kinds,
-    break_kinds: GENERIC_HANDLER.break_kinds,
-    continue_kinds: GENERIC_HANDLER.continue_kinds,
-    yield_kinds: GENERIC_HANDLER.yield_kinds,
-    await_kinds: GENERIC_HANDLER.await_kinds,
-    defer_kinds: GENERIC_HANDLER.defer_kinds,
-    using_kinds: GENERIC_HANDLER.using_kinds,
+    if_kinds: &[
+        "if_statement",
+        "conditional_expression",
+        "match_statement",
+        "elif_clause",
+    ],
+    for_kinds: &["for_statement"],
+    foreach_kinds: &[],
+    while_kinds: &["while_statement"],
+    do_kinds: &[],
+    loop_kinds: &[],
+    call_kinds: &["call"],
+    nested_call_component_kinds: &[],
+    pseudo_call_extractor: None,
+    syntax_event_extractor: None,
+    pseudo_call_receiver_extractor: None,
+    argument_passing_mode_extractor: None,
+    assignment_kinds: &["assignment", "augmented_assignment", "named_expression"],
+    return_kinds: &["return_statement"],
+    throw_kinds: &["raise_statement"],
+    lambda_kinds: &["lambda"],
+    try_kinds: &["try_statement"],
+    catch_kinds: &["except_clause"],
+    finally_kinds: &["finally_clause"],
+    break_kinds: &["break_statement"],
+    continue_kinds: &["continue_statement"],
+    yield_kinds: &["yield"],
+    await_kinds: &["await"],
+    defer_kinds: &[],
+    using_kinds: &["with_statement"],
     special_forms: &[],
+    runtime_type_guard_calls: &["isinstance"],
+    runtime_type_guard_operators: &[],
+    runtime_typeof_operators: &[],
+    runtime_type_equality_operators: &[],
+    value_free_expression_kinds: &[],
+    value_free_call_names: &[],
+    value_free_unary_operators: &[],
+    call_ref_kinds: &["call"],
+    member_expression_kinds: &["attribute"],
+    subscript_expression_kinds: &["subscript"],
+    sigil_variable_kinds: &[],
+    global_variable_kinds: &[],
+    subscript_base_call_refs: true,
+    non_call_ref_names: &[],
+    synthetic_call_ref_names: &[],
+    call_name_suffix_tokens: &[],
+    syntax_error_tolerant_call_names: &[],
+    callable_reference_kinds: &[],
+    callable_reference_extractor: None,
     method_receiver_param_index: Some(0),
     // `self` for ordinary instance methods; `super` so `super().foo()`
     // and `super(Class, self).foo()` resolve to the parent class's
     // `foo` via the engine's `resolve_super_method_candidates`. The adapter
     // normalizes these call receivers to the two forms declared below.
     implicit_receiver_names: &["self", "super"],
-    implicit_receiver_prefixes: GENERIC_HANDLER.implicit_receiver_prefixes,
-    tail_expression_returns: GENERIC_HANDLER.tail_expression_returns,
-    void_return_type_names: GENERIC_HANDLER.void_return_type_names,
+    implicit_receiver_prefixes: EMPTY_HANDLER.implicit_receiver_prefixes,
+    tail_expression_returns: EMPTY_HANDLER.tail_expression_returns,
+    void_return_type_names: EMPTY_HANDLER.void_return_type_names,
 };
 
 #[derive(Debug, Default, Copy, Clone)]
@@ -135,12 +165,21 @@ impl LanguageAdapter for PythonAdapter {
             module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
             reflection: bonsai_lang_api::CapabilityLevel::Partial,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            // Static attribute/subscript projections are exact, but Python
+            // still has dynamic subscripts and reflective projections whose
+            // selected field is unknowable from syntax alone. Keep the
+            // workspace field universe open for those aggregate reads.
+            field_places_complete: false,
             constructor_method_names: &["__init__"],
             bare_call_constructor_syntax: true,
             super_receiver_tokens: &["super", "super()"],
             // Python's receiver is the adapter-proven first method parameter;
             // `self` is a convention, not an implicit grammar token.
             implicit_receiver_tokens: &[],
+            receiver_type_syntax: bonsai_lang_api::ReceiverTypeSyntax {
+                wrapper_calls: &["type"],
+                class_object_suffixes: &[".__class__"],
+            },
             ..LanguageCapabilities::partial_baseline()
         }
     }
@@ -210,6 +249,7 @@ impl LanguageAdapter for PythonAdapter {
             populate_python_condition_expressions(&mut idx, &tree, file, src);
             idx.string_compositions = python_string_compositions(&tree, file, src);
             idx.finite_literal_selections = python_finite_literal_selections(&idx, &tree, file, src);
+            idx.character_substitutions = python_character_substitutions(&idx, &tree, file, src);
             idx.character_constraints = python_character_constraints(&idx, &tree, file, src);
             idx.same_origin_path_constraints = python_same_origin_path_constraints(&idx, &tree, file, src);
             // Phase-6 return-type extraction: `def f() -> T:` populates
@@ -249,10 +289,14 @@ impl LanguageAdapter for PythonAdapter {
                 }
             }
             let match_pattern_bindings = collect_python_match_pattern_bindings(&tree, file, src);
+            let iterable_yield_bindings = collect_python_iterable_yield_bindings(&tree, file, src);
             let property_fn_spans = collect_python_property_function_spans(&tree, file, src);
             let property_aliases = collect_python_property_aliases(&idx, &property_fn_spans);
             let property_aliases_by_decl = python_property_aliases_by_decl(&idx, &property_aliases);
             let assignment_values = AssignmentValueIndex::new(&idx.assignment_values);
+            let assignment_projected_reads = collect_python_assignment_projected_reads(&tree, file, src);
+            let call_argument_places = collect_python_call_argument_places(&tree, file, src);
+            let return_places = collect_python_return_places(&tree, file, src);
             let callable_spans: Vec<Span> = idx
                 .defs
                 .iter()
@@ -272,6 +316,13 @@ impl LanguageAdapter for PythonAdapter {
                     .filter(|pattern| python_match_pattern_owned_by_decl(pattern, decl.span, &callable_spans))
                     .cloned()
                     .collect();
+                let owned_yield_bindings = iterable_yield_bindings
+                    .iter()
+                    .filter(|event| {
+                        python_span_owned_by_decl(python_flow_event_span(event), decl.span, &callable_spans)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
                 let comprehension_iterable_calls =
                     collect_python_comprehension_iterable_call_events(&tree, file, src, decl.span);
                 augment_python_match_pattern_flow_events(&mut decl.flow_events, &owned_match_patterns);
@@ -285,10 +336,12 @@ impl LanguageAdapter for PythonAdapter {
                     decl.span,
                     &comprehension_iterable_calls,
                 );
+                insert_python_iterable_yield_bindings(&mut decl.flow_events, &owned_yield_bindings);
                 augment_python_dict_flow_events(
                     &mut decl.flow_events,
                     snapshot.text.as_ref(),
                     &assignment_values,
+                    &assignment_projected_reads,
                 );
                 if let Some(property_aliases_for_decl) = property_aliases_by_decl.get(&decl.symbol) {
                     augment_python_property_flow_events(&mut decl.flow_events, property_aliases_for_decl);
@@ -296,12 +349,15 @@ impl LanguageAdapter for PythonAdapter {
                 rewrite_python_constant_reflection(&mut decl.flow_events);
                 rewrite_python_generator_send(&mut decl.flow_events);
                 augment_python_asyncio_to_thread_calls(&mut decl.flow_events);
+                apply_python_call_argument_places(&mut decl.flow_events, &call_argument_places);
+                apply_python_return_places(&mut decl.flow_events, &return_places);
             }
             bonsai_lang_api::kit::populate_call_argument_static_values(
                 &mut idx,
                 &tree,
                 file,
                 src,
+                &HANDLER,
                 python_static_scalar,
             );
         }
@@ -459,6 +515,13 @@ fn lower_python_condition_expression(node: Node<'_>, file: FileId, src: &[u8]) -
         }
     }
 
+    if matches!(node.kind(), "identifier" | "attribute" | "subscript") {
+        return ConditionExpressionFact::Truthy {
+            span,
+            operand: python_condition_operand(node, file, src),
+        };
+    }
+
     ConditionExpressionFact::Atom { span }
 }
 
@@ -484,11 +547,49 @@ fn merge_python_condition_junction(
 }
 
 fn python_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
+    let value_node = python_condition_dynamic_value_node(node, src);
     ConditionOperandFact {
         span: span_of(file, &node),
-        value_flow: bonsai_lang_api::kit::expression_flow_from_node(node, file, src),
+        value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(
+            value_node, file, src, &HANDLER,
+        ),
         static_string: python_static_string(node, src),
         static_value: python_static_scalar(node, src),
+    }
+}
+
+/// Preserve the exact dynamic operand of Python's common falsey-fallback
+/// expression (`value or <static>`). The complete operand span remains on the
+/// condition fact, while value-flow points at the Tree-sitter node whose
+/// runtime value is being constrained. This is language semantics, not a
+/// security classification.
+fn python_condition_dynamic_value_node<'tree>(mut node: Node<'tree>, src: &[u8]) -> Node<'tree> {
+    loop {
+        if matches!(
+            node.kind(),
+            "parenthesized_expression" | "parenthesized_expression_list"
+        ) {
+            if let Some(inner) = node.named_child(0) {
+                node = inner;
+                continue;
+            }
+        }
+        if node.kind() == "boolean_operator" {
+            if let (Some(left), Some(right)) = (
+                node.child_by_field_name("left"),
+                node.child_by_field_name("right"),
+            ) {
+                let operator = src
+                    .get(left.end_byte()..right.start_byte())
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                    .map(str::trim);
+                if operator == Some("or") && python_static_scalar(right, src).is_some() {
+                    node = left;
+                    continue;
+                }
+            }
+        }
+        return node;
     }
 }
 
@@ -561,6 +662,7 @@ fn python_character_constraints(
 ) -> Vec<CharacterConstraintFact> {
     let mut facts = python_comprehension_character_constraints(index, tree, file, src);
     facts.extend(python_regex_substitution_constraints(index, tree, file, src));
+    facts.extend(python_regex_validation_constraints(index, tree, file, src));
     facts.sort_by_key(|fact| (fact.transform_span.start, fact.transform_span.end));
     facts.dedup_by_key(|fact| fact.transform_span);
     facts
@@ -612,6 +714,34 @@ fn python_finite_literal_selections(
     }
 
     let mut facts = Vec::new();
+    for assignment in &assignments {
+        let (Some(target), Some(value)) = (
+            assignment.child_by_field_name("left"),
+            assignment.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        if target.kind() != "identifier" || value.kind() != "conditional_expression" {
+            continue;
+        }
+        let mut cursor = value.walk();
+        let operands: Vec<_> = value.named_children(&mut cursor).collect();
+        let [selected, condition, fallback] = operands.as_slice() else {
+            continue;
+        };
+        if !python_positive_finite_membership(*condition, *selected, src)
+            || !python_finite_membership_literal(*fallback, src)
+        {
+            continue;
+        }
+        facts.push(FiniteLiteralSelectionFact {
+            selection_span: span_of(file, &value),
+            assignment_span: Some(span_of(file, assignment)),
+            target: Some(node_text(&target, src).trim().to_string()),
+            call_span: None,
+            argument_index: None,
+        });
+    }
     for call in collect_kinds(tree, &["call"]) {
         let Some((function, _)) = python_call_parts(call) else {
             continue;
@@ -632,11 +762,12 @@ fn python_finite_literal_selections(
                 .find(|decl| decl.span == owner)
                 .is_some_and(|decl| decl.params.iter().any(|parameter| parameter == map_name))
         });
-        if !finite_maps.iter().any(|(name, declaration_end, binding_owner)| {
+        let finite_match = finite_maps.iter().any(|(name, declaration_end, binding_owner)| {
             name == map_name
                 && *declaration_end <= call.start_byte()
                 && (*binding_owner == owner || (binding_owner.is_none() && !parameter_shadows_module))
-        }) {
+        });
+        if !finite_match {
             continue;
         }
         let Some(assignment) = index
@@ -667,15 +798,264 @@ fn python_finite_literal_selections(
     facts
 }
 
+/// `selected if selected in {<finite literals>} else <literal>` can only
+/// produce one of the literals named by the syntax. This is Python runtime
+/// semantics owned by the adapter; whether that finite selection sanitizes a
+/// sink remains rulepack policy.
+fn python_positive_finite_membership(condition: Node<'_>, selected: Node<'_>, src: &[u8]) -> bool {
+    if condition.kind() != "comparison_operator" || selected.kind() != "identifier" {
+        return false;
+    }
+    let mut cursor = condition.walk();
+    let operands: Vec<_> = condition.named_children(&mut cursor).collect();
+    let [subject, collection] = operands.as_slice() else {
+        return false;
+    };
+    if subject.kind() != "identifier"
+        || node_text(subject, src).trim() != node_text(&selected, src).trim()
+        || !matches!(collection.kind(), "set" | "list" | "tuple")
+    {
+        return false;
+    }
+    let operator = src
+        .get(subject.end_byte()..collection.start_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::trim);
+    if operator != Some("in") {
+        return false;
+    }
+    let mut collection_cursor = collection.walk();
+    let values: Vec<_> = collection.named_children(&mut collection_cursor).collect();
+    !values.is_empty()
+        && values
+            .into_iter()
+            .all(|value| python_finite_membership_literal(value, src))
+}
+
+fn python_finite_membership_literal(node: Node<'_>, src: &[u8]) -> bool {
+    match node.kind() {
+        "string" => python_static_string(node, src).is_some(),
+        "integer" | "float" | "true" | "false" | "none" => true,
+        _ => false,
+    }
+}
+
+fn python_character_substitutions(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<CharacterSubstitutionFact> {
+    let assignments = collect_kinds(tree, &["assignment"]);
+    let mut tables = Vec::new();
+    for assignment in &assignments {
+        let (Some(target), Some(value)) = (
+            assignment.child_by_field_name("left"),
+            assignment.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        if target.kind() != "identifier" {
+            continue;
+        }
+        let Some(entries) = python_static_string_map(value, src) else {
+            continue;
+        };
+        let name = node_text(&target, src).trim().to_string();
+        let writes = assignments
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .child_by_field_name("left")
+                    .is_some_and(|left| left.kind() == "identifier" && node_text(&left, src).trim() == name)
+            })
+            .count();
+        let projected_write = assignments.iter().any(|candidate| {
+            candidate.child_by_field_name("left").is_some_and(|left| {
+                left.kind() == "subscript"
+                    && left.child_by_field_name("value").is_some_and(|base| {
+                        base.kind() == "identifier" && node_text(&base, src).trim() == name
+                    })
+            })
+        });
+        let aliases_or_mutations = collect_kinds(tree, &["assignment", "augmented_assignment", "call"])
+            .into_iter()
+            .any(|candidate| python_map_binding_may_escape_or_mutate(candidate, &name, assignment.id(), src))
+            || python_map_binding_has_unsafe_use(tree, &name, assignment.id(), src);
+        if writes == 1 && !projected_write && !aliases_or_mutations {
+            tables.push((
+                name,
+                assignment.end_byte(),
+                python_lexical_owner(index, span_of(file, assignment)),
+                entries,
+            ));
+        }
+    }
+
+    let mut facts = Vec::new();
+    for return_node in collect_kinds(tree, &["return_statement"]) {
+        let Some(returned) = return_node.named_child(0) else {
+            continue;
+        };
+        let Some((join_function, join_arguments)) = python_call_parts(returned) else {
+            continue;
+        };
+        let Some((join_receiver, join_method)) = python_attribute_parts(join_function, src) else {
+            continue;
+        };
+        if join_method != "join" || python_static_string(join_receiver, src).as_deref() != Some("") {
+            continue;
+        }
+        let generator = if join_arguments.kind() == "generator_expression" {
+            join_arguments
+        } else {
+            let arguments = python_argument_nodes(join_arguments);
+            let [generator] = arguments.as_slice() else {
+                continue;
+            };
+            *generator
+        };
+        let Some((table, input_place)) = python_static_map_substitution_generator(generator, src) else {
+            continue;
+        };
+        let transform_span = span_of(file, &return_node);
+        let Some(decl) = python_enclosing_callable(index, transform_span) else {
+            continue;
+        };
+        if !python_is_single_statement_return(return_node) {
+            continue;
+        }
+        let Some(input_param_index) = decl.params.iter().position(|parameter| parameter == &input_place)
+        else {
+            continue;
+        };
+        let owner = python_lexical_owner(index, transform_span);
+        let Some((_, _, _, exact_mappings)) =
+            tables.iter().find(|(name, declaration_end, binding_owner, _)| {
+                name == &table
+                    && *declaration_end <= return_node.start_byte()
+                    && (*binding_owner == owner || binding_owner.is_none())
+            })
+        else {
+            continue;
+        };
+        facts.push(CharacterSubstitutionFact {
+            function_span: decl.span,
+            transform_span,
+            input_param_index,
+            exact_mappings: exact_mappings.clone(),
+            table,
+            domain: CharacterSubstitutionDomain::TableKeysWithIdentityFallback,
+        });
+    }
+    facts.sort_by_key(|fact| (fact.transform_span.start, fact.transform_span.end));
+    facts.dedup_by_key(|fact| fact.transform_span);
+    facts
+}
+
+fn python_static_string_map(node: Node<'_>, src: &[u8]) -> Option<Vec<StaticStringMapEntry>> {
+    if node.kind() != "dictionary" || node.named_child_count() == 0 {
+        return None;
+    }
+    let mut entries = Vec::new();
+    let mut cursor = node.walk();
+    for entry in node.named_children(&mut cursor) {
+        if entry.kind() != "pair" {
+            return None;
+        }
+        let key = entry
+            .child_by_field_name("key")
+            .and_then(|key| python_static_string(key, src))?;
+        let value = entry
+            .child_by_field_name("value")
+            .and_then(|value| python_static_string(value, src))?;
+        entries.push(StaticStringMapEntry { key, value });
+    }
+    entries.sort_by(|left, right| left.key.cmp(&right.key));
+    entries.dedup_by(|left, right| left.key == right.key && left.value == right.value);
+    Some(entries)
+}
+
+fn python_static_map_substitution_generator(generator: Node<'_>, src: &[u8]) -> Option<(String, String)> {
+    if generator.kind() != "generator_expression" {
+        return None;
+    }
+    let body = generator.named_child(0)?;
+    let (function, arguments) = python_call_parts(body)?;
+    let (receiver, method) = python_attribute_parts(function, src)?;
+    if receiver.kind() != "identifier" || method != "get" {
+        return None;
+    }
+    let table = node_text(&receiver, src).trim().to_string();
+    let lookup_arguments = python_argument_nodes(arguments);
+    let [key, fallback] = lookup_arguments.as_slice() else {
+        return None;
+    };
+    if key.kind() != "identifier" || fallback.kind() != "identifier" {
+        return None;
+    }
+    let loop_variable = node_text(key, src).trim().to_string();
+    if node_text(fallback, src).trim() != loop_variable {
+        return None;
+    }
+    let mut cursor = generator.walk();
+    let clauses = generator.named_children(&mut cursor).skip(1).collect::<Vec<_>>();
+    let [for_clause] = clauses.as_slice() else {
+        return None;
+    };
+    if for_clause.kind() != "for_in_clause" {
+        return None;
+    }
+    let left = for_clause
+        .child_by_field_name("left")
+        .or_else(|| for_clause.named_child(0))?;
+    let right = for_clause
+        .child_by_field_name("right")
+        .or_else(|| for_clause.named_child(1))?;
+    if left.kind() != "identifier" || node_text(&left, src).trim() != loop_variable {
+        return None;
+    }
+    let input_place = python_identity_fallback_input(right, src)?;
+    Some((table, input_place))
+}
+
+fn python_identity_fallback_input(mut node: Node<'_>, src: &[u8]) -> Option<String> {
+    while node.kind() == "parenthesized_expression" {
+        node = node.named_child(0)?;
+    }
+    if node.kind() == "identifier" {
+        return Some(node_text(&node, src).trim().to_string());
+    }
+    if node.kind() != "boolean_operator" {
+        return None;
+    }
+    let (Some(left), Some(right)) = (
+        node.child_by_field_name("left"),
+        node.child_by_field_name("right"),
+    ) else {
+        return None;
+    };
+    let operator = src
+        .get(left.end_byte()..right.start_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::trim);
+    (operator == Some("or")
+        && left.kind() == "identifier"
+        && python_static_string(right, src).as_deref() == Some(""))
+    .then(|| node_text(&left, src).trim().to_string())
+}
+
 fn python_lexical_owner(index: &DeclIndex, span: bonsai_common::Span) -> Option<bonsai_common::Span> {
     index
         .defs
         .iter()
         .filter(|decl| {
-            matches!(
-                decl.kind,
-                DeclKind::Function | DeclKind::Method | DeclKind::Constructor | DeclKind::Class
-            ) && decl.span.start <= span.start
+            decl.name != "__module__"
+                && matches!(
+                    decl.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor | DeclKind::Class
+                )
+                && decl.span.start <= span.start
                 && span.end <= decl.span.end
         })
         .min_by_key(|decl| decl.span.len())
@@ -733,6 +1113,18 @@ fn python_map_binding_has_unsafe_use(tree: &Tree, map_name: &str, declaration_id
                 return false;
             }
             let Some(attribute) = identifier.parent().filter(|parent| parent.kind() == "attribute") else {
+                // Reading one entry from a complete immutable literal map
+                // cannot introduce the dynamic key into its selected value.
+                // Projected writes were rejected above; this is only the
+                // parsed value/base position of a subscript expression.
+                if identifier.parent().is_some_and(|parent| {
+                    parent.kind() == "subscript"
+                        && parent
+                            .child_by_field_name("value")
+                            .is_some_and(|value| value.id() == identifier.id())
+                }) {
+                    return false;
+                }
                 return true;
             };
             if attribute
@@ -1015,13 +1407,6 @@ fn python_regex_substitution_constraints(
         let Some((function, arguments)) = python_call_parts(value) else {
             continue;
         };
-        let Some((receiver, method)) = python_attribute_parts(function, src) else {
-            continue;
-        };
-        if receiver.kind() != "identifier" || node_text(&receiver, src).trim() != "re" || method != "compile"
-        {
-            continue;
-        }
         let args = python_argument_nodes(arguments);
         let Some(pattern) = args.first().and_then(|node| python_static_string(*node, src)) else {
             continue;
@@ -1039,7 +1424,12 @@ fn python_regex_substitution_constraints(
             })
             .count();
         if writes == 1 {
-            compiled.push((name, span_of(file, assignment), characters));
+            compiled.push((
+                name,
+                span_of(file, assignment),
+                characters,
+                node_text(&function, src).trim().to_string(),
+            ));
         }
     }
 
@@ -1051,16 +1441,16 @@ fn python_regex_substitution_constraints(
         let Some((function, arguments)) = python_call_parts(call) else {
             continue;
         };
-        let Some((receiver, method)) = python_attribute_parts(function, src) else {
+        let Some((receiver, _)) = python_attribute_parts(function, src) else {
             continue;
         };
-        if receiver.kind() != "identifier" || method != "sub" {
+        if receiver.kind() != "identifier" {
             continue;
         }
         let receiver_name = node_text(&receiver, src).trim();
-        let Some((_, _, mut excluded)) = compiled
+        let Some((_, _, mut excluded, factory_call)) = compiled
             .iter()
-            .find(|(name, assignment_span, _)| {
+            .find(|(name, assignment_span, _, _)| {
                 name == receiver_name && assignment_span.start < return_node.start_byte() as u64
             })
             .cloned()
@@ -1098,10 +1488,223 @@ fn python_regex_substitution_constraints(
             input_place,
             input_param_index: Some(input_param_index),
             output: CharacterConstraintOutput::Return,
-            domain: CharacterConstraintDomain::ExcludesExact { characters: excluded },
+            domain: CharacterConstraintDomain::ProviderBound {
+                factory_call,
+                operation_call: node_text(&function, src).trim().to_string(),
+                domain: Box::new(CharacterConstraintDomain::ExcludesExact { characters: excluded }),
+            },
         });
     }
     facts
+}
+
+/// Lower a compiled-regex rejection guard as a provider-bound alphabet fact.
+/// The frontend proves anchoring, the accepted character domain, branch
+/// polarity, and terminal rejection from Python syntax. It records the exact
+/// factory and predicate calls but does not decide that those APIs are a
+/// sanitizer; rulepack metadata performs that selection.
+fn python_regex_validation_constraints(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<CharacterConstraintFact> {
+    let assignments = collect_kinds(tree, &["assignment"]);
+    let mut compiled = Vec::new();
+    for assignment in &assignments {
+        let (Some(target), Some(value)) = (
+            assignment.child_by_field_name("left"),
+            assignment.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        if target.kind() != "identifier" {
+            continue;
+        }
+        let Some((function, arguments)) = python_call_parts(value) else {
+            continue;
+        };
+        let args = python_argument_nodes(arguments);
+        let Some(pattern) = args.first().and_then(|node| python_static_string(*node, src)) else {
+            continue;
+        };
+        let Some(domain) = python_anchored_regex_character_domain(&pattern) else {
+            continue;
+        };
+        let name = node_text(&target, src).trim().to_string();
+        if assignments
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .child_by_field_name("left")
+                    .is_some_and(|left| node_text(&left, src).trim() == name)
+            })
+            .count()
+            != 1
+        {
+            continue;
+        }
+        compiled.push((
+            name,
+            span_of(file, assignment),
+            node_text(&function, src).trim().to_string(),
+            domain,
+        ));
+    }
+
+    let mut facts = Vec::new();
+    for branch in collect_kinds(tree, &["if_statement"]) {
+        let (Some(condition), Some(consequence)) = (
+            branch.child_by_field_name("condition"),
+            branch.child_by_field_name("consequence"),
+        ) else {
+            continue;
+        };
+        if branch.child_by_field_name("alternative").is_some() || !python_block_abruptly_exits(consequence) {
+            continue;
+        }
+        let Some(call) = python_negated_guard_call(condition) else {
+            continue;
+        };
+        let Some((function, arguments)) = python_call_parts(call) else {
+            continue;
+        };
+        let Some((receiver, _)) = python_attribute_parts(function, src) else {
+            continue;
+        };
+        if receiver.kind() != "identifier" {
+            continue;
+        }
+        let args = python_argument_nodes(arguments);
+        let [input] = args.as_slice() else {
+            continue;
+        };
+        let Some(input_place) = python_exact_guarded_identifier(*input, src) else {
+            continue;
+        };
+        let receiver_name = node_text(&receiver, src).trim();
+        let Some((_, _, factory_call, domain)) = compiled
+            .iter()
+            .filter(|(name, span, _, _)| name == receiver_name && span.start < branch.start_byte() as u64)
+            .max_by_key(|(_, span, _, _)| (span.start, span.end))
+            .cloned()
+        else {
+            continue;
+        };
+        let branch_span = span_of(file, &branch);
+        let Some(decl) = python_enclosing_callable(index, branch_span) else {
+            continue;
+        };
+        if assignments.iter().any(|assignment| {
+            assignment.start_byte() > branch.end_byte()
+                && assignment.end_byte() <= decl.span.end as usize
+                && assignment
+                    .child_by_field_name("left")
+                    .is_some_and(|left| node_text(&left, src).trim() == input_place)
+        }) {
+            continue;
+        }
+        facts.push(CharacterConstraintFact {
+            function_span: decl.span,
+            transform_span: branch_span,
+            input_param_index: decl.params.iter().position(|parameter| parameter == &input_place),
+            input_place: input_place.clone(),
+            output: CharacterConstraintOutput::Assignment { target: input_place },
+            domain: CharacterConstraintDomain::ProviderBound {
+                factory_call,
+                operation_call: node_text(&function, src).trim().to_string(),
+                domain: Box::new(domain),
+            },
+        });
+    }
+    facts
+}
+
+fn python_negated_guard_call(mut condition: Node<'_>) -> Option<Node<'_>> {
+    while matches!(
+        condition.kind(),
+        "parenthesized_expression" | "parenthesized_expression_list"
+    ) {
+        condition = condition.named_child(0)?;
+    }
+    if condition.kind() != "not_operator" {
+        return None;
+    }
+    condition
+        .child_by_field_name("argument")
+        .or_else(|| condition.named_child(0))
+}
+
+fn python_block_abruptly_exits(block: Node<'_>) -> bool {
+    let mut cursor = block.walk();
+    let last = block
+        .named_children(&mut cursor)
+        .filter(|node| node.kind() != "comment")
+        .last();
+    last.is_some_and(|node| matches!(node.kind(), "return_statement" | "raise_statement"))
+}
+
+fn python_exact_guarded_identifier(mut node: Node<'_>, src: &[u8]) -> Option<String> {
+    while node.kind() == "parenthesized_expression" {
+        node = node.named_child(0)?;
+    }
+    (node.kind() == "identifier").then(|| node_text(&node, src).trim().to_string())
+}
+
+fn python_anchored_regex_character_domain(pattern: &str) -> Option<CharacterConstraintDomain> {
+    let body = pattern.strip_prefix('^')?.strip_suffix('$')?;
+    if body.is_empty() || body.contains("[^") || body.contains("(?") {
+        return None;
+    }
+    let mut in_class = false;
+    let mut escaped = false;
+    let mut class = String::new();
+    for character in body.chars() {
+        if escaped {
+            if !matches!(character, '.' | '-' | '_' | 'd' | 'w') {
+                return None;
+            }
+            escaped = false;
+            if in_class {
+                class.push(character);
+            }
+            continue;
+        }
+        match character {
+            '\\' => escaped = true,
+            '[' if !in_class => {
+                in_class = true;
+                class.clear();
+            }
+            ']' if in_class => {
+                if !python_safe_regex_character_class(&class) {
+                    return None;
+                }
+                in_class = false;
+            }
+            '/' => return None,
+            '.' if !in_class => return None,
+            character if in_class => class.push(character),
+            character if character.is_ascii_alphanumeric() || "_-()|{}?+*,".contains(character) => {}
+            _ => return None,
+        }
+    }
+    if escaped || in_class {
+        return None;
+    }
+    Some(CharacterConstraintDomain::ExcludesExact {
+        characters: vec!["/".to_string(), "\\".to_string()],
+    })
+}
+
+fn python_safe_regex_character_class(class: &str) -> bool {
+    if class.is_empty() || class.contains('/') || class.contains('\\') {
+        return false;
+    }
+    let without_ranges = class.replace("A-Z", "").replace("a-z", "").replace("0-9", "");
+    without_ranges
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
 }
 
 fn python_exact_replacement_string(node: Node<'_>, src: &[u8]) -> Option<String> {
@@ -1201,9 +1804,7 @@ fn python_same_origin_path_constraints(
     file: FileId,
     src: &[u8],
 ) -> Vec<SameOriginPathConstraintFact> {
-    if !python_imports_stdlib_urlparse(tree, src) || index.defs.iter().any(|decl| decl.name == "urlparse") {
-        return Vec::new();
-    }
+    let imports = parse_imports(tree, src, file);
     let mut facts = Vec::new();
     for function in collect_kinds(tree, &["function_definition"]) {
         let function_span = span_of(file, &function);
@@ -1242,9 +1843,9 @@ fn python_same_origin_path_constraints(
         let Some((parser, parser_arguments)) = python_call_parts(parser_call) else {
             continue;
         };
-        if parser.kind() != "identifier" || node_text(&parser, src).trim() != "urlparse" {
+        let Some(provider_call) = python_imported_call_identity(parser, &imports, src) else {
             continue;
-        }
+        };
         let parser_args = python_argument_nodes(parser_arguments);
         let [input_node] = parser_args.as_slice() else {
             continue;
@@ -1294,7 +1895,9 @@ fn python_same_origin_path_constraints(
             facts.push(SameOriginPathConstraintFact {
                 function_span,
                 guard_span: span_of(file, guard),
-                input_param_index,
+                input_place: input.to_string(),
+                input_param_index: Some(input_param_index),
+                provider_call: Some(provider_call),
                 rejects_scheme,
                 rejects_authority,
                 requires_absolute_path,
@@ -1307,17 +1910,42 @@ fn python_same_origin_path_constraints(
     facts
 }
 
-fn python_imports_stdlib_urlparse(tree: &Tree, src: &[u8]) -> bool {
-    collect_kinds(tree, &["import_from_statement"])
-        .into_iter()
-        .any(|import| {
-            let mut cursor = import.walk();
-            let names: Vec<_> = import
-                .named_children(&mut cursor)
-                .map(|node| node_text(&node, src).trim())
-                .collect();
-            names.first() == Some(&"urllib.parse") && names.iter().skip(1).any(|name| *name == "urlparse")
-        })
+fn python_imported_call_identity(callee: Node<'_>, imports: &[ImportSpec], src: &[u8]) -> Option<String> {
+    let rendered = node_text(&callee, src).trim();
+    if rendered.is_empty() {
+        return None;
+    }
+    for import in imports {
+        if let Some(original) = import.original_name.as_deref() {
+            let local = import.alias.as_deref().unwrap_or(original);
+            if rendered == local {
+                return Some(format!("{}.{}", import.module, original));
+            }
+            if let Some(suffix) = rendered
+                .strip_prefix(local)
+                .and_then(|tail| tail.strip_prefix('.'))
+            {
+                return Some(format!("{}.{}.{}", import.module, original, suffix));
+            }
+            continue;
+        }
+        if rendered == import.module || rendered.starts_with(&format!("{}.", import.module)) {
+            return Some(rendered.to_string());
+        }
+        let Some(local) = import.alias.as_deref() else {
+            continue;
+        };
+        if rendered == local {
+            return Some(import.module.clone());
+        }
+        if let Some(suffix) = rendered
+            .strip_prefix(local)
+            .and_then(|tail| tail.strip_prefix('.'))
+        {
+            return Some(format!("{}.{}", import.module, suffix));
+        }
+    }
+    None
 }
 
 fn python_collect_or_terms<'tree>(node: Node<'tree>, src: &[u8], out: &mut Vec<Node<'tree>>) {
@@ -2105,7 +2733,13 @@ fn build_python_call_event(node: Node<'_>, file: FileId, src: &[u8]) -> Option<F
             } else {
                 (None, arg)
             };
-            if let Some(argument) = call_arg_from_nodes(arg, value_node, file, src, name) {
+            if let Some(argument) =
+                call_arg_from_nodes_with_handler(arg, value_node, file, src, name, &HANDLER)
+            {
+                let mut argument = argument;
+                if let Some(place) = python_exact_expression_place(value_node, src) {
+                    argument.place = Some(place);
+                }
                 args.push(argument);
             }
         }
@@ -2118,6 +2752,335 @@ fn build_python_call_event(node: Node<'_>, file: FileId, src: &[u8]) -> Option<F
         call_kind,
         args,
     })
+}
+
+/// Exact addressable call arguments lowered from Python's Tree-sitter nodes.
+///
+/// The shared call walker deliberately does not interpret language syntax.
+/// Python static subscripts therefore have to become canonical compiler
+/// places here: `obj["field"]` is `obj.field`, while `obj[key]` remains an
+/// aggregate read because its selected field is not statically known.
+fn collect_python_call_argument_places(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span, String)> {
+    let mut out = Vec::new();
+    for call in collect_kinds(tree, &["call"]) {
+        let Some(arguments) = call.child_by_field_name("arguments") else {
+            continue;
+        };
+        let mut cursor = arguments.walk();
+        for argument in arguments.named_children(&mut cursor) {
+            let value = if argument.kind() == "keyword_argument" {
+                argument.child_by_field_name("value").unwrap_or(argument)
+            } else {
+                argument
+            };
+            let Some(place) = python_exact_expression_place(value, src) else {
+                continue;
+            };
+            out.push((span_of(file, &argument), place));
+        }
+    }
+    out.sort_by_key(|(span, _)| (span.start, span.end));
+    out.dedup_by_key(|(span, _)| *span);
+    out
+}
+
+fn python_exact_expression_place(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" => {
+            let name = node_text(&node, src).trim();
+            (!name.is_empty()).then(|| name.to_string())
+        }
+        "attribute" => {
+            let object = node.child_by_field_name("object")?;
+            let attribute = node.child_by_field_name("attribute")?;
+            let base = python_exact_expression_place(object, src)?;
+            let field = node_text(&attribute, src).trim();
+            (!field.is_empty()).then(|| format!("{base}.{field}"))
+        }
+        "subscript" => {
+            let value = node.child_by_field_name("value")?;
+            let subscript = node.child_by_field_name("subscript")?;
+            let base = python_exact_expression_place(value, src)?;
+            let field = python_static_string(subscript, src)?;
+            if field.is_empty()
+                || !field
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+                || !field.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+            {
+                return None;
+            }
+            Some(format!("{base}.{field}"))
+        }
+        "parenthesized_expression" => {
+            let mut cursor = node.walk();
+            let child = node.named_children(&mut cursor).next()?;
+            python_exact_expression_place(child, src)
+        }
+        _ => None,
+    }
+}
+
+/// Exact addressable return operands lowered from Python's Tree-sitter nodes.
+/// Static attribute/subscript returns carry their complete storage place;
+/// dynamic subscripts deliberately retain the generic aggregate fact.
+fn collect_python_return_places(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span, String)> {
+    let mut out = Vec::new();
+    for statement in collect_kinds(tree, &["return_statement"]) {
+        let Some(value) = statement.named_child(0) else {
+            continue;
+        };
+        let Some(place) = python_exact_expression_place(value, src) else {
+            continue;
+        };
+        out.push((span_of(file, &statement), place));
+    }
+    out.sort_by_key(|(span, _)| (span.start, span.end));
+    out.dedup_by_key(|(span, _)| *span);
+    out
+}
+
+fn apply_python_return_places(events: &mut [FlowEvent], places: &[(Span, String)]) {
+    for event in events {
+        match event {
+            FlowEvent::Return {
+                span,
+                value_name,
+                value_flow,
+                ..
+            } => {
+                if let Ok(index) = places.binary_search_by_key(&(span.start, span.end), |(candidate, _)| {
+                    (candidate.start, candidate.end)
+                }) {
+                    let place = places[index].1.clone();
+                    *value_name = Some(place.clone());
+                    value_flow.place = Some(place.clone());
+                    value_flow.source_names.clear();
+                    value_flow.source_names.push(place);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                apply_python_return_places(then_events, places);
+                apply_python_return_places(else_events, places);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                apply_python_return_places(body, places);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                apply_python_return_places(body, places);
+                apply_python_return_places(catch_events, places);
+                apply_python_return_places(finally_events, places);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn apply_python_call_argument_places(events: &mut [FlowEvent], places: &[(Span, String)]) {
+    for event in events {
+        match event {
+            FlowEvent::Call { args, .. } => {
+                for argument in args {
+                    if let Ok(index) = places
+                        .binary_search_by_key(&(argument.span.start, argument.span.end), |(span, _)| {
+                            (span.start, span.end)
+                        })
+                    {
+                        argument.place = Some(places[index].1.clone());
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                apply_python_call_argument_places(then_events, places);
+                apply_python_call_argument_places(else_events, places);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                apply_python_call_argument_places(body, places);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                apply_python_call_argument_places(body, places);
+                apply_python_call_argument_places(catch_events, places);
+                apply_python_call_argument_places(finally_events, places);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Lower the value delivered by a direct iterable call into a sparse
+/// yield-result binding. Python uses the same `for_statement` grammar shape
+/// for synchronous and asynchronous iteration; the IDG only activates this
+/// relation when resolution proves that the callee owns a `Yield` endpoint.
+/// Ordinary container-returning calls therefore retain their existing return
+/// semantics, while generator fields remain field-precise at the loop target.
+fn collect_python_iterable_yield_bindings(tree: &Tree, file: FileId, src: &[u8]) -> Vec<FlowEvent> {
+    let mut out = Vec::new();
+    for loop_node in collect_kinds(tree, &["for_statement"]) {
+        let (Some(binding), Some(iterable)) = (
+            loop_node.child_by_field_name("left"),
+            loop_node.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        let Some(FlowEvent::Call { name, args, .. }) = build_python_call_event(iterable, file, src) else {
+            continue;
+        };
+        let source_call_args = args.into_iter().map(|arg| arg.value_text).collect::<Vec<_>>();
+        for target in python_loop_binding_targets(binding, src) {
+            out.push(FlowEvent::Assign {
+                // Use the loop statement's write span, not the callee token.
+                // The generic frontend already lowered the loop binding at
+                // this span. Inserting the sparse YieldResult relation next
+                // to that event reuses the same IDG write node, so unresolved
+                // ordinary iterables cannot overwrite and kill the compiler's
+                // local loop flow. `assign_call_site_hint` still joins this
+                // containing span to the exact sibling Call event.
+                span: span_of(file, &loop_node),
+                target,
+                source_name: None,
+                source_call: Some(name.clone()),
+                source_call_args: source_call_args.clone(),
+                source_names: Vec::new(),
+                declares_new_binding: false,
+                value_kind: Some(bonsai_lang_api::AssignValueKind::YieldResult),
+            });
+        }
+    }
+    out.sort_by_key(|event| {
+        let span = python_flow_event_span(event);
+        let target = match event {
+            FlowEvent::Assign { target, .. } => target.as_str(),
+            _ => "",
+        };
+        (span.start, span.end, target.to_string())
+    });
+    out.dedup_by(|left, right| match (left, right) {
+        (
+            FlowEvent::Assign {
+                span: left_span,
+                target: left_target,
+                source_call: left_call,
+                ..
+            },
+            FlowEvent::Assign {
+                span: right_span,
+                target: right_target,
+                source_call: right_call,
+                ..
+            },
+        ) => left_span == right_span && left_target == right_target && left_call == right_call,
+        _ => false,
+    });
+    out
+}
+
+/// Place Python's generator relation beside the generic loop-binding event.
+///
+/// The shared walker lowers a `for` binding before its `Loop` body. Keeping
+/// this adapter-owned refinement in the same event vector and at the same
+/// statement span makes both facts refer to one compiler write. Appending it
+/// inside the body would create a later definition and incorrectly erase the
+/// generic binding whenever the iterable resolves to external code.
+fn insert_python_iterable_yield_bindings(events: &mut Vec<FlowEvent>, bindings: &[FlowEvent]) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                insert_python_iterable_yield_bindings(then_events, bindings);
+                insert_python_iterable_yield_bindings(else_events, bindings);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                insert_python_iterable_yield_bindings(body, bindings);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                insert_python_iterable_yield_bindings(body, bindings);
+                insert_python_iterable_yield_bindings(catch_events, bindings);
+                insert_python_iterable_yield_bindings(finally_events, bindings);
+            }
+            _ => {}
+        }
+    }
+
+    let loop_spans = events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Loop { span, .. } => Some(*span),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for loop_span in loop_spans {
+        let Some(mut insert_at) = events
+            .iter()
+            .position(|event| matches!(event, FlowEvent::Loop { span, .. } if *span == loop_span))
+        else {
+            continue;
+        };
+        for binding in bindings
+            .iter()
+            .filter(|binding| python_flow_event_span(binding) == loop_span)
+        {
+            if events.iter().any(|existing| existing == binding) {
+                continue;
+            }
+            events.insert(insert_at, binding.clone());
+            insert_at += 1;
+        }
+    }
+}
+
+fn python_loop_binding_targets(node: Node<'_>, src: &[u8]) -> Vec<String> {
+    fn collect(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+        if node.kind() == "identifier" {
+            let name = node_text(&node, src).trim();
+            if python_match_capture_identifier(name) {
+                out.push(name.to_string());
+            }
+            return;
+        }
+        if !matches!(
+            node.kind(),
+            "pattern_list" | "tuple_pattern" | "list_pattern" | "star_pattern"
+        ) {
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            collect(child, src, out);
+        }
+    }
+
+    let mut out = Vec::new();
+    collect(node, src, &mut out);
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn python_call_receiver_from_name(name: &str) -> Option<String> {
@@ -2762,13 +3725,17 @@ fn python_match_pattern_owned_by_decl(
     decl_span: Span,
     callable_spans: &[Span],
 ) -> bool {
-    if !python_span_contains(decl_span, pattern.span) {
+    python_span_owned_by_decl(pattern.span, decl_span, callable_spans)
+}
+
+fn python_span_owned_by_decl(span: Span, decl_span: Span, callable_spans: &[Span]) -> bool {
+    if !python_span_contains(decl_span, span) {
         return false;
     }
     let Some(owner) = callable_spans
         .iter()
         .copied()
-        .filter(|span| python_span_contains(*span, pattern.span))
+        .filter(|candidate| python_span_contains(*candidate, span))
         .min_by_key(|span| span.end.saturating_sub(span.start))
     else {
         return false;
@@ -2804,6 +3771,7 @@ fn augment_python_dict_flow_events(
     events: &mut Vec<bonsai_lang_api::FlowEvent>,
     source: &str,
     assignment_values: &AssignmentValueIndex,
+    assignment_projected_reads: &[(Span, Vec<String>)],
 ) {
     for event in events.iter_mut() {
         match event {
@@ -2812,13 +3780,23 @@ fn augment_python_dict_flow_events(
                 else_events,
                 ..
             } => {
-                augment_python_dict_flow_events(then_events, source, assignment_values);
-                augment_python_dict_flow_events(else_events, source, assignment_values);
+                augment_python_dict_flow_events(
+                    then_events,
+                    source,
+                    assignment_values,
+                    assignment_projected_reads,
+                );
+                augment_python_dict_flow_events(
+                    else_events,
+                    source,
+                    assignment_values,
+                    assignment_projected_reads,
+                );
             }
             bonsai_lang_api::FlowEvent::Loop { body, .. }
             | bonsai_lang_api::FlowEvent::Defer { body, .. }
             | bonsai_lang_api::FlowEvent::Using { body, .. } => {
-                augment_python_dict_flow_events(body, source, assignment_values);
+                augment_python_dict_flow_events(body, source, assignment_values, assignment_projected_reads);
             }
             bonsai_lang_api::FlowEvent::Try {
                 body,
@@ -2826,9 +3804,19 @@ fn augment_python_dict_flow_events(
                 finally_events,
                 ..
             } => {
-                augment_python_dict_flow_events(body, source, assignment_values);
-                augment_python_dict_flow_events(catch_events, source, assignment_values);
-                augment_python_dict_flow_events(finally_events, source, assignment_values);
+                augment_python_dict_flow_events(body, source, assignment_values, assignment_projected_reads);
+                augment_python_dict_flow_events(
+                    catch_events,
+                    source,
+                    assignment_values,
+                    assignment_projected_reads,
+                );
+                augment_python_dict_flow_events(
+                    finally_events,
+                    source,
+                    assignment_values,
+                    assignment_projected_reads,
+                );
             }
             _ => {}
         }
@@ -2854,14 +3842,21 @@ fn augment_python_dict_flow_events(
                         value_kind: None,
                     });
                 }
-                for field_read in python_static_get_field_reads(rhs) {
+                for field_read in assignment_projected_reads
+                    .binary_search_by_key(&(span.start, span.end), |(candidate, _)| {
+                        (candidate.start, candidate.end)
+                    })
+                    .ok()
+                    .and_then(|index| assignment_projected_reads.get(index))
+                    .map_or(&[][..], |(_, reads)| reads.as_slice())
+                {
                     synthetic.push(bonsai_lang_api::FlowEvent::Assign {
                         span: *span,
                         target: target.clone(),
                         source_name: Some(field_read.clone()),
                         source_call: None,
                         source_call_args: Vec::new(),
-                        source_names: vec![field_read],
+                        source_names: vec![field_read.clone()],
                         declares_new_binding: false,
                         value_kind: None,
                     });
@@ -2889,6 +3884,72 @@ fn augment_python_dict_flow_events(
         rewritten.extend(synthetic);
     }
     *events = rewritten;
+}
+
+/// AST-derived projected reads on assignment right-hand sides.
+///
+/// The generic expression walker intentionally treats a subscript as an
+/// aggregate unless the owning adapter proves its key is static. Python can
+/// prove literal string subscripts from the CST, so it emits an additional
+/// exact read beside the conservative aggregate fact. Dynamic keys remain
+/// aggregate reads and therefore cannot be mistaken for a sibling field.
+fn collect_python_assignment_projected_reads(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(Span, Vec<String>)> {
+    fn collect(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+        if node.kind() == "subscript" {
+            if let Some(place) = python_exact_expression_place(node, src) {
+                push_python_source_name(out, place);
+                return;
+            }
+        }
+        if node.kind() == "call" {
+            let selected_field = (|| {
+                let function = node.child_by_field_name("function")?;
+                let (receiver, method) = python_attribute_parts(function, src)?;
+                if method != "get" {
+                    return None;
+                }
+                let arguments = node.child_by_field_name("arguments")?;
+                let first = python_argument_nodes(arguments).into_iter().next()?;
+                let field = python_static_string(first, src)?;
+                let base = python_exact_expression_place(receiver, src)?;
+                Some(format!("{base}.{field}"))
+            })();
+            if let Some(place) = selected_field {
+                push_python_source_name(out, place);
+                return;
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            collect(child, src, out);
+        }
+    }
+
+    let mut reads = Vec::new();
+    for assignment in collect_kinds(tree, &["assignment", "named_expression"]) {
+        let Some(value) = assignment.child_by_field_name("right") else {
+            continue;
+        };
+        // Aggregate members already lower independently to field writes.
+        // Adding their projected operands as a second whole-target
+        // assignment would overwrite those fields at the same statement and
+        // erase the exact spread/return relation.
+        if matches!(value.kind(), "dictionary" | "list" | "set" | "tuple") {
+            continue;
+        }
+        let mut projected = Vec::new();
+        collect(value, src, &mut projected);
+        if !projected.is_empty() {
+            reads.push((span_of(file, &assignment), projected));
+        }
+    }
+    reads.sort_by_key(|(span, _)| (span.start, span.end));
+    reads
 }
 
 fn python_value_source_names(text: &str) -> Vec<String> {

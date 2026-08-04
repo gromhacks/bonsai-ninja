@@ -47,6 +47,7 @@ pub fn validate_pack(
         }
     }
     let id_seen: BTreeSet<&str> = rules.iter().map(|rule| rule.id.as_str()).collect();
+    validate_rulepack_metadata(pack, &mut issues);
 
     // R3 invariant: a disabled rule with `disabled_reason.subsumed_by`
     // must point at a rule that is itself ENABLED. Catching broken
@@ -155,40 +156,25 @@ pub fn validate_pack(
                 &example.code,
                 registry.clone(),
             );
-            // Tree-sitter import-index check (no regex). Rules that
-            // use receiver-agnostic regexes plus package/module
-            // signals need at least one adapter-visible import in
-            // positive examples. That import is the semantic file
-            // context that keeps local receiver names from becoming
-            // global API matches.
+            // Tree-sitter import-index check (no source-text heuristic).
+            // Package/module-gated rules need at least one adapter-visible
+            // import or fully-qualified type use in positive examples.
             if !example.expect_no_match && !signals.is_empty() {
                 let mut has_package_signal = false;
                 for file_id in ws.db().vfs().all_files() {
                     let Some(import_index) = ws.db().import_index(file_id) else {
-                        if let Some(idx) = ws.db().decl_index(file_id) {
-                            if decl_index_has_java_like_fqn_package_signal(&rule.language, &idx, &signals) {
-                                has_package_signal = true;
-                                break;
-                            }
-                        }
                         continue;
                     };
                     for spec in &import_index.imports {
                         example_imports.insert(spec.module.clone());
                     }
                     if import_index.imports.iter().any(|spec| {
-                        signals
-                            .iter()
-                            .any(|sig| crate::pkg::import_matches_package(&spec.module, sig))
+                        signals.iter().any(|sig| {
+                            crate::pkg::import_matches_package(&spec.module, sig, &rule.package_matching)
+                        })
                     }) {
                         has_package_signal = true;
                         break;
-                    }
-                    if let Some(idx) = ws.db().decl_index(file_id) {
-                        if decl_index_has_java_like_fqn_package_signal(&rule.language, &idx, &signals) {
-                            has_package_signal = true;
-                            break;
-                        }
                     }
                 }
                 if !has_package_signal {
@@ -199,7 +185,7 @@ pub fn validate_pack(
                         Some(rule),
                         &format!(
                             "example `{}` does not import or fully qualify any of {:?} — the rule's \
-                             receiver-agnostic regex package gate cannot fire on this example",
+                             package gate cannot fire on this example",
                             example.name.as_deref().unwrap_or("<unnamed>"),
                             signals
                         ),
@@ -333,7 +319,7 @@ pub fn validate_pack(
             validate_arg_tainted_index_bounds(rule, &arg_tainted_index_seen, &mut issues);
         }
         validate_constraint_coverage(rule, &mut issues);
-        validate_regex_package_signals_match_example_imports(rule, &example_imports, &mut issues);
+        validate_package_signals_match_example_imports(pack, rule, &example_imports, &mut issues);
     }
 
     let enabled_rules: Vec<_> = rules.iter().copied().filter(|rule| rule.enabled).collect();
@@ -515,17 +501,14 @@ fn validate_constraint_coverage(rule: &Rule, issues: &mut Vec<PackValidationIssu
     }
 }
 
-fn validate_regex_package_signals_match_example_imports(
+fn validate_package_signals_match_example_imports(
+    pack: &Rulepack,
     rule: &Rule,
     example_imports: &BTreeSet<String>,
     issues: &mut Vec<PackValidationIssue>,
 ) {
     let has_signal = !rule.packages.is_empty() || !rule.imports.is_empty() || !rule.modules.is_empty();
-    if !rule.enabled
-        || !has_signal
-        || example_imports.is_empty()
-        || !crate::matcher::rule_regex_requires_package_signal(rule)
-    {
+    if !rule.enabled || !has_signal || example_imports.is_empty() {
         return;
     }
     let signals: Vec<&str> = rule
@@ -536,10 +519,22 @@ fn validate_regex_package_signals_match_example_imports(
         .map(String::as_str)
         .filter(|signal| !signal.is_empty())
         .collect();
+    let aliases = pack
+        .metadata
+        .languages
+        .get(&rule.language)
+        .map(|metadata| &metadata.package_aliases);
     if signals.iter().any(|signal| {
-        example_imports
-            .iter()
-            .any(|imported| crate::pkg::import_matches_package(imported, signal))
+        example_imports.iter().any(|imported| {
+            crate::pkg::import_matches_package(imported, signal, &rule.package_matching)
+                || aliases
+                    .and_then(|aliases| aliases.get(&signal.to_ascii_lowercase()))
+                    .is_some_and(|aliases| {
+                        aliases.iter().any(|alias| {
+                            crate::pkg::import_matches_package(imported, alias, &rule.package_matching)
+                        })
+                    })
+        })
     }) {
         return;
     }
@@ -557,24 +552,169 @@ fn validate_regex_package_signals_match_example_imports(
     );
 }
 
-fn decl_index_has_java_like_fqn_package_signal(
-    language: &str,
-    idx: &bonsai_lang_api::DeclIndex,
-    signals: &[&str],
-) -> bool {
-    if !matches!(language, "java" | "kotlin" | "scala") {
-        return false;
+fn validate_rulepack_metadata(pack: &Rulepack, issues: &mut Vec<PackValidationIssue>) {
+    let all_rules = pack.all_rules();
+    let sink_tags: BTreeSet<&str> = all_rules
+        .iter()
+        .filter(|rule| rule.kind == RuleKind::Sink)
+        .filter_map(|rule| rule.tag.as_deref())
+        .collect();
+    let sanitizer_tags: BTreeSet<&str> = all_rules
+        .iter()
+        .filter(|rule| rule.kind == RuleKind::Sanitizer)
+        .filter_map(|rule| rule.tag.as_deref())
+        .collect();
+
+    let canonical_families = pack
+        .metadata
+        .canonical_sink_families
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    for family in &canonical_families {
+        let valid = pack
+            .metadata
+            .sink_family_short_labels
+            .get(*family)
+            .is_some_and(|label| !label.trim().is_empty() && label.chars().count() <= 5);
+        if !valid {
+            push_validation_issue(
+                issues,
+                "error",
+                "missing-sink-family-short-label",
+                None,
+                &format!(
+                    "metadata canonical sink family `{family}` needs a nonempty sink_family_short_labels value of at most five characters"
+                ),
+            );
+        }
     }
-    idx.refs.iter().any(|reference| {
-        matches!(
-            reference.kind,
-            bonsai_lang_api::RefKind::Call | bonsai_lang_api::RefKind::Type
-        ) && crate::pkg::java_like_fully_qualified_package(&reference.name).is_some_and(|package| {
-            signals
-                .iter()
-                .any(|signal| crate::pkg::import_matches_package(package, signal))
-        })
-    })
+    for family in pack.metadata.sink_family_short_labels.keys() {
+        if !canonical_families.contains(family.as_str()) {
+            push_validation_issue(
+                issues,
+                "error",
+                "unknown-sink-family-short-label",
+                None,
+                &format!("metadata sink_family_short_labels key `{family}` is not a canonical sink family"),
+            );
+        }
+    }
+
+    for (sanitizer_tag, credited_sink_tags) in &pack.metadata.sanitizer_credits {
+        if !sanitizer_tags.contains(sanitizer_tag.as_str()) {
+            push_validation_issue(
+                issues,
+                "error",
+                "unknown-sanitizer-credit-tag",
+                None,
+                &format!("metadata sanitizer_credits key `{sanitizer_tag}` is not used by a sanitizer rule"),
+            );
+        }
+        for sink_tag in credited_sink_tags {
+            if !sink_tags.contains(sink_tag.as_str()) {
+                push_validation_issue(
+                    issues,
+                    "error",
+                    "unknown-sanitizer-credit-sink-tag",
+                    None,
+                    &format!(
+                        "metadata sanitizer_credits.{sanitizer_tag} targets unknown sink tag `{sink_tag}`"
+                    ),
+                );
+            }
+        }
+    }
+    for tag in pack.metadata.sink_tag_semantics.keys() {
+        if !sink_tags.contains(tag.as_str()) {
+            push_validation_issue(
+                issues,
+                "error",
+                "unknown-sink-tag-semantics",
+                None,
+                &format!("metadata sink_tag_semantics key `{tag}` is not used by a sink rule"),
+            );
+        }
+    }
+    for tag in pack.metadata.sanitizer_tag_semantics.keys() {
+        if !sanitizer_tags.contains(tag.as_str()) {
+            push_validation_issue(
+                issues,
+                "error",
+                "unknown-sanitizer-tag-semantics",
+                None,
+                &format!("metadata sanitizer_tag_semantics key `{tag}` is not used by a sanitizer rule"),
+            );
+        }
+    }
+
+    for (name, profile) in &pack.metadata.profiles {
+        if name.trim().is_empty() {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-profile-name",
+                None,
+                "metadata profile names must not be empty",
+            );
+        }
+        if profile
+            .context
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+            || profile.exclude_paths.iter().any(|value| value.trim().is_empty())
+        {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-profile-value",
+                None,
+                &format!("metadata profile `{name}` contains an empty context or path pattern"),
+            );
+        }
+    }
+    if pack
+        .metadata
+        .test_path_patterns
+        .iter()
+        .any(|pattern| pattern.trim().is_empty())
+    {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-test-path-pattern",
+            None,
+            "metadata test_path_patterns must not contain empty values",
+        );
+    }
+    for (language, metadata) in &pack.metadata.languages {
+        let package = &metadata.package_matching;
+        let contains_empty = package
+            .strip_import_prefixes
+            .iter()
+            .chain(package.strip_import_suffixes.iter())
+            .chain(package.package_separators.iter())
+            .any(|value| value.is_empty());
+        let invalid_tail = package
+            .call_qualifier_from_package_tail
+            .as_ref()
+            .is_some_and(|binding| {
+                binding.package_separator.is_empty()
+                    || binding.call_separators.is_empty()
+                    || binding.call_separators.iter().any(String::is_empty)
+            });
+        if contains_empty || invalid_tail {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-package-matching-semantics",
+                None,
+                &format!(
+                    "metadata language `{language}` package_matching values and tail-binding separators must be non-empty"
+                ),
+            );
+        }
+    }
 }
 
 fn validate_rule_metadata(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
@@ -742,7 +882,6 @@ fn validate_rule_metadata(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
     validate_analysis_semantics(rule, issues);
     validate_callback_origin_constraints(rule, issues);
     validate_taint_semantics(rule, issues);
-    validate_packages_not_maven_artifacts(rule, issues);
     validate_yaml_language_field(rule, issues);
 }
 
@@ -878,6 +1017,18 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             "analysis_semantics source ranks are only valid on source rules",
         );
     }
+    if (semantics.suppress_inferred_sources.is_some()
+        || !semantics.suppress_local_source_flow_classes.is_empty())
+        && rule.kind != RuleKind::Sink
+    {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-analysis-semantics",
+            Some(rule),
+            "source-suppression reporting policy is only valid on sink rules",
+        );
+    }
     if (semantics.guard_profile.is_some()
         || semantics.sink_terminal_priority.is_some()
         || semantics.path_containment_guard.is_some()
@@ -897,7 +1048,8 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
         || semantics.url_network_guard.is_some()
         || semantics.url_reconstruction_guard.is_some()
         || semantics.context_flow.is_some()
-        || semantics.post_sink_policy.is_some())
+        || semantics.post_sink_policy.is_some()
+        || semantics.sanitizer_attachment_policy.is_some())
         && rule.kind != RuleKind::Sink
     {
         push_validation_issue(
@@ -905,7 +1057,30 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             "error",
             "invalid-analysis-semantics",
             Some(rule),
-            "sink_terminal_priority, guard_profile, path_containment_guard, path_consumer_containment_guard, relative_path_containment_guard, parameterized_query, nosql_filter, dynamic_key_denylist_guard, receiver_factory_guard, receiver_configuration_guard, configured_argument_factory_guard, configured_argument_receiver_guard, configured_call_argument_guard, character_escape, character_constraint, same_origin_path_constraint, url_network_guard, url_reconstruction_guard, context_flow, and post_sink_policy are only valid on sink rules",
+            "sink and sanitizer-attachment analysis semantics are only valid on sink rules",
+        );
+    }
+    if semantics.sanitizer_guard.is_some() && rule.kind != RuleKind::Sanitizer {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-analysis-semantics",
+            Some(rule),
+            "sanitizer_guard is only valid on sanitizer rules",
+        );
+    }
+    if semantics.sanitizer_guard.as_ref().is_some_and(|guard| {
+        let role_count = usize::from(guard.use_receiver)
+            + usize::from(guard.all_arguments)
+            + usize::from(!guard.argument_indices.is_empty());
+        role_count != 1
+    }) {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-analysis-semantics",
+            Some(rule),
+            "sanitizer_guard must select exactly one of receiver, all arguments, or argument indices",
         );
     }
     if let Some(guard) = semantics.configured_call_argument_guard.as_ref() {
@@ -982,7 +1157,7 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             "same_origin_path_constraint static_context_argument requires non-empty exact renderings",
         );
     }
-    let path_profile = semantics.guard_profile == Some(GuardProfile::PythonPathContainment);
+    let path_profile = semantics.guard_profile == Some(GuardProfile::CanonicalPathContainment);
     if path_profile != semantics.path_containment_guard.is_some() {
         push_validation_issue(
             issues,
@@ -1524,7 +1699,8 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
         };
         let root_valid = match &guard.root {
             crate::rule::UrlGuardRootSemantics::SinkReceiver
-            | crate::rule::UrlGuardRootSemantics::SinkAssignmentTarget => true,
+            | crate::rule::UrlGuardRootSemantics::SinkAssignmentTarget
+            | crate::rule::UrlGuardRootSemantics::SinkArgumentParserInput { .. } => true,
             crate::rule::UrlGuardRootSemantics::SinkArgumentAccessor { accessor, .. } => {
                 callable_target(accessor)
             }
@@ -1558,6 +1734,11 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
                 .iter()
                 .any(|target| !callable_target(target))
             || !callable_target(&guard.dns.resolver)
+            || guard
+                .dns
+                .address_parser
+                .as_ref()
+                .is_some_and(|parser| !callable_target(&parser.target))
             || guard.dns.private_address_predicates.is_empty()
             || guard
                 .dns
@@ -1575,6 +1756,9 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             );
         }
         let mut regex_targets: Vec<(&str, &RuleTarget)> = vec![("parser", &guard.parser)];
+        if let Some(parser) = guard.dns.address_parser.as_ref() {
+            regex_targets.push(("dns.address_parser", &parser.target));
+        }
         if let crate::rule::UrlGuardRootSemantics::SinkArgumentAccessor { accessor, .. } = &guard.root {
             regex_targets.push(("root.accessor", accessor));
         }
@@ -2081,150 +2265,6 @@ fn validate_receiver_agnostic_regex_has_package_gate(rule: &Rule, issues: &mut V
     );
 }
 
-/// Catch package signals whose syntax can never match what the
-/// language adapter emits in `ImportSpec.module`. Runtime package
-/// context checks consult the adapter's import index — a signal that
-/// uses package-manager distribution syntax (Maven `groupId-artifactId`,
-/// PyPI `python-jose`, Cargo `percent-encoding`, Swift `async-http-client`)
-/// instead of the adapter-visible import string is a silent context-gate
-/// failure: the rule loads, the matcher can't fire it on real files,
-/// and previously the validator only noticed when an example imported
-/// the wrong shape. Fail-fast at load time, language-aware.
-///
-/// Languages NOT listed here (C/C++/ObjC, Go, JS/TS, Lua, Ruby, PHP,
-/// Solidity, Erlang) legitimately use hyphens in their import strings
-/// — npm `sanitize-html`, Lua `lua-resty-string`, Ruby `rest-client`,
-/// Go path segments, PHP composer slugs — so the syntactic check
-/// would be a false positive for them. Their import-vs-package drift
-/// is caught by the slower adapter-visible-import warning instead.
-fn validate_packages_not_maven_artifacts(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
-    for signal_field in [&rule.packages, &rule.imports, &rule.modules] {
-        for signal in signal_field {
-            let Some(reason) = package_signal_distro_smell(&rule.language, signal) else {
-                continue;
-            };
-            push_validation_issue(
-                issues,
-                "error",
-                "package-is-distribution-name",
-                Some(rule),
-                &format!(
-                    "`{signal}` is a {reason}, not a string the {} adapter sees in `import` / \
-                     `use` / `require` statements. Runtime package context checks consult the \
-                     adapter's import index — replace with the actual import-visible \
-                     package/module string.",
-                    rule.language
-                ),
-            );
-        }
-    }
-}
-
-/// Decide whether `signal` looks like a package-manager distribution
-/// name rather than the import-visible string the adapter parses.
-/// Returns a short reason fragment for the error message, or `None`
-/// when the signal is well-formed for the language.
-pub(super) fn package_signal_distro_smell(language: &str, signal: &str) -> Option<&'static str> {
-    if signal.is_empty() {
-        return None;
-    }
-    match language {
-        // JVM ecosystems: imports are dotted reverse-domain
-        // (`org.springframework.web`); a token with no dot and a
-        // hyphen is a Maven artifact coordinate (`spring-web`,
-        // `gwt-user`). All-lowercase (or with digits) eliminates
-        // false positives on real JVM names.
-        "java" | "kotlin" | "scala" => {
-            if signal.contains('.') || !signal.contains('-') {
-                return None;
-            }
-            if signal
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-            {
-                return Some("Maven artifact coordinate (groupId-artifactId)");
-            }
-            None
-        }
-        // Python imports never contain `-`. PyPI distributions like
-        // `python-jose`, `argon2-cffi`, `flask-limiter` shouldn't
-        // appear in `packages:`; the adapter only sees the import
-        // string (`jose`, `argon2`, `flask_limiter`).
-        //
-        // Distros without a `-` but whose distribution name still
-        // differs from the Python import name also count
-        // (`pyyaml` → `yaml`, `beautifulsoup4` → `bs4`,
-        // `protobuf` is OK because both names match,
-        // `pillow` → `PIL`). Spotted by the table below; extend it
-        // when a new distro/import mismatch surfaces in real
-        // packs.
-        "python" => {
-            if signal.contains('-') {
-                return Some("PyPI distribution name (Python imports never contain `-`)");
-            }
-            const PYPI_NON_IMPORT_DISTROS: &[&str] = &[
-                "pyyaml",              // → yaml
-                "beautifulsoup4",      // → bs4
-                "djangorestframework", // → rest_framework
-                "pillow",              // → PIL
-                "msgpack-python",      // pre-2.0; → msgpack (also has `-`)
-                "python3-saml",        // → onelogin.saml2
-                "pycryptodome",        // → Crypto (top-level shim)
-            ];
-            if PYPI_NON_IMPORT_DISTROS.contains(&signal) {
-                return Some("PyPI distribution name whose Python import differs (e.g. `pyyaml` → `yaml`)");
-            }
-            None
-        }
-        // Rust crates can carry hyphens in `Cargo.toml` but
-        // `extern crate` / `use` resolves them to underscored
-        // identifiers (`extern crate percent_encoding;`). The
-        // adapter sees `percent_encoding`, not `percent-encoding`,
-        // so signals naming the Cargo distro form silently fail.
-        "rust" => {
-            if signal.contains('-') {
-                Some("Cargo crate distribution name (Rust `use` paths use `_`, not `-`)")
-            } else {
-                None
-            }
-        }
-        // Swift imports are CamelCase module names
-        // (`import AsyncHTTPClient`, `import Foundation`). SwiftPM
-        // package names like `async-http-client` map to a different
-        // import token; the adapter only sees the module form.
-        "swift" => {
-            if signal.contains('-') {
-                Some("SwiftPM distribution name (Swift module imports are CamelCase, no `-`)")
-            } else {
-                None
-            }
-        }
-        // Perl modules use `Foo::Bar` syntax in `use`; CPAN
-        // distribution names have hyphens (`Net-LDAP`) but the
-        // import is `Net::LDAP`. Hyphenated signals are wrong.
-        "perl" => {
-            if signal.contains('-') {
-                Some("CPAN distribution name (Perl `use` is `Foo::Bar`, never `Foo-Bar`)")
-            } else {
-                None
-            }
-        }
-        // Dart packages on pub.dev are required to be snake_case;
-        // hyphens are illegal in package names AND in dart imports.
-        "dart" => {
-            if signal.contains('-') {
-                Some("non-snake_case package name (Dart pub packages disallow `-`)")
-            } else {
-                None
-            }
-        }
-        // C/C++/ObjC, Go, JS/TS, Lua, Ruby, PHP, Solidity, Erlang
-        // all permit hyphens in adapter-visible import strings; the
-        // syntactic check would mis-flag legitimate usage.
-        _ => None,
-    }
-}
-
 pub(super) fn lowercase_receiver_token_from_regex(regex: &str) -> Option<String> {
     let rest = regex.trim().strip_prefix('^')?;
     let (receiver, after_receiver) = if let Some(grouped) = rest.strip_prefix('(') {
@@ -2276,11 +2316,7 @@ fn package_signal_matches_receiver_token(signal: &str, token: &str) -> bool {
     if signal.is_empty() {
         return false;
     }
-    signal == token
-        || signal
-            .rsplit(&['.', '/', ':', '\\', '-'][..])
-            .next()
-            .is_some_and(|tail| tail == token)
+    signal == token || bonsai_common::short_qualified_tail(signal) == token
 }
 
 fn hardcoded_lowercase_receiver_token(token: &str) -> bool {

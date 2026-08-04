@@ -10,7 +10,7 @@
 
 use crate::common::{file_path_matches_filter, format_span};
 use ahash::AHashSet;
-use bonsai_common::{FuncId, SymbolId, ALL_NAME_PUNCTUATION};
+use bonsai_common::{FuncId, SymbolId};
 use bonsai_hash::fnv1a_names_low32;
 use bonsai_lang_api::{Decl, DeclKind, FlowEvent};
 use bonsai_workspace::{
@@ -1208,8 +1208,12 @@ fn simple_symbol_from_value(raw: &str) -> Option<String> {
 }
 
 fn symbol_matches(query: &str, candidate: &str) -> bool {
-    let query = query.trim().trim_start_matches(ALL_NAME_PUNCTUATION);
-    let candidate = candidate.trim().trim_start_matches(ALL_NAME_PUNCTUATION);
+    let query = query
+        .trim()
+        .trim_start_matches(bonsai_common::is_name_punctuation);
+    let candidate = candidate
+        .trim()
+        .trim_start_matches(bonsai_common::is_name_punctuation);
     if query.is_empty() || candidate.is_empty() {
         return false;
     }
@@ -1238,7 +1242,11 @@ fn symbol_segments(value: &str) -> Vec<String> {
     value
         .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '@')))
         .filter(|segment| !segment.is_empty())
-        .map(|segment| segment.trim_start_matches(ALL_NAME_PUNCTUATION).to_string())
+        .map(|segment| {
+            segment
+                .trim_start_matches(bonsai_common::is_name_punctuation)
+                .to_string()
+        })
         .filter(|segment| !segment.is_empty())
         .collect()
 }

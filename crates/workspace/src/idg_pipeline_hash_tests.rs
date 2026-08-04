@@ -48,6 +48,21 @@ fn idg_pipeline_hash_tracks_dependency_metadata() {
 }
 
 #[test]
+fn idg_pipeline_hash_tracks_compiler_frontend_abi() {
+    let current = compiler_frontend_idg_fingerprint(COMPILER_OBJECT_CACHE_VERSION);
+    let next = compiler_frontend_idg_fingerprint(
+        COMPILER_OBJECT_CACHE_VERSION
+            .checked_add(1)
+            .expect("compiler object ABI version overflow"),
+    );
+
+    assert_ne!(
+        current, next,
+        "compiler object ABI changes must invalidate persisted IDG sidecars"
+    );
+}
+
+#[test]
 fn root_only_idg_validation_reconstructs_the_exact_compiler_pipeline() {
     let root = tempdir_for_test("bonsai-idg-root-only-validation");
     let source_path = root.join("app.py");

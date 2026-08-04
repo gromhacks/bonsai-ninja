@@ -3,13 +3,32 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{
-        call_arg_from_node as ast_call_arg_from_node, collect_kinds, first_named_child_of_kind,
-        language_from_pack, node_at_span, node_text, parse_with, span_of,
+        call_arg_from_node_with_handler, collect_kinds, first_named_child_of_kind, language_from_pack,
+        named_child_call_args_with_handler, node_at_span, node_text, parse_with, span_of,
     },
     AdapterContext, AdapterError, AssignValueKind, AssignmentValueIndex, CallArg, CallKind, DeclIndex,
     DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
     LanguageCapabilities, LanguageId, ModulePath, Ref, RefKind, TypeAliasBinding,
 };
+
+fn extract_perl_pseudo_call(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<FlowEvent> {
+    if node.kind() != "eval_expression" || node.named_child(0).is_some_and(|child| child.kind() == "block") {
+        return None;
+    }
+    Some(FlowEvent::Call {
+        span: span_of(file, &node),
+        receiver: None,
+        receiver_types: Vec::new(),
+        name: "eval".to_string(),
+        call_kind: CallKind::Function,
+        args: named_child_call_args_with_handler(&node, file, src, handler),
+    })
+}
 use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("perl");
@@ -28,37 +47,95 @@ const HANDLER: GrammarHandler = GrammarHandler {
         ("package_statement", DeclKind::Module),
         ("class_statement", DeclKind::Class),
     ],
-    method_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.method_kinds,
-    method_context_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.method_context_kinds,
-    method_owner_barrier_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.method_owner_barrier_kinds,
-    constructor_method_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.constructor_method_kinds,
+    method_kinds: &[],
+    // A Perl package is a namespace until its lowered body proves OO
+    // semantics (explicit invocant, constructor, or ancestry).  Treating
+    // every package-contained subroutine as a method loses ordinary package
+    // function resolution before `promote_perl_oo_packages` can classify it.
+    method_context_kinds: &[],
+    method_owner_barrier_kinds: &[],
+    constructor_method_kinds: &[],
     constructor_names: &["new"],
-    if_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.if_kinds,
-    for_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.for_kinds,
-    foreach_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.foreach_kinds,
-    while_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.while_kinds,
-    do_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.do_kinds,
-    loop_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.loop_kinds,
-    call_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.call_kinds,
-    assignment_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.assignment_kinds,
-    return_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.return_kinds,
-    throw_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.throw_kinds,
+    if_kinds: &[
+        "conditional_statement",
+        "conditional_expression",
+        "postfix_conditional_expression",
+        "if_statement",
+        "unless_statement",
+        "if_simple_statement",
+        "unless_simple_statement",
+    ],
+    for_kinds: &[
+        "for_statement",
+        "for_statement_1",
+        "for_statement_2",
+        "for_simple_statement",
+    ],
+    foreach_kinds: &[],
+    while_kinds: &[
+        "while_statement",
+        "until_statement",
+        "while_simple_statement",
+        "until_simple_statement",
+    ],
+    do_kinds: &[],
+    loop_kinds: &[],
+    call_kinds: &[
+        "call_expression",
+        "function_call_expression",
+        "subroutine_call_expression",
+        "method_call_expression",
+        "ambiguous_function_call_expression",
+    ],
+    nested_call_component_kinds: &[],
+    pseudo_call_extractor: Some(extract_perl_pseudo_call),
+    syntax_event_extractor: None,
+    pseudo_call_receiver_extractor: None,
+    argument_passing_mode_extractor: None,
+    assignment_kinds: &["assignment_expression", "variable_declaration"],
+    return_kinds: &["return_expression"],
+    throw_kinds: &[],
     lambda_kinds: &["anonymous_subroutine_expression"],
-    try_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.try_kinds,
-    catch_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.catch_kinds,
-    finally_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.finally_kinds,
-    break_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.break_kinds,
-    continue_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.continue_kinds,
-    yield_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.yield_kinds,
-    await_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.await_kinds,
-    defer_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.defer_kinds,
-    using_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.using_kinds,
+    try_kinds: &[],
+    catch_kinds: &[],
+    finally_kinds: &[],
+    break_kinds: &["loop_control_statement"],
+    continue_kinds: &[],
+    yield_kinds: &[],
+    await_kinds: &[],
+    defer_kinds: &[],
+    using_kinds: &[],
     special_forms: &[],
-    method_receiver_param_index: bonsai_lang_api::kit::GENERIC_HANDLER.method_receiver_param_index,
-    implicit_receiver_names: bonsai_lang_api::kit::GENERIC_HANDLER.implicit_receiver_names,
-    implicit_receiver_prefixes: bonsai_lang_api::kit::GENERIC_HANDLER.implicit_receiver_prefixes,
-    tail_expression_returns: bonsai_lang_api::kit::GENERIC_HANDLER.tail_expression_returns,
-    void_return_type_names: bonsai_lang_api::kit::GENERIC_HANDLER.void_return_type_names,
+    runtime_type_guard_calls: &[],
+    runtime_type_guard_operators: &[],
+    runtime_typeof_operators: &[],
+    runtime_type_equality_operators: &[],
+    value_free_expression_kinds: &[],
+    value_free_call_names: &[],
+    value_free_unary_operators: &[],
+    call_ref_kinds: &[
+        "call_expression",
+        "function_call_expression",
+        "subroutine_call_expression",
+        "method_call_expression",
+        "ambiguous_function_call_expression",
+    ],
+    member_expression_kinds: &[],
+    subscript_expression_kinds: &[],
+    sigil_variable_kinds: &[],
+    global_variable_kinds: &[],
+    subscript_base_call_refs: false,
+    non_call_ref_names: &[],
+    synthetic_call_ref_names: &[],
+    call_name_suffix_tokens: &[],
+    syntax_error_tolerant_call_names: &[],
+    callable_reference_kinds: &[],
+    callable_reference_extractor: None,
+    method_receiver_param_index: None,
+    implicit_receiver_names: &[],
+    implicit_receiver_prefixes: &[],
+    tail_expression_returns: false,
+    void_return_type_names: &[],
 };
 
 /// Tree-sitter adapter for Perl 5.
@@ -103,6 +180,12 @@ impl LanguageAdapter for PerlAdapter {
             // adapter-derived (`$self`, `$class`, or another identifier).
             implicit_receiver_tokens: &[],
             same_directory_unqualified_calls: true,
+            callable_reference_syntax: bonsai_lang_api::CallableReferenceSyntax {
+                prefixes: &["\\&"],
+                numeric_arity_suffix: false,
+                symbol_wrapper: None,
+                trailing_invocation_punctuation: false,
+            },
             ..LanguageCapabilities::partial_baseline()
         }
     }
@@ -2502,15 +2585,20 @@ fn synthesize_method_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(
             .map(|arguments| perl_list_args(&arguments, src, file))
             .unwrap_or_default();
         let span = span_of(file, &call_node);
+        let is_constructor = method_name == "new";
         events.push((
             span,
             FlowEvent::Call {
                 span,
                 name: format!("{receiver}->{method_name}"),
                 receiver: Some(receiver.to_string()),
-                receiver_types: Vec::new(),
+                receiver_types: if is_constructor {
+                    vec![receiver.to_string()]
+                } else {
+                    Vec::new()
+                },
                 // Perl convention: `Class->new` is the constructor.
-                call_kind: if method_name == "new" {
+                call_kind: if is_constructor {
                     CallKind::Constructor
                 } else {
                     CallKind::Method
@@ -2531,7 +2619,7 @@ fn perl_call_arg_from_node(
     src: &[u8],
     name: Option<String>,
 ) -> Option<CallArg> {
-    let mut argument = ast_call_arg_from_node(node, file, src, name)?;
+    let mut argument = call_arg_from_node_with_handler(node, file, src, name, &HANDLER)?;
     if matches!(node.kind(), "scalar" | "array" | "hash") {
         if argument.place.is_none() {
             argument.place = Some(argument.value_text.clone());
@@ -3061,7 +3149,7 @@ fn attach_synthesized_calls_to_decls(idx: &mut DeclIndex, events: Vec<(Span, Flo
             }
         }
         if let Some(decl_idx) = best_decl {
-            // L8: `method_call_expression` is in COMMON_CALL_KINDS, so
+            // L8: the Perl handler declares `method_call_expression`, so
             // the kit already emitted a Call for `$obj->method(...)`
             // (carrying source_names + a receiver this synth lacks).
             // Drop the synth duplicate when the kit's Call for the

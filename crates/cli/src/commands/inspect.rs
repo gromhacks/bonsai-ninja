@@ -14,7 +14,7 @@ use bonsai_sdk::{
 };
 use comfy_table::Cell;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::args::{BrowseFormat, InspectView, GROUPED_VIEW_AUTO_THRESHOLD};
 use crate::footer::render_paging_footer;
@@ -254,6 +254,11 @@ struct InspectTaintFlow {
     chain_display: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     steps: Vec<InspectTaintStep>,
+    /// Conservative serialized-size estimate computed while the owning
+    /// closure worker already has this row hot. Paging reads it in O(1)
+    /// instead of walking every step in the complete result set again.
+    #[serde(skip)]
+    json_size_upper_bound: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -1798,7 +1803,11 @@ fn finish_inspect(
                 cursor: current_info.cursor.clone(),
                 text: current_text,
             }];
-            for page_number in page_cache::eager_window(current_info.page_number, current_info.total_pages) {
+            for page_number in inspect_eager_window(
+                current_info.page_number,
+                current_info.total_pages,
+                !report.taint_flows.is_empty(),
+            ) {
                 if page_number == current_info.page_number {
                     continue;
                 }
@@ -1827,6 +1836,20 @@ fn finish_inspect(
         }
     }
     Ok(())
+}
+
+/// Pages worth rendering into the opportunistic text cache.
+///
+/// Raw taint reports can contain hundreds of thousands of exact paths. Their
+/// current page is already cached above; eagerly formatting future pages adds
+/// unrelated work to the requested command and repeatedly walks the complete
+/// pagination plan. Structural reports remain cheap enough to retain the
+/// normal look-ahead window. This affects cached presentation only.
+fn inspect_eager_window(current_page: u64, total_pages: u64, has_raw_taint: bool) -> BTreeSet<u64> {
+    if has_raw_taint {
+        return BTreeSet::from([current_page.clamp(1, total_pages.max(1))]);
+    }
+    page_cache::eager_window(current_page, total_pages)
 }
 
 /// Pick a source-literal candidate for a semantic inspect name.
@@ -2847,35 +2870,25 @@ fn inspect_taint_flows(
         );
         (entry_flows, graph.plan)
     };
-    let mut results = Vec::new();
-    let remaining = if let Some((&first, remaining)) = entries.split_first() {
-        // Hydrate shared immutable contextual/symbolic indexes before sizing
-        // parallelism from the process's actual resident working set.
-        results.push(analyze_entry(first));
-        remaining
-    } else {
-        &[]
-    };
     let workers = bonsai_common::rooted_semantic_query_worker_count(rayon::current_num_threads());
     bonsai_diagnostics::debug_log!("compiler-cache", "inspect rooted taint workers: {}", workers);
-    if workers == 1 {
-        results.extend(remaining.iter().copied().map(&analyze_entry));
+    let results = if workers == 1 {
+        entries.iter().copied().map(&analyze_entry).collect::<Vec<_>>()
     } else {
         use rayon::prelude::*;
-        let parallel = rayon::ThreadPoolBuilder::new()
+        rayon::ThreadPoolBuilder::new()
             .num_threads(workers)
             .thread_name(|index| format!("bonsai-inspect-flow-{index}"))
             .build()
             .expect("build memory-bounded inspect flow pool")
             .install(|| {
-                remaining
+                entries
                     .par_iter()
                     .copied()
                     .map(&analyze_entry)
                     .collect::<Vec<_>>()
-            });
-        results.extend(parallel);
-    }
+            })
+    };
     bonsai_diagnostics::debug_log!(
         "compiler-cache",
         "inspect taint closures: entries={} elapsed={:.3}s",
@@ -3101,7 +3114,7 @@ fn build_inspect_taint_flow(
     let func_ids: Vec<u32> = funcs.iter().map(|func| func.raw()).collect();
     let chain_display = display_index.disambiguated_names(ws, &funcs);
     let entry_kind = display_index.kind(ws, entry);
-    Some(InspectTaintFlow {
+    let mut flow = InspectTaintFlow {
         taint_id,
         entry: entry_name,
         entry_kind,
@@ -3111,7 +3124,10 @@ fn build_inspect_taint_flow(
         func_ids,
         chain_display,
         steps,
-    })
+        json_size_upper_bound: 0,
+    };
+    flow.json_size_upper_bound = calculate_inspect_taint_flow_json_upper_bound(&flow);
+    Some(flow)
 }
 
 fn taint_step_for_edge(
@@ -4427,6 +4443,17 @@ fn render_inspect_report_text(
     // units, producing a next-page cursor with no stable page start.
     const UNIT_RENDER_FLOOR_BYTES: u64 = 1_600;
     let scale = |raw: u64| (raw * COST_SAFETY_NUM / COST_SAFETY_DEN).max(UNIT_RENDER_FLOOR_BYTES);
+    // A broad raw-flow query can contain hundreds of thousands of exact
+    // paths. Serializing every row just to estimate page boundaries made
+    // rendering slower than the IDG closure itself. Compute one conservative
+    // allocation-free cost per flow and reuse it for full/compact simulation,
+    // page totals, and the live renderer. This changes presentation cost only;
+    // every flow remains in the canonical pageable unit stream.
+    let taint_unit_costs = report
+        .taint_flows
+        .iter()
+        .map(|flow| scale(inspect_taint_flow_json_upper_bound(flow)))
+        .collect::<Vec<_>>();
     fn func_full_cost(f: &InspectFunctionRendered) -> u64 {
         // Module path + def line + every body line. Mirrors what
         // `render_full_source_bodies` actually emits.
@@ -4444,9 +4471,10 @@ fn render_inspect_report_text(
         header + decl.flows.iter().map(&flow_full_cost).sum::<u64>()
     };
     let unit_full_cost = |idx: usize| -> u64 {
-        let raw = if idx < taint_units {
-            serde_json::to_string(&report.taint_flows[idx]).map_or(320, |row| row.len() as u64 + 256)
-        } else if idx < structural_base {
+        if idx < taint_units {
+            return taint_unit_costs[idx];
+        }
+        let raw = if idx < structural_base {
             let hit = flowless_hits[idx - taint_units];
             (hit.text.len() + hit.file.len() + hit.kind.len() + 256) as u64
         } else {
@@ -4460,9 +4488,10 @@ fn render_inspect_report_text(
         scale(raw)
     };
     let unit_compact_cost = |idx: usize| -> u64 {
-        let raw = if idx < taint_units {
-            serde_json::to_string(&report.taint_flows[idx]).map_or(320, |row| row.len() as u64 + 256)
-        } else if idx < structural_base {
+        if idx < taint_units {
+            return taint_unit_costs[idx];
+        }
+        let raw = if idx < structural_base {
             let hit = flowless_hits[idx - taint_units];
             (hit.text.len() + hit.file.len() + hit.kind.len() + 256) as u64
         } else {
@@ -4605,6 +4634,53 @@ fn render_inspect_report_text(
         &unit_full_cost,
         &unit_compact_cost,
     ))
+}
+
+/// Conservative serialized-size estimate for one raw inspect flow.
+///
+/// Paging uses this only as a presentation cost. Fixed object/field overheads
+/// deliberately exceed serde_json punctuation, and string sizes account for
+/// JSON escaping without allocating an intermediate serialized row.
+fn inspect_taint_flow_json_upper_bound(flow: &InspectTaintFlow) -> u64 {
+    flow.json_size_upper_bound
+}
+
+fn calculate_inspect_taint_flow_json_upper_bound(flow: &InspectTaintFlow) -> u64 {
+    fn escaped_string_bytes(value: &str) -> u64 {
+        // JSON's largest expansion is a one-byte control character written
+        // as `\u00XX` (six bytes). Multiplying the UTF-8 byte length is a
+        // deliberately loose upper bound, but makes planning O(1) per string
+        // instead of rescanning every character in hundreds of thousands of
+        // exact flow rows.
+        (value.len() as u64).saturating_mul(6).saturating_add(2)
+    }
+
+    let mut bytes = 256
+        + escaped_string_bytes(&flow.taint_id)
+        + escaped_string_bytes(&flow.entry)
+        + escaped_string_bytes(&flow.terminal)
+        + escaped_string_bytes(&flow.terminal_kind)
+        + escaped_string_bytes(&flow.precision);
+    bytes += flow
+        .chain_display
+        .iter()
+        .map(|value| escaped_string_bytes(value) + 1)
+        .sum::<u64>();
+    for step in &flow.steps {
+        bytes += 192
+            + escaped_string_bytes(&step.caller)
+            + escaped_string_bytes(&step.callee)
+            + escaped_string_bytes(&step.file)
+            + escaped_string_bytes(&step.kind)
+            + escaped_string_bytes(&step.precision);
+        for argument in &step.tainted_args {
+            bytes += 96 + escaped_string_bytes(&argument.value_text);
+            if let Some(parameter) = argument.param_name.as_deref() {
+                bytes += escaped_string_bytes(parameter);
+            }
+        }
+    }
+    bytes
 }
 
 /// Build the ordered, deduplicated list of folded occurrence flows

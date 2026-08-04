@@ -1,6 +1,6 @@
 use super::{
     first_named_child_of_kind, looks_like_bare_identifier, looks_like_identifier, looks_like_literal_value,
-    node_text, parsed_call_target, span_of, FileId, GrammarHandler, Node, Tree, COMMON_CALL_KINDS,
+    node_text, parsed_call_target, span_of, FileId, GrammarHandler, Node, Tree,
 };
 
 /// Extract branch-local runtime type refinements from parsed guard nodes.
@@ -24,7 +24,7 @@ pub fn extract_runtime_type_narrowing_facts(
                 .or_else(|| node.child_by_field_name("then"))
                 .or_else(|| node.child_by_field_name("body"));
             if let (Some(condition), Some(guarded)) = (condition, guarded) {
-                if let Some((subject, type_name)) = runtime_type_guard_parts(condition, src) {
+                if let Some((subject, type_name)) = runtime_type_guard_parts(condition, handler, src) {
                     facts.push(crate::RuntimeTypeNarrowingFact {
                         branch_span: span_of(file, &node),
                         guarded_span: span_of(file, &guarded),
@@ -59,16 +59,16 @@ pub fn extract_runtime_type_narrowing_facts(
     facts
 }
 
-fn runtime_type_guard_parts(condition: Node<'_>, src: &[u8]) -> Option<(String, String)> {
+fn runtime_type_guard_parts(
+    condition: Node<'_>,
+    handler: &GrammarHandler,
+    src: &[u8],
+) -> Option<(String, String)> {
     let condition = unwrap_runtime_guard(condition);
-    if COMMON_CALL_KINDS.contains(&condition.kind()) {
+    if !handler.runtime_type_guard_calls.is_empty() && handler.is_call(condition.kind()) {
         let target = parsed_call_target(&condition, src)?;
-        let tail = target
-            .full_text
-            .rsplit(['.', ':', '\\'])
-            .next()
-            .unwrap_or(target.full_text.as_str());
-        if tail != "isinstance" {
+        let tail = bonsai_common::short_qualified_tail(&target.full_text);
+        if !handler.runtime_type_guard_calls.contains(&tail) {
             return None;
         }
         let arguments = condition
@@ -90,17 +90,13 @@ fn runtime_type_guard_parts(condition: Node<'_>, src: &[u8]) -> Option<(String, 
         ));
     }
 
-    if let Some(narrowing) = runtime_typeof_guard_parts(condition, src) {
+    if let Some(narrowing) = runtime_typeof_guard_parts(condition, handler, src) {
         return Some(narrowing);
     }
 
-    let operator = (0..condition.child_count())
+    (0..condition.child_count())
         .filter_map(|index| condition.child(u32::try_from(index).ok()?))
-        .find(|child| matches!(child.kind(), "instanceof" | "is"))?;
-    if operator.kind() == "is" && condition.kind() == "comparison_operator" {
-        // Python identity tests are not runtime type refinements.
-        return None;
-    }
+        .find(|child| handler.runtime_type_guard_operators.contains(&child.kind()))?;
     let left = condition
         .child_by_field_name("left")
         .or_else(|| condition.child_by_field_name("expression"))
@@ -118,11 +114,17 @@ fn runtime_type_guard_parts(condition: Node<'_>, src: &[u8]) -> Option<(String, 
     ))
 }
 
-fn runtime_typeof_guard_parts(condition: Node<'_>, src: &[u8]) -> Option<(String, String)> {
-    let equality = (0..condition.child_count())
+fn runtime_typeof_guard_parts(
+    condition: Node<'_>,
+    handler: &GrammarHandler,
+    src: &[u8],
+) -> Option<(String, String)> {
+    if handler.runtime_typeof_operators.is_empty() || handler.runtime_type_equality_operators.is_empty() {
+        return None;
+    }
+    (0..condition.child_count())
         .filter_map(|index| condition.child(u32::try_from(index).ok()?))
-        .find(|child| matches!(child.kind(), "==" | "==="))?;
-    debug_assert!(matches!(equality.kind(), "==" | "==="));
+        .find(|child| handler.runtime_type_equality_operators.contains(&child.kind()))?;
     let left = condition
         .child_by_field_name("left")
         .or_else(|| condition.named_child(0))?;
@@ -130,15 +132,19 @@ fn runtime_typeof_guard_parts(condition: Node<'_>, src: &[u8]) -> Option<(String
         let last = u32::try_from(condition.named_child_count().checked_sub(1)?).ok()?;
         condition.named_child(last)
     })?;
-    runtime_typeof_pair(left, right, src).or_else(|| runtime_typeof_pair(right, left, src))
+    runtime_typeof_pair(left, right, handler, src).or_else(|| runtime_typeof_pair(right, left, handler, src))
 }
 
-fn runtime_typeof_pair(typeof_node: Node<'_>, type_node: Node<'_>, src: &[u8]) -> Option<(String, String)> {
+fn runtime_typeof_pair(
+    typeof_node: Node<'_>,
+    type_node: Node<'_>,
+    handler: &GrammarHandler,
+    src: &[u8],
+) -> Option<(String, String)> {
     let typeof_node = unwrap_runtime_guard(typeof_node);
-    let operator = (0..typeof_node.child_count())
+    (0..typeof_node.child_count())
         .filter_map(|index| typeof_node.child(u32::try_from(index).ok()?))
-        .find(|child| child.kind() == "typeof")?;
-    debug_assert_eq!(operator.kind(), "typeof");
+        .find(|child| handler.runtime_typeof_operators.contains(&child.kind()))?;
     let subject = typeof_node
         .child_by_field_name("argument")
         .or_else(|| typeof_node.named_child(0))?;

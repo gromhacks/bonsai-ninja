@@ -24,9 +24,11 @@ pub mod wire;
 pub use atomic_file::write_atomic_bytes;
 pub use ids::{BasicBlockId, FileId, FuncId, PackageId, SymbolId, TraceStepId, TypeId, ValueId};
 pub use names::{
-    callable_reference_variants, is_bonsai_case_probe_path, qualified_names_match, short_qualified_tail,
-    workspace_bonsai_dir, ALL_NAME_PUNCTUATION, BONSAI_CASE_PROBE_PREFIX, IDENTIFIER_SIGILS,
-    PROJECTION_CANONICALIZATION_VECTORS, QUALIFIED_NAME_SEPARATORS, REFERENCE_SIGILS,
+    ends_at_qualified_name_boundary, is_bonsai_case_probe_path, is_name_punctuation,
+    normalize_qualified_name, qualified_name_owner, qualified_name_prefixes, qualified_name_segments,
+    qualified_names_match, short_qualified_tail, split_qualified_name_head_tail,
+    split_qualified_name_owner_tail, starts_at_qualified_name_boundary, trim_leading_name_punctuation,
+    workspace_bonsai_dir, BONSAI_CASE_PROBE_PREFIX,
 };
 pub use policy::MATCHER_POLICY_FINGERPRINT;
 pub use precision::Precision;

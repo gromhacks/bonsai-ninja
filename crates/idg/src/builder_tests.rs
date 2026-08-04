@@ -3,8 +3,11 @@ use crate::edge::IdgEdgeKind;
 use crate::node::NodeId;
 use crate::place::Place;
 use crate::query::ReachabilityIndex;
-use crate::transfer::{transfer_function_for, transfer_function_for_with_options, TransferOptions};
-use crate::{IdgQueryService, PointKind};
+use crate::transfer::{
+    transfer_function_for, transfer_function_for_with_options,
+    transfer_function_for_with_options_and_syntax_facts, TransferOptions,
+};
+use crate::{IdgQueryService, PointKind, WsNodeId};
 use bonsai_common::{FileId, SymbolId};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{CallArg, CallKind, Decl, DeclKind, FlowEvent, ModulePath, Visibility};
@@ -1889,7 +1892,8 @@ fn syntactic_field_universe_keeps_numeric_and_deep_adapter_paths() {
         &MockResolver::new(),
         &StaticF2S(AHashMap::from([(FuncId::new(1), SegmentId(0))])),
     );
-    let universe = FieldPlaceIndex::from_workspace(&ws).syntactic_field_universe();
+    let full_index = FieldPlaceIndex::from_workspace(&ws);
+    let universe = full_index.syntactic_field_universe();
 
     for field in [
         "0.payload.value",
@@ -1912,6 +1916,11 @@ fn syntactic_field_universe_keeps_numeric_and_deep_adapter_paths() {
         writes: true,
     }]);
     let focused = FieldPlaceIndex::from_workspace_for_keys(&ws, &requested);
+    let focused_universe = focused.syntactic_field_universe();
+    assert!(
+        focused_universe.contains("42.command"),
+        "field-row filtering must not discard an adapter-proven suffix needed by later synthetic composition"
+    );
     let tuple_hits = focused
         .field_hits_for_normalized_base(SegmentId(0), FuncId::new(1), "tuple", true)
         .expect("requested AST base remains indexed");
@@ -1921,6 +1930,55 @@ fn syntactic_field_universe_keeps_numeric_and_deep_adapter_paths() {
             .field_hits_for_normalized_base(SegmentId(0), FuncId::new(1), "map", true)
             .is_none(),
         "unrequested bases must not duplicate unrelated workspace field strings"
+    );
+}
+
+#[test]
+fn syntactic_field_universe_composes_resolved_receiver_selector_demand() {
+    let mut getter = empty_decl(2, "cmd");
+    getter.kind = DeclKind::Method;
+    getter.flow_events = vec![FlowEvent::Return {
+        span: span(60, 68),
+        value_name: Some("self.cmd".to_string()),
+        value_text: Some("self.cmd".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("self.cmd"),
+    }];
+    let ws = stitch_idg(
+        vec![transfer_function_for(&getter)],
+        &MockResolver::new(),
+        &StaticF2S(AHashMap::from([(FuncId::new(2), SegmentId(0))])),
+    );
+    let requested = AHashSet::from([FieldPlaceKey {
+        seg_id: SegmentId(0),
+        func: FuncId::new(2),
+        base: "self".to_string(),
+        writes: false,
+    }]);
+    let mut index = FieldPlaceIndex::from_workspace_for_keys(&ws, &requested);
+    let mut universe = index.take_syntactic_field_universe();
+    assert!(universe.contains("cmd"));
+    assert!(!universe.contains("data.cmd"));
+
+    universe.record_argument_projection_demands(
+        &index,
+        &[Arc::new(FieldArgStitch {
+            caller: FuncId::new(1),
+            caller_seg: SegmentId(1),
+            callee: FuncId::new(2),
+            callee_seg: SegmentId(0),
+            actual_arg: "repo.data".to_string(),
+            param_name: "self".to_string(),
+            call_span: span(30, 45),
+            precision: Precision::Exact,
+            call_kind: bonsai_callgraph::EdgeKind::Direct,
+            arg_idx: u32::MAX,
+            param_idx: u32::MAX,
+            allow_out_of_order_source: false,
+        })],
+    );
+    assert!(
+        universe.contains("data.cmd"),
+        "receiver `repo.data` plus the resolved accessor read `self.cmd` proves the finite suffix `data.cmd`"
     );
 }
 
@@ -2727,6 +2785,231 @@ fn method_without_receiver_field_consumers_does_not_synthesize_receiver_field_fo
     assert!(
         !callee_places.iter().any(|place| place == "receiver.secret"),
         "ordinary method calls without receiver-field consumers must not synthesize receiver field writes: {callee_places:?}"
+    );
+}
+
+#[test]
+fn parameterless_receiver_accessor_forwards_the_exact_object_field() {
+    let mut caller = empty_decl(1, "caller");
+    caller.params = vec!["src".to_string()];
+    caller.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(10, 18),
+            target: "value.cmd".to_string(),
+            source_name: Some("src".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: None,
+        },
+        FlowEvent::Call {
+            span: span(30, 45),
+            name: "cmd".to_string(),
+            receiver: Some("value".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        },
+    ];
+
+    let mut getter = empty_decl(2, "cmd");
+    getter.kind = DeclKind::Method;
+    getter.implicit_receiver_names = vec!["self".to_string(), "super".to_string()];
+    getter.receiver_state_sources = vec!["self.cmd".to_string()];
+    getter.flow_events = vec![FlowEvent::Return {
+        span: span(60, 68),
+        value_name: Some("self.cmd".to_string()),
+        value_text: Some("self.cmd".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("self.cmd"),
+    }];
+
+    let f2s = StaticF2S(AHashMap::from([
+        (FuncId::new(1), SegmentId(0)),
+        (FuncId::new(2), SegmentId(1)),
+    ]));
+    let mut resolver = MockResolver::new();
+    resolver.add(FuncId::new(1), "cmd", vec![FuncId::new(2)]);
+
+    let ws = stitch_idg(
+        vec![transfer_function_for(&caller), transfer_function_for(&getter)],
+        &resolver,
+        &f2s,
+    );
+    let caller_segment = ws.segment(SegmentId(0)).expect("caller segment");
+    let getter_segment = ws.segment(SegmentId(1)).expect("getter segment");
+    assert!(
+        ws.cross_file().edges.iter().any(|edge| {
+            edge.edge.meta.kind == IdgEdgeKind::InterFieldCallArg
+                && place_storage_name(
+                    caller_segment,
+                    node_place(caller_segment, edge.edge.from).expect("caller place"),
+                )
+                .as_deref()
+                    == Some("value.cmd")
+                && place_storage_name(
+                    getter_segment,
+                    node_place(getter_segment, edge.edge.to).expect("getter place"),
+                )
+                .as_deref()
+                    == Some("self.cmd")
+        }),
+        "a parameter-less accessor must map value.cmd to its declared self.cmd receiver field: {:?}",
+        ws.cross_file().edges
+    );
+}
+
+#[test]
+fn returned_fields_flow_through_a_nested_call_receiver_without_collapsing_siblings() {
+    let inner_call_span = span(20, 24);
+    let inner_expression_span = span(15, 35);
+    let outer_call_span = span(40, 43);
+    let sink_span = span(80, 92);
+
+    let mut caller = empty_decl(1, "caller");
+    caller.params = vec!["input".to_string()];
+    // PHP and several other grammars lower the outer call before the nested
+    // receiver call. Receiver/result bridging is span-based and must not
+    // depend on FlowEvent order.
+    caller.flow_events = vec![
+        FlowEvent::Call {
+            span: outer_call_span,
+            name: "run".to_string(),
+            receiver: Some("Factory::wrap(input)".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        },
+        FlowEvent::Call {
+            span: inner_call_span,
+            name: "wrap".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(28, 33),
+                name: None,
+                value_text: "input".to_string(),
+                place: Some("input".to_string()),
+                source_names: vec!["input".to_string()],
+            }],
+        },
+    ];
+    let receiver_facts = vec![bonsai_lang_api::CallReceiverFact {
+        call_span: outer_call_span,
+        receiver_span: inner_expression_span,
+        value_flow: bonsai_lang_api::ExpressionFlow {
+            call_sites: vec![inner_expression_span],
+            ..Default::default()
+        },
+        role: bonsai_lang_api::CallReceiverRole::Value,
+        static_value: None,
+    }];
+
+    let mut wrap = empty_decl(2, "wrap");
+    wrap.params = vec!["data".to_string()];
+    wrap.flow_events = vec![FlowEvent::Return {
+        span: span(50, 70),
+        value_name: None,
+        value_text: None,
+        value_flow: bonsai_lang_api::ExpressionFlow {
+            aggregate_fields: vec![bonsai_lang_api::ExpressionField {
+                name: "data".to_string(),
+                value_span: Some(span(55, 68)),
+                value: bonsai_lang_api::ExpressionFlow {
+                    aggregate_fields: vec![
+                        bonsai_lang_api::ExpressionField {
+                            name: "cmd".to_string(),
+                            value_span: Some(span(58, 61)),
+                            value: bonsai_lang_api::ExpressionFlow::from_place("data.cmd"),
+                        },
+                        bonsai_lang_api::ExpressionField {
+                            name: "user".to_string(),
+                            value_span: Some(span(63, 67)),
+                            value: bonsai_lang_api::ExpressionFlow::from_place("data.user"),
+                        },
+                    ],
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        },
+    }];
+
+    let mut run = empty_decl(3, "run");
+    run.implicit_receiver_names = vec!["this".to_string()];
+    run.receiver_state_sources = vec!["this.data".to_string()];
+    run.flow_events = vec![FlowEvent::Call {
+        span: sink_span,
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            passing_mode: Default::default(),
+            span: span(85, 90),
+            name: None,
+            value_text: "this.data.cmd".to_string(),
+            place: Some("this.data.cmd".to_string()),
+            source_names: vec!["this.data.cmd".to_string()],
+        }],
+    }];
+
+    let caller_transfer = transfer_function_for_with_options_and_syntax_facts(
+        &caller,
+        &TransferOptions::default(),
+        &[],
+        &receiver_facts,
+    );
+    let temporary_receiver = caller_transfer
+        .call_sites
+        .iter()
+        .find(|site| site.site.0 == outer_call_span)
+        .and_then(|site| site.receiver_storage_base.as_deref());
+    assert!(
+        temporary_receiver.is_some_and(|base| base.starts_with("__bonsai_receiver_")),
+        "nested call receiver must lower to a span-derived storage identity: {temporary_receiver:?}"
+    );
+
+    let mut resolver = MockResolver::new();
+    resolver.add(FuncId::new(1), "wrap", vec![FuncId::new(2)]);
+    resolver.add(FuncId::new(1), "run", vec![FuncId::new(3)]);
+    let ws = stitch_idg_with_field_forwarding_mode(
+        vec![
+            caller_transfer,
+            transfer_function_for(&wrap),
+            transfer_function_for(&run),
+        ],
+        &resolver,
+        &StaticF2S(AHashMap::from([
+            (FuncId::new(1), SegmentId(0)),
+            (FuncId::new(2), SegmentId(1)),
+            (FuncId::new(3), SegmentId(2)),
+        ])),
+        true,
+        false,
+    );
+    let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
+    let cmd_seeds =
+        service.read_or_write_nodes_for_names(FuncId::new(2), &["__bonsai_return.data.cmd".to_string()]);
+    let user_seeds =
+        service.read_or_write_nodes_for_names(FuncId::new(2), &["__bonsai_return.data.user".to_string()]);
+    assert!(!cmd_seeds.is_empty() && !user_seeds.is_empty());
+
+    let reaches_sink = |seeds: &[WsNodeId]| {
+        service
+            .forward_closure(seeds)
+            .iter()
+            .any(|node| service.call_arg_identity(*node) == Some((FuncId::new(3), sink_span, 0)))
+    };
+    assert!(
+        reaches_sink(&cmd_seeds),
+        "the exact returned data.cmd field must reach the chained receiver's matching field read"
+    );
+    assert!(
+        !reaches_sink(&user_seeds),
+        "a sibling returned data.user field must not be promoted into data.cmd"
     );
 }
 

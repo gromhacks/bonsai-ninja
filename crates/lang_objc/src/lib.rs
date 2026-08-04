@@ -11,9 +11,9 @@ use bonsai_lang_api::{
         c_family_preproc_imports, collect_kinds, first_named_child_of_kind, language_from_pack, node_text,
         package_module_segments_with_workspace_prefix, parse_with, span_of,
     },
-    AdapterContext, AdapterError, AssignValueKind, DeclIndex, DeclKind, FieldWrite, FlowEvent,
-    GrammarHandler, ImportIndex, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath,
-    SyntaxSpecialForm, TypeAliasBinding,
+    AdapterContext, AdapterError, ArgumentPassingMode, AssignValueKind, DeclIndex, DeclKind, FieldWrite,
+    FlowEvent, GrammarHandler, ImportIndex, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    ModulePath, SyntaxSpecialForm, TypeAliasBinding,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -61,6 +61,11 @@ const HANDLER: GrammarHandler = GrammarHandler {
     do_kinds: &["do_statement"],
     loop_kinds: &[],
     call_kinds: &["call_expression", "message_expression"],
+    argument_passing_mode_extractor: Some(objc_argument_passing_mode),
+    call_ref_kinds: &["call_expression", "message_expression"],
+    member_expression_kinds: &["field_expression"],
+    subscript_expression_kinds: &["subscript_expression"],
+    syntax_error_tolerant_call_names: &["va_arg", "__builtin_va_arg"],
     assignment_kinds: &["assignment_expression", "init_declarator"],
     return_kinds: &["return_statement"],
     throw_kinds: &["throw_statement"],
@@ -77,12 +82,28 @@ const HANDLER: GrammarHandler = GrammarHandler {
     defer_kinds: &[],
     using_kinds: &["synchronized_statement", "autoreleasepool_statement"],
     special_forms: &[SyntaxSpecialForm::DirectCallArguments],
+    value_free_expression_kinds: &["sizeof_expression", "alignof_expression", "typeof_specifier"],
     method_receiver_param_index: None,
     implicit_receiver_names: &["self", "super"],
     implicit_receiver_prefixes: &[],
     tail_expression_returns: false,
     void_return_type_names: &[],
+    ..bonsai_lang_api::EMPTY_HANDLER
 };
+
+fn objc_argument_passing_mode(argument: Node<'_>, value: Node<'_>) -> ArgumentPassingMode {
+    if [argument, value].into_iter().any(|node| {
+        matches!(node.kind(), "unary_expression" | "pointer_expression") && {
+            let mut cursor = node.walk();
+            let has_address_of = node.children(&mut cursor).any(|child| child.kind() == "&");
+            has_address_of
+        }
+    }) {
+        ArgumentPassingMode::WriteBack
+    } else {
+        ArgumentPassingMode::Value
+    }
+}
 
 /// Zero-sized adapter handle; all state lives in the shared parser pack.
 #[derive(Debug, Default, Copy, Clone)]
@@ -118,7 +139,12 @@ impl LanguageAdapter for ObjCAdapter {
         vfs: &bonsai_lang_api::Vfs,
         tree: &Tree,
     ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
-        bonsai_lang_api::c_family_declaration_macro_recovery_edits(snapshot, vfs, tree)
+        bonsai_lang_api::c_family_declaration_macro_recovery_edits(
+            snapshot,
+            vfs,
+            tree,
+            &["va_arg", "__builtin_va_arg"],
+        )
     }
     fn capabilities(&self) -> LanguageCapabilities {
         // Macros: tree-sitter-objc parses `NSAssert(...)` / `NS_INLINE`

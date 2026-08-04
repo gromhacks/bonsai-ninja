@@ -38,9 +38,7 @@
 //! resolved call graph.
 
 use crate::{
-    text::{
-        normalise_qualified_text, qualified_access_bases, text_looks_qualified, value_bearing_identifier_text,
-    },
+    text::{normalise_qualified_text, qualified_access_bases, text_looks_qualified},
     tokens::{canonical_bare_name, qualified_wildcard_seed_matches, rhs_has_descendant_shape},
     TokenSet,
 };
@@ -134,7 +132,6 @@ fn walk_events(events: &[FlowEvent], tainted: &mut TokenSet) {
                 target,
                 source_name,
                 source_call,
-                source_call_args,
                 source_names,
                 ..
             } => {
@@ -150,27 +147,13 @@ fn walk_events(events: &[FlowEvent], tainted: &mut TokenSet) {
                         continue;
                     }
                 }
-                // G1 — assign-chain is monotonic: if ANY tainted arg
-                // is a positional arg of a call-RHS, optimistically
-                // taint the target. The interprocedural pass tightens
-                // this via function summaries; assign-chain favours
-                // over-approximation (security bias).
-                if source_call_args
+                // Pass through compiler-proven descendant operands without
+                // promoting the whole target. Display text in
+                // `source_call_args` is never reparsed here; adapters already
+                // lowered value-bearing places into `source_names`.
+                if source_names
                     .iter()
-                    .any(|arg| !arg.is_empty() && text_is_tainted(arg, tainted))
-                {
-                    insert_target_taint(tainted, target);
-                    if rhs_has_descendant_shape(source_names) {
-                        insert_descendant_target_taint(tainted, target);
-                    }
-                    continue;
-                }
-                // Pass through descendant taint without promoting the
-                // whole target — keeps `obj.*` precision when only a
-                // subtree of the call's argument was wildcard-tainted.
-                if source_call_args
-                    .iter()
-                    .any(|arg| !arg.is_empty() && actual_has_descendant_taint(arg, tainted))
+                    .any(|source| !source.is_empty() && actual_has_descendant_taint(source, tainted))
                 {
                     insert_descendant_target_taint(tainted, target);
                     continue;
@@ -274,8 +257,8 @@ fn walk_events(events: &[FlowEvent], tainted: &mut TokenSet) {
 
 /// True when `text` references any tainted identifier — by direct
 /// match, by qualified-access wildcard match (e.g. `obj.*`), by
-/// receiver-method projection (`tainted.method(...)`), or by any
-/// bare identifier token appearing outside string literals.
+/// receiver-method projection (`tainted.method(...)`), or by a canonical
+/// adapter-lowered place.
 fn text_is_tainted(text: &str, tainted: &TokenSet) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -293,14 +276,7 @@ fn text_is_tainted(text: &str, tainted: &TokenSet) -> bool {
     if text_looks_qualified(trimmed) && qualified_wildcard_seed_matches(&normalised, tainted) {
         return true;
     }
-    let qualified_bases = qualified_access_bases(trimmed);
-    identifier_tokens_outside_strings(&value_bearing_identifier_text(trimmed))
-        .iter()
-        .any(|token| {
-            // Skip the base of any qualified access — its presence is structural,
-            // and wildcard seeds were already checked above.
-            !qualified_bases.iter().any(|base| base == token) && tainted.contains(token.as_str())
-        })
+    normalised != trimmed && tainted.contains(&normalised)
 }
 
 /// True when `text`'s value comes from a wildcard-tainted ancestor
@@ -342,58 +318,6 @@ fn qualified_source_bases(source_names: &[String]) -> ahash::AHashSet<String> {
         }
     }
     bases
-}
-
-/// Lex `text` into identifier tokens, skipping content that lies
-/// inside single, double, or backtick string literals. Used so a
-/// stray `tainted` substring inside a quoted string doesn't masquerade
-/// as a real identifier reference.
-pub(crate) fn identifier_tokens_outside_strings(text: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for c in text.chars() {
-        if let Some(q) = quote {
-            // Inside a string literal: only watch for the closing quote and escape sequences.
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(c, '\'' | '"' | '`') {
-            // Flush any in-progress identifier before entering the string region.
-            push_identifier_token(&mut tokens, &mut current);
-            quote = Some(c);
-            continue;
-        }
-        if c == '_' || c.is_ascii_alphanumeric() {
-            current.push(c);
-        } else {
-            push_identifier_token(&mut tokens, &mut current);
-        }
-    }
-    push_identifier_token(&mut tokens, &mut current);
-    tokens
-}
-
-/// Push the in-progress buffer onto `tokens` as an identifier, but
-/// only when it starts with a letter or underscore. Numeric-leading
-/// runs are discarded — they're literal fragments, not identifiers.
-fn push_identifier_token(tokens: &mut Vec<String>, current: &mut String) {
-    if current
-        .chars()
-        .next()
-        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
-    {
-        tokens.push(std::mem::take(current));
-    } else {
-        current.clear();
-    }
 }
 
 // ---------------------------------------------------------------------------

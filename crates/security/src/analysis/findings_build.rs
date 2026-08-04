@@ -92,7 +92,11 @@ fn make_pattern_finding(
         cwe: sink_rule.cwe.clone(),
         owasp: sink_rule.owasp.clone(),
         status: FindingStatus::Unsanitized,
-        from_test: path_is_test_file_with_root(ws.db().workspace_root().as_deref(), &snk.file),
+        from_test: path_is_test_file_with_root(
+            ws.db().workspace_root().as_deref(),
+            &snk.file,
+            &pack.metadata.test_path_patterns,
+        ),
     })
 }
 
@@ -100,7 +104,11 @@ pub(super) fn rule_is_pattern_only_finding(rule: &Rule) -> bool {
     rule.kind == RuleKind::Sink
         && rule.enabled
         && !rule_has_taint_predicate(rule)
-        && (rule.category.as_deref() == Some("source-independent")
+        && (rule
+            .analysis_semantics
+            .as_ref()
+            .and_then(|semantics| semantics.non_taint_evaluation)
+            == Some(NonTaintEvaluation::Pattern)
             || rule.match_spec.kind == MatchKind::Missing)
 }
 
@@ -109,7 +117,11 @@ pub(super) fn rule_is_non_taint_sink(rule: &Rule) -> bool {
         || (rule.kind == RuleKind::Sink
             && rule.enabled
             && !rule_has_taint_predicate(rule)
-            && rule.category.as_deref() == Some("lifecycle-audit"))
+            && rule
+                .analysis_semantics
+                .as_ref()
+                .and_then(|semantics| semantics.non_taint_evaluation)
+                .is_some())
 }
 
 pub(super) fn rule_has_taint_predicate(rule: &Rule) -> bool {
@@ -250,13 +262,16 @@ pub(super) fn make_finding(
                 });
             let dataflow_connected =
                 sanitizer_call_overlaps_tainted_call(sanitizer_match, context.tainted_call_spans)
-                    || sanitizer_char_allowlist_guards_tainted_call(
-                        sanitizer_rule,
-                        sanitizer_match,
-                        context.tainted_call_spans,
-                    )
                     || nested_in_tainted_sink_arg
                     || sanitizer_assignment_output_feeds_sink_arg(
+                        context.ws,
+                        hop_func,
+                        sanitizer_match,
+                        snk,
+                        skr,
+                        &context.sink_tainted_args,
+                    )
+                    || sanitizer_guarded_value_filter_output_feeds_sink_arg(
                         context.ws,
                         hop_func,
                         sanitizer_match,
@@ -279,13 +294,20 @@ pub(super) fn make_finding(
                     || xxe_factory_hardening_sanitizes_sink(
                         context.ws,
                         context.sink_func,
+                        &pack.metadata,
                         sanitizer_rule,
                         skr,
                         sanitizer_match,
                         snk,
                     );
             let post_sink_path_construction_containment = dataflow_connected
-                && post_sink_path_construction_containment_allowed(sanitizer_rule, skr, sanitizer_match, snk);
+                && post_sink_path_construction_containment_allowed(
+                    &pack.metadata,
+                    sanitizer_rule,
+                    skr,
+                    sanitizer_match,
+                    snk,
+                );
             if !sanitizer_can_attach(
                 src,
                 context.source_func,
@@ -315,7 +337,7 @@ pub(super) fn make_finding(
             if seen_keys.insert(dedup_key) {
                 if let Some(rule) = sanitizer_rule {
                     let matched = FindingMatch::from_rule_match(sanitizer_match, rule);
-                    if rule_is_taint_preserving_transform(rule) {
+                    if rule_is_taint_preserving_transform(rule, &pack.metadata) {
                         taint_transforms_seen.push(matched);
                     } else {
                         sanitizers_seen.push(matched);
@@ -324,23 +346,9 @@ pub(super) fn make_finding(
             }
         }
     }
-    if let Some(guard) = dev_only_environment_guard_sanitizer(context.ws, src)
-        .or_else(|| dev_only_environment_guard_sanitizer(context.ws, snk))
+    if let Some(selection) =
+        finite_literal_selection_sanitizer(context.ws, snk, skr, &context.sink_tainted_args)
     {
-        let dedup_key = (guard.file.clone(), guard.line, guard.column);
-        if seen_keys.insert(dedup_key) {
-            sanitizers_seen.push(guard);
-        }
-    }
-    if let Some(allowlist) =
-        finite_literal_map_lookup_allowlist_sanitizer(context.ws, snk, &context.sink_tainted_args)
-    {
-        let dedup_key = (allowlist.file.clone(), allowlist.line, allowlist.column);
-        if seen_keys.insert(dedup_key) {
-            sanitizers_seen.push(allowlist);
-        }
-    }
-    if let Some(selection) = finite_literal_selection_sanitizer(context.ws, snk, &context.sink_tainted_args) {
         let dedup_key = (selection.file.clone(), selection.line, selection.column);
         if seen_keys.insert(dedup_key) {
             sanitizers_seen.push(selection);
@@ -368,18 +376,6 @@ pub(super) fn make_finding(
         );
         if seen_keys.insert(dedup_key) {
             sanitizers_seen.push(parameterized_query);
-        }
-    }
-    if let Some(allowlist) = guarded_char_append_allowlist_sanitizer(
-        context.ws,
-        context.sink_func,
-        snk,
-        skr.tag.as_deref(),
-        &context.sink_tainted_args,
-    ) {
-        let dedup_key = (allowlist.file.clone(), allowlist.line, allowlist.column);
-        if seen_keys.insert(dedup_key) {
-            sanitizers_seen.push(allowlist);
         }
     }
     if let Some(path_guard) = path_containment_guard_sanitizer(
@@ -467,18 +463,6 @@ pub(super) fn make_finding(
             sanitizers_seen.push(path_guard);
         }
     }
-    if let Some(regex_guard) = python_compiled_regex_guard_sanitizer(
-        context.ws,
-        context.sink_func,
-        snk,
-        skr,
-        &context.sink_tainted_args,
-    ) {
-        let dedup_key = (regex_guard.file.clone(), regex_guard.line, regex_guard.column);
-        if seen_keys.insert(dedup_key) {
-            sanitizers_seen.push(regex_guard);
-        }
-    }
     if let Some(configured_factory_guard) =
         configured_argument_factory_guard_sanitizer(context.ws, context.sink_func, snk, skr)
     {
@@ -542,42 +526,14 @@ pub(super) fn make_finding(
             sanitizers_seen.push(reconstruction_guard);
         }
     }
-    if let Some(jwt_guard) =
-        go_jwt_inline_keyfunc_algorithm_guard_sanitizer(context.ws, context.sink_func, snk, skr)
-    {
-        let dedup_key = (jwt_guard.file.clone(), jwt_guard.line, jwt_guard.column);
+    if let Some(compiler_guard) = compiler_guard_sanitizer(context.ws, context.sink_func, snk, skr) {
+        let dedup_key = (
+            compiler_guard.file.clone(),
+            compiler_guard.line,
+            compiler_guard.column,
+        );
         if seen_keys.insert(dedup_key) {
-            sanitizers_seen.push(jwt_guard);
-        }
-    }
-    if let Some(html_helper) = js_ts_local_html_escape_helper_sanitizer(
-        context.ws,
-        context.sink_func,
-        snk,
-        skr,
-        &context.sink_tainted_args,
-    ) {
-        let dedup_key = (html_helper.file.clone(), html_helper.line, html_helper.column);
-        if seen_keys.insert(dedup_key) {
-            sanitizers_seen.push(html_helper);
-        }
-    }
-    if let Some(html_helper) = java_local_html_escape_helper_return_sanitizer(
-        context.ws,
-        context.sink_func,
-        snk,
-        skr,
-        &context.sink_tainted_args,
-    ) {
-        let dedup_key = (html_helper.file.clone(), html_helper.line, html_helper.column);
-        if seen_keys.insert(dedup_key) {
-            sanitizers_seen.push(html_helper);
-        }
-    }
-    if let Some(xml_guard) = go_xml_decoder_hardening_sanitizer(context.ws, context.sink_func, snk, skr) {
-        let dedup_key = (xml_guard.file.clone(), xml_guard.line, xml_guard.column);
-        if seen_keys.insert(dedup_key) {
-            sanitizers_seen.push(xml_guard);
+            sanitizers_seen.push(compiler_guard);
         }
     }
     if let Some(eq_guard) = nosql_eq_filter_wrapper_sanitizer(
@@ -593,52 +549,11 @@ pub(super) fn make_finding(
             sanitizers_seen.push(eq_guard);
         }
     }
-    if let Some(ldap_guard) = local_ldap_escape_helper_sanitizer(
-        context.ws,
-        context.sink_func,
-        snk,
-        skr,
-        &context.sink_tainted_args,
-    ) {
-        let dedup_key = (ldap_guard.file.clone(), ldap_guard.line, ldap_guard.column);
-        if seen_keys.insert(dedup_key) {
-            sanitizers_seen.push(ldap_guard);
-        }
-    }
-    if let Some(redirect_guard) = go_same_origin_redirect_helper_guard_sanitizer(
-        context.ws,
-        context.sink_func,
-        snk,
-        skr,
-        &context.sink_tainted_args,
-    ) {
-        let dedup_key = (
-            redirect_guard.file.clone(),
-            redirect_guard.line,
-            redirect_guard.column,
-        );
-        if seen_keys.insert(dedup_key) {
-            sanitizers_seen.push(redirect_guard);
-        }
-    }
-    if let Some(ssrf_guard) = python_url_ssrf_guard_sanitizer(
-        context.ws,
-        context.sink_func,
-        snk,
-        skr,
-        &context.sink_tainted_args,
-    ) {
-        let dedup_key = (ssrf_guard.file.clone(), ssrf_guard.line, ssrf_guard.column);
-        if seen_keys.insert(dedup_key) {
-            sanitizers_seen.push(ssrf_guard);
-        }
-    }
-
     if source_sink_pair_is_low_signal(&src_match, source_rule, skr) {
         return None;
     }
 
-    let status = compute_status(&sanitizers_seen, skr.tag.as_deref());
+    let status = compute_status(&pack.metadata, &sanitizers_seen, skr.tag.as_deref());
 
     let mut sink_match = FindingMatch::from_rule_match(report_sink, skr);
     sink_match.tainted_args = context.sink_tainted_args;
@@ -648,12 +563,13 @@ pub(super) fn make_finding(
     // to drop these for "production review" reports without
     // rebuilding the analysis.
     let root = context.ws.db().workspace_root();
-    let from_test = path_is_test_file_with_root(root.as_deref(), &src.file)
-        || path_is_test_file_with_root(root.as_deref(), &report_sink.file)
+    let test_patterns = &pack.metadata.test_path_patterns;
+    let from_test = path_is_test_file_with_root(root.as_deref(), &src.file, test_patterns)
+        || path_is_test_file_with_root(root.as_deref(), &report_sink.file, test_patterns)
         || context
             .taint_path
             .iter()
-            .any(|step| path_is_test_file_with_root(root.as_deref(), &step.file));
+            .any(|step| path_is_test_file_with_root(root.as_deref(), &step.file, test_patterns));
 
     // Trust-aware severity. Local CLI/env/file input remains relevant for
     // privileged or multi-user programs, but it is capped at medium so it
@@ -690,7 +606,7 @@ pub(super) fn make_finding(
     })
 }
 
-fn rule_is_taint_preserving_transform(rule: &Rule) -> bool {
+fn rule_is_taint_preserving_transform(rule: &Rule, metadata: &RulepackMetadata) -> bool {
     let has_passthrough_semantics = rule.taint_semantics.as_ref().is_some_and(|semantics| {
         !semantics.call_result_passthrough_args.is_empty() || semantics.call_result_passthrough_receiver
     });
@@ -698,5 +614,5 @@ fn rule_is_taint_preserving_transform(rule: &Rule) -> bool {
         && rule
             .tag
             .as_deref()
-            .is_some_and(sanitizer_tag_is_recognized_non_crediting)
+            .is_some_and(|tag| sanitizer_tag_is_recognized_non_crediting(metadata, tag))
 }

@@ -345,11 +345,7 @@ fn drop_shadowed_assignment_args(args: &mut Vec<ArgFact>) {
 /// segment after a member separator — `Runtime.exec` shadows
 /// `exec`, `os::system` shadows `system`.
 fn arg_callees_shadow(real: &str, assignment: &str) -> bool {
-    real == assignment
-        || real
-            .rsplit(['.', ':', '\\'])
-            .next()
-            .is_some_and(|tail| assignment.rsplit(['.', ':', '\\']).next() == Some(tail))
+    bonsai_common::qualified_names_match(real, assignment)
 }
 
 #[cfg(test)]

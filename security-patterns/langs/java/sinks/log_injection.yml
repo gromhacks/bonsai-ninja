@@ -141,7 +141,7 @@
           log.info("actor=" + input);
         }
       }
-    expect_match_text: [log.info]
+    expect_match_text: [this.log.info]
   - name: instance logger info literal negative
     code: |
       import org.slf4j.Logger;
@@ -215,7 +215,7 @@
           log.warn("actor=" + input);
         }
       }
-    expect_match_text: [log.warn]
+    expect_match_text: [this.log.warn]
   - name: instance logger warn literal negative
     code: |
       import org.slf4j.Logger;
@@ -317,7 +317,7 @@
           log.error("actor=" + input);
         }
       }
-    expect_match_text: [log.error]
+    expect_match_text: [this.log.error]
   - name: instance logger error literal negative
     code: |
       import org.slf4j.Logger;
@@ -443,7 +443,7 @@
           log.info("audit event recorded");
         }
       }
-    expect_match_text: [log.info]
+    expect_match_text: [this.log.info]
   - name: non handler literal info negative
     code: |
       import org.slf4j.Logger;

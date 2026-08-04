@@ -3,8 +3,8 @@ use bonsai_common::{FileId, SymbolId};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of,
-        with_fn_kinds_and_implicit_receivers,
+        call_arg_from_nodes_with_handler, collect_kinds, first_named_child_of_kind, language_from_pack,
+        node_text, normalize_call_name_whitespace, parse_with, span_of,
     },
     AdapterContext, AdapterError, CharacterConstraintDomain, CharacterConstraintFact,
     CharacterConstraintOutput, CharacterSubstitutionDomain, CharacterSubstitutionFact, ConditionEquality,
@@ -12,8 +12,9 @@ use bonsai_lang_api::{
     FiniteLiteralSelectionFact, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
     LanguageCapabilities, LanguageId, SameOriginPathConstraintFact, StaticScalarValue, StaticStringMapEntry,
     StaticStringMapFact, StringCompositionFact, StringCompositionPart, TypeAliasBinding, Visibility,
+    EMPTY_HANDLER,
 };
-use bonsai_lang_api::{CallArg, DeclKind, FlowEvent};
+use bonsai_lang_api::{CallArg, CallKind, DeclKind, FlowEvent};
 use std::collections::{HashMap, HashSet};
 use tree_sitter::{Language, Node, Tree};
 
@@ -21,21 +22,127 @@ pub const LANG_ID: LanguageId = LanguageId::new("javascript");
 pub const JS_TS_MODULE_RESOLUTION_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs"];
 const PACK_NAME: &str = "javascript";
 const HANDLER: GrammarHandler = GrammarHandler {
-    call_kinds: &["new_expression"],
+    fn_kinds: &[
+        "function_declaration",
+        "function_expression",
+        "method_definition",
+        "generator_function_declaration",
+        "generator_function",
+    ],
+    class_kinds: &["class_declaration"],
+    class_decl_kinds: &[("class_declaration", DeclKind::Class)],
+    method_kinds: &["method_definition"],
+    method_context_kinds: &["class_declaration"],
+    if_kinds: &["if_statement", "switch_statement"],
+    for_kinds: &["for_statement"],
+    foreach_kinds: &["for_in_statement"],
+    while_kinds: &["while_statement"],
+    do_kinds: &["do_statement"],
+    call_kinds: &["call_expression", "new_expression"],
+    pseudo_call_extractor: Some(extract_ecmascript_pseudo_call),
+    syntax_event_extractor: None,
+    argument_passing_mode_extractor: None,
+    call_ref_kinds: &["call_expression", "new_expression"],
+    member_expression_kinds: &["member_expression"],
+    subscript_expression_kinds: &["subscript_expression"],
     constructor_names: &["constructor"],
-    ..with_fn_kinds_and_implicit_receivers(
-        &[
-            "function_declaration",
-            "function_expression",
-            "method_definition",
-            // Generator forms: `function* gen() { ... }`.
-            "generator_function_declaration",
-            "generator_function",
-        ],
-        &["this"],
-        &[],
-    )
+    runtime_type_guard_operators: &["instanceof"],
+    runtime_typeof_operators: &["typeof"],
+    runtime_type_equality_operators: &["==", "==="],
+    value_free_unary_operators: &["typeof"],
+    assignment_kinds: &[
+        "assignment_expression",
+        "augmented_assignment_expression",
+        "variable_declarator",
+        "variable_declaration",
+    ],
+    return_kinds: &["return_statement"],
+    throw_kinds: &["throw_statement"],
+    lambda_kinds: &["arrow_function", "function_expression"],
+    try_kinds: &["try_statement"],
+    catch_kinds: &["catch_clause"],
+    finally_kinds: &["finally_clause"],
+    break_kinds: &["break_statement"],
+    continue_kinds: &["continue_statement"],
+    yield_kinds: &["yield_expression"],
+    await_kinds: &["await_expression"],
+    using_kinds: &["with_statement"],
+    implicit_receiver_names: &["this"],
+    ..EMPTY_HANDLER
 };
+
+/// Lower JSX/TSX opening elements to their component-call semantics. The
+/// concrete grammar vocabulary lives here and is shared only with the
+/// TypeScript adapter, which uses the same ECMAScript frontend shapes.
+pub fn extract_ecmascript_pseudo_call(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<FlowEvent> {
+    if !matches!(node.kind(), "jsx_self_closing_element" | "jsx_opening_element") {
+        return None;
+    }
+    let name_node = node.child_by_field_name("name").or_else(|| {
+        let mut cursor = node.walk();
+        let name = node.named_children(&mut cursor).find(|child| {
+            matches!(
+                child.kind(),
+                "identifier"
+                    | "nested_identifier"
+                    | "member_expression"
+                    | "jsx_namespace_name"
+                    | "jsx_member_expression"
+            )
+        });
+        name
+    })?;
+    let component = node_text(&name_node, src).trim().to_string();
+    if component.is_empty() {
+        return None;
+    }
+
+    let mut args = Vec::new();
+    let mut cursor = node.walk();
+    for attribute in node.named_children(&mut cursor) {
+        if attribute.kind() != "jsx_attribute" {
+            continue;
+        }
+        let attr_name = attribute
+            .named_child(0)
+            .map(|name| node_text(&name, src).trim().to_string())
+            .unwrap_or_default();
+        let name = (!attr_name.is_empty()).then_some(attr_name.clone());
+        if let Some(wrapper) = attribute.named_child(1) {
+            let value = wrapper.named_child(0).unwrap_or(wrapper);
+            if let Some(argument) =
+                call_arg_from_nodes_with_handler(attribute, value, file, src, name, handler)
+            {
+                args.push(argument);
+            }
+        } else if !attr_name.is_empty() {
+            // Boolean JSX attributes are the exact literal `true`; they carry
+            // no value dependency even though the rendering uses the name.
+            args.push(CallArg {
+                passing_mode: Default::default(),
+                span: span_of(file, &attribute),
+                name,
+                place: None,
+                source_names: Vec::new(),
+                value_text: normalize_call_name_whitespace(&attr_name),
+            });
+        }
+    }
+
+    Some(FlowEvent::Call {
+        span: span_of(file, &node),
+        receiver: None,
+        receiver_types: Vec::new(),
+        name: component,
+        call_kind: CallKind::Function,
+        args,
+    })
+}
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct JavaScriptAdapter;
@@ -70,6 +177,10 @@ impl LanguageAdapter for JavaScriptAdapter {
             constructor_method_names: &["constructor"],
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["this"],
+            receiver_type_syntax: bonsai_lang_api::ReceiverTypeSyntax {
+                wrapper_calls: &[],
+                class_object_suffixes: &[".constructor"],
+            },
             module_resolution_extensions: JS_TS_MODULE_RESOLUTION_EXTENSIONS,
             ..LanguageCapabilities::partial_baseline()
         }
@@ -237,6 +348,7 @@ pub fn populate_ecmascript_compiler_facts(index: &mut DeclIndex, tree: &Tree, fi
         tree,
         file,
         src,
+        &HANDLER,
         ecmascript_static_scalar,
     );
 }
@@ -457,7 +569,9 @@ fn ecmascript_same_origin_path_constraints(
                 facts.push(SameOriginPathConstraintFact {
                     function_span: decl.span,
                     guard_span: span_of(file, &expression),
-                    input_param_index,
+                    input_place: parameter.clone(),
+                    input_param_index: Some(input_param_index),
+                    provider_call: None,
                     rejects_scheme: true,
                     rejects_authority: true,
                     requires_absolute_path,
@@ -2660,7 +2774,7 @@ fn merge_ecmascript_condition_junction(
 fn ecmascript_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
     ConditionOperandFact {
         span: span_of(file, &node),
-        value_flow: bonsai_lang_api::kit::expression_flow_from_node(node, file, src),
+        value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(node, file, src, &HANDLER),
         static_string: ecmascript_static_string_literal(node, src),
         static_value: ecmascript_static_scalar(node, src),
     }
@@ -4028,7 +4142,7 @@ fn rewrite_javascript_super_constructor_invocations_in_events(
                         name.push_str(super_ctor);
                         *receiver = Some("super".to_string());
                         receiver_types.clear();
-                        *call_kind = bonsai_lang_api::CallKind::Method;
+                        *call_kind = bonsai_lang_api::CallKind::Constructor;
                     }
                 }
             }

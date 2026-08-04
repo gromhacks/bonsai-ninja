@@ -66,6 +66,23 @@ before opening the IDG, batch-resolve matching AST spans, and reuse a sparse
 backward target-demand proof. Reintroducing one unrestricted closure per
 lexical hit is both a latency and peak-memory regression.
 
+Entry-rooted closures are scheduled from the measured non-reclaimable
+linkage/output reserve plus a bounded sparse frontier per worker. Do not size
+this phase from live RSS: the external-memory IDG's clean file-backed pages are
+reclaimable, and charging them as committed memory serializes identical work
+according to page-cache history. Conversely, do not introduce a worker floor
+that ignores the configured budget. Subject to CPU availability, the current
+resource-profile tests pin maximum concurrency of ten workers at 3 GiB, two
+at 2 GiB, and one at 1 GiB; all configurations run the same entries and fixed
+points.
+
+Raw-flow rendering is part of the same gate. Row-size costs are precomputed by
+the closure workers and reused by pagination; page planning must not serialize
+or rescan every flow. Only the requested raw-taint page is formatted and
+cached. Eagerly formatting future pages is unrelated work and is prohibited
+for this mode; the complete deterministic page/cursor stream remains
+available on demand.
+
 The same gate protects two warm-start complexity bounds. Dense IDG compiler
 headers remain fixed-width and buffered rather than being decoded through a
 generic row/object codec, and occurrence deduplication remains an exact hash
@@ -82,6 +99,15 @@ calibrate `BONSAI_ES_WARM_INDEX_MAX_SECS`,
 a regression pass: record the host, source-file count, cold/warm cache state,
 wall time, physical footprint/RSS, swaps, and completeness, then review the
 phase/allocation change.
+
+The 2026-08-03 reference pass completed all five tests in 221.99 seconds:
+fresh-cache production taint 30.90 seconds, semantic generation validation
+5.40 seconds, warm reuse 2.44 seconds, default inspect 9.86 seconds, broad raw
+taint inspect 29.48 seconds, warm production taint 28.56 seconds, and every
+navigation/inventory command below 30 seconds. The explicit empty-cache
+`index --semantic` bulk prewarm is measured separately because normal commands
+do not force it; the current reference is 1,603.47 seconds at about 1.06 GiB
+maximum RSS.
 
 The integration test deliberately does not write the multi-gigabyte native
 Elasticsearch artifact on every CI runner. Changes to native export, compiler

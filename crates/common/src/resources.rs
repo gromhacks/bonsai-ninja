@@ -38,6 +38,16 @@ const SEMANTIC_QUERY_TRANSIENT_BYTES: u64 = 384 * BYTES_PER_MIB;
 // sources keep the heavier profile above because they intentionally propagate
 // into every resolved caller.
 const ROOTED_SEMANTIC_QUERY_TRANSIENT_BYTES: u64 = 128 * BYTES_PER_MIB;
+// Rooted closures read persisted IDG relations through reclaimable file-backed
+// pages. Charging those pages as permanent live RSS makes concurrency depend
+// on whichever relation happened to be touched most recently and serialized
+// Elasticsearch's exact inspect query behind one worker. Reserve the measured
+// non-reclaimable compiler/linkage/output working set instead; the remaining
+// budget schedules bounded sparse closure frontiers. Subject to available CPU
+// parallelism, a 3 GiB machine admits up to ten 128 MiB closures, a 2 GiB
+// machine up to two, and a 1 GiB machine remains safely serial. This changes
+// scheduling only.
+const ROOTED_SEMANTIC_QUERY_RESIDENT_RESERVE_BYTES: u64 = 7 * BYTES_PER_GIB / 4;
 const SEMANTIC_QUERY_MIN_RESERVE_BYTES: u64 = 768 * BYTES_PER_MIB;
 const WEIGHTED_COMPILER_UNIT_BASE_BYTES: u64 = 64 * BYTES_PER_MIB;
 const WEIGHTED_COMPILER_SOURCE_AMPLIFICATION: u64 = 40;
@@ -132,28 +142,24 @@ pub fn semantic_query_worker_count(cpu_workers: usize) -> usize {
     memory_bounded_worker_count(cpu_workers, SEMANTIC_QUERY_TRANSIENT_BYTES, resident)
 }
 
-/// Bound independent entry-rooted semantic closures by live RSS.
+/// Bound independent entry-rooted semantic closures by their non-reclaimable
+/// resident profile.
 ///
-/// This is a scheduling distinction, not a semantic shortcut: each worker
-/// still runs one complete context-matched fixed point, and constrained hosts
-/// execute the identical entry sequence serially.
+/// Persisted IDG relation pages are file-backed and reclaimable, so live RSS
+/// is not a stable measure of memory committed by this phase. This is a
+/// scheduling distinction, not a semantic shortcut: each worker still runs
+/// one complete context-matched fixed point, and constrained hosts execute the
+/// identical entry sequence with less concurrency.
 #[must_use]
 pub fn rooted_semantic_query_worker_count(cpu_workers: usize) -> usize {
-    let resident = current_process_resident_bytes()
-        .unwrap_or(SEMANTIC_QUERY_MIN_RESERVE_BYTES)
-        .max(SEMANTIC_QUERY_MIN_RESERVE_BYTES);
-    rooted_semantic_query_worker_count_for_limit(cpu_workers, effective_memory_limit_bytes(), resident)
+    rooted_semantic_query_worker_count_for_limit(cpu_workers, effective_memory_limit_bytes())
 }
 
-fn rooted_semantic_query_worker_count_for_limit(
-    cpu_workers: usize,
-    limit: Option<u64>,
-    resident_bytes: u64,
-) -> usize {
+fn rooted_semantic_query_worker_count_for_limit(cpu_workers: usize, limit: Option<u64>) -> usize {
     worker_count_for_limit(
         cpu_workers,
         ROOTED_SEMANTIC_QUERY_TRANSIENT_BYTES,
-        resident_bytes.max(SEMANTIC_QUERY_MIN_RESERVE_BYTES),
+        ROOTED_SEMANTIC_QUERY_RESIDENT_RESERVE_BYTES,
         limit,
     )
 }
@@ -689,11 +695,15 @@ mod tests {
     #[test]
     fn rooted_queries_use_the_measured_lighter_concurrency_profile() {
         assert_eq!(
-            rooted_semantic_query_worker_count_for_limit(32, Some(3 * BYTES_PER_GIB), 5 * BYTES_PER_GIB / 2,),
-            4
+            rooted_semantic_query_worker_count_for_limit(32, Some(3 * BYTES_PER_GIB)),
+            10
         );
         assert_eq!(
-            rooted_semantic_query_worker_count_for_limit(32, Some(BYTES_PER_GIB), BYTES_PER_GIB),
+            rooted_semantic_query_worker_count_for_limit(32, Some(2 * BYTES_PER_GIB)),
+            2
+        );
+        assert_eq!(
+            rooted_semantic_query_worker_count_for_limit(32, Some(BYTES_PER_GIB)),
             1,
             "a constrained host must execute the same closures serially"
         );

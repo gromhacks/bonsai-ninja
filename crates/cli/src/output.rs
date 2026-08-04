@@ -219,3 +219,31 @@ fn html_header(theme: Theme) -> String {
          </style></head><body><header><div class=\"mark\">盆</div><div><h1>bonsai-ninja</h1><div class=\"sub\">static code intelligence report</div></div><div class=\"theme\">{theme_name} theme</div></header><main><pre>"
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{html_header, write_html_escaped};
+    use crate::theme::Theme;
+
+    #[test]
+    fn html_writer_escapes_source_and_renderer_markup() {
+        let mut rendered = Vec::new();
+        write_html_escaped(&mut rendered, br#"if a < b && value > 0 { "<tag>" }"#)
+            .expect("escape HTML output");
+        assert_eq!(
+            String::from_utf8(rendered).expect("escaped output is utf8"),
+            r#"if a &lt; b &amp;&amp; value &gt; 0 { "&lt;tag&gt;" }"#
+        );
+    }
+
+    #[test]
+    fn every_theme_builds_a_responsive_standalone_header() {
+        for theme in [Theme::Moss, Theme::EarthyDark, Theme::Dracula, Theme::RetroAmber] {
+            let header = html_header(theme);
+            assert!(header.starts_with("<!doctype html>"));
+            assert!(header.contains("<meta name=\"viewport\""));
+            assert!(header.contains("@media(max-width:640px)"));
+            assert!(header.ends_with("<main><pre>"));
+        }
+    }
+}

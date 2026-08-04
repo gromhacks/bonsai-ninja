@@ -13,21 +13,21 @@ established a **baseline** (a parameter flowing *directly* into a real enabled
 sink fires ≥1 finding) so that a dimension FAIL is a genuine engine gap and not a
 missing sink rule or a fixture-quality artifact.
 
-Current rule-example gate: 2026-07-25. The hand-built dimension matrix and
-the investigation notes below were last refreshed on 2026-06-16; they are
-retained as historical evidence of the fixes, not as a substitute for the
-generated conformance and replay gates.
+This page is a historical audit record. The hand-built dimension matrix and
+the investigation notes below were last refreshed on 2026-06-16; the latest
+rule-example run recorded here was 2026-07-25. Do not use dated totals from
+this page as release status. The generated conformance and replay gates are
+authoritative.
 
 ## Authoritative rule-example coverage
 
 `security <pack> pack --validate --taint-replay` replays every taint-dependent
 rule's positive `match_example` through live taint across all 21 languages.
 
-- **Current result: 0 misses, 0 errors, and 0 warnings** across 7,152
-  rules and 10,499 examples (5,999 rules and 10,084 examples enabled).
-  The three misses recorded by the 2026-06-16 audit have since been closed.
-  Run the command above rather than copying these counts into another status
-  page.
+- **Recorded 2026-07-25 result:** 0 misses, 0 errors, and 0 warnings across
+  7,152 rules and 10,499 examples (5,999 rules and 10,084 examples enabled).
+  The three misses recorded by the 2026-06-16 audit had been closed at that
+  point. Run the command above for current counts and status.
 
 ## Engine-dimension matrix
 
@@ -129,9 +129,9 @@ path, so there is no import to omit.
 | python | yes | PASS | single-seg pkg `os`; `import_matches_package` prefix |
 | javascript | yes | PASS | `child_process.exec` prefix-matches `child_process` |
 | typescript | yes | PASS | same |
-| go | yes | PASS | path-package-tail rule (`os/exec` tail `exec` == call head) |
+| go | yes | PASS | metadata-declared package-tail binding (`os/exec` tail `exec` == call head) |
 | rust | yes | PASS | `std::process::Command::new` matches `std::` prefix |
-| java | yes | PASS | `java.sql.Statement.execute` (attr-form FQN callee) credited |
+| java | yes | PASS | FQN calls and FQN typed-local receiver evidence are adapter-lowered package facts |
 | csharp | yes | PASS | `System.Diagnostics.Process.Start` prefix |
 | kotlin | yes | PASS | incl `java.lang.Runtime` FQN (commit 849d9e7) |
 | scala | yes | PASS | `scala.sys.process.Process.apply` prefix |
@@ -155,13 +155,6 @@ requires loosening the gate, against the standing directive):
   `use` import, so it is not FQN-gate-specific. Real PHP code `use`s the class and
   calls the short form, which fires. Reconstructing last-two-segments would touch
   shared candidate generation + the gate's deliberately case-sensitive tail-match.
-- **java FQN-typed-local (no import)** — `java.sql.Statement stmt = ...;
-  stmt.execute(x)` with no `import java.sql`: the local IS typed `Statement`
-  (canonical_java_type_name strips the FQN tail), but the `java.sql`-gated rule has
-  no package evidence (an FQN *type reference* is not a gate candidate). Crediting
-  arbitrary FQN type refs as package evidence would loosen the gate. Real code
-  imports `java.sql`, which fires.
-
 **Conclusion: the package gate is sound and complete for every realistic
 FQN-no-import case across all 21 languages.** The residuals are precision-over-
 recall choices mandated by the do-not-loosen directive.

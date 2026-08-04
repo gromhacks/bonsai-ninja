@@ -128,6 +128,7 @@ fn compile_rule_produces_non_empty_inspect_args_for_sink() {
         modules: vec![],
         manifests: vec![],
         lockfiles: vec![],
+        package_matching: Default::default(),
         payload_types: vec![],
         match_spec: MatchSpec {
             kind: MatchKind::Call,

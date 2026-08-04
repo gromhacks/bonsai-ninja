@@ -38,6 +38,13 @@ impl bonsai_idg::workspace_adapter::IdgFileSemanticsProvider for CompilerIdgFile
             .map(|adapter| adapter.language_id().as_str())
     }
 
+    fn capabilities(&self, file: bonsai_common::FileId) -> bonsai_lang_api::LanguageCapabilities {
+        self.db
+            .adapter_for(file)
+            .map(|adapter| adapter.capabilities())
+            .unwrap_or_else(bonsai_lang_api::LanguageCapabilities::unsupported)
+    }
+
     fn path(&self, file: bonsai_common::FileId) -> Option<String> {
         self.db
             .vfs()

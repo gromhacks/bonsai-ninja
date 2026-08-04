@@ -621,6 +621,7 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_db",
  "bonsai_lang_api",
+ "bonsai_testkit",
  "bonsai_vfs",
  "tree-sitter",
 ]

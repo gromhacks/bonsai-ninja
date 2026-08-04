@@ -207,6 +207,40 @@ class C {
 }
 
 #[test]
+fn nested_qualified_receiver_type_preserves_its_owner() {
+    let db = db_with(
+        r#"
+class App {
+  record Envelope(String cmd) {}
+}
+
+class Pipeline {
+  String run(App.Envelope envelope) {
+    return envelope.cmd();
+  }
+}
+"#,
+    );
+    let global = db.global_index();
+    let mut calls = Vec::new();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if decl.name == "run" {
+                collect_calls(&decl.flow_events, &mut calls);
+            }
+        }
+    }
+    assert!(
+        calls.iter().any(|(name, receiver_types)| {
+            name == "envelope.cmd"
+                && receiver_types.iter().any(|ty| ty == "App.Envelope")
+                && receiver_types.iter().any(|ty| ty == "Envelope")
+        }),
+        "nested Java type ownership must survive AST lowering, got {calls:?}"
+    );
+}
+
+#[test]
 fn securerandom_factory_refines_random_declared_receiver_type() {
     let db = db_with(
         r#"

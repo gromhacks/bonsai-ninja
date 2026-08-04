@@ -13,6 +13,39 @@ fn conformance_traced() {
 }
 
 #[test]
+fn tsx_uses_the_tsx_grammar_and_lowers_component_calls() {
+    use bonsai_lang_api::{CallKind, FlowEvent, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
+    let workspace = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "view.tsx",
+            "function render(value: string) { return <Widget value={value}/>; }",
+        )],
+    );
+    let file = *workspace.db().vfs().all_files().first().expect("TSX fixture");
+    let parsed = workspace.db().parse(file).expect("parse TSX");
+    assert_eq!(parsed.grammar_name, "tsx");
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "valid TSX must be syntax-clean: {:?}",
+        parsed.diagnostics
+    );
+
+    let index = workspace.db().decl_index(file).expect("TSX declaration index");
+    assert!(index.defs.iter().flat_map(|decl| &decl.flow_events).any(|event| {
+        matches!(
+            event,
+            FlowEvent::Call { name, call_kind: CallKind::Function, args, .. }
+                if name == "Widget"
+                    && args.len() == 1
+                    && args[0].source_names.iter().any(|source| source == "value")
+        )
+    }));
+}
+
+#[test]
 fn typeof_rejection_guard_is_typed_condition_ir() {
     use bonsai_lang_api::{ConditionExpressionFact, LanguageAdapter};
 

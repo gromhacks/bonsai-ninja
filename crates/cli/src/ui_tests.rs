@@ -23,6 +23,22 @@ fn every_supported_lang_has_a_highlight_configuration() {
     }
 }
 
+#[test]
+fn tsx_highlighting_uses_the_tsx_grammar_variant() {
+    let language = syntax_highlight_cache()
+        .syntax_for_extension("tsx")
+        .expect("TSX grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(language).expect("set TSX grammar");
+    let tree = parser
+        .parse("const view = <Widget value={input}/>;", None)
+        .expect("parse TSX snippet");
+    assert!(
+        !tree.root_node().has_error(),
+        "syntax highlighting must not parse TSX with the plain TypeScript grammar"
+    );
+}
+
 /// Mid-file one-line snippets in every supported language must
 /// produce at least two distinct token colors. This catches a grammar fragment
 /// that parses but exposes no useful semantic node classes.

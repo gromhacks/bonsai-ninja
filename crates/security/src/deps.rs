@@ -21,7 +21,7 @@
 use crate::loader::Rulepack;
 use crate::rule::{Rule, Severity};
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::dependency_metadata::{dependency_metadata_dir_skipped, walk_dependency_metadata_files};
+use bonsai_common::dependency_metadata::dependency_metadata_dir_skipped;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 use std::path::Path;
@@ -127,9 +127,6 @@ pub(crate) struct WorkspaceDependencyPackageContext {
     by_language: AHashMap<String, Arc<AHashSet<String>>>,
 }
 
-static WORKSPACE_DEPENDENCY_PACKAGE_CACHE: std::sync::LazyLock<
-    parking_lot::RwLock<AHashMap<String, std::sync::Weak<WorkspaceDependencyPackageContext>>>,
-> = std::sync::LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
 static WORKSPACE_DEPENDENCY_PACKAGE_SCAN_LOCKS: std::sync::LazyLock<
     parking_lot::Mutex<AHashMap<String, std::sync::Weak<parking_lot::Mutex<()>>>>,
 > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(AHashMap::new()));
@@ -177,31 +174,6 @@ impl Drop for WorkspaceDependencyPackageSnapshot {
 /// canonical case). This language-scoped manifest context lets package gates
 /// accept those real project dependencies without letting one language's
 /// manifest satisfy another language's package-scoped rules in a monorepo.
-pub(crate) fn workspace_dependency_packages_for_language(
-    root: &Path,
-    language: &str,
-) -> WorkspaceDependencyPackages {
-    let root_key = workspace_dependency_root_key(root);
-    if let Some(context) = WORKSPACE_DEPENDENCY_PACKAGE_CACHE
-        .read()
-        .get(&root_key)
-        .and_then(std::sync::Weak::upgrade)
-    {
-        return workspace_dependency_packages_from_context(&context, language);
-    }
-
-    let context = Arc::new(build_workspace_dependency_package_context(root));
-    let mut cache = WORKSPACE_DEPENDENCY_PACKAGE_CACHE.write();
-    cache.retain(|_, context| context.strong_count() != 0);
-    let context = if let Some(existing) = cache.get(&root_key).and_then(std::sync::Weak::upgrade) {
-        existing
-    } else {
-        cache.insert(root_key, Arc::downgrade(&context));
-        context
-    };
-    workspace_dependency_packages_from_context(&context, language)
-}
-
 pub(crate) fn workspace_dependency_packages_for_language_in_workspace(
     root: &Path,
     language: &str,
@@ -211,7 +183,10 @@ pub(crate) fn workspace_dependency_packages_for_language_in_workspace(
     if let Some(context) = active_workspace_dependency_package_context(workspace_id, &root_key) {
         return workspace_dependency_packages_from_context(&context, language);
     }
-    workspace_dependency_packages_for_language(root, language)
+    WorkspaceDependencyPackages {
+        fingerprint: 0,
+        packages: Arc::new(AHashSet::new()),
+    }
 }
 
 fn workspace_dependency_packages_from_context(
@@ -228,30 +203,13 @@ fn workspace_dependency_packages_from_context(
     }
 }
 
-/// Refresh manifest-derived package facts at a broad matcher boundary.
-///
-/// Dependency manifests are not necessarily compiler source inputs
-/// (`requirements.txt` is the common example), so the VFS source revision
-/// cannot invalidate this cache reliably. Rebuilding once before a broad
-/// match keeps long-lived SDK/watch processes coherent with saved manifest
-/// edits. Per-file workers then reuse this immutable snapshot.
-pub(crate) fn refresh_workspace_dependency_package_context(
-    root: &Path,
-) -> Arc<WorkspaceDependencyPackageContext> {
-    let root_key = workspace_dependency_root_key(root);
-    let context = Arc::new(build_workspace_dependency_package_context(root));
-    let mut cache = WORKSPACE_DEPENDENCY_PACKAGE_CACHE.write();
-    cache.retain(|_, context| context.strong_count() != 0);
-    cache.insert(root_key, Arc::downgrade(&context));
-    context
-}
-
 pub(crate) fn begin_workspace_dependency_package_snapshot(
     root: &Path,
     workspace_id: u64,
+    pack: &Rulepack,
 ) -> WorkspaceDependencyPackageSnapshot {
     let root_key = workspace_dependency_root_key(root);
-    let context = Arc::new(build_workspace_dependency_package_context(root));
+    let context = Arc::new(build_workspace_dependency_package_context(root, &pack.metadata));
     let mut active = ACTIVE_WORKSPACE_DEPENDENCY_PACKAGES.write();
     active.retain(|_, roots| {
         roots.retain(|_, context| context.strong_count() != 0);
@@ -273,8 +231,12 @@ pub(crate) fn workspace_dependency_package_context_for_scan(
     workspace_id: u64,
 ) -> Arc<WorkspaceDependencyPackageContext> {
     let root_key = workspace_dependency_root_key(root);
-    active_workspace_dependency_package_context(workspace_id, &root_key)
-        .unwrap_or_else(|| refresh_workspace_dependency_package_context(root))
+    active_workspace_dependency_package_context(workspace_id, &root_key).unwrap_or_else(|| {
+        Arc::new(WorkspaceDependencyPackageContext {
+            fingerprint: 0,
+            by_language: AHashMap::new(),
+        })
+    })
 }
 
 fn active_workspace_dependency_package_context(
@@ -312,19 +274,22 @@ fn workspace_dependency_root_key(root: &Path) -> String {
         .into_owned()
 }
 
-fn build_workspace_dependency_package_context(root: &Path) -> WorkspaceDependencyPackageContext {
+fn build_workspace_dependency_package_context(
+    root: &Path,
+    metadata: &crate::loader::RulepackMetadata,
+) -> WorkspaceDependencyPackageContext {
     let mut by_language: AHashMap<String, AHashSet<String>> = AHashMap::new();
-    let mut fingerprint_parts = Vec::new();
-    let _ = walk_dependency_metadata_files(root, |path, rel| {
+    let mut fingerprint_parts = dependency_metadata_fingerprint_parts(metadata);
+    let _ = walk_rulepack_dependency_files(root, metadata, |path, rel| {
         let bytes = std::fs::read(path)?;
         fingerprint_parts.push(format!("{rel}:{}", bonsai_hash::fnv1a_bytes64(&bytes)));
         let text = String::from_utf8_lossy(&bytes);
         let packages = dependency_manifest_package_tokens(&text);
         if !packages.is_empty() {
-            for language in dependency_manifest_languages(path) {
-                let packages = dependency_manifest_packages_for_language(&packages, language);
+            for language in dependency_manifest_languages(path, metadata) {
+                let packages = dependency_manifest_packages_for_language(&packages, language, metadata);
                 by_language
-                    .entry((*language).to_string())
+                    .entry(language.to_string())
                     .or_default()
                     .extend(packages.into_iter());
             }
@@ -343,59 +308,153 @@ fn build_workspace_dependency_package_context(root: &Path) -> WorkspaceDependenc
     }
 }
 
-fn dependency_manifest_languages(path: &Path) -> &'static [&'static str] {
-    let basename = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
-    let lower = basename.to_ascii_lowercase();
-    match basename {
-        "Gemfile" | "Gemfile.lock" => &["ruby"],
-        "package.json"
-        | "package-lock.json"
-        | "pnpm-lock.yaml"
-        | "pnpm-workspace.yaml"
-        | "yarn.lock"
-        | "bun.lock"
-        | "bun.lockb"
-        | "deno.json"
-        | "deno.jsonc"
-        | "deno.lock" => &["javascript", "typescript"],
-        "mix.exs" | "mix.lock" => &["elixir"],
-        "rebar.config" | "rebar.lock" => &["erlang"],
-        "go.mod" | "go.sum" | "go.work" | "go.work.sum" => &["go"],
-        "Cargo.toml" | "Cargo.lock" => &["rust"],
-        "composer.json" | "composer.lock" => &["php"],
-        "pyproject.toml" | "requirements.txt" | "Pipfile" | "Pipfile.lock" | "poetry.lock" | "uv.lock" => {
-            &["python"]
+fn dependency_metadata_fingerprint_parts(metadata: &crate::loader::RulepackMetadata) -> Vec<String> {
+    let mut languages = metadata.languages.iter().collect::<Vec<_>>();
+    languages.sort_by_key(|(language, _)| language.as_str());
+    let mut parts = Vec::new();
+    for (language, values) in languages {
+        let mut patterns = values.dependency_manifest_patterns.clone();
+        patterns.sort();
+        for pattern in patterns {
+            parts.push(format!("metadata:{language}:manifest:{pattern}"));
         }
-        "pom.xml"
-        | "build.gradle"
-        | "build.gradle.kts"
-        | "settings.gradle"
-        | "settings.gradle.kts"
-        | "gradle.lockfile"
-        | "gradle.properties" => &["java", "kotlin", "scala"],
-        "Package.swift" | "Package.resolved" | "Cartfile" | "Cartfile.resolved" => &["swift"],
-        "Podfile" | "Podfile.lock" => &["objc", "swift"],
-        "packages.config" => &["csharp"],
-        _ if path_has_extension(&lower, "gemspec") => &["ruby"],
-        _ if path_has_extension(&lower, "csproj")
-            || path_has_extension(&lower, "fsproj")
-            || path_has_extension(&lower, "vbproj")
-            || path_has_extension(&lower, "sln")
-            || path_has_extension(&lower, "slnx")
-            || path_has_extension(&lower, "props")
-            || path_has_extension(&lower, "targets") =>
-        {
-            &["csharp"]
+        parts.push(format!(
+            "metadata:{language}:hyphen:{}",
+            values.normalize_hyphen_to_underscore
+        ));
+        let mut aliases = values.package_aliases.iter().collect::<Vec<_>>();
+        aliases.sort_by_key(|(distribution, _)| distribution.as_str());
+        for (distribution, imports) in aliases {
+            let mut imports = imports.clone();
+            imports.sort();
+            for import in imports {
+                parts.push(format!("metadata:{language}:alias:{distribution}:{import}"));
+            }
         }
-        _ if lower.starts_with("requirements") && path_has_extension(&lower, "txt") => &["python"],
-        _ => &[],
+        for prefix in &values.package_matching.strip_import_prefixes {
+            parts.push(format!("metadata:{language}:package-strip-prefix:{prefix}"));
+        }
+        for suffix in &values.package_matching.strip_import_suffixes {
+            parts.push(format!("metadata:{language}:package-strip-suffix:{suffix}"));
+        }
+        for separator in &values.package_matching.package_separators {
+            parts.push(format!("metadata:{language}:package-separator:{separator}"));
+        }
+        if let Some(binding) = &values.package_matching.call_qualifier_from_package_tail {
+            parts.push(format!(
+                "metadata:{language}:package-tail-separator:{}",
+                binding.package_separator
+            ));
+            for separator in &binding.call_separators {
+                parts.push(format!("metadata:{language}:call-separator:{separator}"));
+            }
+        }
     }
+    parts
 }
 
-fn path_has_extension(path: &str, extension: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .is_some_and(|actual| actual.eq_ignore_ascii_case(extension))
+fn walk_rulepack_dependency_files(
+    root: &Path,
+    metadata: &crate::loader::RulepackMetadata,
+    mut visit: impl FnMut(&Path, &str) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let stable_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut pending = vec![stable_root.clone()];
+    while let Some(dir) = pending.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            if file_type.is_dir() {
+                if !dependency_metadata_dir_skipped(name) {
+                    pending.push(path);
+                }
+                continue;
+            }
+            if file_type.is_file() && !dependency_manifest_languages(&path, metadata).is_empty() {
+                let relative = path
+                    .strip_prefix(&stable_root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                visit(&path, &relative)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn dependency_manifest_languages<'a>(
+    path: &Path,
+    metadata: &'a crate::loader::RulepackMetadata,
+) -> Vec<&'a str> {
+    let basename = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    let mut languages = metadata
+        .languages
+        .iter()
+        .filter(|(_, language)| {
+            language
+                .dependency_manifest_patterns
+                .iter()
+                .any(|pattern| dependency_manifest_pattern_matches(pattern, basename))
+        })
+        .map(|(language, _)| language.as_str())
+        .collect::<Vec<_>>();
+    languages.sort_unstable();
+    languages
+}
+
+fn dependency_manifest_pattern_matches(pattern: &str, basename: &str) -> bool {
+    let pattern = pattern.to_ascii_lowercase();
+    let basename = basename.to_ascii_lowercase();
+    let Some(star) = pattern.find('*') else {
+        return pattern == basename;
+    };
+    if pattern[star + 1..].contains('*') {
+        return false;
+    }
+    basename.starts_with(&pattern[..star]) && basename.ends_with(&pattern[star + 1..])
 }
 
 fn dependency_manifest_package_tokens(text: &str) -> AHashSet<String> {
@@ -430,52 +489,26 @@ fn insert_dependency_package_token(out: &mut AHashSet<String>, token: &str) {
 fn dependency_manifest_packages_for_language(
     packages: &AHashSet<String>,
     language: &str,
+    metadata: &crate::loader::RulepackMetadata,
 ) -> AHashSet<String> {
     let mut out = packages.clone();
+    let Some(language_metadata) = metadata.languages.get(language) else {
+        return out;
+    };
     for package in packages {
-        insert_dependency_package_aliases(&mut out, language, package);
+        if language_metadata.normalize_hyphen_to_underscore && package.contains('-') {
+            insert_dependency_package_token(&mut out, &package.replace('-', "_"));
+        }
+        if let Some(aliases) = language_metadata
+            .package_aliases
+            .get(&package.to_ascii_lowercase())
+        {
+            for alias in aliases {
+                insert_dependency_package_token(&mut out, alias);
+            }
+        }
     }
     out
-}
-
-fn insert_dependency_package_aliases(out: &mut AHashSet<String>, language: &str, package: &str) {
-    match language {
-        "python" => {
-            if package.contains('-') {
-                insert_dependency_package_token(out, &package.replace('-', "_"));
-            }
-            if let Some(alias) = python_distribution_import_alias(package) {
-                insert_dependency_package_token(out, alias);
-            }
-        }
-        "rust" => {
-            if package.contains('-') {
-                insert_dependency_package_token(out, &package.replace('-', "_"));
-            }
-        }
-        _ => {}
-    }
-}
-
-fn python_distribution_import_alias(package: &str) -> Option<&'static str> {
-    match package.to_ascii_lowercase().as_str() {
-        "argon2-cffi" => Some("argon2"),
-        "beautifulsoup4" => Some("bs4"),
-        "cx-oracle" => Some("cx_Oracle"),
-        "djangorestframework" => Some("rest_framework"),
-        "flask-limiter" => Some("flask_limiter"),
-        "google-cloud-storage" => Some("google.cloud.storage"),
-        "msgpack-python" => Some("msgpack"),
-        "mysql-connector-python" => Some("mysql.connector"),
-        "pillow" => Some("PIL"),
-        "psycopg2-binary" => Some("psycopg2"),
-        "pycryptodome" => Some("Crypto"),
-        "python-jose" => Some("jose"),
-        "python-ldap" => Some("ldap"),
-        "python3-saml" => Some("onelogin.saml2"),
-        "pyyaml" => Some("yaml"),
-        _ => None,
-    }
 }
 
 /// Collect every distinct signal key the rule advertises across the
@@ -601,15 +634,15 @@ fn push_import_signal_for_key(
 /// content the inventory should scan for package-name evidence.
 /// Anything not on this list (random YAML, dotenv, prose) is skipped
 /// to avoid false positives from prose mentioning a package name.
-fn is_dependency_manifest_file(path: &str) -> bool {
+fn is_dependency_manifest_file(path: &str, metadata: &crate::loader::RulepackMetadata) -> bool {
     let Some(basename) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    is_dependency_manifest_basename(basename)
+    is_dependency_manifest_basename(basename, metadata)
 }
 
-fn is_dependency_manifest_basename(basename: &str) -> bool {
-    !dependency_manifest_languages(Path::new(basename)).is_empty()
+fn is_dependency_manifest_basename(basename: &str, metadata: &crate::loader::RulepackMetadata) -> bool {
+    !dependency_manifest_languages(Path::new(basename), metadata).is_empty()
 }
 
 fn collect_manifest_package_evidence(
@@ -619,10 +652,10 @@ fn collect_manifest_package_evidence(
     let target_keys_by_lang = dependency_target_keys_by_language(pack);
     let mut evidence_by_language: AHashMap<String, AHashMap<String, String>> = AHashMap::new();
     for path in manifest_files {
-        if !is_dependency_manifest_file(path) {
+        if !is_dependency_manifest_file(path, &pack.metadata) {
             continue;
         }
-        let languages = dependency_manifest_languages(Path::new(path));
+        let languages = dependency_manifest_languages(Path::new(path), &pack.metadata);
         if languages.is_empty() {
             continue;
         }
@@ -644,14 +677,15 @@ fn collect_manifest_package_evidence(
         };
         let packages = dependency_manifest_package_tokens(&text);
         for language in languages {
-            let Some(target_keys) = target_keys_by_lang.get(*language) else {
+            let Some(target_keys) = target_keys_by_lang.get(language) else {
                 continue;
             };
-            let language_packages = dependency_manifest_packages_for_language(&packages, language);
+            let language_packages =
+                dependency_manifest_packages_for_language(&packages, language, &pack.metadata);
             for package in language_packages {
                 if target_keys.contains(package.as_str()) {
                     evidence_by_language
-                        .entry((*language).to_string())
+                        .entry(language.to_string())
                         .or_default()
                         .entry(package)
                         .or_insert_with(|| path.clone());
@@ -670,7 +704,7 @@ fn collect_manifest_package_evidence(
 fn scan_manifest_files(root: &Path, pack: &Rulepack) -> Vec<String> {
     let target_names = manifest_target_names(pack);
     let mut paths = Vec::new();
-    walk_dir(root, &target_names, &mut paths);
+    walk_dir(root, &target_names, &pack.metadata, &mut paths);
     paths.sort();
     paths.dedup();
     paths
@@ -696,7 +730,12 @@ fn manifest_target_names(pack: &Rulepack) -> AHashSet<String> {
 /// Directory symlinks are not followed. Besides keeping evidence inside the
 /// selected workspace, this prevents cycles without imposing a semantic
 /// depth cap.
-fn walk_dir(root: &Path, target_names: &AHashSet<String>, out: &mut Vec<String>) {
+fn walk_dir(
+    root: &Path,
+    target_names: &AHashSet<String>,
+    metadata: &crate::loader::RulepackMetadata,
+    out: &mut Vec<String>,
+) {
     let mut pending = vec![root.to_path_buf()];
     while let Some(dir) = pending.pop() {
         let rd = match std::fs::read_dir(&dir) {
@@ -733,7 +772,7 @@ fn walk_dir(root: &Path, target_names: &AHashSet<String>, out: &mut Vec<String>)
             if file_type.is_dir() {
                 pending.push(path);
             } else if file_type.is_file()
-                && (target_names.contains(&name) || is_dependency_manifest_basename(&name))
+                && (target_names.contains(&name) || is_dependency_manifest_basename(&name, metadata))
             {
                 out.push(path.display().to_string());
             }
@@ -760,6 +799,13 @@ fn collect_workspace_import_evidence(
         let Some(target_keys) = target_keys_by_lang.get(&language) else {
             continue;
         };
+        let package_matching = pack
+            .metadata
+            .languages
+            .get(&language)
+            .map(|metadata| &metadata.package_matching)
+            .cloned()
+            .unwrap_or_default();
         let file_path = ws
             .vfs()
             .path(file)
@@ -767,7 +813,7 @@ fn collect_workspace_import_evidence(
             .unwrap_or_default();
         if let Some(import_index) = db.import_index_uncached(file) {
             for import_spec in import_index.imports {
-                for candidate in import_package_candidates(&import_spec.module) {
+                for candidate in import_package_candidates(&import_spec.module, &package_matching) {
                     if target_keys.contains(candidate.as_str()) {
                         evidence_by_language
                             .entry(language.clone())
@@ -795,26 +841,28 @@ fn dependency_target_keys_by_language(pack: &Rulepack) -> AHashMap<String, AHash
     out
 }
 
-fn import_package_candidates(imported: &str) -> Vec<String> {
-    let imported = imported.strip_prefix("node:").unwrap_or(imported);
+fn import_package_candidates(
+    imported: &str,
+    semantics: &crate::loader::PackageMatchSemantics,
+) -> Vec<String> {
+    let imported = semantics
+        .strip_import_prefixes
+        .iter()
+        .find_map(|prefix| imported.strip_prefix(prefix))
+        .unwrap_or(imported);
     let mut out = Vec::new();
     push_import_candidate(&mut out, imported);
-    let header_stripped = imported
-        .strip_suffix(".h")
-        .or_else(|| imported.strip_suffix(".hpp"))
-        .or_else(|| imported.strip_suffix(".hxx"))
+    let suffix_stripped = semantics
+        .strip_import_suffixes
+        .iter()
+        .find_map(|suffix| imported.strip_suffix(suffix))
         .unwrap_or(imported);
-    push_import_candidate(&mut out, header_stripped);
-    push_prefix_candidates(&mut out, imported, "/");
-    push_prefix_candidates(&mut out, imported, ".");
-    push_prefix_candidates(&mut out, imported, "\\");
-    push_prefix_candidates(&mut out, imported, "::");
-    push_prefix_candidates(&mut out, imported, "->");
-    if header_stripped != imported {
-        push_prefix_candidates(&mut out, header_stripped, "/");
-        push_prefix_candidates(&mut out, header_stripped, ".");
-        push_prefix_candidates(&mut out, header_stripped, "\\");
-        push_prefix_candidates(&mut out, header_stripped, "::");
+    push_import_candidate(&mut out, suffix_stripped);
+    for separator in &semantics.package_separators {
+        push_prefix_candidates(&mut out, imported, separator);
+        if suffix_stripped != imported {
+            push_prefix_candidates(&mut out, suffix_stripped, separator);
+        }
     }
     out
 }

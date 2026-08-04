@@ -99,6 +99,12 @@ class and verify each box.
       canonical** (or transitively-enabled chain).
 - [ ] **CWE / severity declared on sinks.** Validator catches missing
       values.
+- [ ] **Taxonomy stays in the pack.** Package/API identities, manifest names,
+      sink-family aliases, sanitizer cross-tag credits, and tag-level guard
+      defaults are YAML metadata, not branches or tables in shared Rust.
+- [ ] **Sanitizer-credit audit passes.** `python3
+      scripts/sanitizer_credit_audit.py` reads the same metadata as runtime and
+      reports no unknown or untagged sanitizer rules.
 
 ## Browse / Inspect / Trace change (`crates/browse`, `crates/inspect`, `crates/trace`)
 
@@ -140,6 +146,8 @@ class and verify each box.
       sanitizer_fixtures` reports expected raw + sanitized findings.
 - [ ] **Validator matches CLI.** `cargo test -p bonsai_cli --test
       validate_script` passes.
+- [ ] **Hardcoded-knowledge boundary passes.** `scripts/audit-hardcoded.sh
+      --check` reports zero production violations.
 - [ ] **Documentation updated.** `docs/security-spec.mdx` reflects schema
       / lifecycle changes.
 
@@ -231,6 +239,14 @@ class and verify each box.
 - [ ] **Architecture invariant passes.** Run
       `cargo test --release -p bonsai_conformance --test
       architecture_invariants`.
+- [ ] **Hardcoded-knowledge boundary passes.** Run
+      `scripts/audit-hardcoded.sh --check`. Review production code, excluding
+      `#[cfg(test)]` fixtures: Tree-sitter grammar strings stay in adapters;
+      API/package/security values stay in rulepack data; shared crates contain
+      only typed IR, algorithms, protocols, and centralized product policy.
+      Do not approve a language-id branch in shared analysis or move an API
+      spelling from shared analysis into an adapter as a cosmetic fix. This is
+      a zero-violation gate, not a ratcheted snapshot.
 - [ ] **Elasticsearch exact SLO gate passes.** Build the release binary, then
       run `cargo test --release -p bonsai_cli --test
       elasticsearch_large_repo -- --nocapture` with
@@ -238,6 +254,17 @@ class and verify each box.
       completed exact work and checks warm index, navigation, inspect,
       inventory, and production taint latency under the default 3 GiB
       scheduling budget; it never times out or truncates analysis.
+- [ ] **Rooted query scheduling charges committed memory, not mapped cache
+      history.** The external-memory IDG's clean file-backed pages are
+      reclaimable. Keep the named non-reclaimable reserve and per-closure
+      sparse-frontier profile covered at 1/2/3 GiB; do not use live RSS to
+      collapse a warmed exact query to one worker, and do not add a minimum
+      worker count that ignores the configured budget.
+- [ ] **Broad raw-flow paging performs only requested presentation work.** Row
+      costs are worker-precomputed and reused. The renderer must not serialize
+      or rescan every exact flow for each page and must not eagerly format
+      future raw-taint pages. Every result remains reachable through stable
+      page/cursor navigation.
 - [ ] **Broad matcher scheduling has no artificial barriers.** Raw source
       ingestion uses memory-weighted parallel read windows but publishes VFS
       entries in canonical order. Raw rule-anchor planning uses the bounded
@@ -251,12 +278,11 @@ class and verify each box.
       reuses exact parser coverage in the completion audit. Unchecked files
       receive a Tree-sitter diagnostic pass only; declarations and flow bodies
       are not lowered for `analysis_complete`. On the reference Elasticsearch
-      checkout, compare against the recorded 2026-08-02 fresh-cache baseline
-      (16.09 s, 3 GiB scheduling budget) and investigate material regressions
+      checkout, compare against the recorded 2026-08-03 fresh-cache baseline
+      (30.90 s, 3 GiB scheduling budget) and investigate material regressions
       rather than loosening the gate. The same checkout's exhaustive
-      `security sinks --severity high --context 4k` baseline is 20.81 s command
-      time / 21.90 s process wall time, 2.29 GB maximum RSS, and 8,125 exact
-      results under the same budget.
+      `security sinks --severity high --context 4k` baseline is 21.42 s process
+      wall time under the same budget.
 - [ ] **Large native export gate passes when relevant.** Export the complete
       sibling Elasticsearch checkout under a recorded scheduling budget,
       validate with `jq --stream`, and record bytes, wall time, physical

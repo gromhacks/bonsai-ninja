@@ -29,15 +29,16 @@ impl SyntaxHighlightCache {
         let mut fragment_contexts = AHashMap::new();
         let mut extension_languages = AHashMap::new();
         for adapter in bonsai_adapters::all_adapters() {
-            let language_name = adapter.language_id().as_str().to_string();
-            let Ok(language) = adapter.tree_sitter_language() else {
-                continue;
-            };
             for extension in adapter.file_extensions() {
-                extension_languages.insert((*extension).to_string(), language_name.clone());
+                let synthetic_path = std::path::PathBuf::from(format!("source.{extension}"));
+                let grammar_name = adapter.grammar_name_for_path(&synthetic_path).to_string();
+                let Ok(language) = adapter.tree_sitter_language_for_path(&synthetic_path) else {
+                    continue;
+                };
+                extension_languages.insert((*extension).to_string(), grammar_name.clone());
+                fragment_contexts.insert(grammar_name.clone(), adapter.fragment_parse_context());
+                languages.insert(grammar_name, language);
             }
-            fragment_contexts.insert(language_name.clone(), adapter.fragment_parse_context());
-            languages.insert(language_name, language);
         }
         Self {
             languages,
@@ -51,7 +52,6 @@ impl SyntaxHighlightCache {
     }
 
     fn language_name_for_extension(&self, extension: &str) -> Option<&str> {
-        let extension = extension_alias(extension);
         self.extension_languages.get(extension).map(String::as_str)
     }
 
@@ -254,14 +254,6 @@ fn tone_color(theme: Theme, tone: SyntaxTone) -> (u8, u8, u8) {
         (Theme::Moss, SyntaxTone::Property) => (146, 188, 170),
         (Theme::Moss, SyntaxTone::Punctuation) => (102, 132, 124),
         (Theme::Moss, SyntaxTone::Variable) => (190, 214, 202),
-    }
-}
-
-fn extension_alias(extension: &str) -> &str {
-    match extension {
-        "mjs" | "cjs" | "jsx" => "js",
-        "mts" | "cts" | "tsx" => "ts",
-        _ => extension,
     }
 }
 

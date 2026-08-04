@@ -130,7 +130,7 @@ bonsai-ninja security ./src pack --audit --rules-dir ./security-patterns
 | `<WORKSPACE>` | Required | Workspace root to analyze. |
 | `sources` | None | Enumerate source-rule matches. |
 | `sinks` | None | Enumerate sink-rule matches. |
-| `sanitizers` | None | Enumerate sanitizer-rule matches. |
+| `sanitizers` | None | Enumerate matched rules that can make a credit-bearing sanitizer claim. Passthrough transforms and generic non-crediting validation markers are excluded. |
 | `deps` | None | Show package/framework imports referenced by the rulepack, with evidence files, signals, and rule descriptions. |
 | `taint-analysis` | None | Run source-to-sink taint analysis. |
 | `source-analysis` | None | Map downstream paths from sources without requiring sinks. |
@@ -201,7 +201,7 @@ redo work.
 | Flag | Default | Description |
 |---|---:|---|
 | `--rules-dir <DIR>` | Auto-discovered | Rulepack directory. |
-| `--profile <PROFILE>` | None | Preset bundle. `production` applies production excludes, remote trust, high severity, and 16k context unless overridden. |
+| `--profile <PROFILE>` | None | Rulepack-declared preset bundle. The bundled `production` profile applies production excludes, remote trust, high severity, and 16k context unless overridden. |
 | `--source <REGEX>` | None | Source rule ID regex. |
 | `--finding <S:ID>` | None | Re-render only one stable finding ID. |
 | `--flow <F:ID>` | None | Re-render only one security representative taint-path flow ID. |
@@ -235,14 +235,20 @@ rulepack-free raw taint paths or `--graph-flow` for structural callgraph
 paths and source bodies. These flags change output scope, not analysis
 accuracy: emitted graph facts still use the exact/narrowed static
 evidence contract. Raw taint rows come through the workspace syntax-flow
-facade, which uses a warmed IDG only when one already exists and otherwise
-falls back to the canonical cached dataflow graph. JSON summaries and text
+facade. A warm batch uses its existing IDG target cut; a cold batch builds one
+exact query-scoped source/target IDG and falls back to the canonical cached
+dataflow graph only when scoped persistence is unavailable. JSON summaries and text
 headers report the semantic-flow backend, cache hit/miss counts, target-cut
 scope when used, and fallback reasons so warm/cold inspect behavior is
 visible instead of implicit. For large syntax query shapes, inspect
 first validates a warmed retrieval sidecar and uses its candidate files for
 canonical hydration; if retrieval is absent or stale, it falls back to the
 literal file prefilter instead of publishing partial retrieval state.
+Broad raw-flow reports compute every requested fixed point before paging, but
+format and cache only the requested page. Conservative row costs are recorded
+while closure workers build the rows, so rendering does not serialize or
+rescan every path merely to plan page boundaries. Follow the printed page or
+cursor to continue; `--all` changes presentation only.
 
 ```bash
 bonsai-ninja inspect ./src --query os.system --kind call
@@ -475,7 +481,7 @@ JSON rows include `analysis_complete`, `analysis_incomplete_reasons`, and
 | Flag | Default | Description |
 |---|---:|---|
 | `--rules-dir <DIR>` | Auto-discovered | Rulepack directory. |
-| `--profile <PROFILE>` | None | Preset bundle. `production` applies production excludes, remote trust, and 16k context unless overridden. |
+| `--profile <PROFILE>` | None | Rulepack-declared preset bundle. The bundled `production` profile applies production excludes, remote trust, and 16k context unless overridden. |
 | `--source <REGEX>` | None | Source rule ID regex. |
 | `--trust <TRUST>` | None | Source trust filter. |
 | `--tag <TAG>` | None | Source tag filter. |

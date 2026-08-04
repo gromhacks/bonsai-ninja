@@ -3,12 +3,13 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{
-        c_family_preproc_imports, collect_kinds, collect_param_type_aliases, first_named_child_of_kind,
-        language_from_pack, node_text, parse_with, span_of, with_fn_kinds_and_implicit_receivers,
+        c_family_preproc_imports, collect_kinds, collect_param_type_aliases,
+        expression_operand_names_with_handler, first_named_child_of_kind, language_from_pack,
+        named_child_call_args_with_handler, node_text, parse_with, span_of, walk_flow_events,
     },
-    AdapterContext, AdapterError, AggregateLayout, DeclIndex, DeclKind, FieldWrite, FlowEvent,
-    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    TypeAliasBinding, TypeAliasVocabulary, Visibility,
+    AdapterContext, AdapterError, AggregateLayout, ArgumentPassingMode, CallKind, DeclIndex, DeclKind,
+    FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
+    LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
 };
 
 /// C++ parameter shape: `parameter_declaration` carries `type` and
@@ -31,7 +32,7 @@ use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("cpp");
 const PACK_NAME: &str = "cpp";
-const CPP_CALL_KINDS: &[&str] = &["new_expression"];
+const CPP_CALL_KINDS: &[&str] = &["call_expression", "new_expression"];
 
 /// C++ lifecycle transitions. `release` covers `unique_ptr.release()`.
 /// `delete` / `delete[]` aren't `Call` events so they're not modelled here.
@@ -84,20 +85,125 @@ const CPP_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
 ];
 
 const HANDLER: GrammarHandler = GrammarHandler {
+    fn_kinds: &["function_definition"],
     call_kinds: CPP_CALL_KINDS,
+    pseudo_call_extractor: Some(extract_cpp_pseudo_call),
+    syntax_event_extractor: Some(extract_cpp_syntax_event),
+    argument_passing_mode_extractor: Some(cpp_argument_passing_mode),
+    call_ref_kinds: CPP_CALL_KINDS,
+    member_expression_kinds: &["field_expression", "qualified_identifier", "scoped_identifier"],
+    subscript_expression_kinds: &["subscript_expression"],
+    syntax_error_tolerant_call_names: &["va_arg", "__builtin_va_arg"],
+    value_free_expression_kinds: &["sizeof_expression", "alignof_expression"],
     class_kinds: &["class_specifier", "struct_specifier", "union_specifier"],
     class_decl_kinds: &[
         ("class_specifier", DeclKind::Class),
         ("struct_specifier", DeclKind::Struct),
         ("union_specifier", DeclKind::Struct),
     ],
+    method_context_kinds: &["class_specifier", "struct_specifier", "union_specifier"],
+    if_kinds: &["if_statement", "conditional_expression", "switch_statement"],
+    for_kinds: &["for_statement"],
+    foreach_kinds: &["for_range_loop"],
+    while_kinds: &["while_statement"],
+    do_kinds: &["do_statement"],
+    assignment_kinds: &["assignment_expression", "init_declarator"],
+    return_kinds: &["return_statement", "co_return_statement"],
+    throw_kinds: &["throw_statement"],
+    lambda_kinds: &["lambda_expression"],
+    try_kinds: &["try_statement"],
+    catch_kinds: &["catch_clause"],
+    break_kinds: &["break_statement"],
+    continue_kinds: &["continue_statement"],
+    yield_kinds: &["co_yield_statement"],
+    await_kinds: &["co_await_expression"],
     // `this` for instance methods; C++ has no `super` keyword, but
     // `Base::method()` is a qualified call that the resolver
     // already narrows by qualified-name matching, so the explicit
     // implicit-receiver list stays at `this`.
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
-    ..with_fn_kinds_and_implicit_receivers(&["function_definition"], &["this"], &[])
+    implicit_receiver_names: &["this"],
+    ..EMPTY_HANDLER
 };
+
+fn cpp_argument_passing_mode(argument: Node<'_>, value: Node<'_>) -> ArgumentPassingMode {
+    if [argument, value].into_iter().any(|node| {
+        matches!(node.kind(), "pointer_expression" | "unary_expression") && {
+            let mut cursor = node.walk();
+            let has_address_of = node.children(&mut cursor).any(|child| child.kind() == "&");
+            has_address_of
+        }
+    }) {
+        ArgumentPassingMode::WriteBack
+    } else {
+        ArgumentPassingMode::Value
+    }
+}
+
+fn extract_cpp_pseudo_call(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<FlowEvent> {
+    if node.kind() != "delete_expression" {
+        return None;
+    }
+    Some(FlowEvent::Call {
+        span: span_of(file, &node),
+        receiver: None,
+        receiver_types: Vec::new(),
+        name: "delete".to_string(),
+        call_kind: CallKind::Operator,
+        args: named_child_call_args_with_handler(&node, file, src, handler),
+    })
+}
+
+/// Lower C++ direct initialization (`Type value(args)`) as the constructor
+/// call it denotes. Tree-sitter represents this as an `init_declarator` whose
+/// value is an `argument_list`, not as a `call_expression`; without this
+/// adapter-owned CST rule the compiler sees the assignment and nested
+/// argument calls but loses the constructor boundary itself.
+fn extract_cpp_syntax_event(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<FlowEvent> {
+    let (name, value) = match node.kind() {
+        "init_declarator" => {
+            let value = node.child_by_field_name("value")?;
+            if value.kind() != "argument_list" {
+                return None;
+            }
+            let declaration = node.parent().filter(|parent| parent.kind() == "declaration")?;
+            let type_node = declaration.child_by_field_name("type")?;
+            (cpp_type_descriptor_name(&type_node, src)?, value)
+        }
+        // A constructor's member/base initializer list lives outside its
+        // compound body. The adapter explicitly walks that list below; base
+        // identifiers resolve to constructor declarations, while member
+        // identifiers remain unresolved unless their own typed declaration
+        // provides a callable identity.
+        "field_initializer" => {
+            let name_node = node.named_child(0)?;
+            let value = first_named_child_of_kind(&node, "argument_list")?;
+            (node_text(&name_node, src).trim().to_string(), value)
+        }
+        _ => return None,
+    };
+    if name.is_empty() {
+        return None;
+    }
+    Some(FlowEvent::Call {
+        span: span_of(file, &value),
+        receiver: None,
+        receiver_types: Vec::new(),
+        name,
+        call_kind: CallKind::Constructor,
+        args: named_child_call_args_with_handler(&value, file, src, handler),
+    })
+}
 
 /// Zero-sized adapter handle; all state lives in the shared parser pack.
 #[derive(Debug, Default, Copy, Clone)]
@@ -136,7 +242,12 @@ impl LanguageAdapter for CppAdapter {
         vfs: &bonsai_lang_api::Vfs,
         tree: &Tree,
     ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
-        bonsai_lang_api::c_family_declaration_macro_recovery_edits(snapshot, vfs, tree)
+        bonsai_lang_api::c_family_declaration_macro_recovery_edits(
+            snapshot,
+            vfs,
+            tree,
+            &["va_arg", "__builtin_va_arg"],
+        )
     }
     fn capabilities(&self) -> LanguageCapabilities {
         // Macros: same story as C — tree-sitter-cpp parses
@@ -206,9 +317,25 @@ impl LanguageAdapter for CppAdapter {
             // WS2: `auto c = static_cast<Foo>(x)` / `auto c = (Foo) x` — the
             // kit types declared-type locals (`Foo c = make()`) but not the
             // inferred-`auto` form, where the type lives only on the cast.
-            let cast_aliases = collect_cpp_cast_aliases(&tree, file, src);
-            let initializer_specs = collect_cpp_initializer_field_specs(&tree, file, src);
+            let cast_aliases = collect_cpp_cast_aliases(&tree, file, src).into_iter().fold(
+                std::collections::HashMap::<Span, Vec<TypeAliasBinding>>::new(),
+                |mut by_span, (span, binding)| {
+                    by_span.entry(span).or_default().push(binding);
+                    by_span
+                },
+            );
+            let initializer_specs = collect_cpp_initializer_field_specs(&tree, file, src)
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>();
+            let initializer_events = collect_cpp_constructor_initializer_events(&tree, file, src)
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>();
             for decl in &mut decl_index.defs {
+                if let Some(events) = initializer_events.get(&decl.span) {
+                    let mut ordered = events.clone();
+                    ordered.append(&mut decl.flow_events);
+                    decl.flow_events = ordered;
+                }
                 if let Some(fields) = decl.parent.and_then(|parent| fields_by_parent.get(&parent)) {
                     qualify_cpp_member_expression_flows(&mut decl.flow_events, fields);
                 }
@@ -218,10 +345,8 @@ impl LanguageAdapter for CppAdapter {
                 if let Some(aliases) = alias_map.get(&decl.span) {
                     decl.type_aliases = aliases.clone();
                 }
-                for (fn_span, binding) in &cast_aliases {
-                    if *fn_span == decl.span {
-                        decl.type_aliases.push(binding.clone());
-                    }
+                if let Some(bindings) = cast_aliases.get(&decl.span) {
+                    decl.type_aliases.extend(bindings.iter().cloned());
                 }
                 // Repair catch-param bindings: the kit's generic
                 // extractor picks the first identifier descendant of
@@ -230,17 +355,17 @@ impl LanguageAdapter for CppAdapter {
                 fix_cpp_catch_params(&mut decl.flow_events, &tree, src);
                 // Bases only attach to class-shaped decls; skip
                 // free functions, methods, vars, etc.
-                if let Some(specs) = initializer_specs
-                    .iter()
-                    .find_map(|(span, specs)| (*span == decl.span).then_some(specs))
-                {
+                if let Some(specs) = initializer_specs.get(&decl.span) {
                     for spec in specs {
                         let source_param_indices = decl
                             .params
                             .iter()
                             .enumerate()
                             .filter_map(|(idx, param)| {
-                                cpp_value_mentions_param(&spec.value, param).then_some(idx)
+                                spec.sources
+                                    .iter()
+                                    .any(|source| cpp_source_mentions_param(source, param))
+                                    .then_some(idx)
                             })
                             .collect::<Vec<_>>();
                         if source_param_indices.is_empty() {
@@ -280,9 +405,11 @@ impl LanguageAdapter for CppAdapter {
                 .params
                 .iter()
                 .any(|param| param == bonsai_lang_api::kit::SYNTHETIC_VARARGS_PARAM);
-            bonsai_lang_api::kit::normalize_c_variadic_builtin_flow(
+            bonsai_lang_api::kit::normalize_variadic_builtin_flow(
                 &mut decl.flow_events,
                 has_variadic_param,
+                &["va_start", "__builtin_va_start"],
+                &["va_arg", "__builtin_va_arg"],
             );
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, CPP_LIFECYCLE_TRANSITIONS);
             apply_cpp_moved_argument_places(&mut decl.flow_events);
@@ -302,6 +429,24 @@ impl LanguageAdapter for CppAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+fn collect_cpp_constructor_initializer_events(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(Span, Vec<FlowEvent>)> {
+    let mut out = Vec::new();
+    for function in collect_kinds(tree, &["function_definition"]) {
+        let Some(initializers) = first_named_child_of_kind(&function, "field_initializer_list") else {
+            continue;
+        };
+        let events = walk_flow_events(initializers, file, src, &HANDLER, &[]);
+        if !events.is_empty() {
+            out.push((span_of(file, &function), events));
+        }
+    }
+    out
 }
 
 /// Preserve object identity through a parsed move expression nested inside a
@@ -615,7 +760,7 @@ fn collect_tu_private_function_names(
 struct CppInitializerFieldSpec {
     span: Span,
     field: String,
-    value: String,
+    sources: Vec<String>,
 }
 
 fn collect_cpp_initializer_field_specs(
@@ -641,19 +786,14 @@ fn collect_cpp_initializer_field_specs(
                 continue;
             };
             let field = node_text(&field_node, src).trim().to_string();
-            let value = node_text(&value_node, src)
-                .trim()
-                .trim_start_matches('(')
-                .trim_end_matches(')')
-                .trim()
-                .to_string();
-            if field.is_empty() || value.is_empty() {
+            let sources = expression_operand_names_with_handler(&value_node, src, &HANDLER);
+            if field.is_empty() || sources.is_empty() {
                 continue;
             }
             specs.push(CppInitializerFieldSpec {
                 span: span_of(file, &init),
                 field,
-                value,
+                sources,
             });
         }
         if !specs.is_empty() {
@@ -663,19 +803,13 @@ fn collect_cpp_initializer_field_specs(
     out
 }
 
-fn cpp_value_mentions_param(value: &str, param: &str) -> bool {
-    let mut token = String::new();
-    for ch in value.chars().chain(std::iter::once(' ')) {
-        if ch == '_' || ch.is_ascii_alphanumeric() {
-            token.push(ch);
-            continue;
-        }
-        if token == param {
-            return true;
-        }
-        token.clear();
-    }
-    false
+fn cpp_source_mentions_param(source: &str, param: &str) -> bool {
+    let source = bonsai_common::normalize_qualified_name(source);
+    let param = bonsai_common::normalize_qualified_name(param);
+    source == param
+        || source
+            .strip_prefix(&param)
+            .is_some_and(|projection| projection.starts_with('.'))
 }
 
 fn collect_cpp_member_visibility(

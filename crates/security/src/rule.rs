@@ -422,15 +422,48 @@ pub enum MatchOrigin {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GuardProfile {
-    GoJwtInlineKeyfuncAlgorithm,
-    GoXmlDecoderHardening,
-    PythonPathContainment,
+    #[serde(alias = "python-path-containment")]
+    CanonicalPathContainment,
     #[serde(
         rename = "path-consumer-containment",
         alias = "python-path-consumer-containment"
     )]
     PathConsumerContainment,
     RelativePathContainment,
+}
+
+/// Rule-selected compiler capability that clears a matched sink.
+///
+/// The adapter proves the syntax/runtime property and emits a typed
+/// [`bonsai_lang_api::CompilerGuardFact`]. The shared engine only joins that
+/// fact to the matched call; capability vocabulary and security labels stay
+/// in rulepack data.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompilerGuardSemantics {
+    pub capability: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_evidence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forbidden_evidence: Vec<String>,
+    pub sanitizer_tag: String,
+    pub category: String,
+}
+
+/// Rule-selected value roles for sanitizer calls that act as guards rather
+/// than returning a replacement value. The engine joins these roles to exact
+/// compiler call arguments and control flow without interpreting the tag.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SanitizerGuardSemantics {
+    #[serde(default)]
+    pub use_receiver: bool,
+    #[serde(default)]
+    pub all_arguments: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argument_indices: Vec<usize>,
+    #[serde(default)]
+    pub require_terminal_rejection: bool,
 }
 
 /// Rulepack-owned callable roles used by the structured path-containment
@@ -750,6 +783,19 @@ pub struct CharacterConstraintSemantics {
     /// expression, where an alphanumeric allowlist alone is not a sanitizer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_enclosing_literal_delimiter: Option<String>,
+    /// Accepted runtime providers for a compiler-lowered candidate transform.
+    /// The adapter records call identity without assigning security meaning;
+    /// these rulepack targets decide which factory/operation pair has the
+    /// required runtime semantics.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_providers: Vec<CharacterConstraintProviderSemantics>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterConstraintProviderSemantics {
+    pub factory: RuleTarget,
+    pub operation: RuleTarget,
 }
 
 /// Required facets of a compiler-proven same-origin path helper.
@@ -760,6 +806,10 @@ pub struct SameOriginPathConstraintSemantics {
     pub require_authority_rejection: bool,
     pub require_absolute_path: bool,
     pub require_scheme_relative_rejection: bool,
+    /// Runtime providers accepted for provider-bound compiler facts. Empty
+    /// means the proof is entirely syntax-defined and provider-independent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_providers: Vec<RuleTarget>,
     /// Exact tainted sink argument that must receive the constrained path.
     /// Header-style APIs use argument one while direct redirect APIs use zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -784,6 +834,13 @@ pub struct StaticContextArgumentSemantics {
 pub enum UrlGuardRootSemantics {
     SinkReceiver,
     SinkAssignmentTarget,
+    /// The sink consumes the original URL value while a preceding parser
+    /// assignment validates that same value. Both argument roles and parser
+    /// identity are rulepack data.
+    SinkArgumentParserInput {
+        sink_argument_index: usize,
+        parser_argument_index: usize,
+    },
     SinkArgumentAccessor {
         argument_index: usize,
         accessor: Box<RuleTarget>,
@@ -829,8 +886,19 @@ pub struct UrlHostAllowlistSemantics {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct UrlAddressParserSemantics {
+    pub target: RuleTarget,
+    pub argument_index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UrlDnsGuardSemantics {
     pub resolver: RuleTarget,
+    /// Optional provider that converts one resolver result into the value
+    /// consumed by the private-address predicates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address_parser: Option<UrlAddressParserSemantics>,
     pub private_address_predicates: Vec<RuleTarget>,
 }
 
@@ -933,6 +1001,17 @@ pub enum PostSinkPolicy {
     PathConstructionContainment,
 }
 
+/// Exact dataflow attachment shape for sanitizer evidence that is not a
+/// direct tainted-value call. Rules select the shape; shared analysis only
+/// proves it from compiler facts.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SanitizerAttachmentPolicy {
+    /// A hardened factory/configuration receiver must be the sink receiver or
+    /// must construct that receiver before the sink.
+    ReceiverFactoryLineage,
+}
+
 /// Optional analysis behavior compiled from the rulepack.
 ///
 /// This keeps engine policy independent of rule ids and language/API names.
@@ -943,6 +1022,14 @@ pub enum PostSinkPolicy {
 pub struct AnalysisSemantics {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flow_classes: Vec<FlowClass>,
+    /// Suppress inferred entry parameters for this sink class because those
+    /// values are not evidence for the sink's security property.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suppress_inferred_sources: Option<bool>,
+    /// Suppress locally trusted sources with any matching rule-declared flow
+    /// class. This is reporting policy, not a propagation shortcut.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suppress_local_source_flow_classes: Vec<FlowClass>,
     /// Lower values win when equally proven source sites are grouped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_specificity_rank: Option<u8>,
@@ -955,8 +1042,24 @@ pub struct AnalysisSemantics {
     /// sinks remain in the compiler facts and taint graph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sink_terminal_priority: Option<u8>,
+    /// Explicit evaluation mode for sink rules that do not require a taint
+    /// source. Authored categories may inherit this through rulepack metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub non_taint_evaluation: Option<NonTaintEvaluation>,
+    /// Permit file-level package/import evidence for this sink even when the
+    /// call itself has no receiver/package identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_file_package_evidence: Option<bool>,
+    /// The sink's compiler/lifecycle constraint is sufficient identity, so a
+    /// separate call-site package gate is unnecessary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_call_package_gate: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard_profile: Option<GuardProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiler_guard: Option<CompilerGuardSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sanitizer_guard: Option<SanitizerGuardSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_containment_guard: Option<PathContainmentGuardSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -993,6 +1096,94 @@ pub struct AnalysisSemantics {
     pub context_flow: Option<ContextFlowSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_sink_policy: Option<PostSinkPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sanitizer_attachment_policy: Option<SanitizerAttachmentPolicy>,
+}
+
+impl AnalysisSemantics {
+    /// Overlay explicitly declared fields while retaining unspecified bundled
+    /// defaults. This is the inverse view of `inherit_missing`: overlay data
+    /// wins and the existing value fills its omissions.
+    pub(crate) fn merge_overriding(&mut self, incoming: Self) {
+        let mut merged = incoming;
+        merged.inherit_missing(self);
+        *self = merged;
+    }
+
+    /// Fill absent rule-specific semantics from rulepack metadata. Explicit
+    /// rule fields always win; metadata provides declarative per-tag defaults
+    /// without introducing security taxonomy branches in the engine.
+    pub(crate) fn inherit_missing(&mut self, defaults: &Self) {
+        if self.flow_classes.is_empty() {
+            self.flow_classes.clone_from(&defaults.flow_classes);
+        }
+        if self.suppress_local_source_flow_classes.is_empty() {
+            self.suppress_local_source_flow_classes
+                .clone_from(&defaults.suppress_local_source_flow_classes);
+        }
+        if let (Some(current), Some(default)) = (
+            self.character_constraint.as_mut(),
+            defaults.character_constraint.as_ref(),
+        ) {
+            if current.accepted_providers.is_empty() {
+                current.accepted_providers.clone_from(&default.accepted_providers);
+            }
+        }
+        if self.character_constraint.is_none() {
+            self.character_constraint
+                .clone_from(&defaults.character_constraint);
+        }
+        if let (Some(current), Some(default)) = (
+            self.same_origin_path_constraint.as_mut(),
+            defaults.same_origin_path_constraint.as_ref(),
+        ) {
+            if current.accepted_providers.is_empty() {
+                current.accepted_providers.clone_from(&default.accepted_providers);
+            }
+        }
+        macro_rules! inherit_option {
+            ($($field:ident),+ $(,)?) => {
+                $(if self.$field.is_none() { self.$field = defaults.$field.clone(); })+
+            };
+        }
+        inherit_option!(
+            source_specificity_rank,
+            source_reporting_rank,
+            suppress_inferred_sources,
+            sink_terminal_priority,
+            non_taint_evaluation,
+            allow_file_package_evidence,
+            skip_call_package_gate,
+            guard_profile,
+            compiler_guard,
+            sanitizer_guard,
+            path_containment_guard,
+            path_consumer_containment_guard,
+            relative_path_containment_guard,
+            parameterized_query,
+            nosql_filter,
+            dynamic_key_denylist_guard,
+            receiver_factory_guard,
+            receiver_configuration_guard,
+            configured_argument_factory_guard,
+            configured_argument_receiver_guard,
+            configured_call_argument_guard,
+            character_escape,
+            same_origin_path_constraint,
+            url_network_guard,
+            url_reconstruction_guard,
+            context_flow,
+            post_sink_policy,
+            sanitizer_attachment_policy,
+        );
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NonTaintEvaluation {
+    Pattern,
+    Lifecycle,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1652,6 +1843,10 @@ pub struct Rule {
     pub manifests: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lockfiles: Vec<String>,
+    /// Loader-injected adapter-visible package spelling semantics. Security
+    /// values stay in YAML metadata while the matcher remains language-neutral.
+    #[serde(skip, default)]
+    pub package_matching: crate::loader::PackageMatchSemantics,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub payload_types: Vec<PayloadType>,
     #[serde(rename = "match")]

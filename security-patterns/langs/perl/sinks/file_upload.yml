@@ -1,5 +1,37 @@
 # Perl file-upload sinks (CGI / Mojolicious / Dancer).
 # Matches client-controlled filename retrieval on uploaded files.
+- id: perl.upload.mojo_move_to_tainted_destination
+  enabled: true
+  language: perl
+  tag: file-upload
+  severity: high
+  packages: [Mojolicious]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      name: move_to
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: Mojolicious upload tainted destination
+    code: |
+      use Mojolicious;
+      sub example {
+        my ($upload, $input) = @_;
+        $upload->move_to($input)
+      }
+  - name: Mojolicious upload literal destination negative
+    code: |
+      use Mojolicious;
+      sub example {
+        my ($upload, $input) = @_;
+        $upload->move_to("public/uploads/avatar.bin")
+      }
+    expect_no_match: true
+  description: "Mojolicious Upload::move_to writes the uploaded temporary file to its argument. An attacker-controlled destination can place uploaded content outside the intended upload location."
+
 - id: perl.upload.cgi_upload_filename
   enabled: false
   disabled_reason:

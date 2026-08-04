@@ -902,6 +902,11 @@ struct FieldPlaceKey {
 #[derive(Default, Debug)]
 struct FieldPlaceIndex {
     by_base: AHashMap<FieldPlaceKey, Vec<FieldPlaceHit>>,
+    /// Exact suffixes observed in adapter-lowered places. This remains
+    /// independent of `by_base` filtering: a synthetic interprocedural write
+    /// may compose two AST-proven path fragments and later need a suffix whose
+    /// original base was not itself a requested transform key.
+    syntactic_fields: SyntacticFieldUniverse,
 }
 
 /// Finite access-path demand derived from the adapter-produced IDG before
@@ -917,6 +922,50 @@ struct SyntacticFieldUniverse {
 impl SyntacticFieldUniverse {
     fn contains(&self, field: &str) -> bool {
         self.suffixes.contains(field)
+    }
+
+    fn record_full_storage_place(&mut self, full_name: &str) {
+        let cached_parts = storage_segments_cached(full_name);
+        let parts = cached_parts.iter().map(String::as_str).collect::<Vec<_>>();
+        for split in 1..parts.len() {
+            let suffix = join_storage_part_refs(&parts[split..]);
+            if !suffix.is_empty() {
+                self.suffixes.insert(suffix);
+            }
+        }
+    }
+
+    fn record_argument_projection_demands(
+        &mut self,
+        field_index: &FieldPlaceIndex,
+        sites: &[Arc<FieldArgStitch>],
+    ) {
+        // Tree-sitter grammars commonly lower a member access as a receiver
+        // place plus a selector call. The individual compiler facts prove
+        // both halves, but neither necessarily contains their composed access
+        // path. Preserve that exact demand so an upstream object hop can carry
+        // `container.value.field` through a later `value.field` accessor.
+        // This is a finite projection of resolver-backed call sites and
+        // adapter-lowered reads; it never admits a token absent from the IR.
+        for site in sites {
+            let normalized_param = normalize_storage_base_cached(&site.param_name);
+            let Some(reads) = field_index.field_hits_for_normalized_base(
+                site.callee_seg,
+                site.callee,
+                normalized_param.as_ref(),
+                false,
+            ) else {
+                continue;
+            };
+            for read in reads {
+                let full_name = if site.actual_arg.trim().is_empty() {
+                    read.field.clone()
+                } else {
+                    format!("{}.{}", site.actual_arg.trim(), read.field)
+                };
+                self.record_full_storage_place(&full_name);
+            }
+        }
     }
 }
 
@@ -2817,18 +2866,68 @@ fn stitch_candidate_receiver_inputs(
                     true,
                 );
                 let projection_bases = return_projection_bases(endpoints);
+                let mut seen = AHashSet::new();
                 for param_name in endpoints
                     .implicit_receiver_bases()
                     .chain(endpoints.receiver_field_bases())
                     .chain(projection_bases.iter().map(String::as_str))
                 {
+                    let param_name = param_name.trim();
+                    if param_name.is_empty() {
+                        continue;
+                    }
+                    if let Some(receiver_root) =
+                        receiver_root_if_declared_names(param_name, endpoints.receiver_names())
+                    {
+                        // Parameter-less methods and synthesized property
+                        // accessors still consume an object receiver. Map the
+                        // caller's exact receiver root onto the adapter's
+                        // declared receiver root, then let ordinary field
+                        // forwarding preserve the remaining access path. For
+                        // `value.cmd -> self.cmd`, using `value.cmd` itself as
+                        // the source base would incorrectly ask for a deeper
+                        // suffix and strand the scalar field.
+                        if seen.insert((actual_receiver.clone(), receiver_root.to_string())) {
+                            push_receiver_field_arg_site(
+                                field_arg_sites,
+                                caller,
+                                caller_seg,
+                                cand.func,
+                                endpoints.segment,
+                                &actual_receiver,
+                                receiver_root,
+                                site.site.0,
+                                cand.precision,
+                                cand.edge_kind,
+                                None,
+                            );
+                            push_nested_receiver_field_arg_sites(
+                                field_arg_sites,
+                                caller,
+                                caller_seg,
+                                cand.func,
+                                endpoints.segment,
+                                &actual_receiver,
+                                receiver_root,
+                                endpoints,
+                                site.site.0,
+                                cand.precision,
+                                cand.edge_kind,
+                            );
+                        }
+                        continue;
+                    }
+                    let actual_base = format!("{}.{}", actual_receiver.trim(), param_name);
+                    if !seen.insert((actual_base.clone(), param_name.to_string())) {
+                        continue;
+                    }
                     push_receiver_field_arg_site(
                         field_arg_sites,
                         caller,
                         caller_seg,
                         cand.func,
                         endpoints.segment,
-                        &actual_receiver,
+                        &actual_base,
                         param_name,
                         site.site.0,
                         cand.precision,
@@ -3019,6 +3118,18 @@ fn stitch_candidate_return_outputs(
                 IdgEdge::inter_yield(callee_yield, target, site.site.0, cand.precision, cand.edge_kind),
                 ws,
             );
+            return_field_sites.push(ReturnFieldStitch {
+                caller,
+                caller_seg,
+                callee: cand.func,
+                callee_seg: endpoints.segment,
+                source_base: crate::transfer::YIELD_FIELD_BASE.to_string(),
+                target_base: binding.target_base.clone(),
+                call_span: site.site.0,
+                write_span: binding.write_span,
+                precision: cand.precision,
+                call_kind: cand.edge_kind,
+            });
             if let Some(stats) = stats.as_deref_mut() {
                 stats.inter_edges = stats.inter_edges.saturating_add(1);
             }
@@ -3192,12 +3303,14 @@ fn stitch_candidate_constructor_receiver_effects(
             .unwrap_or_default();
         if !target_base.is_empty() {
             for callee_receiver_param_name in constructor_receiver_bases(endpoints) {
+                let projected_target_base =
+                    projected_receiver_target_base(&target_base, &callee_receiver_param_name);
                 receiver_mutation_sites.push(Arc::new(ReceiverMutationStitch {
                     caller,
                     caller_seg,
                     callee: cand.func,
                     callee_seg: endpoints.segment,
-                    target_base: target_base.clone(),
+                    target_base: projected_target_base,
                     callee_receiver_param_name,
                     call_span: site.site.0,
                     precision: cand.precision,
@@ -3440,6 +3553,10 @@ fn scalar_post_call_consumer_edges(
         .edges
         .iter()
         .filter(|edge| live_producers.contains(&edge.from))
+        // Aggregate markers carry field-demand intent only. They are
+        // deliberately non-traversable and cannot prove a scalar post-call
+        // consumer for mutable write-back stitching.
+        .filter(|edge| edge.meta.kind != crate::edge::IdgEdgeKind::IntraAggregateConsume)
         .filter(|edge| {
             edge.meta.via_span.file != call_span.file || edge.meta.via_span.start > call_span.start
         })
@@ -3668,6 +3785,22 @@ fn constructor_implicit_receiver_base(
     caller_receiver_names: &[String],
     is_ancestor_dispatch: bool,
 ) -> Option<String> {
+    // Ancestor dispatch changes method lookup, not object identity. Both an
+    // explicit ancestor qualifier and an inherited method reached through the
+    // current receiver operate on the same current object. Canonicalize to the
+    // adapter-declared primary receiver before selecting storage; otherwise a
+    // call such as `current.inherited_method()` can move state onto the
+    // ancestor token and strand exact fields that remain on `current`.
+    let receiver = if is_ancestor_dispatch {
+        caller_receiver_names
+            .first()
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(receiver)
+    } else {
+        receiver
+    };
     let matches_requested_receiver = |base: &&String| {
         receiver_root_if_declared(base, caller_receiver_names)
             .is_some_and(|root| receiver_tokens_equal(root, receiver))
@@ -3675,35 +3808,19 @@ fn constructor_implicit_receiver_base(
     let declared_bases = caller_implicit_receiver_bases
         .iter()
         .filter(|base| receiver_root_if_declared(base, caller_receiver_names).is_some());
-    if is_ancestor_dispatch {
-        declared_bases
-            .clone()
-            .find(|base| !matches_requested_receiver(base))
-            .or_else(|| declared_bases.clone().next())
-            .map(|base| base.trim().to_string())
-            .or_else(|| {
-                caller_receiver_names
-                    .iter()
-                    .find(|name| !receiver_tokens_equal(name, receiver))
-                    .or_else(|| caller_receiver_names.first())
-                    .map(|name| name.trim().to_string())
-                    .filter(|name| !name.is_empty())
-            })
-    } else {
-        declared_bases
-            .clone()
-            .find(matches_requested_receiver)
-            .or_else(|| declared_bases.clone().next())
-            .map(|base| base.trim().to_string())
-            .or_else(|| {
-                caller_receiver_names
-                    .iter()
-                    .find(|name| receiver_tokens_equal(name, receiver))
-                    .or_else(|| caller_receiver_names.first())
-                    .map(|name| name.trim().to_string())
-                    .filter(|name| !name.is_empty())
-            })
-    }
+    declared_bases
+        .clone()
+        .find(matches_requested_receiver)
+        .or_else(|| declared_bases.clone().next())
+        .map(|base| base.trim().to_string())
+        .or_else(|| {
+            caller_receiver_names
+                .iter()
+                .find(|name| receiver_tokens_equal(name, receiver))
+                .or_else(|| caller_receiver_names.first())
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+        })
 }
 
 fn receiver_field_forwarding_base(
@@ -4271,7 +4388,8 @@ fn stitch_field_argument_forwarding(
     requested_segments.sort_by_key(|segment| segment.0);
     requested_segments.dedup();
     let mut field_index = FieldPlaceIndex::from_workspace_for_keys_streaming(ws, &requested_field_places)?;
-    let syntactic_fields = field_index.syntactic_field_universe();
+    let mut syntactic_fields = field_index.take_syntactic_field_universe();
+    syntactic_fields.record_argument_projection_demands(&field_index, sites);
     let mut inter_call_arg_entries =
         InterCallArgEntryIndex::from_workspace_for_segments_streaming(ws, &requested_segments)?;
     let mut synthetic_field_writes = SyntheticFieldWriteCache::from_workspace(ws);
@@ -5740,6 +5858,7 @@ impl FieldPlaceIndex {
                 }
                 _ => continue,
             };
+            self.syntactic_fields.record_full_storage_place(&full_name);
             let node_id = NodeId(node_idx as u32);
             let _ = self.record_full_storage_place_filtered(
                 seg_id, node.func, &full_name, writes, span, node_id, requested,
@@ -5747,17 +5866,17 @@ impl FieldPlaceIndex {
         }
     }
 
-    fn syntactic_field_universe(&self) -> SyntacticFieldUniverse {
+    fn take_syntactic_field_universe(&mut self) -> SyntacticFieldUniverse {
         // This snapshot is intentionally taken before synthetic writes are
         // recorded. Reads and writes emitted by every language adapter use the
         // same Place representation, so numeric map/tuple keys and arbitrarily
         // deep exact paths participate without language-specific constants.
-        let suffixes = self
-            .by_base
-            .values()
-            .flat_map(|hits| hits.iter().map(|hit| hit.field.clone()))
-            .collect();
-        SyntacticFieldUniverse { suffixes }
+        std::mem::take(&mut self.syntactic_fields)
+    }
+
+    #[cfg(test)]
+    fn syntactic_field_universe(&self) -> &SyntacticFieldUniverse {
+        &self.syntactic_fields
     }
 
     fn field_writes_for_base_before_call(

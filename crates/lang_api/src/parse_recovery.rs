@@ -10,11 +10,10 @@
 //!
 //! Recovery edits are same-width masks. The recovered tree's byte ranges stay
 //! aligned with the original source, so every downstream span and source slice
-//! remains exact. Macro bodies are never guessed or hard-coded. The only
-//! standardized macro handled directly is C-family `va_arg`: Tree-sitter
-//! represents a pointer type operand as an expression plus an `ERROR` node, so
-//! the recovery masks only the pointer declarator token proven by that CST
-//! shape.
+//! remains exact. Macro bodies are never guessed or hard-coded. Adapters may
+//! declare variadic read builtins whose pointer type operand Tree-sitter
+//! represents as an expression plus an `ERROR` node; recovery masks only the
+//! pointer declarator token proven by that CST shape.
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_vfs::{FileSnapshot, Vfs};
@@ -135,6 +134,7 @@ pub fn c_family_declaration_macro_recovery_edits(
     snapshot: &FileSnapshot,
     vfs: &Vfs,
     tree: &Tree,
+    variadic_read_builtins: &[&str],
 ) -> Vec<ParseRecoveryEdit> {
     if !tree.root_node().has_error() {
         return Vec::new();
@@ -142,7 +142,7 @@ pub fn c_family_declaration_macro_recovery_edits(
 
     let source = snapshot.text.as_bytes();
     let mut edits = Vec::new();
-    collect_variadic_pointer_type_recovery_edits(source, tree, &mut edits);
+    collect_variadic_pointer_type_recovery_edits(source, tree, variadic_read_builtins, &mut edits);
 
     let macros = reachable_object_macros(snapshot, vfs);
     if macros.is_empty() {
@@ -184,12 +184,13 @@ pub fn c_family_declaration_macro_recovery_edits(
 fn collect_variadic_pointer_type_recovery_edits(
     source: &[u8],
     tree: &Tree,
+    variadic_read_builtins: &[&str],
     edits: &mut Vec<ParseRecoveryEdit>,
 ) {
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
         if node.is_error() {
-            if variadic_pointer_type_error(node, source) {
+            if variadic_pointer_type_error(node, source, variadic_read_builtins) {
                 edits.push(ParseRecoveryEdit::new(node.start_byte(), node.end_byte()));
             }
             continue;
@@ -203,7 +204,7 @@ fn collect_variadic_pointer_type_recovery_edits(
     }
 }
 
-fn variadic_pointer_type_error(node: Node<'_>, source: &[u8]) -> bool {
+fn variadic_pointer_type_error(node: Node<'_>, source: &[u8], variadic_read_builtins: &[&str]) -> bool {
     let Some(fragment) = source.get(node.start_byte()..node.end_byte()) else {
         return false;
     };
@@ -242,7 +243,8 @@ fn variadic_pointer_type_error(node: Node<'_>, source: &[u8]) -> bool {
     };
     source
         .get(function.start_byte()..function.end_byte())
-        .is_some_and(|name| matches!(name, b"va_arg" | b"__builtin_va_arg"))
+        .and_then(|name| std::str::from_utf8(name).ok())
+        .is_some_and(|name| variadic_read_builtins.contains(&name))
 }
 
 fn declaration_prefix_container(mut node: Node<'_>) -> Option<Node<'_>> {

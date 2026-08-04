@@ -1,5 +1,5 @@
 use bonsai_db::AnalyzerDb;
-use bonsai_lang_api::{FlowEvent, LanguageRegistry};
+use bonsai_lang_api::{AssignValueKind, FlowEvent, LanguageRegistry};
 use bonsai_vfs::Vfs;
 use std::sync::Arc;
 
@@ -71,6 +71,38 @@ function save(PDOStatement $stmt, $id) {
             name.ends_with("execute") && receiver_types.iter().any(|ty| ty == "PDOStatement")
         }),
         "PHP sigiled receiver should inherit parameter type, got {calls:?}"
+    );
+}
+
+#[test]
+fn implicit_this_receiver_uses_enclosing_class_and_bases() {
+    let db = db_with(
+        r#"
+<?php
+class BaseRepository {
+  public function cmd(): string { return "clean"; }
+}
+class Repository extends BaseRepository {
+  public function run(): string { return $this->cmd(); }
+}
+"#,
+    );
+    let global = db.global_index();
+    let run = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "run")
+        .expect("run method should be indexed");
+    let mut calls = Vec::new();
+    collect_calls(&run.flow_events, &mut calls);
+
+    assert!(
+        calls.iter().any(|(name, receiver_types)| {
+            name.ends_with("cmd")
+                && receiver_types.iter().any(|ty| ty == "Repository")
+                && receiver_types.iter().any(|ty| ty == "BaseRepository")
+        }),
+        "PHP's Tree-sitter adapter must type `$this` from the enclosing declaration hierarchy, got {calls:?}"
     );
 }
 
@@ -200,4 +232,48 @@ fn keyed_array_destructure_reads_the_selected_rhs_field() {
             handle.flow_events
         );
     }
+}
+
+#[test]
+fn quoted_runtime_callable_is_lowered_to_typed_callable_reference() {
+    let db = db_with("<?php\nfunction helper($x) {}\nfunction entry($arg) { $cb = 'helper'; $cb($arg); }\n");
+    let global = db.global_index();
+    let entry = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "entry")
+        .expect("entry function should be indexed");
+
+    assert!(entry.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Assign {
+            target,
+            source_name: Some(source),
+            value_kind: Some(AssignValueKind::CallableReference),
+            ..
+        } if target == "$cb" && source == "helper"
+    )));
+}
+
+#[test]
+fn ordinary_quoted_string_remains_a_literal_overwrite() {
+    let db = db_with("<?php\nfunction entry() { $value = 'helper'; return $value; }\n");
+    let global = db.global_index();
+    let entry = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "entry")
+        .expect("entry function should be indexed");
+
+    assert!(entry.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Assign {
+            target,
+            source_name: None,
+            source_call: None,
+            source_names,
+            value_kind: Some(AssignValueKind::Literal),
+            ..
+        } if target == "$value" && source_names.is_empty()
+    )));
 }

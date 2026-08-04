@@ -205,7 +205,7 @@ pub const LANGS: &[LangExp] = &[
         min_sources_micro: 0,
         min_source_flows_micro: 0,
         min_deps_micro: 1,
-        min_sanitizers_micro: 1,
+        min_sanitizers_micro: 0,
     },
     LangExp {
         lang: "cpp",
@@ -317,7 +317,11 @@ pub const LANGS: &[LangExp] = &[
         refs_populated: true,
         has_classes: false,
         min_sources_micro: 3,
-        min_source_flows_micro: 7,
+        // Six distinct, complete lineages remain after canonical flow
+        // identity removes duplicate path renderings: two database-output
+        // chains, three request-query chains through VerifyToken/GetUser or
+        // UpdateUser, and one request-query chain to RunAdminCommand.
+        min_source_flows_micro: 6,
         min_deps_micro: 5,
         min_sanitizers_micro: 0,
     },
@@ -433,7 +437,7 @@ pub const LANGS: &[LangExp] = &[
         min_sources_micro: 0,
         min_source_flows_micro: 0,
         min_deps_micro: 1,
-        min_sanitizers_micro: 2,
+        min_sanitizers_micro: 0,
     },
     LangExp {
         lang: "perl",
@@ -498,8 +502,10 @@ pub const LANGS: &[LangExp] = &[
         // joins stopped reporting as filesystem sinks and untyped Mako
         // render calls stopped reporting as template-source execution. The
         // real downstream path consumers and Mako Template constructor stay
-        // covered by dedicated positive/negative regression tests.
-        min_findings_complex: 50,
+        // covered by dedicated positive/negative regression tests. 50 -> 49
+        // after canonical flow-identity dedup removed the final duplicate;
+        // all 13 sink-rule families remain represented by distinct flows.
+        min_findings_complex: 49,
         min_complex_decls: 190,
         refs_populated: true,
         has_classes: false,
@@ -591,7 +597,7 @@ pub const LANGS: &[LangExp] = &[
         min_sources_micro: 3,
         min_source_flows_micro: 2,
         min_deps_micro: 0,
-        min_sanitizers_micro: 2,
+        min_sanitizers_micro: 0,
     },
     LangExp {
         lang: "swift",
@@ -1797,9 +1803,10 @@ fn dependency_signal_value(signal: &str) -> Option<&str> {
     .find_map(|prefix| signal.strip_prefix(prefix))
 }
 
-/// Assert `security sanitizers` has the expected inventory count. Most
-/// micro fixtures intentionally have no sanitizer; Objective-C and
-/// Solidity currently exercise positive passthrough/sanitizer paths.
+/// Assert `security sanitizers` has the expected credit-bearing inventory
+/// count. Passthrough transforms and generic validation markers intentionally
+/// do not appear on this command surface even though pack compatibility keeps
+/// their declarations in the sanitizer rule directory.
 fn check_security_sanitizers(ws: &str, lang: &str, expected_min: usize) {
     let Some((out, _, code)) = run(&["security", ws, "sanitizers", "--format", "json"]) else {
         return;

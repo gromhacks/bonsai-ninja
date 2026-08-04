@@ -264,6 +264,7 @@ fn base_rule(id: &str, kind: RuleKind, match_kind: MatchKind) -> Rule {
         modules: vec![],
         manifests: vec![],
         lockfiles: vec![],
+        package_matching: Default::default(),
         payload_types: vec![],
         match_spec: MatchSpec {
             kind: match_kind,
@@ -390,6 +391,18 @@ class Handlers(private val conn: Connection) {
     );
     rule.language = "kotlin".to_string();
     rule.packages = vec!["java.sql".to_string()];
+    rule.package_matching = bonsai_security::load_rulepack(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("security-patterns"),
+    )
+    .expect("bundled rulepack")
+    .metadata
+    .languages
+    .get("kotlin")
+    .expect("Kotlin metadata")
+    .package_matching
+    .clone();
     rule.match_spec.callee = Some(RuleTarget {
         regex: Some(r"^[A-Za-z_$][A-Za-z0-9_$]*\.createStatement\(\)\.executeQuery$".to_string()),
         ..Default::default()

@@ -16,8 +16,9 @@
 //!     required: taint reachability, not argument-shape gating, is the
 //!     source of truth for sink findings.
 
-use crate::rule::{MatchKind, Rule, RuleKind, Severity};
+use crate::rule::{AnalysisSemantics, MatchKind, Rule, RuleKind, Severity, TrustClass};
 use ahash::AHashMap;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -32,6 +33,234 @@ pub struct LanguagePack {
     /// `build_factory_returns` via `all_rules()` but never appear in any
     /// finding/inventory path. See [`RuleKind::Typing`].
     pub typing: Vec<Rule>,
+}
+
+/// Rulepack-owned ecosystem and taxonomy data that is not a source/sink rule
+/// by itself. Keeping this beside the YAML rules prevents shared crates from
+/// accumulating package-manager filenames, distribution aliases, or
+/// language-specific security-model exceptions.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RulepackMetadata {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub canonical_sink_families: Vec<String>,
+    #[serde(default, skip_serializing_if = "map_is_empty")]
+    pub sink_family_short_labels: AHashMap<String, String>,
+    #[serde(default, skip_serializing_if = "map_is_empty")]
+    pub sink_family_aliases: AHashMap<String, String>,
+    /// Sanitizer tag -> sink tags for which that sanitizer is relevant.
+    /// Same-tag credit is implicit. An empty target list declares a known
+    /// inventory/passthrough tag that intentionally clears no sink family.
+    #[serde(default, skip_serializing_if = "map_is_empty")]
+    pub sanitizer_credits: AHashMap<String, Vec<String>>,
+    /// Pack-wide defaults inherited by sink rules with the matching tag.
+    /// Per-language defaults and explicit rule fields take precedence.
+    #[serde(default, skip_serializing_if = "map_is_empty")]
+    pub sink_tag_semantics: AHashMap<String, AnalysisSemantics>,
+    /// Pack-wide defaults inherited by sink rules with the matching category.
+    #[serde(default, skip_serializing_if = "map_is_empty")]
+    pub sink_category_semantics: AHashMap<String, AnalysisSemantics>,
+    /// Pack-wide defaults inherited by sanitizer rules with the matching tag.
+    #[serde(default, skip_serializing_if = "map_is_empty")]
+    pub sanitizer_tag_semantics: AHashMap<String, AnalysisSemantics>,
+    /// Named CLI/security profile defaults. File inventories and policy
+    /// values live in rulepack data so the CLI does not compile ecosystem
+    /// layouts or deployment assumptions into the binary.
+    #[serde(default, skip_serializing_if = "map_is_empty")]
+    pub profiles: AHashMap<String, SecurityProfileMetadata>,
+    /// Workspace-relative patterns used to classify test findings. The
+    /// matcher is generic; language/ecosystem filename conventions live here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_path_patterns: Vec<String>,
+    #[serde(default)]
+    pub languages: AHashMap<String, LanguageRuleMetadata>,
+}
+
+impl RulepackMetadata {
+    /// Apply pack-owned defaults to one parsed rule. This is the single
+    /// inheritance path used by production loading and focused matcher tests;
+    /// callers never need to reproduce tag/category policy in Rust.
+    pub fn apply_rule_defaults(&self, rule: &mut Rule) {
+        let language_metadata = self.languages.get(&rule.language);
+        rule.package_matching = language_metadata
+            .map(|metadata| metadata.package_matching.clone())
+            .unwrap_or_default();
+
+        let defaults = match rule.kind {
+            RuleKind::Sink => {
+                let language_default = rule.tag.as_deref().and_then(|tag| {
+                    language_metadata.and_then(|metadata| metadata.sink_tag_semantics.get(tag))
+                });
+                let global_default = rule
+                    .tag
+                    .as_deref()
+                    .and_then(|tag| self.sink_tag_semantics.get(tag));
+                let category_default = rule
+                    .category
+                    .as_deref()
+                    .and_then(|category| self.sink_category_semantics.get(category));
+                [language_default, global_default, category_default]
+            }
+            RuleKind::Sanitizer => [
+                None,
+                rule.tag
+                    .as_deref()
+                    .and_then(|tag| self.sanitizer_tag_semantics.get(tag)),
+                None,
+            ],
+            RuleKind::Source | RuleKind::Typing => [None, None, None],
+        };
+
+        for default in defaults.into_iter().flatten() {
+            rule.analysis_semantics
+                .get_or_insert_with(AnalysisSemantics::default)
+                .inherit_missing(default);
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecurityProfileMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<TrustClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<Severity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_tests: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_paths: Vec<String>,
+}
+
+impl SecurityProfileMetadata {
+    fn merge_overriding(&mut self, incoming: Self) {
+        if incoming.trust.is_some() {
+            self.trust = incoming.trust;
+        }
+        if incoming.severity.is_some() {
+            self.severity = incoming.severity;
+        }
+        if incoming.context.is_some() {
+            self.context = incoming.context;
+        }
+        if incoming.exclude_tests.is_some() {
+            self.exclude_tests = incoming.exclude_tests;
+        }
+        if !incoming.exclude_paths.is_empty() {
+            self.exclude_paths = incoming.exclude_paths;
+        }
+    }
+}
+
+/// Adapter-visible package spelling rules for one language ecosystem.
+/// Shared matching applies these operations generically and never switches on
+/// a language id, package-manager convention, or provider spelling.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageMatchSemantics {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub strip_import_prefixes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub strip_import_suffixes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_separators: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_qualifier_from_package_tail: Option<PackageTailBindingSemantics>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageTailBindingSemantics {
+    pub package_separator: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_separators: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LanguageRuleMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_sink_families_applicable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_applicable_sink_families: Vec<String>,
+    /// Exact names or one-asterisk basename patterns for dependency metadata
+    /// files (for example `requirements*.txt` or `*.csproj`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_manifest_patterns: Vec<String>,
+    #[serde(default)]
+    pub normalize_hyphen_to_underscore: bool,
+    /// Manifest distribution name -> adapter-visible import/package aliases.
+    #[serde(default, skip_serializing_if = "map_is_empty")]
+    pub package_aliases: AHashMap<String, Vec<String>>,
+    /// Exact import/package spelling semantics emitted by this language's
+    /// adapter. These values are copied onto loaded rules for the generic
+    /// package gate; they are not interpreted as security findings.
+    #[serde(default)]
+    pub package_matching: PackageMatchSemantics,
+    /// Defaults inherited by sink rules with the matching tag. Individual
+    /// rule fields override these values.
+    #[serde(default, skip_serializing_if = "map_is_empty")]
+    pub sink_tag_semantics: AHashMap<String, AnalysisSemantics>,
+}
+
+impl LanguageRuleMetadata {
+    fn merge_overriding(&mut self, incoming: Self) {
+        if incoming.security_model.is_some() {
+            self.security_model = incoming.security_model;
+        }
+        if incoming.canonical_sink_families_applicable.is_some() {
+            self.canonical_sink_families_applicable = incoming.canonical_sink_families_applicable;
+        }
+        if !incoming.not_applicable_sink_families.is_empty() {
+            self.not_applicable_sink_families = incoming.not_applicable_sink_families;
+        }
+        if !incoming.dependency_manifest_patterns.is_empty() {
+            self.dependency_manifest_patterns = incoming.dependency_manifest_patterns;
+        }
+        if incoming.normalize_hyphen_to_underscore {
+            self.normalize_hyphen_to_underscore = true;
+        }
+        self.package_aliases.extend(incoming.package_aliases);
+        if !incoming.package_matching.strip_import_prefixes.is_empty() {
+            self.package_matching.strip_import_prefixes = incoming.package_matching.strip_import_prefixes;
+        }
+        if !incoming.package_matching.strip_import_suffixes.is_empty() {
+            self.package_matching.strip_import_suffixes = incoming.package_matching.strip_import_suffixes;
+        }
+        if !incoming.package_matching.package_separators.is_empty() {
+            self.package_matching.package_separators = incoming.package_matching.package_separators;
+        }
+        if incoming
+            .package_matching
+            .call_qualifier_from_package_tail
+            .is_some()
+        {
+            self.package_matching.call_qualifier_from_package_tail =
+                incoming.package_matching.call_qualifier_from_package_tail;
+        }
+        merge_analysis_semantics_map(&mut self.sink_tag_semantics, incoming.sink_tag_semantics);
+    }
+}
+
+fn map_is_empty<K, V>(map: &AHashMap<K, V>) -> bool {
+    map.is_empty()
+}
+
+fn merge_analysis_semantics_map(
+    target: &mut AHashMap<String, AnalysisSemantics>,
+    incoming: AHashMap<String, AnalysisSemantics>,
+) {
+    for (tag, semantics) in incoming {
+        if let Some(existing) = target.get_mut(&tag) {
+            existing.merge_overriding(semantics);
+        } else {
+            target.insert(tag, semantics);
+        }
+    }
 }
 
 impl LanguagePack {
@@ -59,6 +288,7 @@ impl LanguagePack {
 pub struct Rulepack {
     pub packs: AHashMap<String, LanguagePack>,
     pub root: PathBuf,
+    pub metadata: RulepackMetadata,
     /// Lazy `id → (language, kind, index)` lookup. Built once on
     /// the first `find_rule_by_id` call so hot rendering loops
     /// (`make_finding`, `combine_findings_by_source_flow`,
@@ -86,6 +316,7 @@ impl Default for Rulepack {
         Self {
             packs: AHashMap::new(),
             root: PathBuf::new(),
+            metadata: RulepackMetadata::default(),
             by_id: std::sync::OnceLock::new(),
             taint_graph_rule_content_fingerprint: std::sync::OnceLock::new(),
             receiver_mutation_targets: std::sync::OnceLock::new(),
@@ -111,6 +342,7 @@ impl Clone for Rulepack {
         Self {
             packs: self.packs.clone(),
             root: self.root.clone(),
+            metadata: self.metadata.clone(),
             by_id: std::sync::OnceLock::new(),
             taint_graph_rule_content_fingerprint: std::sync::OnceLock::new(),
             receiver_mutation_targets: std::sync::OnceLock::new(),
@@ -119,6 +351,30 @@ impl Clone for Rulepack {
 }
 
 impl Rulepack {
+    #[must_use]
+    pub fn normalized_sink_family<'a>(&'a self, family: &'a str) -> &'a str {
+        self.metadata
+            .sink_family_aliases
+            .get(family)
+            .map(String::as_str)
+            .unwrap_or(family)
+    }
+
+    fn apply_metadata_defaults(&mut self) {
+        let metadata = self.metadata.clone();
+        for pack in self.packs.values_mut() {
+            for rule in pack
+                .sinks
+                .iter_mut()
+                .chain(pack.sanitizers.iter_mut())
+                .chain(pack.sources.iter_mut())
+                .chain(pack.typing.iter_mut())
+            {
+                metadata.apply_rule_defaults(rule);
+            }
+        }
+    }
+
     /// Every rule in every language, for CLI filters that aren't scoped.
     #[must_use]
     pub fn all_rules(&self) -> Vec<&Rule> {
@@ -215,6 +471,47 @@ impl Rulepack {
     /// `docs/pattern-guide.mdx`.
     pub fn merge_overriding(&mut self, overlay: Rulepack) -> Vec<String> {
         let mut overridden = Vec::new();
+        if !overlay.metadata.canonical_sink_families.is_empty() {
+            self.metadata.canonical_sink_families = overlay.metadata.canonical_sink_families.clone();
+        }
+        self.metadata
+            .sink_family_short_labels
+            .extend(overlay.metadata.sink_family_short_labels);
+        self.metadata
+            .sink_family_aliases
+            .extend(overlay.metadata.sink_family_aliases);
+        self.metadata
+            .sanitizer_credits
+            .extend(overlay.metadata.sanitizer_credits);
+        for (name, incoming) in overlay.metadata.profiles {
+            self.metadata
+                .profiles
+                .entry(name)
+                .or_default()
+                .merge_overriding(incoming);
+        }
+        if !overlay.metadata.test_path_patterns.is_empty() {
+            self.metadata.test_path_patterns = overlay.metadata.test_path_patterns;
+        }
+        merge_analysis_semantics_map(
+            &mut self.metadata.sink_tag_semantics,
+            overlay.metadata.sink_tag_semantics,
+        );
+        merge_analysis_semantics_map(
+            &mut self.metadata.sink_category_semantics,
+            overlay.metadata.sink_category_semantics,
+        );
+        merge_analysis_semantics_map(
+            &mut self.metadata.sanitizer_tag_semantics,
+            overlay.metadata.sanitizer_tag_semantics,
+        );
+        for (language, incoming) in overlay.metadata.languages {
+            self.metadata
+                .languages
+                .entry(language)
+                .or_default()
+                .merge_overriding(incoming);
+        }
         for (language, overlay_pack) in overlay.packs {
             let target = self
                 .packs
@@ -242,6 +539,7 @@ impl Rulepack {
         // `find_rule_by_id` rebuilds against the merged set.
         self.by_id = std::sync::OnceLock::new();
         self.receiver_mutation_targets = std::sync::OnceLock::new();
+        self.apply_metadata_defaults();
         overridden
     }
 }
@@ -283,6 +581,7 @@ pub fn load_workspace_local_rules(workspace: &Path) -> Result<Option<Rulepack>, 
     let mut pack = Rulepack {
         packs: AHashMap::new(),
         root: local_root.clone(),
+        metadata: load_rulepack_metadata(&local_root)?,
         by_id: std::sync::OnceLock::new(),
         taint_graph_rule_content_fingerprint: std::sync::OnceLock::new(),
         receiver_mutation_targets: std::sync::OnceLock::new(),
@@ -337,6 +636,7 @@ pub fn load_workspace_local_rules(workspace: &Path) -> Result<Option<Rulepack>, 
     // Flat-layout overlay: <ws>/.bonsai/rules/{sources,sinks,sanitizers}/*.yml.
     // YAML must declare `language:`. Same routing as `load_rulepack`.
     load_flat_layout_into(&local_root, &mut pack)?;
+    pack.apply_metadata_defaults();
     // Overlay packs feed `merge_overriding`, which legitimately
     // last-writes on collision against the global pack — but two
     // overlay rules sharing an id are almost certainly a mistake.
@@ -425,6 +725,7 @@ pub fn load_rulepack(root: &Path) -> Result<Rulepack, LoadError> {
     let mut pack = Rulepack {
         packs: AHashMap::new(),
         root: root.to_path_buf(),
+        metadata: load_rulepack_metadata(root)?,
         by_id: std::sync::OnceLock::new(),
         taint_graph_rule_content_fingerprint: std::sync::OnceLock::new(),
         receiver_mutation_targets: std::sync::OnceLock::new(),
@@ -478,6 +779,7 @@ pub fn load_rulepack(root: &Path) -> Result<Rulepack, LoadError> {
     // declare `language:` in YAML and are routed into the matching
     // language pack (creating a new bucket if needed).
     load_flat_layout_into(root, &mut pack)?;
+    pack.apply_metadata_defaults();
     // Duplicate-id check WITHIN each language, across all three buckets.
     for lp in pack.packs.values() {
         let mut seen: AHashMap<String, String> = AHashMap::new();
@@ -504,6 +806,23 @@ pub fn load_rulepack(root: &Path) -> Result<Rulepack, LoadError> {
     // require deliberate misnaming, but lock it in at load time.
     check_cross_language_duplicate_ids(&pack)?;
     Ok(pack)
+}
+
+fn load_rulepack_metadata(root: &Path) -> Result<RulepackMetadata, LoadError> {
+    let yaml = root.join("metadata.yml");
+    let yaml_alt = root.join("metadata.yaml");
+    let path = if yaml.exists() {
+        yaml
+    } else if yaml_alt.exists() {
+        yaml_alt
+    } else {
+        return Ok(RulepackMetadata::default());
+    };
+    let text = std::fs::read_to_string(&path).map_err(|source| LoadError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    serde_yaml::from_str(&text).map_err(|source| LoadError::Parse { path, source })
 }
 
 /// Walk `<root>/{sources,sinks,sanitizers}/*.yml` and add every rule

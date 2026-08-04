@@ -1,15 +1,15 @@
 use super::{
     build_dart_cascade_events, build_dart_object_expression_call, build_dart_selector_call_event,
-    call_receiver_from_name, elixir_unwrap_def, emit_elixir_control_flow_call,
-    emit_erlang_functional_loop_call, emit_ruby_block_loop_call, extract_comprehension_for_clause_assigns,
-    extract_foreach_binding_assigns, extract_match_binding_assigns, extract_rhs_expr_operands,
-    extract_rust_let_condition_bindings, first_identifier_like_child, first_named_child,
-    first_named_child_of_kind, has_direct_child_kind, is_comprehension_binding_clause, is_comprehension_kind,
-    is_initializer_list_kind, is_large_data_declaration_node, is_large_literal_initializer_node,
-    is_scala_operator_method_call, is_swift_defer_call, looks_like_bare_identifier,
-    next_named_sibling_within, node_text, pseudo_call_event, repair_branch_events_by_else_keyword, span_of,
-    swift_trailing_lambdas, walk_deep_sequence_executable_nodes, walk_lambda_body, FileId, FlowEvent,
-    GrammarHandler, LoopKind, Node, SyntaxSpecialForm,
+    elixir_unwrap_def, emit_elixir_control_flow_call, emit_erlang_functional_loop_call,
+    emit_ruby_block_loop_call, extract_comprehension_for_clause_assigns, extract_foreach_binding_assigns,
+    extract_match_binding_assigns, extract_rhs_expr_operands, extract_rust_let_condition_bindings,
+    first_identifier_like_child, first_named_child_of_kind, has_direct_child_kind,
+    is_comprehension_binding_clause, is_comprehension_kind, is_initializer_list_kind,
+    is_large_data_declaration_node, is_large_literal_initializer_node, is_swift_defer_call,
+    looks_like_bare_identifier, next_named_sibling_within, node_text, pseudo_call_event,
+    repair_branch_events_by_else_keyword, span_of, swift_trailing_lambdas,
+    walk_deep_sequence_executable_nodes, walk_lambda_body, FileId, FlowEvent, GrammarHandler, LoopKind, Node,
+    SyntaxSpecialForm,
 };
 
 mod assignment;
@@ -44,6 +44,17 @@ pub(super) fn walk_into(
         handler,
         class_names,
     };
+    // Adapter-owned syntax events are executable compiler facts. Evaluate
+    // them before large-literal/declaration pruning: a grammar may represent
+    // a real call as declaration syntax (C++ direct initialization is the
+    // canonical case), and the structural skip must not erase that language
+    // semantic. The shared walker still owns recursion and downstream IR.
+    if let Some(event) = handler
+        .syntax_event_extractor
+        .and_then(|extract| extract(node, file, src, handler))
+    {
+        out.push(event);
+    }
     if is_large_literal_initializer_node(kind, &node) {
         return;
     }
@@ -52,6 +63,18 @@ pub(super) fn walk_into(
         return;
     }
     if is_large_data_declaration_node(kind, &node) {
+        // Large static/data declarations skip recursive expression walking,
+        // but their direct grammar children may still carry an
+        // adapter-classified executable event. Preserve those exact facts
+        // without descending through the potentially enormous initializer.
+        if let Some(extract) = handler.syntax_event_extractor {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if let Some(event) = extract(child, file, src, handler) {
+                    out.push(event);
+                }
+            }
+        }
         return;
     }
 
@@ -75,10 +98,9 @@ pub(super) fn walk_into(
         return;
     }
 
-    if let Some(event) = pseudo_call_event(&node, file, src) {
+    if let Some(event) = pseudo_call_event(node, file, src, handler) {
         out.push(event);
     }
-
     // Comprehensions / generator expressions across Python, JS, TS.
     // Tree-sitter exposes them as `list_comprehension`,
     // `dict_comprehension`, `set_comprehension`, `generator_expression`
@@ -228,7 +250,7 @@ fn lower_branch(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<Flow
                     source_name: looks_like_bare_identifier(&value_text).then(|| value_text.clone()),
                     source_call: None,
                     source_call_args: Vec::new(),
-                    source_names: extract_rhs_expr_operands(&value, src),
+                    source_names: extract_rhs_expr_operands(&value, src, handler),
                     declares_new_binding: true,
                     value_kind: None,
                 });
@@ -242,7 +264,7 @@ fn lower_branch(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<Flow
             prefixed_else.extend(else_events);
             else_events = prefixed_else;
         }
-        let match_bindings = extract_match_binding_assigns(file, &node, src);
+        let match_bindings = extract_match_binding_assigns(file, &node, src, handler);
         if !match_bindings.is_empty() {
             let mut prefixed = match_bindings.clone();
             prefixed.extend(then_events);
@@ -314,7 +336,9 @@ fn lower_comprehension(node: Node<'_>, context: LoweringContext<'_>, out: &mut V
         }
         clauses.sort_by_key(|clause| clause.start_byte());
         for clause in &clauses {
-            out.extend(extract_comprehension_for_clause_assigns(file, clause, src));
+            out.extend(extract_comprehension_for_clause_assigns(
+                file, clause, src, handler,
+            ));
         }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
@@ -383,9 +407,9 @@ fn lower_loop(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<FlowEv
             LoopKind::While
         };
         if matches!(loop_kind, LoopKind::ForEach | LoopKind::For) {
-            out.extend(extract_foreach_binding_assigns(file, &node, src));
+            out.extend(extract_foreach_binding_assigns(file, &node, src, handler));
         }
-        out.extend(extract_rust_let_condition_bindings(file, &node, src));
+        out.extend(extract_rust_let_condition_bindings(file, &node, src, handler));
         out.push(FlowEvent::Loop {
             span: span_of(file, &node),
             loop_kind,
@@ -414,7 +438,7 @@ fn lower_special_form(node: Node<'_>, context: LoweringContext<'_>, out: &mut Ve
     // `identifier.identifier selector`, so the prev sibling is a `.`
     // followed by the method identifier; we walk back as needed.
     if handler.has_special_form(SyntaxSpecialForm::SplitSelectorCall) && kind == "selector" {
-        if let Some(event) = build_dart_selector_call_event(node, file, src) {
+        if let Some(event) = build_dart_selector_call_event(node, file, src, handler) {
             out.push(event);
             // Descend into arguments for nested calls.
             if let Some(arg_part) = first_named_child_of_kind(&node, "argument_part") {
@@ -436,7 +460,7 @@ fn lower_special_form(node: Node<'_>, context: LoweringContext<'_>, out: &mut Ve
     // the idiomatic Flutter builder pattern is invisible to sink rules
     // (no Call) and cascade field writes vanish (no Assign).
     if handler.has_special_form(SyntaxSpecialForm::CascadeSection) && kind == "cascade_section" {
-        if let Some(events) = build_dart_cascade_events(node, file, src) {
+        if let Some(events) = build_dart_cascade_events(node, file, src, handler) {
             out.extend(events);
             // Descend into call arguments / the written value for
             // nested calls, mirroring the selector branch above.
@@ -472,7 +496,7 @@ fn lower_special_form(node: Node<'_>, context: LoweringContext<'_>, out: &mut Ve
         && (kind == "new_expression" || kind == "const_object_expression")
         && !handler.is_call(kind)
     {
-        if let Some(event) = build_dart_object_expression_call(node, file, src) {
+        if let Some(event) = build_dart_object_expression_call(node, file, src, handler) {
             out.push(event);
             if let Some(args) = first_named_child_of_kind(&node, "arguments") {
                 let mut cursor = args.walk();
@@ -482,39 +506,6 @@ fn lower_special_form(node: Node<'_>, context: LoweringContext<'_>, out: &mut Ve
             }
             return true;
         }
-    }
-
-    // Scala-specific: `foo.!` / `foo.bar_!` (Scala operator-method
-    // postfix invocations — used by the `sys.process` "run-as-shell-
-    // command" idiom). tree-sitter-scala parses these as
-    // `field_expression` with an `operator_identifier` as the second
-    // child, NOT as a call. Emit a Call event here so the sink
-    // surfaces in the flow.
-    if handler.has_special_form(SyntaxSpecialForm::PostfixOperatorCall)
-        && kind == "field_expression"
-        && is_scala_operator_method_call(&node)
-    {
-        let receiver_node = node
-            .child_by_field_name("value")
-            .or_else(|| first_named_child(&node));
-        if let Some(receiver_node) = receiver_node {
-            // Evaluate the receiver before invoking its postfix method. This
-            // preserves nested calls such as `Seq(a, value).!` as ordinary
-            // Call/CallArg facts instead of flattening their source text.
-            walk_into(receiver_node, file, src, handler, class_names, out, false);
-        }
-        let name = node_text(&node, src).trim().to_string();
-        if !name.is_empty() {
-            out.push(FlowEvent::Call {
-                span: span_of(file, &node),
-                receiver: call_receiver_from_name(&name),
-                receiver_types: Vec::new(),
-                name,
-                call_kind: crate::CallKind::Method,
-                args: Vec::new(),
-            });
-        }
-        return true;
     }
 
     // Swift-specific: `defer { body }` parses as a `call_expression`

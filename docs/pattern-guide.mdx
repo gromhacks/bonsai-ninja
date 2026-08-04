@@ -13,11 +13,67 @@ rejected.
 
 ```
 security-patterns/langs/<lang>/{sources,sinks,sanitizers,typing}/<family>.yml
+security-patterns/metadata.yml
 ```
 
 The directory determines the rule kind. `<lang>` matches one of the 21
 supported language IDs. `<family>` is a free-form filename that groups
 related rules - `cmdi.yml`, `sqli.yml`, `xss.yml`, etc.
+
+`metadata.yml` owns pack-wide taxonomy and ecosystem knowledge that is not a
+finding rule: canonical sink families and aliases, named security profiles,
+test-path classification, per-language security-model exceptions,
+dependency-manifest basename patterns, adapter-visible package spelling,
+distribution-to-import aliases, sanitizer-to-sink tag credit, and tag-level
+default `analysis_semantics`. Shared Rust code consumes this schema generically;
+do not add package-manager filenames, profile path lists, import prefixes,
+namespace separators, provider identities, security taxonomy, or distribution
+aliases to `crates/security` or the CLI.
+
+`sink_family_short_labels` is presentation metadata for compact CLI audit
+tables. Every configured canonical family must have a label; adding or
+renaming a family therefore changes YAML, validation fixtures, and cache
+fingerprints—not a Rust match statement.
+
+`profiles.<name>` declares optional trust, severity, context, test exclusion,
+and workspace-relative `exclude_paths`. Explicit CLI flags win over profile
+defaults. `test_path_patterns` is the single test-file inventory used by
+`--exclude-tests` and finding `from_test` attribution; matching is
+case-normalized and workspace-relative.
+
+Each `languages.<language>.package_matching` entry describes the package/import
+spelling emitted by that adapter. `strip_import_prefixes` and
+`strip_import_suffixes` remove only declared wrappers;
+`package_separators` defines whole-component boundaries; and
+`call_qualifier_from_package_tail` declares the uncommon case where a final
+package-path component becomes a local call qualifier. Shared matching applies
+these values without a language-id branch, and changes participate in cache
+fingerprints.
+
+Tag defaults reduce repeated guard policy without moving security meaning into
+an adapter. A sink's explicit `analysis_semantics` wins; missing fields inherit
+from its language/tag entry in `metadata.yml`.
+
+Workspace overlays may include `.bonsai/rules/metadata.yml`. Overlay entries
+replace only the fields they declare: package aliases and tag defaults merge by
+key, sanitizer-credit entries merge by sanitizer tag, while omitted bundled
+manifest patterns, normalization, taxonomy, and security-model settings remain
+active. This keeps a local alias addition from silently disabling dependency
+discovery or bundled guard semantics.
+
+`sanitizer_credits` maps a sanitizer tag to the sink tags whose context it can
+sanitize. Same-tag credit is implicit. Declare an empty list for recognized
+passthrough or inventory-only tags that intentionally clear no taint. This is
+the only cross-tag credit taxonomy: the runtime and
+`scripts/sanitizer_credit_audit.py` both consume it directly.
+
+Pack-wide `sink_tag_semantics` declares reporting and sanitizer-attachment
+policy shared by a sink family. `sanitizer_tag_semantics` declares generic
+guard-call value roles such as receiver, all arguments, or selected argument
+indices. These schemas let shared analysis prove behavior from typed compiler
+facts without branching on an authored tag string. Per-language
+`sink_tag_semantics` may refine a global sink default; explicit rule fields
+remain authoritative.
 
 ## Minimum viable rule
 
@@ -272,7 +328,9 @@ taint/argument constraints — but expect lower precision than a
 - format_arg_index: 0
 ```
 
-Treats arg N as a format string - for `printf`-shaped sinks.
+Treats arg N as a dynamic format string for formatter-shaped sinks. Static
+literal directives do not satisfy this constraint; model a dangerous literal
+with a separate rule-owned argument regex/value constraint.
 
 ### `top_level`
 
@@ -501,10 +559,13 @@ the engine must not hardcode every library method.
 These transfer declarations live in the sanitizer rule directory for pack
 compatibility, but they are passthrough rules with a non-crediting tag such as
 `passthrough-decode` or `passthrough-transform`. They are rendered and emitted
-as `TAINT TRANSFORM` / `taint-transform`, never as sanitizer evidence. Do not
-replace this with a generic engine heuristic, because unrelated application
-methods with similar names may validate, ignore, or transform different
-operands.
+as `TAINT TRANSFORM` / `taint-transform`, never as sanitizer evidence or as a
+`security sanitizers` inventory row. Generic tags declared with an empty
+`sanitizer_credits` target list follow the same inventory rule: they can
+describe validation-shaped or transfer facts, but cannot claim to sanitize a
+sink. Do not replace this with a generic engine heuristic, because unrelated
+application methods with similar names may validate, ignore, or transform
+different operands.
 The matcher normalizes common qualified-name separators (`.`, `::`, `->`,
 and Erlang `:`), so structured callee attributes can represent language
 surface syntax without hardcoding that API in Rust code.
@@ -522,10 +583,23 @@ sanitizer inventory. Use a sink's typed `analysis_semantics` only when the
 relevant adapter emits an exact value-shape summary. Supported proof families
 include `character_constraint`, `same_origin_path_constraint`,
 `dynamic_key_denylist_guard`, `configured_call_argument_guard`, and
-`url_reconstruction_guard`. Each family fails closed on ambiguity or partial
-syntax and must have a positive and a one-condition-broken negative test. See
+`url_reconstruction_guard` / `url_network_guard`. Provider-backed compiler facts carry their exact
+factory/operation identity without trusting it. Declare accepted providers in
+`character_constraint.accepted_providers` or
+`same_origin_path_constraint.accepted_providers`; for generic capability proofs use
+`compiler_guard.required_evidence` and `forbidden_evidence`. API names and
+security-sensitive literals stay in YAML in both cases. Each family fails
+closed on ambiguity or partial syntax and must have a positive and a
+one-condition-broken negative test. See
 [Security Specification](security-spec.mdx#compiler-proven-guard-semantics)
 and [Adapter Contract](contributing/adapter-contract.mdx#value-shape-summary-contract).
+
+For `url_network_guard`, `root.kind: sink-argument-parser-input` binds a sink
+argument to the input of a rule-declared parser call by exact assignment and
+argument facts. `dns.address_parser` optionally declares the provider that
+converts a resolver result before rule-declared private-address predicates are
+tested. `target` plus `argument_index` are required; a same-named local helper
+does not receive credit unless its canonical import identity matches.
 
 For receiver-return transforms, use
 `taint_semantics.call_result_passthrough_receiver: true` instead of a

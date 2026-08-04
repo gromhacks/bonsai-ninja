@@ -16,6 +16,13 @@ tree-sitter tree and emits a `Vec<FlowEvent>` per declaration. The walk
 is driven by a supplied `GrammarHandler` — a declarative configuration
 struct that names node kinds for each construct.
 
+Every non-empty `GrammarHandler` field used in production is declared by the
+owning adapter. `EMPTY_HANDLER` is only an ergonomic all-empty base for struct
+update syntax; it does not activate defaults. `GENERIC_HANDLER` and
+`COMMON_CALL_KINDS` exist only in `lang_api` tests for synthetic multi-grammar
+fixtures. Production adapters may not reference either symbol, and the
+architecture conformance gate rejects such a dependency.
+
 `kit::decl_index_with_handler(pack_name, file, ctx, handler)` is the full
 adapter pipeline (decls + refs + per-function flow events) in a single
 call. Most adapters delegate fully to this helper and add language-
@@ -29,10 +36,26 @@ fresh Tree-sitter lowering and a decoded compiler object must be identical.
 Object reuse is validated by relative path/module context, selected adapter,
 frontend ABI, and SHA-256 source content.
 
-## Where language-specific code belongs
+An adapter that owns multiple Tree-sitter grammar variants selects the exact
+pack with `LanguageAdapter::grammar_name_for_path`. TypeScript uses the
+`typescript` grammar for `.ts`/`.mts`/`.cts` and the `tsx` grammar for `.tsx`.
+The parser cache keys both adapter and grammar variant; syntax highlighting
+uses the same per-extension selection. Shared parser/CLI code does not carry a
+parallel extension-to-grammar table.
 
-In the adapter, not in `kit`. A useful test: if the rule applies to
-exactly one language, it lives in that language's adapter.
+## Where language syntax belongs
+
+In the adapter, not in `kit`. A useful test: if a Tree-sitter construct or
+runtime syntax rule applies to exactly one language, it lives in that
+language's adapter.
+
+This does **not** make adapters a home for security API inventories. A package
+name, framework receiver, source/sink method, safe configuration value,
+forbidden key, escaping table, severity, trust class, or CWE belongs in
+`security-patterns/langs/<language>`. The adapter lowers syntax to a typed
+fact; rule data assigns security meaning; shared analysis joins the two. If a
+proof needs new information, add a narrow typed fact or semantic role rather
+than matching the API name in Rust.
 
 Examples that follow this rule:
 
@@ -102,10 +125,44 @@ right move is a hook field on `GrammarHandler`, not an
 
 Existing hooks:
 
-- `pseudo_call_event_hook(node, file, src) -> Option<FlowEvent>` —
-  adapters lower non-call-shaped invocations to the `Call` model.
-- `unwrap_def_node` — Elixir uses this to disambiguate `call` nodes
-  (runtime call vs `def`/`defp` macro).
+- `pseudo_call_extractor(node, file, src, handler) -> Option<FlowEvent>` —
+  adapters lower non-call-shaped invocations to the `Call` model. JSX/TSX,
+  Go sends, C++ delete expressions, Perl scalar eval, PHP echo, Ruby
+  subshells, and Scala operator calls are implemented by their owning
+  adapters; `kit/pseudo_call.rs` only dispatches the active callback.
+- `pseudo_call_receiver_extractor(node, src) -> Option<Node>` — preserves the
+  exact receiver subtree for pseudo calls so value-flow facts join by span.
+- `syntax_event_extractor(node, file, src, handler) -> Option<FlowEvent>` —
+  lowers an adapter-owned grammar node whose typed control/dataflow meaning
+  cannot be selected from a single construct-kind list. Kotlin uses it to
+  distinguish the variants of `jump_expression`; Scala uses it to retain the
+  dynamic payload carried by a constructed exception; C++ uses it for direct
+  initialization declarations such as `Repository repo(args)` and constructor
+  initializer entries such as `Derived(args)`. The shared walker consumes the
+  emitted event without inspecting language keywords or types. Adapter syntax
+  events are tested before generic declaration/initializer pruning because a
+  grammar may encode an executable construct in a declaration-shaped node.
+  When a grammar places executable nodes outside the function body, as C++
+  does for a constructor's `field_initializer_list`, the owning adapter must
+  walk that exact syntax and prepend its events to the declaration body. It
+  must not reconstruct the call later from text or callee-name guesses.
+- `argument_passing_mode_extractor(argument, value) -> ArgumentPassingMode` —
+  classifies caller-visible write-back from the owning grammar. Shared
+  lowering receives only `Value` or `WriteBack`; it has no cross-language
+  inventory of address/ref/out syntax.
+- `callable_reference_extractor(node, src) -> Option<String>` — lowers a
+  grammar-proven callable value without invoking it.
+
+The ordinary construct inventories (`call_kinds`, `assignment_kinds`,
+`member_expression_kinds`, `subscript_expression_kinds`, branch/loop/exit
+kinds, and call-reference kinds) follow the same rule. An empty list means the
+language does not expose that construct through the shared walker; shared
+code never substitutes a union collected from other adapters.
+
+`special_forms` selects a small typed lowering capability when a grammar
+encodes control flow or calls in a nonstandard tree shape. The adapter still
+declares the capability; shared consumers must never select it from a
+`LanguageId` or an API/package spelling.
 
 Helpers that aren't hooks:
 
@@ -135,6 +192,8 @@ New hooks should:
    accumulate over time.
 3. Carry a docstring naming the language(s) that use it and why the kit
    can't do it generically.
+4. Describe source syntax only. A hook must not classify a library call as a
+   source, sink, sanitizer, or vulnerability.
 
 ## Branch arm contract
 
@@ -155,6 +214,12 @@ facts automatically. A custom declaration-index path must call
 `extract_branch_condition_facts`; downstream analyses must not reconstruct
 condition polarity from `FlowEvent::Branch.condition` text.
 
+`ConditionExpressionFact::Truthy` is the typed form for a grammar-proven
+runtime truth test of one exact operand, such as a boolean property projection.
+An adapter must preserve the operand place/call identity. For falsey fallback
+expressions, retain the dynamic operand selected by the AST; a clean literal
+fallback does not erase the dynamic projection from the condition fact.
+
 ## Value-shape summary contract
 
 Security guards that are not a single library call are still compiler facts,
@@ -164,6 +229,10 @@ exact, serializable summaries to `DeclIndex`:
 - `CharacterConstraintFact` for a character comprehension, regular-expression
   substitution, or equivalent runtime construct whose output alphabet is
   proven by the parsed syntax;
+- `GuardedValueFilterFact` for a clean output whose only dynamic element write
+  is copied from one input under a positively required predicate call. The
+  fact records the exact predicate, write, input, and output spans/places but
+  does not decide what the predicate means;
 - `SameOriginPathConstraintFact` for a helper that rejects schemes and
   authorities, requires an absolute path, and rejects `//` paths;
 - `DynamicKeyFilterFact` for a helper that drops a finite static key set before
@@ -172,6 +241,18 @@ exact, serializable summaries to `DeclIndex`:
   and language-level literal fallbacks used to reconstruct a value;
 - exact static aggregate/scalar fields on `CallArgumentValueFact` for
   constructor or call configuration.
+
+Provider-dependent facts record the canonical imported factory/operation call
+but do not classify it. `CharacterConstraintDomain::ProviderBound` and
+`SameOriginPathConstraintFact::provider_call` receive security credit only
+when rule metadata declares that provider. `SameOriginPathConstraintFact`
+also carries the exact guarded `input_place`; `input_param_index` is present
+only for a reusable helper summary and absent for caller-local guarded values.
+Likewise, a `GuardedValueFilterFact` receives sanitizer credit only when an
+enabled sanitizer rule matches its exact `predicate_call_span`. Proximity to a
+predicate is never evidence: negated predicates, predicates over a different
+input, non-zero initialization, and any additional unguarded dynamic output
+write must prevent the adapter from emitting the fact.
 
 These facts describe language/runtime behavior only. They do not name a CWE,
 sink, package, or security API. The rulepack assigns security meaning by
@@ -206,11 +287,22 @@ where adapters declare per-language behaviour the engine consults:
   cross-language fallback.
 - **`super_receiver_tokens`** / **`implicit_receiver_tokens`** — same
   shape: exact per-adapter declarations. Empty means no such source syntax.
+- **`callable_reference_syntax`** — exact callable-value prefixes, arity
+  notation, optional symbol wrapper, and trailing invocation punctuation.
+  Shared callgraph/IDG code applies only the active adapter's declaration.
 - **`field_places_complete`** — every source-level field/property
   projection is emitted as an IDG `Place`. Sink-oriented analysis may then
   run sparse AST-demand forwarding for that adapter. Leave this false until
   call-shaped properties, patterns, and implicit projections all have
   conformance coverage; complete export graphs never use this optimization.
+
+Synthesized declarations remain adapter-owned compiler IR. A computed
+property getter must derive `receiver_state_sources` from its lowered body in
+the same way as an ordinary method; for example, `var cmd { data.cmd }`
+retains the exact `self.data` receiver dependency. Template adapters follow
+the same rule: Ruby ERB/RHTML synthetic modules expose only Tree-sitter-proven
+instance-variable inputs from template expressions, never a shared list of
+framework variable names.
 
 The empty value is meaningful. Shared compiler backends do not substitute a
 cross-language token list, guess from capitalization, or parse source text.
@@ -281,10 +373,11 @@ existing `Decl` / `FlowEvent` contracts.
   `Self(`, `static(`, or any other syntactic keyword out of raw
   expression text. Adapters classify constructors structurally
   (`CallKind::Constructor`), emit return values via `FlowEvent::Return`,
-  and produce `value_text` that already has the keyword removed.
-  Cross-language tokens that *do* live in the engine (variable sigils,
-  pointer sigils, implicit-receiver prefixes, super tokens) are named
-  constants in `bonsai_common::names`; see design-patterns.mdx §12a.
+  and produce `value_text` that already has the keyword removed. Callable
+  value prefixes, arity notation, and symbol wrappers are declared through
+  `LanguageCapabilities::callable_reference_syntax`; shared crates own no
+  cross-language punctuation inventory. Vocabulary-free name-boundary helpers
+  are candidate lookup only and never establish symbol identity.
 
 Imported namespace and type qualifiers are call-resolution syntax, not
 runtime receiver values. Adapters emit their exact `ImportSpec` and
@@ -293,6 +386,12 @@ bindings as `CallReceiverRole::Namespace`. A parameter or non-import assignment
 with the same name is exact shadowing evidence and keeps the receiver role
 `Value`. IDG transfer must not create an implicit receiver edge for a
 `Namespace` fact.
+
+`ImportSpec` entries come only from grammar import/include/use declarations.
+Never fabricate an import from a qualified type use to satisfy a package gate:
+that corrupts local nested-type resolution and makes a syntax occurrence look
+like external dependency evidence. Fully qualified calls remain provable from
+their exact call identity plus rulepack-declared package semantics.
 
 ## Testing contract
 

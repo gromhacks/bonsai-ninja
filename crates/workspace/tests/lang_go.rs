@@ -120,8 +120,7 @@ fn panic_is_a_call() {
 
 #[test]
 fn switch_as_branch() {
-    // Go's switch statement is classified in the generic handler's branch
-    // kinds (`switch_statement` / `expression_switch_statement`).
+    // Go's adapter classifies both parsed switch statement forms as branches.
     let w =
         make("package m\nfunc f(x int) { switch x { case 1: g(); default: h() } }\nfunc g(){}\nfunc h(){}");
     assert!(has_branch(&w, "f"), "switch not classified as branch");

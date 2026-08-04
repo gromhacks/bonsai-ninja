@@ -238,7 +238,12 @@ fn eval_die_dollar_at_rewrites_to_try_throw_alias_catch() {
             } => Some((body, catch_events, catch_param)),
             _ => None,
         })
-        .expect("eval/die should lower to Try");
+        .unwrap_or_else(|| {
+            panic!(
+                "eval/die should lower to Try; emitted events: {:#?}",
+                handle.flow_events
+            )
+        });
 
     assert_eq!(catch_param.as_deref(), Some("$e"));
     assert!(

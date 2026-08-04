@@ -28,10 +28,23 @@ pub(super) fn config_fingerprint(
             rule_tokens
                 .push(serde_json::to_string(rule).unwrap_or_else(|_| format!("rule-json-error:{}", rule.id)));
         }
+        let mut package_languages = pack.metadata.languages.iter().collect::<Vec<_>>();
+        package_languages.sort_by_key(|(language, _)| language.as_str());
+        for (language, metadata) in package_languages {
+            rule_tokens.push(format!(
+                "package-matching:{language}:{}",
+                serde_json::to_string(&metadata.package_matching)
+                    .unwrap_or_else(|_| "package-matching-json-error".to_string())
+            ));
+        }
         bonsai_hash::fnv1a_names64(&rule_tokens)
     });
     let tokens = vec![
-        "taint-graph-config-v2".to_string(),
+        // Query ABI: bump whenever the exact source-graph result changes
+        // without a rulepack/configuration change. v3 makes an incomplete
+        // backward field-relevance relation non-pruning, so cached negative
+        // graphs produced by v2 are not reusable.
+        "taint-graph-config-v3".to_string(),
         format!("mode={mode}"),
         format!(
             "max_precision={}",

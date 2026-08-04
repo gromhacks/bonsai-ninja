@@ -5,16 +5,86 @@ use bonsai_lang_api::{
     kit::{
         collect_assign_targets, collect_kinds, collect_receiver_field_writes, first_named_child_of_kind,
         language_from_pack, node_text, package_module_segments_with_workspace_prefix, parse_with, span_of,
-        walk_flow_events, with_fn_kinds_and_implicit_receivers,
+        walk_flow_events,
     },
     rewrite_implicit_member_reads, AdapterContext, AdapterError, CallKind, Decl, DeclIndex, DeclKind,
     FieldWrite, FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec,
     LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasBinding, Visibility,
+    EMPTY_HANDLER,
 };
 use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("kotlin");
 const PACK_NAME: &str = "kotlin";
+
+fn extract_kotlin_syntax_event(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<FlowEvent> {
+    if node.kind() != "jump_expression" {
+        return None;
+    }
+    let keyword = node.child(0)?.kind();
+    let value = node.named_child(0);
+    match keyword {
+        "throw" => {
+            let value_name = value.and_then(|value| {
+                let flow =
+                    bonsai_lang_api::kit::expression_flow_from_node_with_handler(value, file, src, handler);
+                let operands =
+                    bonsai_lang_api::kit::expression_operand_names_with_handler(&value, src, handler);
+                single_kotlin_value_source(&flow, operands)
+            });
+            Some(FlowEvent::Throw {
+                span: span_of(file, &node),
+                value_name,
+                thrown_type: None,
+            })
+        }
+        "return" => {
+            let value_flow = value.map_or_else(bonsai_lang_api::ExpressionFlow::default, |value| {
+                bonsai_lang_api::kit::expression_flow_from_node_with_handler(value, file, src, handler)
+            });
+            Some(FlowEvent::Return {
+                span: span_of(file, &node),
+                value_text: value.map(|value| node_text(&value, src).trim().to_string()),
+                value_name: single_kotlin_value_source(&value_flow, Vec::new()),
+                value_flow,
+            })
+        }
+        "break" => Some(FlowEvent::Break {
+            span: span_of(file, &node),
+            label: value.map(|value| node_text(&value, src).trim().to_string()),
+        }),
+        "continue" => Some(FlowEvent::Continue {
+            span: span_of(file, &node),
+            label: value.map(|value| node_text(&value, src).trim().to_string()),
+        }),
+        _ => None,
+    }
+}
+
+fn single_kotlin_value_source(
+    flow: &bonsai_lang_api::ExpressionFlow,
+    mut sources: Vec<String>,
+) -> Option<String> {
+    sources.extend(flow.source_names.iter().cloned());
+    sources.sort();
+    sources.dedup();
+    if sources.len() == 1 {
+        return Some(sources.remove(0));
+    }
+    (sources.is_empty())
+        .then(|| {
+            flow.place
+                .as_ref()
+                .filter(|place| !place.trim().is_empty())
+                .cloned()
+        })
+        .flatten()
+}
 // `getter` and `setter` are property accessor bodies in
 // tree-sitter-kotlin. Treating them as function-declaration kinds
 // gives each accessor its own Decl with its own flow_events, so
@@ -23,18 +93,43 @@ const PACK_NAME: &str = "kotlin";
 // into a single Field decl and accessor body events disappear
 // (audit task #131).
 const HANDLER: GrammarHandler = GrammarHandler {
+    fn_kinds: &["function_declaration", "getter", "setter"],
+    // A primary-constructor delegation (`class Child(x) : Base(x)`) is a
+    // real constructor call in Kotlin's grammar, represented by
+    // `constructor_invocation` rather than `call_expression`. The synthetic
+    // constructor pass walks only the direct delegation specifier, so adding
+    // this node kind exposes the exact base call without pulling class-header
+    // syntax into ordinary method bodies.
+    call_kinds: &["call_expression", "constructor_invocation"],
+    syntax_event_extractor: Some(extract_kotlin_syntax_event),
+    argument_passing_mode_extractor: None,
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+    runtime_type_guard_operators: &["is"],
+    call_ref_kinds: &["call_expression", "constructor_invocation", "callable_reference"],
+    callable_reference_kinds: &["callable_reference"],
+    member_expression_kinds: &["navigation_expression"],
+    subscript_expression_kinds: &["indexing_expression", "indexing_suffix"],
     class_kinds: &["class_declaration", "object_declaration", "interface_declaration"],
     class_decl_kinds: &[
         ("class_declaration", DeclKind::Class),
         ("object_declaration", DeclKind::Class),
         ("interface_declaration", DeclKind::Interface),
     ],
-    ..with_fn_kinds_and_implicit_receivers(
-        &["function_declaration", "getter", "setter"],
-        &["this", "super"],
-        &[],
-    )
+    method_kinds: &["getter", "setter"],
+    method_context_kinds: &["class_declaration", "object_declaration", "interface_declaration"],
+    if_kinds: &["if_expression", "when_expression"],
+    for_kinds: &["for_statement"],
+    while_kinds: &["while_statement"],
+    do_kinds: &["do_while_statement"],
+    assignment_kinds: &["assignment", "property_declaration", "variable_declaration"],
+    return_kinds: &["return_expression"],
+    throw_kinds: &["throw_expression"],
+    lambda_kinds: &["anonymous_function", "lambda_literal", "annotated_lambda"],
+    try_kinds: &["try_expression"],
+    catch_kinds: &["catch_block"],
+    finally_kinds: &["finally_block"],
+    implicit_receiver_names: &["this", "super"],
+    ..EMPTY_HANDLER
 };
 
 const KOTLIN_VOCAB: ModifierVocabulary = ModifierVocabulary {
@@ -94,7 +189,17 @@ impl LanguageAdapter for KotlinAdapter {
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["this"],
+            receiver_type_syntax: bonsai_lang_api::ReceiverTypeSyntax {
+                wrapper_calls: &[],
+                class_object_suffixes: &[".class"],
+            },
             same_directory_unqualified_calls: true,
+            callable_reference_syntax: bonsai_lang_api::CallableReferenceSyntax {
+                prefixes: &["::"],
+                numeric_arity_suffix: false,
+                symbol_wrapper: None,
+                trailing_invocation_punctuation: false,
+            },
             ..LanguageCapabilities::partial_baseline()
         }
     }
@@ -120,6 +225,7 @@ impl LanguageAdapter for KotlinAdapter {
             synthesize_kotlin_object_decls(&mut idx, file, &tree, src);
             synthesize_kotlin_constructor_decls(&mut idx, file, &tree, src);
             synthesize_kotlin_property_getter_decls(&mut idx, file, &tree, src);
+            qualify_kotlin_receiver_field_getters(&mut idx);
             // Module path from `package com.foo.bar` declaration; falls
             // back to file-stem when absent.
             if let Some(segments) = extract_kotlin_package(tree.root_node(), src) {
@@ -457,6 +563,120 @@ fn qualify_kotlin_implicit_member_reads(index: &mut DeclIndex) {
                 call_kind: CallKind::Method,
             }
         });
+    }
+}
+
+/// Qualify an unadorned property root in a zero-argument member return as
+/// receiver state when the owning class's parsed constructor declares that
+/// property. Kotlin permits `get() = data.cmd` where the semantic place is
+/// `this.data.cmd`; Tree-sitter correctly exposes the navigation projection
+/// but, by design, does not invent the implicit receiver. The adapter joins
+/// that projection with its constructor-owned `receiver_field_writes` and
+/// emits the canonical place consumed by the IDG.
+fn qualify_kotlin_receiver_field_getters(index: &mut DeclIndex) {
+    let mut fields_by_parent: std::collections::HashMap<
+        bonsai_common::SymbolId,
+        std::collections::HashSet<String>,
+    > = std::collections::HashMap::new();
+    for decl in &index.defs {
+        let Some(parent) = decl.parent else { continue };
+        for write in &decl.receiver_field_writes {
+            let Some(field) = write.target.strip_prefix("this.") else {
+                continue;
+            };
+            let field = field.split('.').next().unwrap_or(field).trim();
+            if !field.is_empty() {
+                fields_by_parent
+                    .entry(parent)
+                    .or_default()
+                    .insert(field.to_string());
+            }
+        }
+    }
+
+    for decl in &mut index.defs {
+        if !matches!(decl.kind, DeclKind::Function | DeclKind::Method) || !decl.params.is_empty() {
+            continue;
+        }
+        let Some(fields) = decl.parent.and_then(|parent| fields_by_parent.get(&parent)) else {
+            continue;
+        };
+        qualify_kotlin_receiver_field_returns(&mut decl.flow_events, fields);
+    }
+}
+
+fn qualify_kotlin_receiver_field_returns(
+    events: &mut [FlowEvent],
+    fields: &std::collections::HashSet<String>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Return { value_flow, .. } | FlowEvent::Yield { value_flow, .. } => {
+                qualify_kotlin_receiver_field_flow(value_flow, fields);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                qualify_kotlin_receiver_field_returns(then_events, fields);
+                qualify_kotlin_receiver_field_returns(else_events, fields);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                qualify_kotlin_receiver_field_returns(body, fields);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                qualify_kotlin_receiver_field_returns(body, fields);
+                qualify_kotlin_receiver_field_returns(catch_events, fields);
+                qualify_kotlin_receiver_field_returns(finally_events, fields);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn qualify_kotlin_receiver_field_flow(
+    flow: &mut bonsai_lang_api::ExpressionFlow,
+    fields: &std::collections::HashSet<String>,
+) {
+    let old_place = flow.place.clone();
+    if let Some(projection) = &mut flow.projection {
+        if fields.contains(&projection.base) {
+            projection.path.insert(0, std::mem::take(&mut projection.base));
+            projection.base = "this".to_string();
+            flow.place = Some(projection.canonical_place());
+        }
+    } else if let Some(place) = flow.place.as_deref() {
+        if fields.contains(place) {
+            flow.projection = Some(bonsai_lang_api::ExpressionProjection {
+                base: "this".to_string(),
+                path: vec![place.to_string()],
+            });
+            flow.place = Some(format!("this.{place}"));
+        }
+    }
+    if let (Some(old_place), Some(new_place)) = (old_place.as_deref(), flow.place.as_deref()) {
+        if old_place != new_place {
+            for source in &mut flow.source_names {
+                if source == old_place {
+                    *source = new_place.to_string();
+                }
+            }
+        }
+    }
+    for field in &mut flow.aggregate_fields {
+        qualify_kotlin_receiver_field_flow(&mut field.value, fields);
+    }
+    for item in &mut flow.tuple_items {
+        qualify_kotlin_receiver_field_flow(item, fields);
+    }
+    for spread in &mut flow.spreads {
+        qualify_kotlin_receiver_field_flow(spread, fields);
     }
 }
 
@@ -1061,7 +1281,12 @@ fn synthesize_kotlin_property_getter_decls(idx: &mut DeclIndex, file: FileId, tr
                     span: body_span,
                     value_text: Some(expr.clone()),
                     value_name: kotlin_bare_identifier(&expr),
-                    value_flow: bonsai_lang_api::kit::expression_flow_from_node(expression_node, file, src),
+                    value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(
+                        expression_node,
+                        file,
+                        src,
+                        &HANDLER,
+                    ),
                 });
             }
         }

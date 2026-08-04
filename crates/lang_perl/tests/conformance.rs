@@ -77,3 +77,41 @@ fn inherited_bless_dispatch_has_structural_receiver_facts() {
         entry.flow_events
     );
 }
+
+#[test]
+fn conditional_and_postfix_conditional_expressions_lower_to_branches() {
+    use bonsai_lang_api::FlowEvent;
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_perl::PerlAdapter::new())],
+        &[(
+            "branches.pl",
+            r#"
+sub choose {
+    my ($value, $flag) = @_;
+    my $selected = $flag ? $value : '';
+    sink($selected) if $flag;
+    die "empty" unless length $selected;
+    return $selected;
+}
+"#,
+        )],
+    );
+    let file = workspace.vfs().all_files()[0];
+    let index = workspace.db().decl_index(file).expect("Perl declaration index");
+    let choose = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "choose")
+        .expect("choose declaration");
+    let branches = choose
+        .flow_events
+        .iter()
+        .filter(|event| matches!(event, FlowEvent::Branch { .. }))
+        .count();
+    assert!(
+        branches >= 3,
+        "ternary, postfix-if, and postfix-unless syntax must be explicit branches: {:#?}",
+        choose.flow_events
+    );
+}

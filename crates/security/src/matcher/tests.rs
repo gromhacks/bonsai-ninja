@@ -16,6 +16,10 @@ fn span() -> Span {
 fn rule_from_yaml(yaml: &str, kind: crate::rule::RuleKind) -> Rule {
     let mut rule: Rule = serde_yaml::from_str(yaml).expect("rule yaml parses");
     rule.kind = kind;
+    let metadata: crate::loader::RulepackMetadata =
+        serde_yaml::from_str(include_str!("../../../../security-patterns/metadata.yml"))
+            .expect("checked-in rulepack metadata parses");
+    metadata.apply_rule_defaults(&mut rule);
     rule
 }
 
@@ -493,6 +497,49 @@ fn package_facts_require_compiler_or_dependency_evidence() {
 }
 
 #[test]
+fn ruby_template_package_facts_include_manifest_evidence() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "bonsai-ruby-template-package-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&root).expect("create Ruby template workspace");
+    std::fs::write(root.join("Gemfile"), "gem \"actionview\"\n").expect("write Gemfile");
+    std::fs::write(root.join("show.html.erb"), "<%= raw @comment %>\n").expect("write ERB template");
+
+    let ws = Workspace::open(&root, bonsai_adapters::all_languages_registry()).expect("open workspace");
+    let pack = crate::loader::load_rulepack(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("security-patterns"),
+    )
+    .expect("load bundled rulepack");
+    let _snapshot =
+        crate::deps::begin_workspace_dependency_package_snapshot(&root, ws.vfs().instance_id(), &pack);
+    let file = ws
+        .vfs()
+        .all_files()
+        .into_iter()
+        .find(|file| {
+            ws.vfs()
+                .path(*file)
+                .ok()
+                .is_some_and(|path| path.ends_with("show.html.erb"))
+        })
+        .expect("ERB file");
+    let packages =
+        file_package_set_with_workspace_context_and_retention(&ws, file, true, FactRetention::Transient);
+    assert!(
+        packages.contains("actionview"),
+        "Gemfile evidence must apply to adapter-declared template files: {packages:?}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn flow_read_attribute_match_requires_actual_qualified_token() {
     let split_callback_tokens = vec!["req".to_string(), "err.path".to_string()];
     assert!(
@@ -733,6 +780,44 @@ description: static import target
 }
 
 #[test]
+fn compiler_syntax_header_indexes_symbolic_tail_on_compound_attribute() {
+    let rule = rule_from_yaml(
+        r#"
+id: ruby.test.password_compare
+enabled: true
+language: ruby
+tag: constant-time
+severity: info
+match:
+  kind: call
+  callee:
+    attribute: ["BCrypt::Password", "=="]
+description: compound receiver with symbolic method
+"#,
+        crate::rule::RuleKind::Sanitizer,
+    );
+    let prepared = PreparedRule::new(&rule).expect("rule prepares");
+    let refs = vec![&prepared];
+    let batch = PreparedRuleBatch::new(&refs, empty_factory_returns());
+    let syntax = CompilerSyntaxHeader {
+        calls: vec![bonsai_lang_api::CompilerCallHeader {
+            name: "BCrypt::Password.==".to_string(),
+            receiver: Some("BCrypt::Password".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+        }],
+        ..Default::default()
+    };
+
+    let (filtered, deferred) =
+        batch.filtered_rule_refs_for_syntax_header(refs, &syntax, None, &AHashSet::new(), "ruby", true);
+
+    assert!(!deferred);
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].rule.id, "ruby.test.password_compare");
+}
+
+#[test]
 fn compiler_syntax_header_defers_only_calls_receiver_ancestry_can_change() {
     let rule = rule_from_yaml(
         r#"
@@ -921,6 +1006,38 @@ fn receiver_type_facts_match_type_method_rules_without_receiver_names() {
         Some(&attr),
         None,
     ));
+}
+
+#[test]
+fn qualified_implicit_receiver_uses_compiler_type_evidence() {
+    let rule = rule_from_yaml(
+        r#"
+id: java.test.typed_logger
+enabled: true
+language: java
+tag: log-injection
+severity: high
+match:
+  kind: call
+  callee:
+    regex: '(^|[.])info$'
+    receiver_type_in: [Logger]
+description: Typed logger fixture.
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+    let prepared = PreparedRule::new(&rule).expect("rule prepares");
+    assert!(base_receiver_type_allows(
+        &prepared,
+        None,
+        "this.log.info",
+        &["Logger".to_string()],
+        &[],
+    ));
+    assert!(
+        !base_receiver_type_allows(&prepared, None, "info", &[], &[]),
+        "a terminal ref without receiver evidence must fail closed"
+    );
 }
 
 #[test]
@@ -1289,6 +1406,46 @@ def handler(payload):
         prepared.call_context_allows("gql.execute", &[], &alias_map, &AHashSet::new()),
         "direct package-qualified calls must satisfy package gates without file imports"
     );
+}
+
+#[test]
+fn symbolic_operator_calls_keep_their_exact_candidate_identity() {
+    let alias_map = std::collections::HashMap::new();
+    assert_eq!(call_candidate_keys("`", &alias_map), vec!["`".to_string()]);
+    assert!(callee_matches("`", Some("`"), None, None));
+
+    // Identifier sigils remain representation details when a real name
+    // follows; this is what distinguishes them from symbolic operators.
+    assert_eq!(call_candidate_keys("$exec", &alias_map), vec!["exec".to_string()]);
+}
+
+#[test]
+fn complete_callee_name_matches_before_terminal_name_fallback() {
+    assert!(callee_matches("pool.query", Some("pool.query"), None, None));
+    assert!(callee_matches("pool.query", Some("query"), None, None));
+    assert!(!callee_matches("other.query", Some("pool.query"), None, None));
+}
+
+#[test]
+fn compound_attribute_components_match_canonical_compiler_identities() {
+    for (callee, attribute) in [
+        ("CryptoJS.DES.encrypt", vec!["CryptoJS.DES", "encrypt"]),
+        ("ERB::Util.html_escape", vec!["ERB::Util", "html_escape"]),
+        ("Crypt::DES->new", vec!["Crypt::DES", "new"]),
+        ("BCrypt::Password.==", vec!["BCrypt::Password", "=="]),
+    ] {
+        let attribute = attribute.into_iter().map(str::to_string).collect();
+        assert!(
+            callee_matches(callee, None, Some(&attribute), None),
+            "{callee} did not match {attribute:?}"
+        );
+    }
+}
+
+#[test]
+fn sigiled_rule_attribute_matches_structural_call_identity() {
+    let attribute = vec![":zip".to_string(), "extract".to_string()];
+    assert!(callee_matches(":zip.extract", None, Some(&attribute), None));
 }
 
 #[test]

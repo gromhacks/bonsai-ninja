@@ -1,7 +1,7 @@
 //! `bonsai-ninja refs` data layer.
 
 use crate::common::{file_path_matches_filter, format_span, textual_relevance_key};
-use bonsai_common::{short_qualified_tail, QUALIFIED_NAME_SEPARATORS};
+use bonsai_common::short_qualified_tail;
 use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -239,11 +239,9 @@ fn declaration_matches_symbol_query(decl: &bonsai_lang_api::Decl, query: &str) -
     decl.name == query
         || decl.qualified_name.as_deref().is_some_and(|qualified| {
             qualified == query
-                || QUALIFIED_NAME_SEPARATORS.iter().any(|separator| {
-                    qualified
-                        .strip_suffix(query)
-                        .is_some_and(|prefix| prefix.ends_with(separator))
-                })
+                || qualified
+                    .strip_suffix(query)
+                    .is_some_and(bonsai_common::ends_at_qualified_name_boundary)
         })
 }
 
@@ -257,25 +255,19 @@ fn symbol_query_matches(query: &str, candidate: &str, allow_bare_qualified_tail:
         // Adapter-lowered short references are a necessary compatibility
         // form, but another qualified receiver with the same tail is not.
         (allow_bare_qualified_tail && candidate == lexical_name)
-            || QUALIFIED_NAME_SEPARATORS.iter().any(|separator| {
-                candidate
-                    .strip_suffix(query)
-                    .is_some_and(|prefix| prefix.ends_with(separator))
-            })
-            || QUALIFIED_NAME_SEPARATORS.iter().any(|separator| {
-                candidate
-                    .strip_prefix(query)
-                    .is_some_and(|suffix| suffix.starts_with(separator))
-            })
-    } else {
-        QUALIFIED_NAME_SEPARATORS.iter().any(|separator| {
-            candidate
+            || candidate
                 .strip_suffix(query)
-                .is_some_and(|prefix| prefix.ends_with(separator))
-                || candidate
-                    .strip_prefix(query)
-                    .is_some_and(|suffix| suffix.starts_with(separator))
-        })
+                .is_some_and(bonsai_common::ends_at_qualified_name_boundary)
+            || candidate
+                .strip_prefix(query)
+                .is_some_and(bonsai_common::starts_at_qualified_name_boundary)
+    } else {
+        candidate
+            .strip_suffix(query)
+            .is_some_and(bonsai_common::ends_at_qualified_name_boundary)
+            || candidate
+                .strip_prefix(query)
+                .is_some_and(bonsai_common::starts_at_qualified_name_boundary)
     }
 }
 
@@ -385,12 +377,7 @@ fn declaration_is_within_owner(
 }
 
 fn qualified_owner(name: &str) -> Option<&str> {
-    QUALIFIED_NAME_SEPARATORS
-        .iter()
-        .filter_map(|separator| name.rfind(separator).map(|index| (index, *separator)))
-        .max_by_key(|(index, separator)| (*index, separator.len()))
-        .map(|(index, _)| &name[..index])
-        .filter(|owner| !owner.is_empty())
+    bonsai_common::qualified_name_owner(name)
 }
 
 fn qualified_owner_matches(query_owner: &str, candidate: &str) -> bool {
@@ -398,14 +385,12 @@ fn qualified_owner_matches(query_owner: &str, candidate: &str) -> bool {
     if candidate == query_owner {
         return true;
     }
-    QUALIFIED_NAME_SEPARATORS.iter().any(|separator| {
-        query_owner
-            .strip_suffix(candidate)
-            .is_some_and(|prefix| prefix.ends_with(separator))
-            || candidate
-                .strip_suffix(query_owner)
-                .is_some_and(|prefix| prefix.ends_with(separator))
-    })
+    query_owner
+        .strip_suffix(candidate)
+        .is_some_and(bonsai_common::ends_at_qualified_name_boundary)
+        || candidate
+            .strip_suffix(query_owner)
+            .is_some_and(bonsai_common::ends_at_qualified_name_boundary)
 }
 
 fn enclosing_function_for_span(

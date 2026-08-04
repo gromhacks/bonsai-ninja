@@ -1,5 +1,20 @@
 use super::*;
 
+#[test]
+fn callable_capture_is_adapter_owned_and_structural() {
+    let language = language_from_pack(PACK_NAME).expect("elixir grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set elixir grammar");
+    let src = "cb = &helper/1\nvalue = helper / other\n";
+    let tree = parser.parse(src, None).expect("parse elixir source");
+    let captures = collect_kinds(&tree, &["unary_operator"]);
+    assert_eq!(captures.len(), 1);
+    assert_eq!(
+        extract_elixir_callable_reference(captures[0], src.as_bytes()).as_deref(),
+        Some("helper")
+    );
+}
+
 fn parse_import_specs(src: &str) -> Vec<ImportSpec> {
     let language = language_from_pack(PACK_NAME).expect("elixir grammar");
     let mut parser = tree_sitter::Parser::new();

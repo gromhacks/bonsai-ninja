@@ -63,7 +63,7 @@ Adapter obligations:
   post-pass fills it. Adapters that want to short-circuit (e.g. when
   the callee class is unambiguous from the syntax) may pre-populate
   it — the kit pass is idempotent.
-- `call_kind::Constructor` is structural: `CallKind::Construct` for
+- `call_kind::Constructor` is structural: `CallKind::Constructor` for
   `new Foo(...)` / `Foo::new(...)` / `Foo()` (Python `__init__` is
   matched by `effective_constructor_method_names()`, not by name in
   the engine).
@@ -72,6 +72,12 @@ Adapter obligations:
   `passing_mode`, and the file's `CallArgumentValueFact` table carry semantic
   value shape. Shared analysis must never recover argument semantics by
   tokenizing `value_text` or slicing the source with `Span`.
+- `args[i].passing_mode` is emitted by the active adapter. `WriteBack` means
+  the callee may update the caller-owned place and enables the IDG's outbound
+  parameter stitch. The shared kit and taint engine do not recognize
+  language-specific address/ref/out tokens; unsupported languages emit
+  `Value`, and each supported adapter carries positive and negative
+  conformance fixtures.
 
 ### `Branch`
 
@@ -89,7 +95,9 @@ Adapter obligations:
 - `condition` is adapter-normalized diagnostic text. Engines must not parse
   it. The adapter's sibling `BranchConditionFact` owns semantic polarity and
   its optional typed `ConditionExpressionFact` tree owns boolean, equality,
-  membership, type-test, and exact scalar facts derived from Tree-sitter.
+  membership, type-test, runtime-truth, and exact scalar facts derived from
+  Tree-sitter. `Truthy { operand }` preserves the exact tested property/value;
+  a falsey literal fallback does not turn a dynamic projection into a constant.
 - `then_events` / `else_events` must be **non-overlapping** even when
   the grammar emits a single flat block. The kit helper
   `repair_branch_events_by_else_keyword` partitions on the literal

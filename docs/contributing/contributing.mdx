@@ -38,11 +38,16 @@ Integration and matrix tests stay under each crate's `tests/` directory.
 
 ## Add A Rule
 
-1. Choose `sources`, `sinks`, or `sanitizers`.
+1. Choose `sources`, `sinks`, `sanitizers`, or non-finding `typing`.
 2. Put the rule in `security-patterns/langs/<lang>/<kind>/<family>.yml`.
 3. Add positive and negative `match_examples`.
 4. Run `python3 scripts/validate-pattern-pack.py --binary ./target/release/bonsai-ninja`.
 5. Add a fixture test if propagation behavior changes.
+
+Pack-wide ecosystem values belong in `security-patterns/metadata.yml`:
+dependency manifest patterns, package aliases, sink-family aliases,
+security-model exceptions, and per-language/tag semantic defaults. Do not add
+those inventories to shared Rust code or a language adapter.
 
 ## Add A Language Adapter
 
@@ -54,11 +59,13 @@ Integration and matrix tests stay under each crate's `tests/` directory.
 3. Declare every `LanguageCapabilities` field explicitly, including module,
    constructor, receiver, type, and field-place facts. Do not add language
    branches or source-token inventories to shared analysis.
-4. Keep all emitted facts and diagnostics compatible with the immutable
+4. Lower library-shaped syntax to generic typed facts. Keep package/framework
+   identities and security interpretation in rule data.
+5. Keep all emitted facts and diagnostics compatible with the immutable
    `CompiledFileObject` boundary; do not add an adapter-specific cache.
-5. Add micro, complex, sanitizer, and mega-flow fixtures.
-6. Register the adapter in the bundled registry.
-7. Run conformance, per-language matrix, and full workspace tests.
+6. Add micro, complex, sanitizer, and mega-flow fixtures.
+7. Register the adapter in the bundled registry.
+8. Run conformance, per-language matrix, and full workspace tests.
 
 </Steps>
 

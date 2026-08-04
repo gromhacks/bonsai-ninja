@@ -214,7 +214,12 @@
   packages: [github.com/golang-jwt/jwt, github.com/dgrijalva/jwt-go]
   cwe: [CWE-347, CWE-327]
   analysis_semantics:
-    guard_profile: go-jwt-inline-keyfunc-algorithm
+    compiler_guard:
+      capability: callback.selector-result-pinned
+      required_evidence: ["callback-argument:1", "selector:Method.Alg"]
+      forbidden_evidence: ["literal:none"]
+      sanitizer_tag: jwt-verify
+      category: jwt-algorithm-keyfunc-guard
   match:
     kind: call
     callee:

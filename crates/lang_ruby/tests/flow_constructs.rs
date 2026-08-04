@@ -4,8 +4,12 @@ use bonsai_vfs::Vfs;
 use std::sync::Arc;
 
 fn db_with(source: &str) -> AnalyzerDb {
+    db_with_path("a.rb", source)
+}
+
+fn db_with_path(path: &str, source: &str) -> AnalyzerDb {
     let vfs = Arc::new(Vfs::new());
-    vfs.write("a.rb".to_string(), Arc::<str>::from(source));
+    vfs.write(path.to_string(), Arc::<str>::from(source));
     let registry = Arc::new(LanguageRegistry::new());
     registry.register(Arc::new(bonsai_lang_ruby::RubyAdapter::new()));
     let db = AnalyzerDb::new(vfs, registry);
@@ -13,6 +17,40 @@ fn db_with(source: &str) -> AnalyzerDb {
         let _ = db.decl_index(f);
     }
     db
+}
+
+#[test]
+fn erb_instance_variable_call_arguments_are_typed_places() {
+    let db = db_with_path("show.html.erb", "<%= raw @comment %>\n");
+    let file = db.vfs().all_files().into_iter().next().expect("ERB file");
+    let index = db.global_index();
+    let module = index
+        .all_files()
+        .flat_map(|file| index.decls_in(file))
+        .find(|decl| decl.name == "__module__")
+        .expect("ERB expression should be wrapped in a module declaration");
+    assert_eq!(module.params, ["self.comment"]);
+    assert_eq!(module.param_annotations, [Vec::<String>::new()]);
+    let events = &module.flow_events;
+
+    let arg = events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { name, args, .. } if name == "raw" => args.first(),
+            _ => None,
+        })
+        .expect("raw call argument should be adapter-lowered");
+    assert_eq!(arg.value_text, "self.comment");
+    assert_eq!(arg.place.as_deref(), Some("self.comment"));
+    assert_eq!(arg.source_names, vec!["self.comment"]);
+
+    let syntax = db
+        .compiler_syntax_header_uncached(file)
+        .expect("ERB compiler syntax header");
+    assert!(
+        syntax.calls.iter().any(|call| call.name == "raw"),
+        "ERB adapter calls must survive in the compact compiler header: {syntax:#?}"
+    );
 }
 
 fn ruby_decl_events(source: &str, name: &str) -> Vec<FlowEvent> {

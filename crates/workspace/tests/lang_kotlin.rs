@@ -100,8 +100,7 @@ fn do_while_loop() {
 
 #[test]
 fn when_as_branch() {
-    // Kotlin's `when` is surfaced via the generic handler's if-kinds
-    // (`when_expression` maps to Branch).
+    // Kotlin's adapter maps its `when_expression` node to Branch.
     let w = make("fun f(x: Int) { when (x) { 0 -> g(); else -> h() } }\nfun g(){}\nfun h(){}");
     assert!(has_branch(&w, "f"), "when not classified as branch");
 }

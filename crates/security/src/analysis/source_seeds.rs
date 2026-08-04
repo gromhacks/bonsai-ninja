@@ -378,7 +378,7 @@ fn source_base_matches(base: &str, source_text: &str) -> bool {
 }
 
 fn strip_security_sigils(text: &str) -> &str {
-    text.trim().trim_start_matches(&['$', '@', '%'][..])
+    text.trim().trim_start_matches(bonsai_common::is_name_punctuation)
 }
 
 fn target_is_destructuring_pattern(target: &str) -> bool {
@@ -432,48 +432,25 @@ pub(super) fn security_text_matches_source_strict(text: &str, source_text: &str)
     if text_norm == src_norm {
         return true;
     }
-    // Tail match: `getenv` matches `os.getenv` (one is a suffix of
-    // the other when split on `.` / `:`). Do not tail-match
+    // Tail match: `getenv` matches `os.getenv` (one is the structural
+    // qualified tail of the other). Do not tail-match
     // multi-segment receiver chains such as `request.headers.get`:
     // the tail `get` is generic and would conflate sibling framework
     // sources like `request.args.get` and `request.headers.get`.
     if source_qualified_segment_count(source_text) > 2 {
         return false;
     }
-    let text_tail = text.rsplit(&['.', ':'][..]).next().unwrap_or(text);
-    let src_tail = source_text.rsplit(&['.', ':'][..]).next().unwrap_or(source_text);
+    let text_tail = bonsai_common::short_qualified_tail(text);
+    let src_tail = bonsai_common::short_qualified_tail(source_text);
     text_tail == src_tail && !text_tail.is_empty()
 }
 
 fn source_qualified_segment_count(text: &str) -> usize {
     let normalized = security_normalise_qualified_text(text);
-    normalized
-        .split(&['.', ':'][..])
-        .filter(|part| !part.trim().is_empty())
-        .count()
+    bonsai_common::qualified_name_segments(&normalized).len()
 }
 
 fn security_normalise_qualified_text(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut in_brackets = false;
-    let mut chars = text.trim().chars().peekable();
-    while matches!(chars.peek(), Some('&' | '*')) {
-        chars.next();
-    }
-    while let Some(c) = chars.next() {
-        match c {
-            '-' if matches!(chars.peek(), Some('>')) => {
-                chars.next();
-                out.push('.');
-            }
-            '[' => {
-                in_brackets = true;
-                out.push('.');
-            }
-            ']' => in_brackets = false,
-            '\'' | '"' if in_brackets => {}
-            _ => out.push(c),
-        }
-    }
-    out.trim_matches('.').to_string()
+    let compiler_name = bonsai_common::trim_leading_name_punctuation(text.trim());
+    bonsai_common::normalize_qualified_name(compiler_name)
 }

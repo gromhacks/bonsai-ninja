@@ -144,15 +144,9 @@ fn decorator_name_segments(raw: &str) -> Vec<String> {
         return Vec::new();
     }
     let mut segments = vec![trimmed.to_string()];
-    for sep in bonsai_common::QUALIFIED_NAME_SEPARATORS {
-        if !trimmed.contains(sep) {
-            continue;
-        }
-        for part in trimmed.split(sep) {
-            let part = part.trim();
-            if !part.is_empty() && !segments.iter().any(|existing| existing == part) {
-                segments.push(part.to_string());
-            }
+    for part in bonsai_common::qualified_name_segments(trimmed) {
+        if !part.is_empty() && !segments.iter().any(|existing| existing == part) {
+            segments.push(part.to_string());
         }
     }
     segments

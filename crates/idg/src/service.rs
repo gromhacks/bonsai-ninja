@@ -576,6 +576,123 @@ impl SymbolicFactSpan {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum SymbolicBaseRebaseKind {
+    /// `(nested, field)` becomes `(ancestor, nested_suffix.field)`.
+    PrependPrefix,
+    /// `(ancestor, nested_suffix.field)` becomes `(nested, field)`.
+    StripPrefix,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct SymbolicBaseRebase {
+    target: u32,
+    prefix: u32,
+    kind: SymbolicBaseRebaseKind,
+}
+
+/// Sparse source-indexed equivalence rows for alternate access-path
+/// decompositions. A sorted flat relation avoids one empty allocation per
+/// symbolic base and remains cheap to binary-search in the closure hot path.
+#[derive(Default)]
+struct SymbolicBaseRebaseIndex {
+    keys: Box<[u32]>,
+    offsets: Box<[u32]>,
+    rows: Box<[SymbolicBaseRebase]>,
+}
+
+impl SymbolicBaseRebaseIndex {
+    fn specs(
+        symbolic: &crate::symbolic::SymbolicFieldGraph,
+    ) -> Vec<(u32, u32, String, SymbolicBaseRebaseKind)> {
+        let mut specs = Vec::new();
+        for (nested_id, nested) in symbolic.bases().iter().enumerate() {
+            let Some(storage) = symbolic.string(nested.storage) else {
+                continue;
+            };
+            let parts = storage
+                .split('.')
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>();
+            for split in 1..parts.len() {
+                let ancestor_text = parts[..split].join(".");
+                let prefix = parts[split..].join(".");
+                let Some(ancestor_id) = symbolic.base_id(nested.segment, nested.func, &ancestor_text) else {
+                    continue;
+                };
+                let nested_id = u32::try_from(nested_id).expect("symbolic base count exceeds u32");
+                specs.push((
+                    nested_id,
+                    ancestor_id,
+                    prefix.clone(),
+                    SymbolicBaseRebaseKind::PrependPrefix,
+                ));
+                specs.push((
+                    ancestor_id,
+                    nested_id,
+                    prefix,
+                    SymbolicBaseRebaseKind::StripPrefix,
+                ));
+            }
+        }
+        specs.sort_unstable();
+        specs.dedup();
+        specs
+    }
+
+    fn from_specs(
+        specs: Vec<(u32, u32, String, SymbolicBaseRebaseKind)>,
+        fields: &PackedStringTable,
+    ) -> Self {
+        let mut compiled = specs
+            .into_iter()
+            .filter_map(|(source, target, prefix, kind)| {
+                Some((
+                    source,
+                    SymbolicBaseRebase {
+                        target,
+                        prefix: fields.find(&prefix)?,
+                        kind,
+                    },
+                ))
+            })
+            .collect::<Vec<_>>();
+        compiled.sort_unstable();
+        compiled.dedup();
+        let mut keys = Vec::new();
+        let mut offsets = vec![0_u32];
+        let mut rows = Vec::with_capacity(compiled.len());
+        let mut current = None;
+        for (source, row) in compiled {
+            if current != Some(source) {
+                if current.is_some() {
+                    offsets.push(u32::try_from(rows.len()).expect("symbolic rebase count exceeds u32"));
+                }
+                keys.push(source);
+                current = Some(source);
+            }
+            rows.push(row);
+        }
+        if current.is_some() {
+            offsets.push(u32::try_from(rows.len()).expect("symbolic rebase count exceeds u32"));
+        }
+        Self {
+            keys: keys.into_boxed_slice(),
+            offsets: offsets.into_boxed_slice(),
+            rows: rows.into_boxed_slice(),
+        }
+    }
+
+    fn outgoing(&self, source: u32) -> &[SymbolicBaseRebase] {
+        let Ok(index) = self.keys.binary_search(&source) else {
+            return &[];
+        };
+        let start = self.offsets[index] as usize;
+        let end = self.offsets[index + 1] as usize;
+        &self.rows[start..end]
+    }
+}
+
 struct SymbolicRuntimeIndex {
     /// Sorted AST-derived suffix paths. The owned dictionary is built only in
     /// the query phase and replaces no compiler fact; numeric ids keep the
@@ -590,8 +707,27 @@ struct SymbolicRuntimeIndex {
     /// field facts reached through many local writes do not multiply in the
     /// exact fixed point.
     ordering_sensitive_bases: Box<[u64]>,
+    /// Equivalent decompositions of one canonical compiler access path.
+    /// For example, `(self._data, cmd)` and `(self, _data.cmd)` denote the
+    /// same field. Rows exist only when both bases occur in the symbolic
+    /// transform dictionary, so storage is proportional to real nested
+    /// compiler places rather than the Cartesian product of bases and fields.
+    base_rebases: SymbolicBaseRebaseIndex,
     exact_reads: GroupedNodeIndex<u64>,
-    bare_reads: GroupedNodeIndex<u32>,
+    /// Sorted exact `(base, field)` identities that occur in adapter-lowered
+    /// projected storage.  The backward demand compiler starts from this
+    /// finite syntax relation, then follows inverse field transforms to admit
+    /// carrier bases.  A suffix can therefore cross scalar-looking wrapper
+    /// names only when some real projected place downstream demands it.
+    projected_fact_keys: Box<[u64]>,
+    /// Whole-aggregate AST consumers keyed by their canonical storage base.
+    ///
+    /// These are narrower than all bare reads: only nodes with an
+    /// `IntraAggregateConsume` edge are admitted, and resolver-proven local
+    /// call arguments are excluded because their exact field transforms own
+    /// interprocedural propagation. This preserves `sink(record)` semantics
+    /// without turning scalar carrier reads into invented field consumers.
+    aggregate_reads: GroupedNodeIndex<u32>,
     scalar_writes: GroupedNodeIndex<(u32, Span)>,
     storage_reads: NodeStorageReadIndex,
     storage_writes: NodeStorageWriteIndex,
@@ -603,9 +739,14 @@ struct SymbolicRuntimeIndex {
     reverse_scalar_transforms: ReverseScalarTransformIndex,
     fact_pages: Mutex<SymbolicFactPager>,
     transforms: Mutex<SymbolicTransformPager>,
+    field_demands: Mutex<AHashMap<Option<Precision>, Arc<SymbolicFieldDemand>>>,
 }
 
-const SYMBOLIC_RUNTIME_ACCELERATOR_VERSION: u32 = 1;
+// Version 4 adds the compiler-proven whole-aggregate consumer relation.
+// Older accelerators remain semantically valid as IDG bodies, but must rebuild
+// this derived query product before symbolic closure can distinguish a real
+// `sink(record)` read from a scalar carrier used by a resolved local call.
+const SYMBOLIC_RUNTIME_ACCELERATOR_VERSION: u32 = 4;
 
 #[derive(serde::Serialize)]
 struct PersistedSymbolicRuntimeRef<'a> {
@@ -614,7 +755,8 @@ struct PersistedSymbolicRuntimeRef<'a> {
     spans: &'a [SymbolicFactSpan],
     ordering_sensitive_bases: &'a [u64],
     exact_reads: &'a GroupedNodeIndex<u64>,
-    bare_reads: &'a GroupedNodeIndex<u32>,
+    projected_fact_keys: &'a [u64],
+    aggregate_reads: &'a GroupedNodeIndex<u32>,
     scalar_writes: &'a GroupedNodeIndex<(u32, Span)>,
     storage_reads: &'a NodeStorageReadIndex,
     storage_writes: &'a NodeStorageWriteIndex,
@@ -636,7 +778,8 @@ struct PersistedSymbolicRuntime {
     spans: Box<[SymbolicFactSpan]>,
     ordering_sensitive_bases: Box<[u64]>,
     exact_reads: GroupedNodeIndex<u64>,
-    bare_reads: GroupedNodeIndex<u32>,
+    projected_fact_keys: Box<[u64]>,
+    aggregate_reads: GroupedNodeIndex<u32>,
     scalar_writes: GroupedNodeIndex<(u32, Span)>,
     storage_reads: NodeStorageReadIndex,
     storage_writes: NodeStorageWriteIndex,
@@ -657,8 +800,10 @@ impl Default for SymbolicRuntimeIndex {
             fields: PackedStringTable::default(),
             spans: Box::new([]),
             ordering_sensitive_bases: Box::new([]),
+            base_rebases: SymbolicBaseRebaseIndex::default(),
             exact_reads: GroupedNodeIndex::default(),
-            bare_reads: GroupedNodeIndex::default(),
+            projected_fact_keys: Box::new([]),
+            aggregate_reads: GroupedNodeIndex::default(),
             scalar_writes: GroupedNodeIndex::default(),
             storage_reads: NodeStorageReadIndex::default(),
             storage_writes: NodeStorageWriteIndex::default(),
@@ -670,6 +815,7 @@ impl Default for SymbolicRuntimeIndex {
             reverse_scalar_transforms: ReverseScalarTransformIndex::empty(),
             fact_pages: Mutex::new(SymbolicFactPager::new(0)),
             transforms: Mutex::new(SymbolicTransformPager::empty()),
+            field_demands: Mutex::new(AHashMap::default()),
         }
     }
 }
@@ -692,7 +838,14 @@ impl PersistedSymbolicRuntime {
             && persisted.spans.windows(2).all(|pair| pair[0] < pair[1])
             && persisted.ordering_sensitive_bases.len() == base_count.div_ceil(u64::BITS as usize)
             && persisted.exact_reads.has_valid_layout(node_count)
-            && persisted.bare_reads.has_valid_layout(node_count)
+            && persisted
+                .projected_fact_keys
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            && persisted.projected_fact_keys.iter().all(|key| {
+                ((*key >> 32) as usize) < base_count && ((*key as u32) as usize) < persisted.fields.len()
+            })
+            && persisted.aggregate_reads.has_valid_layout(node_count)
             && persisted.scalar_writes.has_valid_layout(node_count)
             && persisted.storage_reads.is_valid_for(node_count, base_count)
             && persisted
@@ -751,12 +904,18 @@ impl PersistedSymbolicRuntime {
                 "workspace IDG symbolic accelerator has unknown blob relations",
             ));
         }
+        let base_rebases = SymbolicBaseRebaseIndex::from_specs(
+            SymbolicBaseRebaseIndex::specs(workspace.symbolic_field()),
+            &persisted.fields,
+        );
         Ok(SymbolicRuntimeIndex {
             fields: persisted.fields,
             spans: persisted.spans,
             ordering_sensitive_bases: persisted.ordering_sensitive_bases,
+            base_rebases,
             exact_reads: persisted.exact_reads,
-            bare_reads: persisted.bare_reads,
+            projected_fact_keys: persisted.projected_fact_keys,
+            aggregate_reads: persisted.aggregate_reads,
             scalar_writes: persisted.scalar_writes,
             storage_reads: persisted.storage_reads,
             storage_writes: persisted.storage_writes,
@@ -768,7 +927,29 @@ impl PersistedSymbolicRuntime {
             reverse_scalar_transforms,
             fact_pages: Mutex::new(fact_pages),
             transforms: Mutex::new(transforms),
+            field_demands: Mutex::new(AHashMap::default()),
         })
+    }
+}
+
+/// Exact field suffixes that can reach some real adapter-lowered projected
+/// place through the symbolic transform algebra.
+///
+/// The relation is compiled backward from the finite syntax fact set.  It is
+/// intentionally independent of any source query: callers may carry an
+/// aggregate through arbitrarily many wrappers, but a scalar carrier cannot
+/// acquire invented descendants merely because the same field spelling exists
+/// elsewhere in the workspace.  The sparse set spills exactly when required;
+/// representation changes never cap or approximate the fixed point.
+struct SymbolicFieldDemand {
+    facts: SpillSet,
+    wildcard_bases: SpillSet,
+}
+
+impl SymbolicFieldDemand {
+    fn contains(&self, base: u32, field: u32) -> bool {
+        self.wildcard_bases.contains(u128::from(base))
+            || self.facts.contains(u128::from(symbolic_fact_key(base, field)))
     }
 }
 
@@ -786,6 +967,12 @@ pub struct IdgTargetRelevance {
     nodes: RootClosureVisited,
     facts: SpillSet,
     wildcard_bases: SpillSet,
+    // `false` means the frontend exposed a projected compiler place without
+    // the symbolic access-path fact required to invert it. In that case this
+    // relation remains useful for diagnostics, but it is not a proof that an
+    // omitted node or fact cannot reach the target. Exact forward closure
+    // therefore treats it as non-pruning.
+    pruning_complete: bool,
 }
 
 impl std::fmt::Debug for IdgTargetRelevance {
@@ -795,17 +982,19 @@ impl std::fmt::Debug for IdgTargetRelevance {
             .field("nodes", &self.nodes.len())
             .field("facts", &self.facts.len())
             .field("wildcard_bases", &self.wildcard_bases.len())
+            .field("pruning_complete", &self.pruning_complete)
             .finish()
     }
 }
 
 impl IdgTargetRelevance {
     fn contains_node(&self, node: NodeId) -> bool {
-        self.nodes.contains(node)
+        !self.pruning_complete || self.nodes.contains(node)
     }
 
     fn contains_fact(&self, base: u32, field: u32) -> bool {
-        self.wildcard_bases.contains(u128::from(base))
+        !self.pruning_complete
+            || self.wildcard_bases.contains(u128::from(base))
             || self.facts.contains(u128::from(symbolic_fact_key(base, field)))
     }
 
@@ -832,6 +1021,7 @@ impl TargetRelevanceWorklist {
                 nodes: RootClosureVisited::new(node_count, 0),
                 facts: target_relevance_fact_store(),
                 wildcard_bases: target_relevance_wildcard_store(),
+                pruning_complete: true,
             },
             pending_nodes: target_relevance_frontier_store(),
             pending_facts: target_relevance_frontier_store(),
@@ -875,6 +1065,19 @@ impl SymbolicRuntimeIndex {
 
     fn field_id(&self, field: &str) -> Option<u32> {
         self.fields.find(field)
+    }
+
+    fn rebased_field(&self, rebase: SymbolicBaseRebase, field: u32) -> Option<u32> {
+        let prefix = self.field(rebase.prefix)?;
+        let field = self.field(field)?;
+        match rebase.kind {
+            SymbolicBaseRebaseKind::PrependPrefix => self.fields.find_joined(prefix, field),
+            SymbolicBaseRebaseKind::StripPrefix => field
+                .strip_prefix(prefix)
+                .and_then(|rest| rest.strip_prefix('.'))
+                .filter(|rest| !rest.is_empty())
+                .and_then(|rest| self.field_id(rest)),
+        }
     }
 
     fn span_id(&self, span: Span) -> Option<u32> {
@@ -957,6 +1160,34 @@ impl PackedStringTable {
         while low < high {
             let middle = low + (high - low) / 2;
             match self.get_bytes(u32::try_from(middle).ok()?)?.cmp(value.as_bytes()) {
+                std::cmp::Ordering::Less => low = middle + 1,
+                std::cmp::Ordering::Greater => high = middle,
+                std::cmp::Ordering::Equal => return u32::try_from(middle).ok(),
+            }
+        }
+        None
+    }
+
+    /// Find `prefix + "." + suffix` without allocating the joined field in
+    /// the fixed-point hot path. The table is byte-sorted, so comparing the
+    /// candidate against the chained byte iterators preserves binary search.
+    fn find_joined(&self, prefix: &str, suffix: &str) -> Option<u32> {
+        if prefix.is_empty() || suffix.is_empty() {
+            return None;
+        }
+        let mut low = 0usize;
+        let mut high = self.len();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let candidate = self.get_bytes(u32::try_from(middle).ok()?)?;
+            let ordering = candidate.iter().cmp(
+                prefix
+                    .as_bytes()
+                    .iter()
+                    .chain(std::iter::once(&b'.'))
+                    .chain(suffix.as_bytes()),
+            );
+            match ordering {
                 std::cmp::Ordering::Less => low = middle + 1,
                 std::cmp::Ordering::Greater => high = middle,
                 std::cmp::Ordering::Equal => return u32::try_from(middle).ok(),
@@ -3681,6 +3912,7 @@ struct SymbolicClosureWorklist<'a> {
     summary_restricted: bool,
     allowed_funcs: Option<&'a AHashSet<FuncId>>,
     target_relevance: Option<&'a IdgTargetRelevance>,
+    field_demand: &'a SymbolicFieldDemand,
 }
 
 impl<'a> SymbolicClosureWorklist<'a> {
@@ -3690,6 +3922,7 @@ impl<'a> SymbolicClosureWorklist<'a> {
         summary_root: Option<FuncId>,
         allowed_funcs: Option<&'a AHashSet<FuncId>>,
         target_relevance: Option<&'a IdgTargetRelevance>,
+        field_demand: &'a SymbolicFieldDemand,
     ) -> Self {
         let mut active_summary_funcs = AHashSet::default();
         if let Some(root) = summary_root {
@@ -3706,6 +3939,7 @@ impl<'a> SymbolicClosureWorklist<'a> {
             summary_restricted: summary_root.is_some(),
             allowed_funcs,
             target_relevance,
+            field_demand,
         }
     }
 
@@ -3743,11 +3977,15 @@ impl<'a> SymbolicClosureWorklist<'a> {
             .insert(ClosureNodeState { node, context }.key())
     }
 
+    fn fact_is_relevant(&self, base: u32, field: u32) -> bool {
+        self.field_demand.contains(base, field)
+            && self
+                .target_relevance
+                .is_none_or(|relevance| relevance.contains_fact(base, field))
+    }
+
     fn enqueue_fact_state(&mut self, fact: SymbolicNodeFact) {
-        if self
-            .target_relevance
-            .is_some_and(|relevance| !relevance.contains_fact(fact.base, fact.field))
-        {
+        if !self.fact_is_relevant(fact.base, fact.field) {
             return;
         }
         let key = fact.state_key();
@@ -4140,7 +4378,8 @@ impl IdgQueryService {
                 spans: &symbolic.spans,
                 ordering_sensitive_bases: &symbolic.ordering_sensitive_bases,
                 exact_reads: &symbolic.exact_reads,
-                bare_reads: &symbolic.bare_reads,
+                projected_fact_keys: &symbolic.projected_fact_keys,
+                aggregate_reads: &symbolic.aggregate_reads,
                 scalar_writes: &symbolic.scalar_writes,
                 storage_reads: &symbolic.storage_reads,
                 storage_writes: &symbolic.storage_writes,
@@ -5279,8 +5518,21 @@ impl IdgQueryService {
                 // not appear in `storage_reads` (that compact inverse is for
                 // bare-base wildcard consumers), so nesting this loop under
                 // the bare lookup incorrectly pruned `arg.field` targets.
-                for fact in Self::symbolic_facts_for_node(&unified, &runtime, node) {
+                let symbolic_facts = Self::symbolic_facts_for_node(&unified, &runtime, node);
+                let has_symbolic_fact = !symbolic_facts.is_empty();
+                for fact in symbolic_facts {
                     worklist.enqueue_fact(fact.base, fact.field);
+                }
+                // A projected place with no symbolic fact comes from a
+                // frontend that has not supplied the access-path fact needed
+                // to invert this construct. The backward relation is a
+                // pruning proof, so a partial inverse must become non-pruning:
+                // forward compilation can still relate a scalar
+                // receiver/carrier to that projection through exact call and
+                // return summaries. The exact forward fixed point still
+                // decides whether a real path exists.
+                if !has_symbolic_fact && unified.projected_storage.get(node.0 as usize).copied() == Some(1) {
+                    worklist.relevance.pruning_complete = false;
                 }
                 if let Some(base) = runtime.storage_reads.base(WsNodeId(node.0)) {
                     worklist.enqueue_wildcard_base(base);
@@ -5318,6 +5570,11 @@ impl IdgQueryService {
                 let key = key as u64;
                 let base = (key >> 32) as u32;
                 let field = key as u32;
+                for &rebase in runtime.base_rebases.outgoing(base) {
+                    if let Some(field) = runtime.rebased_field(rebase, field) {
+                        worklist.enqueue_fact(rebase.target, field);
+                    }
+                }
                 runtime.fact_sources.visit_key(key, |source| {
                     let source = NodeId(source);
                     if node_is_allowed(source, active_funcs.as_ref()) {
@@ -5353,6 +5610,13 @@ impl IdgQueryService {
 
             if let Some(base) = worklist.pending_wildcard_bases.pop() {
                 let base = base as u32;
+                // Backward wildcard demand is a conservative pruning proof.
+                // Either decomposition can denote fields below the other, so
+                // admitting both bases cannot create forward facts and avoids
+                // pruning a realizable nested receiver path.
+                for rebase in runtime.base_rebases.outgoing(base) {
+                    worklist.enqueue_wildcard_base(rebase.target);
+                }
                 runtime.fact_sources.visit_base(base, |source| {
                     let source = NodeId(source);
                     if node_is_allowed(source, active_funcs.as_ref()) {
@@ -5389,7 +5653,7 @@ impl IdgQueryService {
 
         bonsai_diagnostics::debug_log!(
             "idg-target",
-            "backward relevance targets={} fallback_funcs={} allowed_funcs={} source_root={} active_funcs={} nodes={} facts={} wildcard_bases={}",
+            "backward relevance targets={} fallback_funcs={} allowed_funcs={} source_root={} active_funcs={} nodes={} facts={} wildcard_bases={} pruning_complete={}",
             target_nodes.len(),
             target_funcs.map_or(0, |funcs| funcs.len()),
             allowed_funcs.map_or(0, |funcs| funcs.len()),
@@ -5397,7 +5661,8 @@ impl IdgQueryService {
             active_funcs.as_ref().map_or(0, |funcs| funcs.len()),
             worklist.relevance.nodes.len(),
             worklist.relevance.facts.len(),
-            worklist.relevance.wildcard_bases.len()
+            worklist.relevance.wildcard_bases.len(),
+            worklist.relevance.pruning_complete
         );
         worklist.relevance
     }
@@ -7693,6 +7958,7 @@ impl IdgQueryService {
             return Vec::new();
         }
         let runtime = self.ensure_symbolic_runtime(unified, allowed_funcs);
+        let field_demand = Self::ensure_symbolic_field_demand(&runtime, max_precision);
         let node_count = Self::unified_node_count(unified);
         let mut worklist = SymbolicClosureWorklist::new(
             node_count,
@@ -7700,6 +7966,7 @@ impl IdgQueryService {
             summary_root,
             allowed_funcs,
             target_relevance,
+            field_demand.as_ref(),
         );
         for seed in seeds.iter().copied() {
             if (seed.0 as usize) < node_count && symbolic_node_allowed(unified, &worklist, seed) {
@@ -8016,6 +8283,15 @@ impl IdgQueryService {
         mut symbolic_cross_calls: Option<&mut AHashSet<CrossCallEdge>>,
         worklist: &mut SymbolicClosureWorklist<'_>,
     ) {
+        for &rebase in runtime.base_rebases.outgoing(fact.base) {
+            let Some(field) = runtime.rebased_field(rebase, fact.field) else {
+                continue;
+            };
+            let mut equivalent = fact;
+            equivalent.base = rebase.target;
+            equivalent.field = field;
+            worklist.enqueue_fact_state(equivalent);
+        }
         Self::seed_symbolic_fact_consumers(unified, runtime, fact, worklist);
         let transforms = runtime.transforms.lock().outgoing(fact.base);
         for transform in transforms.iter().copied() {
@@ -8031,6 +8307,11 @@ impl IdgQueryService {
                         .is_some_and(|span| {
                             span.file == transform.call_span.file && span.start > transform.call_span.start
                         }))
+            {
+                continue;
+            }
+            if transform.kind != SymbolicFieldTransformKind::ScalarReturn
+                && !worklist.fact_is_relevant(transform.target, fact.field)
             {
                 continue;
             }
@@ -8201,7 +8482,7 @@ impl IdgQueryService {
                 }
             }
         }
-        if let Some(nodes) = runtime.bare_reads.get(&fact.base) {
+        if let Some(nodes) = runtime.aggregate_reads.get(&fact.base) {
             for node in nodes {
                 let node = NodeId(node.0);
                 if symbolic_node_allowed(unified, worklist, node) {
@@ -8286,6 +8567,8 @@ impl IdgQueryService {
                 }
             }
         }
+        let rebase_specs = SymbolicBaseRebaseIndex::specs(symbolic);
+        field_names.extend(rebase_specs.iter().map(|(_, _, prefix, _)| prefix.clone()));
         let mut fields: Vec<String> = field_names.into_iter().collect();
         fields.sort_unstable();
         let (transforms, reverse_transforms, reverse_scalar_transforms, ordering_sensitive_bases) =
@@ -8314,6 +8597,7 @@ impl IdgQueryService {
             ordering_sensitive_bases,
             ..SymbolicRuntimeIndex::default()
         };
+        out.base_rebases = SymbolicBaseRebaseIndex::from_specs(rebase_specs, &out.fields);
         out.transforms = Mutex::new(transforms);
         out.reverse_transforms = reverse_transforms;
         out.reverse_scalar_transforms = reverse_scalar_transforms;
@@ -8335,7 +8619,6 @@ impl IdgQueryService {
                 )
             }));
 
-        out.bare_reads = GroupedNodeIndex::from_rows(bare_read_rows);
         out.scalar_writes = GroupedNodeIndex::from_rows(scalar_write_rows);
         bonsai_diagnostics::debug_log!(
             "idg-query",
@@ -8351,7 +8634,23 @@ impl IdgQueryService {
         let mut fact_sources = FactSourceSpool::new();
         let mut aggregate_input_rows = Vec::new();
         let mut aggregate_output_rows = Vec::new();
+        let mut aggregate_read_rows = Vec::new();
         let mut resolved_call_args = AHashSet::default();
+        let mut projected_fact_keys = Vec::new();
+        let resolved_symbolic_args: AHashSet<(SegmentId, FuncId, Span, u32)> = symbolic
+            .transforms()
+            .iter()
+            .filter(|transform| transform.kind == SymbolicFieldTransformKind::Argument)
+            .filter_map(|transform| {
+                let source = symbolic.bases().get(transform.source as usize)?;
+                Some((
+                    source.segment,
+                    source.func,
+                    transform.call_span,
+                    transform.arg_idx,
+                ))
+            })
+            .collect();
         for &segment_id in &segments {
             let Some(segment) = self.workspace.segment_view(segment_id) else {
                 continue;
@@ -8365,8 +8664,14 @@ impl IdgQueryService {
                 let Some(ws_node) = Self::ws_node_for_segment_bases(segment_bases, segment_id, local) else {
                     continue;
                 };
+                if let Some(Place::CallArg { site, idx }) = segment.places.get(node.place) {
+                    if resolved_symbolic_args.contains(&(segment_id, node.func, site.0, *idx)) {
+                        resolved_call_args.insert(ws_node);
+                    }
+                }
                 for fact in page.get(local) {
                     let key = symbolic_fact_key(fact.base, fact.field);
+                    projected_fact_keys.push(key);
                     fact_sources.push(key, ws_node.0);
                     if matches!(segment.places.get(node.place), Some(Place::Read { .. })) {
                         exact_read_rows.push((key, ws_node));
@@ -8398,6 +8703,9 @@ impl IdgQueryService {
                 let Some(to) = Self::ws_node_for_segment_bases(segment_bases, segment_id, edge.to) else {
                     continue;
                 };
+                if let Some(base) = out.storage_reads.base(from) {
+                    aggregate_read_rows.push((base, to));
+                }
                 if allowed_funcs.is_some_and(|allowed| {
                     let unified = unified.expect("scoped symbolic build has unified node ownership");
                     !Self::ws_node_func(unified, NodeId(from.0)).is_some_and(|func| allowed.contains(&func))
@@ -8448,8 +8756,17 @@ impl IdgQueryService {
         out.fact_pages = Mutex::new(fact_pages);
         out.exact_reads = GroupedNodeIndex::from_rows(exact_read_rows);
         out.fact_sources = fact_sources.finish();
+        out.aggregate_reads = GroupedNodeIndex::from_rows(
+            aggregate_read_rows
+                .into_iter()
+                .filter(|(_, node)| !resolved_call_args.contains(node))
+                .collect(),
+        );
         out.aggregate_inputs = GroupedNodeIndex::from_rows(aggregate_input_rows);
         out.aggregate_outputs = GroupedNodeIndex::from_rows(aggregate_output_rows);
+        projected_fact_keys.sort_unstable();
+        projected_fact_keys.dedup();
+        out.projected_fact_keys = projected_fact_keys.into_boxed_slice();
         let mut resolved_call_args: Vec<_> = resolved_call_args.into_iter().collect();
         resolved_call_args.sort_unstable_by_key(|node| node.0);
         out.resolved_call_args = resolved_call_args.into_boxed_slice();
@@ -8542,6 +8859,95 @@ impl IdgQueryService {
             runtime: Arc::clone(&runtime),
         });
         runtime
+    }
+
+    /// Compile the least backward fixed point of field identities demanded by
+    /// real projected syntax in this runtime's exact function scope.
+    ///
+    /// This is a semantic relation, not a budget: every inverse transform and
+    /// access-path rebase is followed until convergence.  The spill-backed
+    /// set starts empty and promotes storage only with actual relation density.
+    fn ensure_symbolic_field_demand(
+        runtime: &Arc<SymbolicRuntimeIndex>,
+        max_precision: Option<Precision>,
+    ) -> Arc<SymbolicFieldDemand> {
+        if let Some(demand) = runtime.field_demands.lock().get(&max_precision).cloned() {
+            return demand;
+        }
+
+        // A whole value passed to an unresolved/external consumer demands
+        // every concrete suffix that can reach that compiler base. Keep this
+        // as a sparse wildcard relation instead of materializing
+        // `bases × fields`; inverse transforms propagate it exactly.
+        let mut wildcard_bases = closure_fact_store();
+        let mut pending_wildcards = pending_fact_store();
+        for &base in runtime.aggregate_reads.keys.iter() {
+            let base = u128::from(base);
+            if wildcard_bases.insert(base) {
+                pending_wildcards.push(base);
+            }
+        }
+        while let Some(base) = pending_wildcards.pop() {
+            let base = base as u32;
+            let mut enqueue = |base: u32| {
+                let base = u128::from(base);
+                if wildcard_bases.insert(base) {
+                    pending_wildcards.push(base);
+                }
+            };
+            for &rebase in runtime.base_rebases.outgoing(base) {
+                enqueue(rebase.target);
+            }
+            runtime.reverse_transforms.visit_incoming(base, |row| {
+                if max_precision.is_none_or(|max| row.precision <= max) {
+                    enqueue(row.source);
+                }
+            });
+        }
+
+        let mut facts = closure_fact_store();
+        let mut pending = pending_fact_store();
+        for &key in &runtime.projected_fact_keys {
+            let key = u128::from(key);
+            if facts.insert(key) {
+                pending.push(key);
+            }
+        }
+        while let Some(key) = pending.pop() {
+            let key = key as u64;
+            let base = (key >> 32) as u32;
+            let field = key as u32;
+            let mut enqueue = |base: u32, field: u32| {
+                let key = u128::from(symbolic_fact_key(base, field));
+                if facts.insert(key) {
+                    pending.push(key);
+                }
+            };
+            for &rebase in runtime.base_rebases.outgoing(base) {
+                if let Some(rebased_field) = runtime.rebased_field(rebase, field) {
+                    enqueue(rebase.target, rebased_field);
+                }
+            }
+            runtime.reverse_transforms.visit_incoming(base, |row| {
+                if max_precision.is_none_or(|max| row.precision <= max) {
+                    enqueue(row.source, field);
+                }
+            });
+        }
+        let demand = Arc::new(SymbolicFieldDemand {
+            facts,
+            wildcard_bases,
+        });
+        bonsai_diagnostics::debug_log!(
+            "idg-query",
+            "symbolic field demand ready syntax_facts={} demanded_facts={} wildcard_bases={} precision={:?}",
+            runtime.projected_fact_keys.len(),
+            demand.facts.len(),
+            demand.wildcard_bases.len(),
+            max_precision
+        );
+        let mut cache = runtime.field_demands.lock();
+        Arc::clone(cache.entry(max_precision).or_insert_with(|| Arc::clone(&demand)))
     }
 
     fn load_persisted_symbolic_runtime(
@@ -9062,10 +9468,9 @@ fn projected_storage_path(
 }
 
 fn normalise_projected_storage_text(name: &str) -> String {
-    name.trim()
-        .trim_start_matches('&')
-        .trim_start_matches('*')
-        .replace("->", ".")
+    bonsai_common::normalize_qualified_name(
+        name.trim().trim_start_matches(bonsai_common::is_name_punctuation),
+    )
 }
 
 fn flat_place_matches_projected_seed(

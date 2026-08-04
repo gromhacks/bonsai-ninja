@@ -100,16 +100,11 @@ impl DeclIndex {
             if let CharacterConstraintOutput::Assignment { target } = &mut fact.output {
                 target.shrink_to_fit();
             }
-            match &mut fact.domain {
-                CharacterConstraintDomain::AllowOnly {
-                    classes,
-                    exact_characters,
-                } => {
-                    classes.shrink_to_fit();
-                    compact_strings(exact_characters);
-                }
-                CharacterConstraintDomain::ExcludesExact { characters } => compact_strings(characters),
-            }
+            compact_character_constraint_domain(&mut fact.domain);
+        }
+        for fact in &mut self.guarded_value_filters {
+            fact.input_place.shrink_to_fit();
+            fact.output_place.shrink_to_fit();
         }
         for fact in &mut self.dynamic_key_filters {
             compact_optional_string(&mut fact.output_place);
@@ -154,6 +149,7 @@ impl DeclIndex {
         self.finite_literal_selections.shrink_to_fit();
         self.character_substitutions.shrink_to_fit();
         self.character_constraints.shrink_to_fit();
+        self.guarded_value_filters.shrink_to_fit();
         self.same_origin_path_constraints.shrink_to_fit();
         self.compiler_guards.shrink_to_fit();
         self.dynamic_key_filters.shrink_to_fit();
@@ -162,6 +158,28 @@ impl DeclIndex {
         self.aggregate_layouts.shrink_to_fit();
         self.strings.shrink_to_fit();
         self.comments.shrink_to_fit();
+    }
+}
+
+fn compact_character_constraint_domain(domain: &mut CharacterConstraintDomain) {
+    match domain {
+        CharacterConstraintDomain::AllowOnly {
+            classes,
+            exact_characters,
+        } => {
+            classes.shrink_to_fit();
+            compact_strings(exact_characters);
+        }
+        CharacterConstraintDomain::ExcludesExact { characters } => compact_strings(characters),
+        CharacterConstraintDomain::ProviderBound {
+            factory_call,
+            operation_call,
+            domain,
+        } => {
+            factory_call.shrink_to_fit();
+            operation_call.shrink_to_fit();
+            compact_character_constraint_domain(domain);
+        }
     }
 }
 
@@ -174,6 +192,7 @@ fn compact_static_scalar(value: &mut StaticScalarValue) {
 fn compact_condition_expression(expression: &mut ConditionExpressionFact) {
     match expression {
         ConditionExpressionFact::Atom { .. } => {}
+        ConditionExpressionFact::Truthy { operand, .. } => compact_condition_operand(operand),
         ConditionExpressionFact::Not { operand, .. } => compact_condition_expression(operand),
         ConditionExpressionFact::All { operands, .. } | ConditionExpressionFact::Any { operands, .. } => {
             for operand in operands.iter_mut() {

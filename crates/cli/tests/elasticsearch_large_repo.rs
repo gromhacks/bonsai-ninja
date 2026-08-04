@@ -199,6 +199,7 @@ fn assert_performance(label: &str, elapsed: Duration, variable: &str, default_se
          this gate never terminates or caps analysis. Set {variable} only when \
          intentionally calibrating a slower performance host"
     );
+    eprintln!("{label} completed in {elapsed:.2?} (SLO {limit:.2?})");
 }
 
 fn assert_success_timed(bin: &Path, args: &[String]) -> (String, Duration) {

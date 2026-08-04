@@ -560,6 +560,27 @@
   - httpx
   cwe:
   - CWE-918
+  analysis_semantics:
+    url_network_guard:
+      root:
+        kind: sink-argument-parser-input
+        sink_argument_index: 0
+        parser_argument_index: 0
+      parser: {attribute: [urllib, parse, urlparse]}
+      scheme:
+        component: {field: scheme}
+        allowed_values: [https]
+      host_allowlist:
+        component: {field: hostname}
+      dns:
+        resolver: {attribute: [socket, getaddrinfo]}
+        address_parser:
+          target: {attribute: [ipaddress, ip_address]}
+          argument_index: 0
+        private_address_predicates:
+        - {name: is_private}
+        - {name: is_loopback}
+        - {name: is_link_local}
   match:
     kind: call
     callee:

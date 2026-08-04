@@ -128,6 +128,35 @@ fn unqualified_callable_resolution_accepts_same_module_package() {
 }
 
 #[test]
+fn class_resolution_accepts_exact_relative_nested_type_path_only() {
+    let mut global = GlobalIndex::new();
+    let wanted_file = FileId::new(1);
+    let other_file = FileId::new(2);
+    let mut wanted = decl(wanted_file, DeclKind::Class, "Envelope", &["mega"], 10);
+    wanted.qualified_name = Some("mega.App.Envelope".to_string());
+    insert_one(&mut global, wanted_file, wanted);
+    let mut other = decl(other_file, DeclKind::Class, "Envelope", &["other"], 20);
+    other.qualified_name = Some("other.App.Envelope".to_string());
+    insert_one(&mut global, other_file, other);
+
+    let caller_module = ModulePath::from_segments(["mega"]);
+    let ctx = ResolveContext::new(FileId::new(99), &caller_module);
+    let hits = resolve_class(&global, "App.Envelope", &ctx);
+
+    assert_eq!(
+        hits.len(),
+        1,
+        "relative nested type must not fan out by leaf: {hits:?}"
+    );
+    assert_eq!(
+        global
+            .decl_of(hits[0])
+            .and_then(|decl| decl.qualified_name.as_deref()),
+        Some("mega.App.Envelope")
+    );
+}
+
+#[test]
 fn unqualified_callable_resolution_accepts_same_directory_kotlin_globals() {
     let mut global = GlobalIndex::new();
     let caller_file = FileId::new(1);

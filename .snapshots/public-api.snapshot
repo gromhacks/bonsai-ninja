@@ -258,6 +258,7 @@ pub const LANG_ID: LanguageId = LanguageId::new("javascript");
 pub fn apply_javascript_getter_property_sources(
 pub fn apply_js_ts_commonjs_named_export_aliases(
 pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tree, src: &[u8], file: FileId) {
+pub fn extract_ecmascript_pseudo_call(
 pub fn js_ts_imports(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<ImportSpec> {
 pub fn js_ts_module_segments(path: &std::path::Path) -> Vec<String> {
 pub fn js_ts_require_calls(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<ImportSpec> {
@@ -458,11 +459,10 @@ pub use compile::{compile_rule_to_inspect_args, CompiledRule};
 pub use deps::{build_inventory, DependencyInventory, DependencyRow};
 pub use finding::{
 pub use flow_evidence::{build_flow_bodies, FlowFunctionBody, FlowRole, FlowSourceLine};
-pub use loader::{load_rulepack, load_workspace_local_rules, parse_severity, LoadError, Rulepack};
+pub use loader::{
 pub use matcher::{
 pub use report::{
 pub use rule::{
-pub use sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recognized_non_crediting};
 
 === taint ===
 pub mod idg_build;

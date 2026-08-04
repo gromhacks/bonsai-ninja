@@ -493,4 +493,12 @@ class Repository {
         "declared typealias must resolve to its AST target: {:?}",
         getter.flow_events
     );
+    assert!(
+        getter
+            .receiver_state_sources
+            .iter()
+            .any(|source| source == "self.data"),
+        "computed getter must retain its AST-derived receiver field state: {:?}",
+        getter.receiver_state_sources
+    );
 }

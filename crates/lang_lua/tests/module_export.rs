@@ -173,6 +173,16 @@ fn dotted_table_call_keeps_explicit_receiver_argument() {
         FlowEvent::Call { name, call_kind: CallKind::Function, args, .. }
             if name == "Box.method" && args.len() == 2
     )));
+    let method = global
+        .find_by_name("method")
+        .iter()
+        .find_map(|symbol| global.decl_of(*symbol))
+        .expect("table member declaration");
+    assert_eq!(
+        method.qualified_name.as_deref(),
+        Some("Box.method"),
+        "the Tree-sitter declaration owner must survive into semantic identity"
+    );
 }
 
 #[test]

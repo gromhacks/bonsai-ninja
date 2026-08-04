@@ -39,19 +39,23 @@ fn span_overlaps_error(span: Span, error_spans: &[Span]) -> bool {
 /// events (calls, assigns, returns, …) that the error actually
 /// mis-scopes. This preserves flows from the correctly-parsed parts of
 /// a callable that has one localized parse error.
-pub(super) fn retain_flow_events_outside_errors(events: &mut Vec<FlowEvent>, error_spans: &[Span]) {
+pub(super) fn retain_flow_events_outside_errors(
+    events: &mut Vec<FlowEvent>,
+    error_spans: &[Span],
+    tolerant_call_names: &[&str],
+) {
     events.retain_mut(|event| match event {
         FlowEvent::Branch {
             then_events,
             else_events,
             ..
         } => {
-            retain_flow_events_outside_errors(then_events, error_spans);
-            retain_flow_events_outside_errors(else_events, error_spans);
+            retain_flow_events_outside_errors(then_events, error_spans, tolerant_call_names);
+            retain_flow_events_outside_errors(else_events, error_spans, tolerant_call_names);
             true
         }
         FlowEvent::Loop { body, .. } => {
-            retain_flow_events_outside_errors(body, error_spans);
+            retain_flow_events_outside_errors(body, error_spans, tolerant_call_names);
             true
         }
         FlowEvent::Try {
@@ -60,37 +64,32 @@ pub(super) fn retain_flow_events_outside_errors(events: &mut Vec<FlowEvent>, err
             finally_events,
             ..
         } => {
-            retain_flow_events_outside_errors(body, error_spans);
-            retain_flow_events_outside_errors(catch_events, error_spans);
-            retain_flow_events_outside_errors(finally_events, error_spans);
+            retain_flow_events_outside_errors(body, error_spans, tolerant_call_names);
+            retain_flow_events_outside_errors(catch_events, error_spans, tolerant_call_names);
+            retain_flow_events_outside_errors(finally_events, error_spans, tolerant_call_names);
             true
         }
         FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-            retain_flow_events_outside_errors(body, error_spans);
+            retain_flow_events_outside_errors(body, error_spans, tolerant_call_names);
             true
         }
-        // C/C++ `x = va_arg(ap, TYPE)`: tree-sitter-c/cpp cannot parse the
-        // TYPE operand of the `va_arg` builtin (`const char *` → an ERROR
-        // node), so the assignment's span always overlaps a benign error.
-        // The taint-relevant operand — the `ap` va_list — parses cleanly,
-        // and `va_start` taint propagation depends on this Assign surviving.
-        // Keep it: the error is in a non-runtime type position, not the
-        // value flow.
-        leaf @ FlowEvent::Assign { .. } if assign_is_variadic_builtin_read(leaf) => true,
+        // An adapter may declare a call whose type-metadata operand is a
+        // known Tree-sitter recovery error. Its value operand still parses
+        // cleanly, so retain that assignment without teaching this shared
+        // filter the builtin spelling.
+        leaf @ FlowEvent::Assign { .. } if assign_uses_tolerated_call(leaf, tolerant_call_names) => true,
         leaf => !span_overlaps_error(leaf.span(), error_spans),
     });
 }
 
-/// True when `event` is an `Assign` whose RHS is a C/C++ `va_arg` /
-/// `__builtin_va_arg` builtin read. These are exempt from
-/// error-span pruning because the macro's TYPE argument is unparseable
-/// by tree-sitter and produces a spurious ERROR node that would
-/// otherwise discard the whole assignment.
-fn assign_is_variadic_builtin_read(event: &FlowEvent) -> bool {
+/// True when an assignment invokes one of the active adapter's explicitly
+/// tolerated calls. These are exempt from error-span pruning only because the
+/// adapter has proven that the damaged operand is non-value syntax.
+fn assign_uses_tolerated_call(event: &FlowEvent, tolerant_call_names: &[&str]) -> bool {
     matches!(
         event,
         FlowEvent::Assign { source_call: Some(call), .. }
-            if call == "va_arg" || call == "__builtin_va_arg"
+            if tolerant_call_names.contains(&call.as_str())
     )
 }
 

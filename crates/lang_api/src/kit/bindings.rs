@@ -13,15 +13,24 @@ use crate::FlowEvent;
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-pub(super) fn extract_match_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+pub(super) fn extract_match_binding_assigns(
+    file: FileId,
+    node: &Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<FlowEvent> {
     let mut out = Vec::new();
-    out.extend(extract_instanceof_pattern_binding_assigns(file, node, src));
-    out.extend(extract_is_pattern_binding_assigns(file, node, src));
-    out.extend(extract_kotlin_when_subject_binding_assigns(file, node, src));
-    out.extend(extract_case_match_binding_assigns(file, node, src));
-    out.extend(extract_case_pattern_binding_assigns(file, node, src));
-    out.extend(extract_elixir_case_stab_clause_bindings(file, node, src));
-    out.extend(extract_rust_let_condition_bindings(file, node, src));
+    out.extend(extract_instanceof_pattern_binding_assigns(
+        file, node, src, handler,
+    ));
+    out.extend(extract_is_pattern_binding_assigns(file, node, src, handler));
+    out.extend(extract_kotlin_when_subject_binding_assigns(
+        file, node, src, handler,
+    ));
+    out.extend(extract_case_match_binding_assigns(file, node, src, handler));
+    out.extend(extract_case_pattern_binding_assigns(file, node, src, handler));
+    out.extend(extract_elixir_case_stab_clause_bindings(file, node, src, handler));
+    out.extend(extract_rust_let_condition_bindings(file, node, src, handler));
 
     // Rust's grammar exposes `match_expression { value, body }` while
     // Python exposes `match_statement { subject, body }`. Both lower from
@@ -31,7 +40,7 @@ pub(super) fn extract_match_binding_assigns(file: FileId, node: &Node<'_>, src: 
         node.kind(),
         "match_expression" | "if_let_expression" | "while_let_expression"
     ) {
-        out.extend(extract_rust_style_match_bindings(file, node, src));
+        out.extend(extract_rust_style_match_bindings(file, node, src, handler));
         return out;
     }
     if node.kind() == "match_statement" {
@@ -41,7 +50,7 @@ pub(super) fn extract_match_binding_assigns(file: FileId, node: &Node<'_>, src: 
         let Some(body) = node.child_by_field_name("body") else {
             return out;
         };
-        let (source_name, mut source_names) = binding_source_facts(subject, src);
+        let (source_name, mut source_names) = binding_source_facts(subject, src, handler);
         // A canonical place already identifies the dependency exactly.
         // Avoid emitting the same bare place through both carriers: Python's
         // branch lowering treats `source_names` as additional operands, and
@@ -100,6 +109,7 @@ pub(super) fn extract_rust_let_condition_bindings(
     file: FileId,
     node: &Node<'_>,
     src: &[u8],
+    handler: &GrammarHandler,
 ) -> Vec<FlowEvent> {
     if !matches!(node.kind(), "if_expression" | "while_expression") {
         return Vec::new();
@@ -128,7 +138,7 @@ pub(super) fn extract_rust_let_condition_bindings(
         else {
             continue;
         };
-        let (source_name, source_names) = binding_source_facts(val, src);
+        let (source_name, source_names) = binding_source_facts(val, src, handler);
         for ident in binding_targets_from_pattern_node(&pat, src) {
             // Skip variant constructors (`Some`, `Ok`, user `Variant`) —
             // uppercase-leading — and non-binding pattern keywords.
@@ -156,6 +166,7 @@ pub(super) fn extract_elixir_case_stab_clause_bindings(
     file: FileId,
     node: &Node<'_>,
     src: &[u8],
+    handler: &GrammarHandler,
 ) -> Vec<FlowEvent> {
     if node.kind() != "call" {
         return Vec::new();
@@ -183,7 +194,9 @@ pub(super) fn extract_elixir_case_stab_clause_bindings(
                     if target == "_" || target.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
                         continue;
                     }
-                    if let Some(assign) = pattern_binding_assign(file, &pattern, &target, subject, src) {
+                    if let Some(assign) =
+                        pattern_binding_assign(file, &pattern, &target, subject, src, handler)
+                    {
                         out.push(assign);
                     }
                 }
@@ -196,7 +209,12 @@ pub(super) fn extract_elixir_case_stab_clause_bindings(
     dedup_assign_events(out)
 }
 
-fn extract_instanceof_pattern_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+fn extract_instanceof_pattern_binding_assigns(
+    file: FileId,
+    node: &Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<FlowEvent> {
     let mut out = Vec::new();
     let mut cursor = node.walk();
     let mut stack = vec![*node];
@@ -208,7 +226,7 @@ fn extract_instanceof_pattern_binding_assigns(file: FileId, node: &Node<'_>, src
             ) {
                 let target_text = node_text(&target, src).trim();
                 if looks_like_bare_identifier(target_text) {
-                    let (source_name, mut source_names) = binding_source_facts(source, src);
+                    let (source_name, mut source_names) = binding_source_facts(source, src, handler);
                     source_names.retain(|name| !same_identifier_name(name, target_text));
                     source_names.sort();
                     source_names.dedup();
@@ -232,7 +250,12 @@ fn extract_instanceof_pattern_binding_assigns(file: FileId, node: &Node<'_>, src
     out
 }
 
-fn extract_is_pattern_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+fn extract_is_pattern_binding_assigns(
+    file: FileId,
+    node: &Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<FlowEvent> {
     let mut out = Vec::new();
     let mut cursor = node.walk();
     let mut stack = vec![*node];
@@ -243,7 +266,9 @@ fn extract_is_pattern_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8])
                 current.child_by_field_name("pattern"),
             ) {
                 for target in binding_targets_from_pattern_node(&pattern, src) {
-                    if let Some(assign) = pattern_binding_assign(file, &current, &target, source, src) {
+                    if let Some(assign) =
+                        pattern_binding_assign(file, &current, &target, source, src, handler)
+                    {
                         out.push(assign);
                     }
                 }
@@ -256,7 +281,12 @@ fn extract_is_pattern_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8])
     out
 }
 
-fn extract_kotlin_when_subject_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+fn extract_kotlin_when_subject_binding_assigns(
+    file: FileId,
+    node: &Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<FlowEvent> {
     let mut out = Vec::new();
     let mut cursor = node.walk();
     let mut stack = vec![*node];
@@ -276,7 +306,7 @@ fn extract_kotlin_when_subject_binding_assigns(file: FileId, node: &Node<'_>, sr
             else {
                 continue;
             };
-            if let Some(assign) = pattern_binding_assign(file, &current, target, source, src) {
+            if let Some(assign) = pattern_binding_assign(file, &current, target, source, src, handler) {
                 out.push(assign);
             }
         }
@@ -287,14 +317,19 @@ fn extract_kotlin_when_subject_binding_assigns(file: FileId, node: &Node<'_>, sr
     out
 }
 
-fn extract_case_match_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+fn extract_case_match_binding_assigns(
+    file: FileId,
+    node: &Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<FlowEvent> {
     if node.kind() != "case_match" {
         return Vec::new();
     }
     let Some(subject) = node.child_by_field_name("value") else {
         return Vec::new();
     };
-    let (source_name, source_names) = binding_source_facts(subject, src);
+    let (source_name, source_names) = binding_source_facts(subject, src, handler);
 
     let mut targets: Vec<String> = Vec::new();
     let mut cursor = node.walk();
@@ -344,7 +379,12 @@ fn extract_case_match_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8])
         .collect()
 }
 
-fn extract_case_pattern_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+fn extract_case_pattern_binding_assigns(
+    file: FileId,
+    node: &Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<FlowEvent> {
     // These shapes have a dedicated lowering pass below. Running the
     // generic case-arm pass as well would duplicate bindings and treat a
     // unit variant such as Rust `None` as a capture.
@@ -391,7 +431,9 @@ fn extract_case_pattern_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8
             }
             for pattern in patterns {
                 for target in binding_targets_from_pattern_node(&pattern, src) {
-                    if let Some(assign) = pattern_binding_assign(file, &pattern, &target, subject, src) {
+                    if let Some(assign) =
+                        pattern_binding_assign(file, &pattern, &target, subject, src, handler)
+                    {
                         out.push(assign);
                     }
                 }
@@ -550,11 +592,12 @@ pub(super) fn pattern_binding_assign(
     target: &str,
     source: Node<'_>,
     src: &[u8],
+    handler: &GrammarHandler,
 ) -> Option<FlowEvent> {
     if !looks_like_bare_identifier(target) {
         return None;
     }
-    let (source_name, mut source_names) = binding_source_facts(source, src);
+    let (source_name, mut source_names) = binding_source_facts(source, src, handler);
     source_names.retain(|name| !same_identifier_name(name, target));
     source_names.sort();
     source_names.dedup();
@@ -573,9 +616,13 @@ pub(super) fn pattern_binding_assign(
     })
 }
 
-fn binding_source_facts(source: Node<'_>, src: &[u8]) -> (Option<String>, Vec<String>) {
+fn binding_source_facts(
+    source: Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> (Option<String>, Vec<String>) {
     let source_name = argument_place(&source, src);
-    let mut source_names = extract_rhs_expr_operands(&source, src);
+    let mut source_names = extract_rhs_expr_operands(&source, src, handler);
     if source_names.is_empty() {
         source_names.extend(source_name.iter().cloned());
     }
@@ -620,7 +667,12 @@ pub(super) fn dedup_assign_events(events: Vec<FlowEvent>) -> Vec<FlowEvent> {
 /// across every arm. Each binding inherits the subject expression's
 /// identifier(s) as `source_names` so taint on the subject reaches
 /// the bindings without text-parsing the source.
-fn extract_rust_style_match_bindings(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+fn extract_rust_style_match_bindings(
+    file: FileId,
+    node: &Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<FlowEvent> {
     let subject_node = node
         .child_by_field_name("value")
         .or_else(|| node.child_by_field_name("subject"))
@@ -629,7 +681,7 @@ fn extract_rust_style_match_bindings(file: FileId, node: &Node<'_>, src: &[u8]) 
     let Some(subject) = subject_node else {
         return Vec::new();
     };
-    let (source_name, source_names) = binding_source_facts(subject, src);
+    let (source_name, source_names) = binding_source_facts(subject, src, handler);
     let mut out: Vec<FlowEvent> = Vec::new();
     let mut targets: Vec<String> = Vec::new();
     let mut visit_pattern = |pat_node: &Node<'_>| {
@@ -695,6 +747,7 @@ pub(super) fn extract_comprehension_for_clause_assigns(
     file: FileId,
     clause: &Node<'_>,
     src: &[u8],
+    handler: &GrammarHandler,
 ) -> Vec<FlowEvent> {
     // Python's tree-sitter grammar exposes the iterable as `left`
     // and the binding as the unfielded first named child. JS / TS
@@ -732,7 +785,7 @@ pub(super) fn extract_comprehension_for_clause_assigns(
     if targets.is_empty() {
         return Vec::new();
     }
-    let (source_name, source_names) = binding_source_facts(rhs, src);
+    let (source_name, source_names) = binding_source_facts(rhs, src, handler);
     targets
         .into_iter()
         .map(|target| FlowEvent::Assign {
@@ -748,12 +801,17 @@ pub(super) fn extract_comprehension_for_clause_assigns(
         .collect()
 }
 
-pub(super) fn extract_foreach_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+pub(super) fn extract_foreach_binding_assigns(
+    file: FileId,
+    node: &Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<FlowEvent> {
     if let Some((binding, iterable)) = foreach_binding_nodes(node) {
         let targets = binding_targets_from_pattern_node(&binding, src);
         if !targets.is_empty() {
             let (source_name, source_names, source_call, source_call_args) =
-                foreach_binding_source_facts(iterable, file, src);
+                foreach_binding_source_facts(iterable, file, src, handler);
             let value_kind = Some(if source_call.is_some() {
                 crate::AssignValueKind::CallResult
             } else {
@@ -781,16 +839,25 @@ fn foreach_binding_source_facts(
     iterable: Node<'_>,
     file: FileId,
     src: &[u8],
+    handler: &GrammarHandler,
 ) -> (Option<String>, Vec<String>, Option<String>, Vec<String>) {
     // Dart represents `gen(args)` as sibling `identifier` + `selector`
     // nodes under `for_loop_parts`. Preserve that parsed call-result edge so
     // a yielded value reaches the loop binding through the callee summary.
     if iterable.kind() == "for_loop_parts" {
-        if let Some((source_call, source_call_args)) = extract_dart_selector_call_info(iterable, file, src) {
+        if let Some((source_call, source_call_args)) =
+            extract_dart_selector_call_info(iterable, file, src, handler)
+        {
             return (None, Vec::new(), source_call, source_call_args);
         }
     }
-    let (source_name, source_names) = binding_source_facts(iterable, src);
+    let source_name = argument_place(&iterable, src);
+    let mut source_names = extract_rhs_expr_operands(&iterable, src, handler);
+    if source_names.is_empty() {
+        source_names.extend(source_name.iter().cloned());
+    }
+    source_names.sort();
+    source_names.dedup();
     (source_name, source_names, None, Vec::new())
 }
 

@@ -20,21 +20,18 @@ use super::*;
 /// values. Resolver code still falls back to the short tail when it
 /// needs to bind to a local function declaration. The returned arg
 /// texts are the raw source strings of each positional argument.
-pub(crate) fn extract_direct_call_info(node: &Node<'_>, src: &[u8]) -> Option<(Option<String>, Vec<String>)> {
-    if !COMMON_CALL_KINDS.contains(&node.kind()) {
-        // Recurse only where a descendant call genuinely IS the RHS's
-        // operative call: transparent single-call wrappers (member /
-        // await / paren chains), a grouping list wrapping exactly one
-        // expression (Go / Python `x := f()` → `expression_list` of one
-        // call). A
-        // compound RHS (`a + f()`) or a multi-value list (`f(), g()`)
-        // must NOT collapse to its first call — it falls through to
-        // `source_names`.
-        let single_expr_grouping = grouping_list_kind(node.kind()) && node.named_child_count() == 1;
-        if !direct_call_wrapper_kind(node.kind()) && !single_expr_grouping {
-            return None;
-        }
-        return first_call_descendant(*node).and_then(|call| extract_direct_call_info(&call, src));
+pub(crate) fn extract_direct_call_info(
+    node: &Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<(Option<String>, Vec<String>)> {
+    if !handler.is_call(node.kind()) {
+        // Follow only the direct operand of a syntax-proven transparent
+        // wrapper. Searching arbitrary descendants is unsound here: in
+        // `x = ({"v": raw} if len(raw) else None)`, `len(raw)` is nested in
+        // the condition and is not the value-producing call for `x`.
+        return transparent_direct_call_child(node, handler)
+            .and_then(|child| extract_direct_call_info(&child, src, handler));
     }
     let erlang_remote = node
         .child_by_field_name("expr")
@@ -102,6 +99,38 @@ pub(crate) fn extract_direct_call_info(node: &Node<'_>, src: &[u8]) -> Option<(O
 /// must not be collapsed to its first call.
 pub(super) fn grouping_list_kind(kind: &str) -> bool {
     matches!(kind, "expression_list" | "expressions" | "expression_series")
+}
+
+/// Return the single direct child through which a transparent expression
+/// wrapper can carry a call result.
+///
+/// This deliberately reasons from the CST's immediate structure. A wrapper
+/// around one expression may recurse into that expression; it may never scan
+/// through an unrelated compound expression to find an arbitrary nested call.
+/// Member/type wrappers can have additional named children (a field or type),
+/// so they are transparent only when exactly one direct child is itself a call
+/// or another declared transparent wrapper.
+pub(super) fn transparent_direct_call_child<'tree>(
+    node: &Node<'tree>,
+    handler: &GrammarHandler,
+) -> Option<Node<'tree>> {
+    if grouping_list_kind(node.kind()) {
+        return (node.named_child_count() == 1)
+            .then(|| first_named_child(node))
+            .flatten();
+    }
+    if !direct_call_wrapper_kind(node.kind()) {
+        return None;
+    }
+
+    let mut cursor = node.walk();
+    let mut candidates = node.named_children(&mut cursor).filter(|child| {
+        handler.is_call(child.kind())
+            || direct_call_wrapper_kind(child.kind())
+            || (grouping_list_kind(child.kind()) && child.named_child_count() == 1)
+    });
+    let candidate = candidates.next()?;
+    candidates.next().is_none().then_some(candidate)
 }
 
 pub(super) fn direct_call_wrapper_kind(kind: &str) -> bool {
@@ -232,14 +261,17 @@ pub(super) fn qualified_method_name_node<'tree>(node: &Node<'tree>) -> Option<No
     }
 }
 
-pub(super) fn first_call_descendant<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
+pub(super) fn first_call_descendant<'tree>(
+    node: Node<'tree>,
+    handler: &GrammarHandler,
+) -> Option<Node<'tree>> {
     let mut cursor = node.walk();
     let children: Vec<Node<'tree>> = node.named_children(&mut cursor).collect();
     for child in children {
-        if COMMON_CALL_KINDS.contains(&child.kind()) {
+        if handler.is_call(child.kind()) {
             return Some(child);
         }
-        if let Some(found) = first_call_descendant(child) {
+        if let Some(found) = first_call_descendant(child, handler) {
             return Some(found);
         }
     }
@@ -250,13 +282,15 @@ pub(super) fn extract_dart_selector_call_info(
     node: Node<'_>,
     file: FileId,
     src: &[u8],
+    handler: &GrammarHandler,
 ) -> Option<(Option<String>, Vec<String>)> {
     let selector = if node.kind() == "selector" {
         Some(node)
     } else {
         first_dart_selector_call_descendant(node)
     }?;
-    let FlowEvent::Call { name, args, .. } = build_dart_selector_call_event(selector, file, src)? else {
+    let FlowEvent::Call { name, args, .. } = build_dart_selector_call_event(selector, file, src, handler)?
+    else {
         return None;
     };
     let positional_args = args
