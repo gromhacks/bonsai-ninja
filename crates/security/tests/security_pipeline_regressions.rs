@@ -3530,6 +3530,7 @@ fn python_compiled_regex_guard_sanitizes_later_path_sink() {
     python_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
         character_constraint: Some(CharacterConstraintSemantics {
             required_excluded_characters: vec!["/".to_string(), "\\".to_string()],
+            required_mappings: Vec::new(),
             required_enclosing_literal_delimiter: None,
             accepted_providers: vec![CharacterConstraintProviderSemantics {
                 factory: RuleTarget {
@@ -4271,6 +4272,7 @@ fn comprehension_character_constraint_sanitizes_only_its_exact_lineage() {
     sink.analysis_semantics = Some(AnalysisSemantics {
         character_constraint: Some(CharacterConstraintSemantics {
             required_excluded_characters: vec!["'".to_string()],
+            required_mappings: Vec::new(),
             required_enclosing_literal_delimiter: Some("'".to_string()),
             accepted_providers: Vec::new(),
         }),
@@ -4373,6 +4375,7 @@ fn regex_character_constraint_summary_sanitizes_only_exact_helper_result() {
     sink.analysis_semantics = Some(AnalysisSemantics {
         character_constraint: Some(CharacterConstraintSemantics {
             required_excluded_characters: vec!["\r".to_string(), "\n".to_string()],
+            required_mappings: Vec::new(),
             required_enclosing_literal_delimiter: None,
             accepted_providers: vec![CharacterConstraintProviderSemantics {
                 factory: RuleTarget {
@@ -4433,6 +4436,7 @@ fn direct_character_constraint_helper_result_sanitizes_sink_argument() {
     sink.analysis_semantics = Some(AnalysisSemantics {
         character_constraint: Some(CharacterConstraintSemantics {
             required_excluded_characters: vec!["\r".to_string(), "\n".to_string()],
+            required_mappings: Vec::new(),
             required_enclosing_literal_delimiter: None,
             accepted_providers: vec![CharacterConstraintProviderSemantics {
                 factory: RuleTarget {
@@ -4481,6 +4485,93 @@ func unsafe() { sink(source()) }
         enclosing,
         std::collections::BTreeSet::from(["unsafe".to_string(), "untrusted_provider".to_string()]),
         "the declared provider must be discharged; an identical callback on an undeclared provider must not"
+    );
+}
+
+#[test]
+fn configured_character_substitution_requires_declared_provider_and_complete_map() {
+    let mut pack = constrained_call_sink_rulepack("go", "source", "sink");
+    let sink = pack
+        .packs
+        .get_mut("go")
+        .and_then(|pack| pack.sinks.first_mut())
+        .expect("Go sink");
+    sink.tag = Some("ldap-injection".to_string());
+    sink.analysis_semantics = Some(AnalysisSemantics {
+        character_constraint: Some(CharacterConstraintSemantics {
+            required_excluded_characters: Vec::new(),
+            required_mappings: vec![
+                ExactStringMapping {
+                    input: "\\".to_string(),
+                    output: "\\5c".to_string(),
+                },
+                ExactStringMapping {
+                    input: "*".to_string(),
+                    output: "\\2a".to_string(),
+                },
+                ExactStringMapping {
+                    input: "(".to_string(),
+                    output: "\\28".to_string(),
+                },
+                ExactStringMapping {
+                    input: ")".to_string(),
+                    output: "\\29".to_string(),
+                },
+                ExactStringMapping {
+                    input: "\0".to_string(),
+                    output: "\\00".to_string(),
+                },
+            ],
+            required_enclosing_literal_delimiter: None,
+            accepted_providers: vec![CharacterConstraintProviderSemantics {
+                factory: RuleTarget {
+                    name: Some("strings.NewReplacer".to_string()),
+                    ..RuleTarget::default()
+                },
+                operation: RuleTarget {
+                    regex: Some("^[A-Za-z_][A-Za-z0-9_]*\\.Replace$".to_string()),
+                    ..RuleTarget::default()
+                },
+            }],
+        }),
+        ..AnalysisSemantics::default()
+    });
+    let ws = workspace(&[(
+        "/app/filter.go",
+        r#"
+package app
+import "strings"
+import thirdparty "example.invalid/strings"
+
+var exact = strings.NewReplacer("\\", `\5c`, "*", `\2a`, "(", `\28`, ")", `\29`, "\x00", `\00`)
+var partial = strings.NewReplacer("\\", `\5c`, "*", `\2a`, "(", `\28`)
+var extra = strings.NewReplacer("\\", `\5c`, "*", `\2a`, "(", `\28`, ")", `\29`, "\x00", `\00`, "(*", "unsafe")
+var lookalike = thirdparty.NewReplacer("\\", `\5c`, "*", `\2a`, "(", `\28`, ")", `\29`, "\x00", `\00`)
+
+func source() string { return "" }
+func safe() { value := exact.Replace(source()); sink(value) }
+func incomplete() { value := partial.Replace(source()); sink(value) }
+func overlappingExtra() { value := extra.Replace(source()); sink(value) }
+func wrongProvider() { value := lookalike.Replace(source()); sink(value) }
+func unsafe() { sink(source()) }
+"#,
+    )]);
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    let enclosing = report
+        .findings
+        .iter()
+        .filter_map(|finding| finding.finding.sink.enclosing_fn.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        enclosing,
+        std::collections::BTreeSet::from([
+            "incomplete".to_string(),
+            "overlappingExtra".to_string(),
+            "unsafe".to_string(),
+            "wrongProvider".to_string(),
+        ]),
+        "only the declared provider with the complete mapping may be discharged: {:#?}",
+        report.findings
     );
 }
 
@@ -4898,6 +4989,7 @@ fn java_url_constructor_guarded_by_scheme_host_and_private_ip_is_sanitized() {
                 },
                 comparison_predicate: Some(target("equalsIgnoreCase")),
                 allowed_values: vec!["https".to_string()],
+                reconstructed_values: Vec::new(),
             },
             host_allowlist: UrlHostAllowlistSemantics {
                 component: UrlComponentSemantics {
@@ -5053,6 +5145,7 @@ fn go_url_client_guard_requires_exact_ast_projections_dns_and_redirect_callback(
                 },
                 comparison_predicate: None,
                 allowed_values: vec!["https".to_string()],
+                reconstructed_values: Vec::new(),
             },
             host_allowlist: UrlHostAllowlistSemantics {
                 component: UrlComponentSemantics {
@@ -5902,6 +5995,7 @@ fn python_ssrf_url_guard_is_sanitized() {
                 },
                 comparison_predicate: None,
                 allowed_values: vec!["https".to_string()],
+                reconstructed_values: Vec::new(),
             },
             host_allowlist: UrlHostAllowlistSemantics {
                 component: UrlComponentSemantics {
@@ -6058,6 +6152,7 @@ fn python_url_reconstruction_helper_requires_exact_compiler_facts() {
                 },
                 comparison_predicate: None,
                 allowed_values: vec!["https".to_string()],
+                reconstructed_values: Vec::new(),
             },
             host_allowlist: UrlHostAllowlistSemantics {
                 component: UrlComponentSemantics {
@@ -6229,6 +6324,107 @@ def unsafe_redirects():
 }
 
 #[test]
+fn javascript_url_reconstruction_uses_typed_protocol_and_option_facts() {
+    let mut pack = constrained_call_sink_rulepack("javascript", "source", "got");
+    let sink = pack
+        .packs
+        .get_mut("javascript")
+        .and_then(|pack| pack.sinks.first_mut())
+        .expect("JavaScript sink");
+    sink.tag = Some("ssrf".to_string());
+    sink.analysis_semantics = Some(AnalysisSemantics {
+        url_reconstruction_guard: Some(UrlReconstructionGuardSemantics {
+            sink_argument_index: 0,
+            parser: RuleTarget {
+                name: Some("URL".to_string()),
+                ..RuleTarget::default()
+            },
+            scheme: UrlSchemeGuardSemantics {
+                component: UrlComponentSemantics {
+                    field: Some("protocol".to_string()),
+                    accessor: None,
+                },
+                comparison_predicate: None,
+                allowed_values: vec!["https:".to_string()],
+                reconstructed_values: vec!["https".to_string()],
+            },
+            host_allowlist: UrlHostAllowlistSemantics {
+                component: UrlComponentSemantics {
+                    field: Some("hostname".to_string()),
+                    accessor: None,
+                },
+                membership_predicate: Some(RuleTarget {
+                    name: Some("has".to_string()),
+                    ..RuleTarget::default()
+                }),
+                static_collection_factories: vec![RuleTarget {
+                    name: Some("Set".to_string()),
+                    ..RuleTarget::default()
+                }],
+            },
+            path_component: UrlComponentSemantics {
+                field: Some("pathname".to_string()),
+                accessor: None,
+            },
+            path_fallback: None,
+            redirect: Some(UrlRedirectGuardSemantics::CallArgumentFields {
+                argument_index: 1,
+                required_fields: vec![RequiredAggregateFieldSemantics {
+                    path: vec!["followRedirect".to_string()],
+                    value: StaticScalarValue::Boolean(false),
+                }],
+            }),
+            required_sink_named_arguments: Vec::new(),
+        }),
+        ..AnalysisSemantics::default()
+    });
+
+    let ws = workspace(&[(
+        "/app/probe.js",
+        r#"
+const ALLOWED = new Set(["api.example"]);
+function source() { return ""; }
+function checked(url) {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:" || !ALLOWED.has(parsed.hostname)) throw new Error("blocked");
+  return "https://" + parsed.hostname + parsed.pathname;
+}
+function guarded() {
+  const url = source();
+  return got(checked(url), { timeout: 5000, followRedirect: false });
+}
+function unsafe() {
+  const url = source();
+  return got(checked(url), { timeout: 5000, followRedirect: true });
+}
+"#,
+    )]);
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    let functions: BTreeSet<_> = report
+        .findings
+        .iter()
+        .filter_map(|finding| finding.finding.sink.enclosing_fn.as_deref())
+        .collect();
+    assert_eq!(functions, BTreeSet::from(["unsafe"]), "{:#?}", report.findings);
+
+    let explicit = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    let guarded = explicit
+        .findings
+        .iter()
+        .find(|finding| finding.finding.sink.enclosing_fn.as_deref() == Some("guarded"))
+        .expect("guarded reconstruction finding");
+    assert_eq!(guarded.finding.status, FindingStatus::Sanitized, "{guarded:#?}");
+}
+
+#[test]
 fn java_url_reconstruction_assignment_requires_exact_components_and_guards() {
     let mut pack = constrained_call_sink_rulepack("java", "source", "url");
     let sink = pack
@@ -6255,6 +6451,7 @@ fn java_url_reconstruction_assignment_requires_exact_components_and_guards() {
                 },
                 comparison_predicate: Some(target("equals")),
                 allowed_values: vec!["https".to_string()],
+                reconstructed_values: Vec::new(),
             },
             host_allowlist: UrlHostAllowlistSemantics {
                 component: UrlComponentSemantics {

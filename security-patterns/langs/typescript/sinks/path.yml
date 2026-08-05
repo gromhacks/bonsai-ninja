@@ -376,6 +376,7 @@
       attribute: [fsp, readFile]
   constraints:
   - arg_tainted: {index: 0}
+  analysis_semantics: *typescript_path_consumer_containment
   match_examples:
   - name: fs promises readfile
     code: |
@@ -405,6 +406,7 @@
       attribute: [fs, promises, readFile]
   constraints:
   - arg_tainted: {index: 0}
+  analysis_semantics: *typescript_path_consumer_containment
   match_examples:
   - name: fsp readfile module
     code: |
@@ -434,6 +436,7 @@
       attribute: [fs, promises, writeFile]
   constraints:
   - arg_tainted: {index: 0}
+  analysis_semantics: *typescript_path_consumer_containment
   match_examples:
   - name: fsp writefile module
     code: |

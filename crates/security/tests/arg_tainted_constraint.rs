@@ -664,9 +664,13 @@ fn matcher_policy_fingerprint_was_bumped_for_arg_tainted() {
     // Bumped 0x0035 → 0x0036 when typed receiver evidence became
     // authoritative and qualified/import matching moved to structural
     // compiler names, changing cached matcher and reachability facts.
+    // Bumped 0x0036 → 0x0038 when regex rules began consuming authoritative
+    // adapter receiver types without collapsing fluent call receivers, and
+    // typed guard joins gained exact configured aggregate/substitution
+    // semantics.
     assert_eq!(
         bonsai_security::MATCHER_POLICY_FINGERPRINT,
-        0x4d41_5443_4845_525f_504f_4c49_4359_0036_u128
+        0x4d41_5443_4845_525f_504f_4c49_4359_0038_u128
     );
 }
 

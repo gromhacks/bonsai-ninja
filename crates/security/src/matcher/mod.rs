@@ -7212,8 +7212,39 @@ fn callee_matches_with_receiver_types(
     if callee_matches(callee, name, attribute, regex) {
         return true;
     }
-    if regex.is_some() {
-        return false;
+    if let Some(regex) = regex {
+        // A canonical compiler place may include an implicit receiver
+        // (`this.client.get`) while a rule intentionally targets the
+        // receiver's declared type (`HttpClient.get`). Reconstruct that
+        // rule-facing identity exclusively from adapter-emitted type facts
+        // plus the compiler-emitted method tail. This is typed matching, not
+        // API-name inference: provider vocabulary remains entirely in the
+        // rule regex. A call-expression receiver is deliberately excluded:
+        // the declared type of `client` does not prove the return type of
+        // `client.get()` in `client.get().uri(...)`. Rules for fluent chains
+        // match the adapter-emitted chain directly.
+        let receiver = callee.rsplit_once('.').map_or("", |(receiver, _)| receiver);
+        if receiver.contains(['(', ')']) {
+            return false;
+        }
+        let method = bonsai_common::short_qualified_tail(callee).trim();
+        if method.is_empty() {
+            return false;
+        }
+        return receiver_types.iter().any(|receiver_type| {
+            let receiver_type = receiver_type.trim();
+            if receiver_type.is_empty() {
+                return false;
+            }
+            let typed_callee = format!("{receiver_type}.{method}");
+            if regex.is_match(&typed_callee) {
+                return true;
+            }
+            let simple_type = bonsai_common::short_qualified_tail(receiver_type).trim();
+            simple_type != receiver_type
+                && !simple_type.is_empty()
+                && regex.is_match(&format!("{simple_type}.{method}"))
+        });
     }
     attribute.is_some_and(|attr| receiver_type_attribute_matches(callee, receiver_types, attr))
 }

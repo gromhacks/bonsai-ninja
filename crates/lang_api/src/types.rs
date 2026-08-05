@@ -2257,6 +2257,10 @@ pub enum CharacterConstraintDomain {
     },
     /// Every listed character is absent from the output.
     ExcludesExact { characters: Vec<String> },
+    /// Every listed input character is replaced by the exact decoded output.
+    /// This describes configured character transformers without assigning
+    /// security meaning to either the provider or the mapping.
+    SubstitutesExact { mappings: Vec<StaticStringMapEntry> },
     /// A syntactically proven candidate whose runtime meaning depends on a
     /// rulepack-selected factory/operation pair. Adapters record exact call
     /// identity and the derived domain; they do not classify the provider as
@@ -2289,6 +2293,9 @@ pub enum CharacterConstraintOutput {
 pub struct CharacterConstraintFact {
     pub function_span: Span,
     pub transform_span: Span,
+    /// Stable input place when the transform consumes an addressable value.
+    /// Direct call results have no place; their exact call is related through
+    /// `transform_span` and this field is empty.
     pub input_place: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_param_index: Option<usize>,
@@ -2606,8 +2613,9 @@ pub struct CallArgumentValueFact {
     /// Exact scalar value decoded by the owning language frontend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub static_value: Option<StaticScalarValue>,
-    /// Complete, spread-free aggregate fields whose scalar values were
-    /// decoded by the owning language frontend. Field names and literals
+    /// Exact scalar fields from a complete, spread-free aggregate structure.
+    /// Unrelated dynamic leaves may be omitted, but dynamic keys, spreads,
+    /// and duplicate paths reject the aggregate. Field names and literals
     /// come from Tree-sitter nodes; consumers must not parse `value_text`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exact_static_aggregate_fields: Vec<StaticAggregateFieldValue>,

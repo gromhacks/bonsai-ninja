@@ -25,7 +25,7 @@ The analyzer is one compiler-style pipeline:
 
 ## Current validation
 
-Validated on 2026-08-03 (dated measurements below retain their run date):
+Validated on 2026-08-04 (dated measurements below retain their run date):
 
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` passed;
   this strict gate compiled the complete workspace and every test target.
@@ -39,6 +39,13 @@ Validated on 2026-08-03 (dated measurements below retain their run date):
   parity, the 1,076-case per-language CLI matrix, the 121-case end-to-end taint
   engine suite, conformance architecture invariants, and the exhaustive
   rule-example collision validator.
+- The August compiler-guard regression set is pinned at the fact boundary:
+  Java constructor locals keep lexical scope, declared receiver types do not
+  collapse fluent call receivers, nested receiver-call arguments retain their
+  inputs, Go composite literals retain qualified receiver types, Python finite
+  literal-map membership is scope/mutation checked, exact configured character
+  substitutions require complete mappings, and URL rebuild guards prove scheme,
+  host allowlist, path, and redirect options from typed IR.
 - The 1,441-case taint matrix now enforces positive and negative contracts for
   every supported language. Valid-source conformance rejects parser/adapter
   diagnostics, malformed-source conformance requires an explicit incomplete
@@ -78,8 +85,8 @@ The current deep rulepack gate is clean:
 | Rules | 7,159 |
 | Enabled rules | 5,996 |
 | Disabled rules | 1,163 |
-| Match examples | 10,519 |
-| Enabled match examples | 10,084 |
+| Match examples | 10,523 |
+| Enabled match examples | 10,088 |
 | Taint-replay misses | 0 |
 | Errors | 0 |
 | Warnings | 0 |
@@ -124,16 +131,18 @@ seconds with 35,110,912 bytes maximum RSS.
 ## Elasticsearch scale result
 
 The current release pipeline is measured against the sibling 30,055-source
-Elasticsearch checkout. The 2026-08-03 exact large-workspace integration gate
-passed 5/5 in 221.99 seconds under a 3 GiB scheduling budget. It starts fresh
+Elasticsearch checkout. The final 2026-08-04 ABI-v60 exact large-workspace
+integration gate passed 5/5 in 221.29 seconds under a 3 GiB scheduling budget.
+It starts fresh
 processes and covers fresh-cache taint planning, warm semantic reuse, nine
 navigation commands, targeted inspect with taint evidence, security inventory,
 and production taint. Its enforced ceilings are 15 seconds for warm semantic
 reuse and 30 seconds for each measured query/analysis command.
 
-The cached generation validation/open phase completed in 5.40 seconds and the
-immediate fresh-process warm reuse completed in 2.44 seconds. The broad exact
-`inspect execute --taint-flow` regression query completed in 29.48 seconds and
+The cached generation validation/open phase completed in 5.37 seconds and the
+immediate fresh-process warm reuse completed in 2.45 seconds. Default inspect
+completed in 10.21 seconds. The broad exact
+`inspect execute --taint-flow` regression query completed in 29.26 seconds and
 reported 3,895 declaration hits, 26,047 other syntax hits, 198,718 unique raw
 taint flows, and 12,233/12,233 scoped-IDG entry closures. A matching timed run
 used 3,420,733,440 bytes maximum RSS, a 2,775,017,280-byte peak physical
@@ -146,9 +155,11 @@ closure, or output.
 
 The same current generation was also built once from an empty semantic cache.
 That explicit, opt-in `index --semantic` compiler prewarm completed in
-1,603.47 seconds (26m43s) with about 1.06 GiB maximum RSS. Normal commands do
+1,621.89 seconds (27m02s). The compiler-object worker remained near 1.0 GiB
+RSS, exited before IDG replay began, and the IDG worker remained below the
+3 GiB scheduling budget. Normal commands do
 not force that whole-workspace prewarm: cold production taint completed in
-30.90 seconds, warm production taint in 28.56 seconds, and exact syntax
+33.79 seconds, warm production taint in 27.21 seconds, and exact syntax
 commands hydrate only the product they request. The long explicit prewarm is
 recorded honestly because it remains a bulk cache-publication operation, not
 an interactive-command latency claim.
@@ -177,9 +188,9 @@ callee-name matching cannot manufacture field flow. Regression tests pin
 scalar-to-receiver mapping, sibling-field isolation, clean output-argument
 overwrites, Java record accessors, and C# expression-bodied properties.
 
-The final gate measured source inventory at 4.13 seconds, the exhaustive
-high-severity sink inventory at 21.42 seconds, credit-bearing sanitizer
-inventory at 15.57 seconds, and dependency inventory at 9.65 seconds. These
+The final gate measured source inventory at 3.57 seconds, the exhaustive
+high-severity sink inventory at 20.30 seconds, credit-bearing sanitizer
+inventory at 17.12 seconds, and dependency inventory at 8.84 seconds. These
 are syntax/compiler and rulepack facts, not Elasticsearch-specific name lists.
 
 Production security in the integration gate reports
@@ -259,14 +270,33 @@ external implementations cannot be presented as resolved compiler facts.
 
 ## External benchmark snapshot
 
-The final 2026-08-02 CVEBench-SAST artifact used isolated copies of every
-vulnerable and fixed repository. Its verified report records 229/230 primary
-detections, 100% sanitizer recognition, 0 decoy trips, 0 duplicate findings,
-0 incomplete scans, 89.80% precision, 97.83% fix validation, and a 4.9348 mean
-score. The sole miss is the documented `XSSFWorkbook` case: the benchmark
-labels normal spreadsheet construction as an XXE sink even though that API
-does not parse attacker-controlled XML. Bonsai intentionally does not add a
-false sink to make that invalid case pass.
+The final 2026-08-04 ABI-v60 CVEBench-SAST artifact used isolated copies of
+every vulnerable and fixed repository. All 460 scans exited successfully in
+208.6 seconds with no incomplete analysis: vulnerable-repository latency was
+0.456 seconds mean, 0.558 seconds p95, and 0.758 seconds maximum. Its verified report
+records 229/230 primary detections, 100% sanitizer recognition, 0 duplicate
+findings, 84.81% precision, 95.67% precision excluding off-chain findings,
+91.30% fix validation, 0.70 false positives per kLOC, and a 4.8815 mean score.
+
+The sole empty vulnerable scan is the documented `XSSFWorkbook` case: the
+benchmark labels normal spreadsheet construction as an XXE sink even though
+that API does not parse attacker-controlled XML. Bonsai intentionally does not
+add a false sink to make that invalid case pass. The TypeScript
+`fast-xml-parser` case is reported as its actual configuration hazard
+(entity-expansion denial of service, CWE-776); the rule does not falsely claim
+that this library resolves external `SYSTEM` entities.
+
+The artifact records 11 decoy trips, all copies of one shared Flask
+`/raw` route. That route passes attacker-controlled JSON to SQL whenever
+`APP_ENV=dev-internal`; a production deployment file currently selects a
+different environment, but the source route remains registered and reachable
+under a supported runtime configuration. Suppressing it would make compiler
+flow depend on one deployment snapshot and hide a real configuration-dependent
+attack path, so the engine reports it. This is an intentional soundness choice,
+not a benchmark-specific exception. The benchmark also scores Python
+`os.path.join` as the planted path-traversal sink even when Bonsai reports the
+downstream `FileResponse` emission sink; that location mismatch does not change
+the detected source-to-filesystem flow.
 
 Benchmark metrics are evidence about the checked corpus, not a substitute for
 the 21-language adapter/rule conformance gates. Dataset corrections must be

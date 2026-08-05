@@ -201,3 +201,41 @@ func Login() gin.HandlerFunc {
         "returned func literal should keep if-initializer calls and typed receiver aliases, got {calls:?}"
     );
 }
+
+#[test]
+fn qualified_composite_literal_types_the_short_declared_receiver() {
+    let db = db_with(
+        r#"
+package main
+
+import "net/http"
+
+func fetch(url string) {
+    client := &http.Client{}
+    _, _ = client.Get(url)
+}
+"#,
+    );
+    let global = db.global_index();
+    let fetch = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "fetch")
+        .expect("fetch declaration");
+    assert!(
+        fetch
+            .type_aliases
+            .iter()
+            .any(|alias| alias.name == "client" && alias.type_name == "http.Client"),
+        "qualified composite literal must retain the complete Go type: {:?}",
+        fetch.type_aliases
+    );
+    let mut calls = Vec::new();
+    collect_calls(&fetch.flow_events, &mut calls);
+    assert!(
+        calls.iter().any(|(name, receiver_types)| {
+            name == "client.Get" && receiver_types.iter().any(|ty| ty == "http.Client")
+        }),
+        "client.Get must carry http.Client receiver evidence: {calls:?}"
+    );
+}

@@ -172,6 +172,17 @@
   - gopkg.in/ldap.v3
   cwe:
   - CWE-90
+  analysis_semantics:
+    character_constraint:
+      required_mappings:
+      - {input: '\', output: '\5c'}
+      - {input: '*', output: '\2a'}
+      - {input: '(', output: '\28'}
+      - {input: ')', output: '\29'}
+      - {input: "\0", output: '\00'}
+      accepted_providers:
+      - factory: {name: strings.NewReplacer}
+        operation: {regex: '^[A-Za-z_][A-Za-z0-9_]*\.Replace$'}
   match:
     kind: call
     callee:

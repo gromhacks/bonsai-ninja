@@ -1009,6 +1009,32 @@ fn receiver_type_facts_match_type_method_rules_without_receiver_names() {
 }
 
 #[test]
+fn receiver_type_facts_match_regex_rules_for_canonical_instance_places() {
+    let regex = Regex::new(r"^XStream\.fromXML$").expect("valid fixture regex");
+    assert!(callee_matches_with_receiver_types(
+        "this.xstream.fromXML",
+        &["com.thoughtworks.xstream.XStream".to_string()],
+        None,
+        None,
+        Some(&regex),
+    ));
+    assert!(!callee_matches_with_receiver_types(
+        "this.parser.fromXML",
+        &["SafeXmlParser".to_string()],
+        None,
+        None,
+        Some(&regex),
+    ));
+    assert!(!callee_matches_with_receiver_types(
+        "client.get().fromXML",
+        &["com.thoughtworks.xstream.XStream".to_string()],
+        None,
+        None,
+        Some(&regex),
+    ));
+}
+
+#[test]
 fn qualified_implicit_receiver_uses_compiler_type_evidence() {
     let rule = rule_from_yaml(
         r#"

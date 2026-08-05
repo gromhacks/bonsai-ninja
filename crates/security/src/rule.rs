@@ -739,9 +739,11 @@ pub struct RequiredAggregateFieldSemantics {
 
 /// Rulepack-owned safe configuration for a direct sink call.
 ///
-/// The adapter decodes a complete, spread-free aggregate argument. The
-/// engine compares typed field/value facts and credits only the explicitly
-/// listed value arguments; neither layer reparses source text.
+/// The adapter decodes exact scalar fields from a structurally complete,
+/// spread-free aggregate argument. Dynamic values in unrelated fields are
+/// retained as unknown and cannot override the exact fields. The engine
+/// compares typed field/value facts and credits only the explicitly listed
+/// value arguments; neither layer reparses source text.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfiguredCallArgumentGuardSemantics {
@@ -776,7 +778,13 @@ pub struct CharacterEscapeSemantics {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CharacterConstraintSemantics {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_excluded_characters: Vec<String>,
+    /// Complete exact substitution inventory required at this security
+    /// boundary. Provider and mapping identities remain rulepack policy;
+    /// adapters only lower the configured runtime transform from syntax.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_mappings: Vec<ExactStringMapping>,
     /// Optional delimiter that must compiler-provably enclose the constrained
     /// value in the final string composition. SQL sinks use this to
     /// distinguish a quote-safe string value from an unquoted identifier or
@@ -868,6 +876,12 @@ pub struct UrlSchemeGuardSemantics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comparison_predicate: Option<RuleTarget>,
     pub allowed_values: Vec<String>,
+    /// Exact scheme strings accepted in the rebuilt URL. Some runtimes expose
+    /// a parsed protocol with punctuation (`https:`) while source syntax
+    /// reconstructs the RFC scheme without it (`https://`). When omitted, the
+    /// comparison values are also the reconstruction values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reconstructed_values: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -914,6 +928,14 @@ pub enum UrlRedirectGuardSemantics {
         call: Box<RuleTarget>,
         argument_index: usize,
         required_value: StaticScalarValue,
+    },
+    /// A sink option object carries one or more exact static fields, such as
+    /// `{ followRedirect: false }`. The adapter lowers exact scalar fields
+    /// from the structurally complete argument aggregate; rule metadata owns
+    /// the client-specific option paths and values.
+    CallArgumentFields {
+        argument_index: usize,
+        required_fields: Vec<RequiredAggregateFieldSemantics>,
     },
 }
 

@@ -410,6 +410,188 @@ func partial(s string) string {
 }
 
 #[test]
+fn configured_string_pair_transform_emits_provider_bound_exact_mappings() {
+    let db = db_with(
+        r#"
+package main
+import "strings"
+
+var escapes = strings.NewReplacer("\\", `\5c`, "*", `\2a`, "(", `\28`, ")", `\29`, "\xc3\xa9", "e")
+
+func source() string { return "" }
+func clean() string {
+    safe := escapes.Replace(source())
+    return safe
+}
+
+func inline(input string) string {
+    return escapes.Replace(input)
+}
+
+func mixed(input string) string {
+    combined := escapes.Replace(input) + input
+    return combined
+}
+"#,
+    );
+    let file = db.vfs().all_files().into_iter().next().expect("Go source file");
+    let index = db.decl_index(file).expect("Go declaration index");
+    let constraint = index
+        .character_constraints
+        .iter()
+        .find(|fact| matches!(&fact.output, CharacterConstraintOutput::Assignment { target } if target == "safe"))
+        .unwrap_or_else(|| {
+            panic!(
+                "configured substitution fact: defs={:#?} assignments={:#?} arguments={:#?} constraints={:#?}",
+                index.defs, index.assignment_values, index.call_argument_values, index.character_constraints
+            )
+        });
+    let CharacterConstraintDomain::ProviderBound {
+        factory_call,
+        operation_call,
+        domain,
+    } = &constraint.domain
+    else {
+        panic!("provider-bound domain: {constraint:#?}");
+    };
+    assert_eq!(factory_call, "strings.NewReplacer");
+    assert_eq!(operation_call, "escapes.Replace");
+    let CharacterConstraintDomain::SubstitutesExact { mappings } = domain.as_ref() else {
+        panic!("exact substitution domain: {domain:#?}");
+    };
+    assert!(mappings
+        .iter()
+        .any(|mapping| mapping.key == "*" && mapping.value == r"\2a"));
+    assert!(mappings
+        .iter()
+        .any(|mapping| mapping.key == "(" && mapping.value == r"\28"));
+    assert!(mappings
+        .iter()
+        .any(|mapping| mapping.key == "é" && mapping.value == "e"));
+    let inline = index
+        .character_constraints
+        .iter()
+        .find(|fact| {
+            matches!(fact.output, CharacterConstraintOutput::Expression { .. })
+                && fact.input_param_index == Some(0)
+        })
+        .expect("direct transform expression");
+    assert_eq!(inline.input_place, "input");
+    assert!(
+        !index
+            .character_constraints
+            .iter()
+            .any(|fact| matches!(&fact.output, CharacterConstraintOutput::Assignment { target } if target == "combined")),
+        "a transformed subexpression cannot sanitize a composite assignment"
+    );
+}
+
+#[test]
+fn configured_string_pair_transform_rejects_non_utf8_go_byte_strings() {
+    let db = db_with(
+        r#"
+package main
+import "strings"
+
+var escapes = strings.NewReplacer("\xff", "x")
+func clean(input string) string { return escapes.Replace(input) }
+"#,
+    );
+    let file = db.vfs().all_files().into_iter().next().expect("Go source file");
+    let index = db.decl_index(file).expect("Go declaration index");
+    assert!(
+        index.character_constraints.is_empty(),
+        "Unicode-backed typed IR must not claim an arbitrary non-UTF-8 byte string is exact"
+    );
+}
+
+#[test]
+fn configured_string_pair_transform_respects_lexical_binding_scope() {
+    let db = db_with(
+        r#"
+package main
+import "strings"
+
+var globalEscapes = strings.NewReplacer("(", `\28`)
+
+func configure() {
+    escapes := strings.NewReplacer("*", `\2a`)
+    _ = escapes
+}
+
+func clean(escapes *strings.Replacer, input string) string {
+    safe := escapes.Replace(input)
+    return safe
+}
+
+func cleanGlobal(globalEscapes *strings.Replacer, input string) string {
+    safeGlobal := globalEscapes.Replace(input)
+    return safeGlobal
+}
+"#,
+    );
+    let file = db.vfs().all_files().into_iter().next().expect("Go source file");
+    let index = db.decl_index(file).expect("Go declaration index");
+    assert!(
+        !index
+            .character_constraints
+            .iter()
+            .any(|fact| matches!(&fact.output, CharacterConstraintOutput::Assignment { target } if target == "safe" || target == "safeGlobal")),
+        "configured locals in another function and shadowed globals cannot classify same-named parameters: {:#?}",
+        index.character_constraints
+    );
+}
+
+#[test]
+fn configured_string_pair_transforms_keep_independent_callable_bindings() {
+    let db = db_with(
+        r#"
+package main
+import "strings"
+
+func cleanFilter(input string) string {
+    escapes := strings.NewReplacer("*", `\2a`)
+    return escapes.Replace(input)
+}
+
+func cleanDn(input string) string {
+    escapes := strings.NewReplacer("(", `\28`)
+    return escapes.Replace(input)
+}
+"#,
+    );
+    let file = db.vfs().all_files().into_iter().next().expect("Go source file");
+    let index = db.decl_index(file).expect("Go declaration index");
+    let constraints = index
+        .character_constraints
+        .iter()
+        .filter(|fact| fact.input_param_index == Some(0))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        constraints.len(),
+        2,
+        "same-spelled locals in independent callables retain distinct compiler identities: {:#?}",
+        index.character_constraints
+    );
+    assert!(constraints.iter().any(|fact| {
+        matches!(
+            &fact.domain,
+            CharacterConstraintDomain::ProviderBound { domain, .. }
+                if matches!(domain.as_ref(), CharacterConstraintDomain::SubstitutesExact { mappings }
+                    if mappings.iter().any(|mapping| mapping.key == "*" && mapping.value == r"\2a"))
+        )
+    }));
+    assert!(constraints.iter().any(|fact| {
+        matches!(
+            &fact.domain,
+            CharacterConstraintDomain::ProviderBound { domain, .. }
+                if matches!(domain.as_ref(), CharacterConstraintDomain::SubstitutesExact { mappings }
+                    if mappings.iter().any(|mapping| mapping.key == "(" && mapping.value == r"\28"))
+        )
+    }));
+}
+
+#[test]
 fn guarded_append_loop_emits_exact_character_constraint_without_security_policy() {
     let db = db_with(
         r#"

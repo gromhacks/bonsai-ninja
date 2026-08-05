@@ -674,7 +674,30 @@ fn python_finite_literal_selections(
     file: FileId,
     src: &[u8],
 ) -> Vec<FiniteLiteralSelectionFact> {
+    #[derive(Clone)]
+    struct FiniteMapBinding {
+        name: String,
+        declaration_end: usize,
+        owner: Option<Span>,
+    }
+
+    fn binding_visible(
+        resolver: &PythonLexicalBindingResolver<'_, '_>,
+        bindings: &[FiniteMapBinding],
+        map_name: &str,
+        use_start: usize,
+        use_span: Span,
+    ) -> bool {
+        let owner = resolver.owner_for_use(use_span, map_name);
+        bindings.iter().any(|binding| {
+            binding.name == map_name
+                && (binding.owner.is_none() || binding.declaration_end <= use_start)
+                && binding.owner == owner
+        })
+    }
+
     let assignments = collect_kinds(tree, &["assignment"]);
+    let binding_resolver = PythonLexicalBindingResolver::new(index, tree, file, src, &assignments);
     let mut finite_maps = Vec::new();
     for assignment in &assignments {
         let (Some(target), Some(value)) = (
@@ -687,13 +710,14 @@ fn python_finite_literal_selections(
             continue;
         }
         let name = node_text(&target, src).trim().to_string();
-        let owner = python_lexical_owner(index, span_of(file, assignment));
+        let owner = binding_resolver.owner_for_use(span_of(file, assignment), &name);
         let writes = assignments
             .iter()
             .filter(|candidate| {
                 candidate
                     .child_by_field_name("left")
                     .is_some_and(|left| left.kind() == "identifier" && node_text(&left, src).trim() == name)
+                    && binding_resolver.owner_for_use(span_of(file, candidate), &name) == owner
             })
             .count();
         let projected_write = assignments.iter().any(|candidate| {
@@ -702,14 +726,21 @@ fn python_finite_literal_selections(
                     && left.child_by_field_name("value").is_some_and(|base| {
                         base.kind() == "identifier" && node_text(&base, src).trim() == name
                     })
-            })
+            }) && binding_resolver.owner_for_use(span_of(file, candidate), &name) == owner
         });
         let aliases_or_mutations = collect_kinds(tree, &["assignment", "augmented_assignment", "call"])
             .into_iter()
-            .any(|candidate| python_map_binding_may_escape_or_mutate(candidate, &name, assignment.id(), src))
-            || python_map_binding_has_unsafe_use(tree, &name, assignment.id(), src);
+            .any(|candidate| {
+                binding_resolver.owner_for_use(span_of(file, &candidate), &name) == owner
+                    && python_map_binding_may_escape_or_mutate(candidate, &name, assignment.id(), src)
+            })
+            || python_map_binding_has_unsafe_use(&binding_resolver, &name, assignment.id(), owner);
         if writes == 1 && !projected_write && !aliases_or_mutations {
-            finite_maps.push((name, assignment.end_byte(), owner));
+            finite_maps.push(FiniteMapBinding {
+                name,
+                declaration_end: assignment.end_byte(),
+                owner,
+            });
         }
     }
 
@@ -729,9 +760,19 @@ fn python_finite_literal_selections(
         let [selected, condition, fallback] = operands.as_slice() else {
             continue;
         };
-        if !python_positive_finite_membership(*condition, *selected, src)
-            || !python_finite_membership_literal(*fallback, src)
-        {
+        let Some(collection) = python_positive_membership_collection(*condition, *selected, src) else {
+            continue;
+        };
+        let collection_is_finite = python_finite_literal_collection(collection, src)
+            || (collection.kind() == "identifier"
+                && binding_visible(
+                    &binding_resolver,
+                    &finite_maps,
+                    node_text(&collection, src).trim(),
+                    condition.start_byte(),
+                    span_of(file, condition),
+                ));
+        if !collection_is_finite || !python_finite_membership_literal(*fallback, src) {
             continue;
         }
         facts.push(FiniteLiteralSelectionFact {
@@ -754,19 +795,13 @@ fn python_finite_literal_selections(
         }
         let map_name = node_text(&receiver, src).trim();
         let selection_span = span_of(file, &call);
-        let owner = python_lexical_owner(index, selection_span);
-        let parameter_shadows_module = owner.is_some_and(|owner| {
-            index
-                .defs
-                .iter()
-                .find(|decl| decl.span == owner)
-                .is_some_and(|decl| decl.params.iter().any(|parameter| parameter == map_name))
-        });
-        let finite_match = finite_maps.iter().any(|(name, declaration_end, binding_owner)| {
-            name == map_name
-                && *declaration_end <= call.start_byte()
-                && (*binding_owner == owner || (binding_owner.is_none() && !parameter_shadows_module))
-        });
+        let finite_match = binding_visible(
+            &binding_resolver,
+            &finite_maps,
+            map_name,
+            call.start_byte(),
+            selection_span,
+        );
         if !finite_match {
             continue;
         }
@@ -798,30 +833,37 @@ fn python_finite_literal_selections(
     facts
 }
 
-/// `selected if selected in {<finite literals>} else <literal>` can only
-/// produce one of the literals named by the syntax. This is Python runtime
-/// semantics owned by the adapter; whether that finite selection sanitizes a
-/// sink remains rulepack policy.
-fn python_positive_finite_membership(condition: Node<'_>, selected: Node<'_>, src: &[u8]) -> bool {
+/// Return the collection from a positive `selected in collection` condition
+/// whose subject is the conditional's selected value. The caller proves that
+/// collection is either literal syntax or an immutable finite-map binding.
+fn python_positive_membership_collection<'tree>(
+    condition: Node<'tree>,
+    selected: Node<'tree>,
+    src: &[u8],
+) -> Option<Node<'tree>> {
     if condition.kind() != "comparison_operator" || selected.kind() != "identifier" {
-        return false;
+        return None;
     }
     let mut cursor = condition.walk();
     let operands: Vec<_> = condition.named_children(&mut cursor).collect();
     let [subject, collection] = operands.as_slice() else {
-        return false;
+        return None;
     };
-    if subject.kind() != "identifier"
-        || node_text(subject, src).trim() != node_text(&selected, src).trim()
-        || !matches!(collection.kind(), "set" | "list" | "tuple")
-    {
-        return false;
+    if subject.kind() != "identifier" || node_text(subject, src).trim() != node_text(&selected, src).trim() {
+        return None;
     }
     let operator = src
         .get(subject.end_byte()..collection.start_byte())
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
         .map(str::trim);
     if operator != Some("in") {
+        return None;
+    }
+    Some(*collection)
+}
+
+fn python_finite_literal_collection(collection: Node<'_>, src: &[u8]) -> bool {
+    if !matches!(collection.kind(), "set" | "list" | "tuple") {
         return false;
     }
     let mut collection_cursor = collection.walk();
@@ -847,6 +889,7 @@ fn python_character_substitutions(
     src: &[u8],
 ) -> Vec<CharacterSubstitutionFact> {
     let assignments = collect_kinds(tree, &["assignment"]);
+    let binding_resolver = PythonLexicalBindingResolver::new(index, tree, file, src, &assignments);
     let mut tables = Vec::new();
     for assignment in &assignments {
         let (Some(target), Some(value)) = (
@@ -862,12 +905,14 @@ fn python_character_substitutions(
             continue;
         };
         let name = node_text(&target, src).trim().to_string();
+        let owner = binding_resolver.owner_for_use(span_of(file, assignment), &name);
         let writes = assignments
             .iter()
             .filter(|candidate| {
                 candidate
                     .child_by_field_name("left")
                     .is_some_and(|left| left.kind() == "identifier" && node_text(&left, src).trim() == name)
+                    && binding_resolver.owner_for_use(span_of(file, candidate), &name) == owner
             })
             .count();
         let projected_write = assignments.iter().any(|candidate| {
@@ -876,19 +921,17 @@ fn python_character_substitutions(
                     && left.child_by_field_name("value").is_some_and(|base| {
                         base.kind() == "identifier" && node_text(&base, src).trim() == name
                     })
-            })
+            }) && binding_resolver.owner_for_use(span_of(file, candidate), &name) == owner
         });
         let aliases_or_mutations = collect_kinds(tree, &["assignment", "augmented_assignment", "call"])
             .into_iter()
-            .any(|candidate| python_map_binding_may_escape_or_mutate(candidate, &name, assignment.id(), src))
-            || python_map_binding_has_unsafe_use(tree, &name, assignment.id(), src);
+            .any(|candidate| {
+                binding_resolver.owner_for_use(span_of(file, &candidate), &name) == owner
+                    && python_map_binding_may_escape_or_mutate(candidate, &name, assignment.id(), src)
+            })
+            || python_map_binding_has_unsafe_use(&binding_resolver, &name, assignment.id(), owner);
         if writes == 1 && !projected_write && !aliases_or_mutations {
-            tables.push((
-                name,
-                assignment.end_byte(),
-                python_lexical_owner(index, span_of(file, assignment)),
-                entries,
-            ));
+            tables.push((name, assignment.end_byte(), owner, entries));
         }
     }
 
@@ -929,12 +972,12 @@ fn python_character_substitutions(
         else {
             continue;
         };
-        let owner = python_lexical_owner(index, transform_span);
+        let owner = binding_resolver.owner_for_use(transform_span, &table);
         let Some((_, _, _, exact_mappings)) =
             tables.iter().find(|(name, declaration_end, binding_owner, _)| {
                 name == &table
-                    && *declaration_end <= return_node.start_byte()
-                    && (*binding_owner == owner || binding_owner.is_none())
+                    && (binding_owner.is_none() || *declaration_end <= return_node.start_byte())
+                    && *binding_owner == owner
             })
         else {
             continue;
@@ -1062,6 +1105,108 @@ fn python_lexical_owner(index: &DeclIndex, span: bonsai_common::Span) -> Option<
         .map(|decl| decl.span)
 }
 
+/// Per-file Python lexical binding resolver shared by value-shape lowerers.
+/// Directive nodes are indexed once so repeated candidate checks remain
+/// linear in the small set of relevant scopes instead of rescanning the CST.
+struct PythonLexicalBindingResolver<'a, 'tree> {
+    index: &'a DeclIndex,
+    file: FileId,
+    src: &'a [u8],
+    assignments: &'a [Node<'tree>],
+    directives: Vec<Node<'tree>>,
+    identifiers: Vec<Node<'tree>>,
+}
+
+impl<'a, 'tree> PythonLexicalBindingResolver<'a, 'tree> {
+    fn new(
+        index: &'a DeclIndex,
+        tree: &'tree Tree,
+        file: FileId,
+        src: &'a [u8],
+        assignments: &'a [Node<'tree>],
+    ) -> Self {
+        Self {
+            index,
+            file,
+            src,
+            assignments,
+            directives: collect_kinds(tree, &["global_statement", "nonlocal_statement"]),
+            identifiers: collect_kinds(tree, &["identifier"]),
+        }
+    }
+
+    /// Resolve one Python binding spelling to its lexical compiler owner.
+    ///
+    /// Python decides whether a name is local for the whole callable from
+    /// parsed parameters and assignments, not source order. Nested callables
+    /// close over the nearest such owner; `global` and `nonlocal` directives
+    /// alter that lookup. Class bodies own their direct assignments, but a
+    /// method does not capture the class namespace through a bare identifier.
+    fn owner_for_use(&self, use_span: Span, name: &str) -> Option<Span> {
+        let mut scopes = self
+            .index
+            .defs
+            .iter()
+            .filter(|decl| {
+                decl.name != "__module__"
+                    && matches!(
+                        decl.kind,
+                        DeclKind::Function | DeclKind::Method | DeclKind::Constructor | DeclKind::Class
+                    )
+                    && decl.span.start <= use_span.start
+                    && use_span.end <= decl.span.end
+            })
+            .collect::<Vec<_>>();
+        scopes.sort_by_key(|decl| decl.span.len());
+
+        let mut inside_callable = false;
+        for scope in scopes {
+            let callable = matches!(
+                scope.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+            );
+            if scope.kind == DeclKind::Class && inside_callable {
+                continue;
+            }
+            if callable {
+                inside_callable = true;
+                if self.scope_has_name_directive(scope.span, "global_statement", name) {
+                    return None;
+                }
+                if self.scope_has_name_directive(scope.span, "nonlocal_statement", name) {
+                    continue;
+                }
+            }
+            let parameter = callable && scope.params.iter().any(|parameter| parameter == name);
+            let assigned = self.assignments.iter().any(|assignment| {
+                python_lexical_owner(self.index, span_of(self.file, assignment)) == Some(scope.span)
+                    && assignment.child_by_field_name("left").is_some_and(|left| {
+                        left.kind() == "identifier" && node_text(&left, self.src).trim() == name
+                    })
+            });
+            if parameter || assigned {
+                return Some(scope.span);
+            }
+        }
+        None
+    }
+
+    fn scope_has_name_directive(&self, scope: Span, kind: &str, name: &str) -> bool {
+        self.directives.iter().any(|directive| {
+            if directive.kind() != kind
+                || python_lexical_owner(self.index, span_of(self.file, directive)) != Some(scope)
+            {
+                return false;
+            }
+            let mut cursor = directive.walk();
+            let contains_name = directive
+                .named_children(&mut cursor)
+                .any(|child| child.kind() == "identifier" && node_text(&child, self.src).trim() == name);
+            contains_name
+        })
+    }
+}
+
 fn python_map_binding_may_escape_or_mutate(
     node: Node<'_>,
     map_name: &str,
@@ -1099,49 +1244,85 @@ fn python_map_binding_may_escape_or_mutate(
     }
 }
 
-fn python_map_binding_has_unsafe_use(tree: &Tree, map_name: &str, declaration_id: usize, src: &[u8]) -> bool {
-    collect_kinds(tree, &["identifier"])
-        .into_iter()
-        .any(|identifier| {
-            if node_text(&identifier, src).trim() != map_name {
+fn python_map_binding_has_unsafe_use(
+    resolver: &PythonLexicalBindingResolver<'_, '_>,
+    map_name: &str,
+    declaration_id: usize,
+    owner: Option<Span>,
+) -> bool {
+    resolver.identifiers.iter().any(|identifier| {
+        if node_text(identifier, resolver.src).trim() != map_name {
+            return false;
+        }
+        if resolver.owner_for_use(span_of(resolver.file, identifier), map_name) != owner {
+            return false;
+        }
+        if identifier
+            .parent()
+            .is_some_and(|parent| parent.kind() == "assignment" && parent.id() == declaration_id)
+        {
+            return false;
+        }
+        if identifier
+            .parent()
+            .is_some_and(|parent| matches!(parent.kind(), "global_statement" | "nonlocal_statement"))
+        {
+            // Binding directives carry no runtime value and cannot expose
+            // or mutate the selected map by themselves.
+            return false;
+        }
+        let Some(attribute) = identifier.parent().filter(|parent| parent.kind() == "attribute") else {
+            // Reading one entry from a complete immutable literal map
+            // cannot introduce the dynamic key into its selected value.
+            // Projected writes were rejected above; this is only the
+            // parsed value/base position of a subscript expression.
+            if identifier.parent().is_some_and(|parent| {
+                parent.kind() == "subscript"
+                    && parent
+                        .child_by_field_name("value")
+                        .is_some_and(|value| value.id() == identifier.id())
+            }) {
                 return false;
             }
-            if identifier
-                .parent()
-                .is_some_and(|parent| parent.kind() == "assignment" && parent.id() == declaration_id)
-            {
-                return false;
-            }
-            let Some(attribute) = identifier.parent().filter(|parent| parent.kind() == "attribute") else {
-                // Reading one entry from a complete immutable literal map
-                // cannot introduce the dynamic key into its selected value.
-                // Projected writes were rejected above; this is only the
-                // parsed value/base position of a subscript expression.
-                if identifier.parent().is_some_and(|parent| {
-                    parent.kind() == "subscript"
-                        && parent
-                            .child_by_field_name("value")
-                            .is_some_and(|value| value.id() == identifier.id())
-                }) {
+            // `candidate in STATIC_MAP` reads only the immutable map's
+            // finite key set. It neither exposes nor mutates the map and
+            // is the exact runtime predicate used to constrain a later
+            // subscript selection.
+            if identifier.parent().is_some_and(|parent| {
+                if parent.kind() != "comparison_operator" {
                     return false;
                 }
-                return true;
-            };
-            if attribute
-                .child_by_field_name("object")
-                .is_none_or(|object| object.id() != identifier.id())
-            {
-                return true;
+                let mut cursor = parent.walk();
+                let operands = parent.named_children(&mut cursor).collect::<Vec<_>>();
+                let [subject, collection] = operands.as_slice() else {
+                    return false;
+                };
+                collection.id() == identifier.id()
+                    && resolver
+                        .src
+                        .get(subject.end_byte()..collection.start_byte())
+                        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                        .is_some_and(|operator| operator.trim() == "in")
+            }) {
+                return false;
             }
-            let Some(call) = attribute.parent().filter(|parent| parent.kind() == "call") else {
-                return true;
-            };
-            call.child_by_field_name("function")
-                .is_none_or(|function| function.id() != attribute.id())
-                || attribute
-                    .child_by_field_name("attribute")
-                    .is_none_or(|method| node_text(&method, src).trim() != "get")
-        })
+            return true;
+        };
+        if attribute
+            .child_by_field_name("object")
+            .is_none_or(|object| object.id() != identifier.id())
+        {
+            return true;
+        }
+        let Some(call) = attribute.parent().filter(|parent| parent.kind() == "call") else {
+            return true;
+        };
+        call.child_by_field_name("function")
+            .is_none_or(|function| function.id() != attribute.id())
+            || attribute
+                .child_by_field_name("attribute")
+                .is_none_or(|method| node_text(&method, resolver.src).trim() != "get")
+    })
 }
 
 fn python_finite_static_map(node: Node<'_>, src: &[u8]) -> bool {

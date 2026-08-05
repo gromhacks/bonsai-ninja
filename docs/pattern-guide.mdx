@@ -594,6 +594,24 @@ one-condition-broken negative test. See
 [Security Specification](security-spec.mdx#compiler-proven-guard-semantics)
 and [Adapter Contract](contributing/adapter-contract.mdx#value-shape-summary-contract).
 
+`character_constraint.required_mappings` is an exact rule-owned substitution
+inventory. Use it with `accepted_providers` when an adapter has lowered a
+configured runtime transformer; do not add that provider or its security
+meaning to adapter or engine code. Every required mapping must be present and
+decoded exactly, with no extra or duplicate mappings. An incomplete or
+overlapping configuration, or an identical-looking local API, fails closed.
+Adapters join a configured transform to its uses by lexical compiler ownership
+as well as its source spelling; same-named bindings in independent callables
+must neither suppress nor inherit one another's facts.
+
+For URL reconstruction, use `scheme.allowed_values` for the parser's runtime
+component spelling and `scheme.reconstructed_values` when the rebuilt source
+spelling differs (for example, `https:` versus `https`). A redirect policy
+stored in an options object uses `redirect.kind: call-argument-fields`, an
+`argument_index`, and typed `required_fields`. Unrelated dynamic option values
+are allowed; spreads, computed keys, duplicates, missing fields, and wrong
+scalar types are not.
+
 For `url_network_guard`, `root.kind: sink-argument-parser-input` binds a sink
 argument to the input of a rule-declared parser call by exact assignment and
 argument facts. `dns.address_parser` optionally declares the provider that
@@ -715,6 +733,14 @@ Structured `attribute:` rules are strict. `[Eta, render]` matches exact
 module/static calls such as `Eta.render(...)`; instance calls such as
 `engine.render(...)` require adapter-emitted receiver-type facts that prove
 `engine` is an `Eta`.
+
+Declared receiver types may canonicalize lexical places such as
+`this.parser.parse(...)` to a rule-facing `XMLParser.parse` identity. They do
+not canonicalize through a call-expression receiver: `client.get().uri(...)`
+is a fluent chain, not a direct `WebClient.uri(...)` call merely because
+`client` has type `WebClient`. Match the adapter-emitted fluent chain directly
+and attach its semantics to that rule. This distinction prevents a broad
+direct-call rule from shadowing a more precise fluent-chain rule.
 
 ```yaml
 packages: [eta]
