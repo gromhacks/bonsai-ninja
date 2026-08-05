@@ -171,6 +171,13 @@ fn compact_character_constraint_domain(domain: &mut CharacterConstraintDomain) {
             compact_strings(exact_characters);
         }
         CharacterConstraintDomain::ExcludesExact { characters } => compact_strings(characters),
+        CharacterConstraintDomain::SubstitutesExact { mappings } => {
+            for mapping in mappings.iter_mut() {
+                mapping.key.shrink_to_fit();
+                mapping.value.shrink_to_fit();
+            }
+            mappings.shrink_to_fit();
+        }
         CharacterConstraintDomain::ProviderBound {
             factory_call,
             operation_call,

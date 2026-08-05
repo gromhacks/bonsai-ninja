@@ -30,6 +30,21 @@ use std::sync::Arc;
 /// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
 /// or the object validation contract changes in a way that can alter compiler
 /// facts.
+// v60: Go interpreted strings assemble exact byte/octal escapes before UTF-8
+// conversion, retaining valid multi-byte static scalar values while invalid
+// byte strings still fail closed.
+// v59: Python finite-map and character-substitution binding checks resolve
+// lexical owners, nested closures, and global/nonlocal directives instead of
+// treating same-spelled names across a file as one binding.
+// v58: configured Go transformer bindings are keyed by callable ownership, so
+// same-spelled locals in independent functions cannot suppress or inherit one
+// another's facts. Cached v57 objects used file-wide textual write counts.
+// v57: exact aggregate fields survive unrelated dynamic leaves; configured
+// Go character transforms retain decoded substitution maps and lexical binding
+// ownership; Go qualified composite receivers, Java constructor-local scope,
+// nested receiver-call operands, and Python finite-map membership use their
+// corrected adapter IR. Cached v55/v56 objects cannot represent or reliably
+// reproduce all of those facts.
 // v55: synthesized Swift computed-property declarations retain the same
 // AST-derived receiver-state sources as ordinary callable lowering.
 // v54: Ruby ERB/RHTML compiler objects retain Tree-sitter-proven instance
@@ -105,7 +120,7 @@ use std::sync::Arc;
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 55;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 60;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;

@@ -237,6 +237,10 @@ engine sanitizers.
 Structured attribute rules match exact API paths or semantic receiver
 types. `[Eta, render]` matches `Eta.render(...)`; `engine.render(...)`
 matches only when adapter facts prove `engine` has receiver type `Eta`.
+Regex callees follow the same contract: after direct canonical-name matching,
+the matcher may compare `DeclaredReceiverType.method` synthesized from the
+adapter's receiver-type facts. It never infers the type from a variable name
+or embeds a library inventory in shared Rust.
 
 Receiver/class-shaped rules that declare adapter-visible `packages:`,
 `imports:`, or `modules:` are gated at the call site. This includes
@@ -337,13 +341,13 @@ adapter IR without hardcoding an API or a language in the engine:
 
 | Field | Exact proof consumed |
 |---|---|
-| `configured_call_argument_guard` | A complete spread-free aggregate argument whose frontend-decoded scalar fields equal the rule's required values. |
+| `configured_call_argument_guard` | Exact scalar fields from a structurally complete, spread-free aggregate argument equal the rule's required values. Unrelated dynamic field values stay unknown and do not invalidate an independent exact field. |
 | `receiver_configuration_guard` / `configured_argument_receiver_guard` | Unconditional calls configure the exact receiver. `identity_argument_indices` selects the configuration facet, so the latest write to that facet wins without confusing another call to the same setter. |
-| `character_constraint` | A constrained alphabet reaches the selected sink value; SQL rules may also require that value to be enclosed by a particular literal delimiter. |
+| `character_constraint` | A constrained alphabet or exact substitution map reaches the selected sink value; SQL rules may also require that value to be enclosed by a particular literal delimiter. Provider-backed transforms receive credit only when their factory, operation, and rule-required mappings all match. |
 | `compiler_guard` | An adapter-proven, API-neutral capability reaches the exact matched call. `required_evidence` selects syntax roles such as a callback slot or selector chain; `forbidden_evidence` rejects unsafe static choices. |
 | `same_origin_path_constraint` | A unique helper rejects URL schemes and authorities, requires `/`, and rejects `//` before returning the path. Provider-backed parsing is credited only when `accepted_providers` authorizes the adapter-recorded import identity. |
 | `dynamic_key_denylist_guard` | A unique helper drops the rule-owned static key set and, when required, recursively rebuilds nested values. |
-| `url_reconstruction_guard` | A unique helper parses a URL, restricts scheme and host against static facts, and rebuilds the outbound URL from the declared components. |
+| `url_reconstruction_guard` | A unique helper parses a URL, restricts scheme and host against static facts, and rebuilds the outbound URL from the declared components. `scheme.reconstructed_values` distinguishes parser spellings such as `https:` from reconstructed spellings such as `https`; redirect policy can require typed fields in a sink option aggregate. |
 | `url_network_guard` | Exact parser, scheme/host, DNS resolver, optional address-parser, and private-address predicate roles are rule data. `sink-argument-parser-input` proves the sink consumes the same compiler value that the parser validated. |
 | `context_flow.sanitized_rewrite_clears_channel` | A sanitized producer rewrites an implicit channel before its consumer. Straight-line order or a typed non-null branch must prove the replacement, and a later unsanitized write cancels it. |
 | `sink_terminal_priority` | Presentation-only collapse of a lower-priority downstream transport sink in the same vulnerability class when an exact resolved call/assignment chain proves both sites belong to one flow. |
@@ -359,6 +363,21 @@ while a syntax-only fact is accepted only when that provider list is empty.
 Missing, ambiguous, mutable, or partially decoded evidence never grants
 credit. Pack-wide dependency/taxonomy/default policy lives in
 `security-patterns/metadata.yml`, not in analyzer source.
+
+Exact aggregate fields are independent proofs, not a claim that every sibling
+value is static. For example, `{ timeout: dynamicTimeout, followRedirect:
+false }` proves the boolean field when the object has no spread, computed key,
+or duplicate path. A spread, dynamic key, duplicate field, missing required
+field, or wrong typed scalar fails closed.
+
+Configured character transformers use the same separation. A language
+adapter may prove that a factory was configured with a complete sequence of
+decoded one-character substitutions and that its result flows through a
+particular operation. The sink rule alone declares which factory/operation
+identities and complete mapping inventory are security-relevant. Shared
+analysis performs an exact join and has no built-in escaper, LDAP, SQL, or
+provider names. Extra, missing, duplicate, or mismatched mappings fail closed
+because an overlapping replacement could change runtime precedence.
 
 `ConditionExpressionFact::Truthy` represents an exact compiler value tested
 for runtime truth, including boolean property reads used by network-address

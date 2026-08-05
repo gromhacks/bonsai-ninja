@@ -2055,9 +2055,17 @@ fn character_domain_matches(
         return semantics.accepted_providers.iter().any(|provider| {
             rule_target_matches_call(factory_call, &[], &provider.factory)
                 && rule_target_matches_call(operation_call, &[], &provider.operation)
-        }) && character_domain_excludes(domain, &semantics.required_excluded_characters);
+        }) && character_domain_satisfies(domain, semantics);
     }
+    character_domain_satisfies(domain, semantics)
+}
+
+fn character_domain_satisfies(
+    domain: &bonsai_lang_api::CharacterConstraintDomain,
+    semantics: &crate::rule::CharacterConstraintSemantics,
+) -> bool {
     character_domain_excludes(domain, &semantics.required_excluded_characters)
+        && character_domain_substitutes(domain, &semantics.required_mappings)
 }
 
 fn character_domain_excludes(
@@ -2081,9 +2089,36 @@ fn character_domain_excludes(
                     })
                 })
         }),
+        bonsai_lang_api::CharacterConstraintDomain::SubstitutesExact { .. } => required.is_empty(),
         bonsai_lang_api::CharacterConstraintDomain::ProviderBound { domain, .. } => {
             character_domain_excludes(domain, required)
         }
+    }
+}
+
+fn character_domain_substitutes(
+    domain: &bonsai_lang_api::CharacterConstraintDomain,
+    required: &[crate::rule::ExactStringMapping],
+) -> bool {
+    if required.is_empty() {
+        return true;
+    }
+    match domain {
+        bonsai_lang_api::CharacterConstraintDomain::SubstitutesExact { mappings } => {
+            mappings.len() == required.len()
+                && required.iter().all(|required| {
+                    let mut matching = mappings.iter().filter(|mapping| mapping.key == required.input);
+                    matching
+                        .next()
+                        .is_some_and(|mapping| mapping.value == required.output)
+                        && matching.next().is_none()
+                })
+        }
+        bonsai_lang_api::CharacterConstraintDomain::ProviderBound { domain, .. } => {
+            character_domain_substitutes(domain, required)
+        }
+        bonsai_lang_api::CharacterConstraintDomain::AllowOnly { .. }
+        | bonsai_lang_api::CharacterConstraintDomain::ExcludesExact { .. } => false,
     }
 }
 
@@ -4459,11 +4494,31 @@ pub(super) fn url_reconstruction_guard_sanitizer(
         guard.redirect.as_ref(),
         &sink_file_index,
     ) {
+        bonsai_diagnostics::debug_log!(
+            "security-taint",
+            "url_reconstruction sink={} redirect policy failed",
+            sink.rule_id
+        );
         return None;
     }
-    let target =
-        url_reconstruction_target_for_sink(ws, call_graph, sink_func, sink, guard, sink_tainted_args)?;
-    let guard_span = compiler_proven_url_reconstruction_guard(ws, target, guard)?;
+    let Some(target) =
+        url_reconstruction_target_for_sink(ws, call_graph, sink_func, sink, guard, sink_tainted_args)
+    else {
+        bonsai_diagnostics::debug_log!(
+            "security-taint",
+            "url_reconstruction sink={} reconstructed target failed",
+            sink.rule_id
+        );
+        return None;
+    };
+    let Some(guard_span) = compiler_proven_url_reconstruction_guard(ws, target, guard) else {
+        bonsai_diagnostics::debug_log!(
+            "security-taint",
+            "url_reconstruction sink={} helper proof failed",
+            sink.rule_id
+        );
+        return None;
+    };
     let mut finding = finding_for_guard_span_in_workspace(
         ws,
         sink,
@@ -4747,13 +4802,12 @@ fn url_reconstruction_composition_is_exact(
         calls,
         guard.path_fallback.as_deref(),
     );
-    guard
-        .scheme
-        .allowed_values
-        .iter()
-        .any(|allowed| allowed == scheme)
-        && host_matches
-        && path_matches
+    let reconstructed_schemes = if guard.scheme.reconstructed_values.is_empty() {
+        &guard.scheme.allowed_values
+    } else {
+        &guard.scheme.reconstructed_values
+    };
+    reconstructed_schemes.iter().any(|allowed| allowed == scheme) && host_matches && path_matches
 }
 
 fn string_composition_part_reads_url_component(
@@ -5157,7 +5211,13 @@ fn url_collection_is_static(
     !factory.args.is_empty()
         && factory.args.iter().enumerate().all(|(index, _)| {
             bonsai_lang_api::call_argument_value_fact(&file_index.call_argument_values, factory.span, index)
-                .is_some_and(|fact| fact.static_value.is_some())
+                .is_some_and(|fact| {
+                    fact.static_value.is_some()
+                        || fact
+                            .exact_static_sequence_values
+                            .as_ref()
+                            .is_some_and(|values| !values.is_empty() && values.iter().all(Option::is_some))
+                })
         })
 }
 
@@ -5343,6 +5403,24 @@ fn url_redirect_guard_is_exact(
                         == Some(required_value)
             })
             .is_some()
+        }
+        crate::rule::UrlRedirectGuardSemantics::CallArgumentFields {
+            argument_index,
+            required_fields,
+        } => {
+            !required_fields.is_empty()
+                && bonsai_lang_api::call_argument_value_fact(
+                    &file_index.call_argument_values,
+                    sink_call.span,
+                    *argument_index,
+                )
+                .is_some_and(|fact| {
+                    required_fields.iter().all(|required| {
+                        fact.exact_static_aggregate_fields
+                            .iter()
+                            .any(|field| field.path == required.path && field.value == required.value)
+                    })
+                })
         }
     }
 }

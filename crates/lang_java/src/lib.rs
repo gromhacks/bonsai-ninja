@@ -1565,7 +1565,13 @@ fn java_binding_scope_and_declaration(mut node: Node<'_>) -> Option<(Node<'_>, N
         if matches!(parent.kind(), "field_declaration" | "local_variable_declaration") {
             declaration = Some(parent);
         }
-        if parent.kind() == "block" {
+        // Tree-sitter Java gives constructor bodies their own
+        // `constructor_body` node rather than the `block` used by ordinary
+        // methods. Both are lexical local scopes. Treating a constructor
+        // body as a class boundary turns constructor locals into fields and
+        // incorrectly canonicalizes `local.method()` as
+        // `this.local.method()`.
+        if matches!(parent.kind(), "block" | "constructor_body") {
             return Some((parent, declaration?, false));
         }
         if parent.kind() == "class_body" {

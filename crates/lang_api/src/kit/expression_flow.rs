@@ -337,12 +337,15 @@ fn is_nested_aggregate(kind: &str) -> bool {
     )
 }
 
-/// Decode every scalar field in a complete, spread-free aggregate.
+/// Decode exact scalar fields from a structurally complete, spread-free
+/// aggregate.
 ///
 /// The shared walker contributes only grammar structure and static field
 /// relationships already used by [`expression_flow_from_node_with_handler`]. Literal
 /// spelling remains language-owned through `decode`. Any dynamic key,
-/// spread, duplicate field, or non-scalar leaf makes the aggregate inexact.
+/// spread or duplicate field makes the aggregate inexact. Unrelated dynamic
+/// leaves remain absent from the returned table; they cannot override a
+/// returned static field because every field path is tracked independently.
 pub(super) fn exact_static_aggregate_fields(
     node: Node<'_>,
     src: &[u8],
@@ -354,6 +357,7 @@ pub(super) fn exact_static_aggregate_fields(
         decode: fn(Node<'_>, &[u8]) -> Option<crate::StaticScalarValue>,
         path: &mut Vec<String>,
         out: &mut Vec<crate::StaticAggregateFieldValue>,
+        seen: &mut std::collections::HashSet<Vec<String>>,
     ) -> Option<()> {
         if !is_nested_aggregate(node.kind()) {
             return None;
@@ -374,21 +378,17 @@ pub(super) fn exact_static_aggregate_fields(
                 continue;
             };
             let name = static_field_name(key, src)?;
-            if out.iter().any(|field| {
-                field.path.len() == path.len() + 1
-                    && field.path[..path.len()] == path[..]
-                    && field.path.last() == Some(&name)
-            }) {
-                return None;
-            }
             saw_field = true;
             path.push(name);
+            if !seen.insert(path.clone()) {
+                return None;
+            }
             if is_nested_aggregate(value.kind()) {
-                collect(value, src, decode, path, out)?;
-            } else {
+                collect(value, src, decode, path, out, seen)?;
+            } else if let Some(value) = decode(value, src) {
                 out.push(crate::StaticAggregateFieldValue {
                     path: path.clone(),
-                    value: decode(value, src)?,
+                    value,
                 });
             }
             path.pop();
@@ -397,7 +397,14 @@ pub(super) fn exact_static_aggregate_fields(
     }
 
     let mut out = Vec::new();
-    collect(node, src, decode, &mut Vec::new(), &mut out)?;
+    collect(
+        node,
+        src,
+        decode,
+        &mut Vec::new(),
+        &mut out,
+        &mut std::collections::HashSet::new(),
+    )?;
     Some(out)
 }
 

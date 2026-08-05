@@ -5395,7 +5395,11 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // v75 (2026-08-03): parameter-less receiver accessors map object roots
     // exactly, and resolver-proven receiver-plus-selector projections extend
     // the finite syntax demand universe across constructor/inheritance hops.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 75;
+    // v76 (2026-08-04): nested receiver-call arguments retain their exact
+    // input dependencies, Java constructor locals preserve lexical identity,
+    // and qualified Go composite receivers resolve by their declared type.
+    // Rebuild graphs whose call or transfer edges used the earlier facts.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 76;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 

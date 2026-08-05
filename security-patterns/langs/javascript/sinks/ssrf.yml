@@ -146,6 +146,24 @@
   - got
   cwe:
   - CWE-918
+  analysis_semantics:
+    url_reconstruction_guard:
+      sink_argument_index: 0
+      parser: {name: URL}
+      scheme:
+        component: {field: protocol}
+        allowed_values: ["https:"]
+        reconstructed_values: ["https"]
+      host_allowlist:
+        component: {field: hostname}
+        membership_predicate: {name: has}
+        static_collection_factories: [{name: Set}]
+      path_component: {field: pathname}
+      redirect:
+        kind: call-argument-fields
+        argument_index: 1
+        required_fields:
+        - {path: [followRedirect], value: {kind: boolean, value: false}}
   match:
     kind: call
     callee:

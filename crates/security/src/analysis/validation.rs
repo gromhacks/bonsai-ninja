@@ -1101,11 +1101,22 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
         }
     }
     if semantics.character_constraint.as_ref().is_some_and(|guard| {
-        guard.required_excluded_characters.is_empty()
+        (guard.required_excluded_characters.is_empty() && guard.required_mappings.is_empty())
             || guard
                 .required_excluded_characters
                 .iter()
                 .any(|character| character.chars().count() != 1)
+            || guard
+                .required_mappings
+                .iter()
+                .any(|mapping| mapping.input.chars().count() != 1 || mapping.output.is_empty())
+            || {
+                let mut inputs = std::collections::HashSet::new();
+                !guard
+                    .required_mappings
+                    .iter()
+                    .all(|mapping| inputs.insert(mapping.input.as_str()))
+            }
             || guard
                 .required_enclosing_literal_delimiter
                 .as_ref()
@@ -1116,7 +1127,7 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             "error",
             "invalid-analysis-semantics",
             Some(rule),
-            "character_constraint requires non-empty single-character exclusions and, when present, a single-character enclosing delimiter",
+            "character_constraint requires single-character exclusions and/or unique exact non-empty substitutions and, when present, a single-character enclosing delimiter",
         );
     }
     if semantics
@@ -1711,6 +1722,12 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
                 required_return_place,
             } => !field.trim().is_empty() && !required_return_place.trim().is_empty(),
             crate::rule::UrlRedirectGuardSemantics::PostSinkCall { call, .. } => callable_target(call),
+            crate::rule::UrlRedirectGuardSemantics::CallArgumentFields { required_fields, .. } => {
+                !required_fields.is_empty()
+                    && required_fields.iter().all(|field| {
+                        !field.path.is_empty() && field.path.iter().all(|part| !part.trim().is_empty())
+                    })
+            }
         });
         if !root_valid
             || !callable_target(&guard.parser)
@@ -1722,6 +1739,11 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
                 .is_some_and(|target| !callable_target(target))
             || guard.scheme.allowed_values.is_empty()
             || guard.scheme.allowed_values.iter().any(|value| value.is_empty())
+            || guard
+                .scheme
+                .reconstructed_values
+                .iter()
+                .any(|value| value.is_empty())
             || !component_valid(&guard.host_allowlist.component)
             || guard
                 .host_allowlist
@@ -1833,6 +1855,11 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
                 .is_some_and(|target| !callable_target(target))
             || guard.scheme.allowed_values.is_empty()
             || guard.scheme.allowed_values.iter().any(|value| value.is_empty())
+            || guard
+                .scheme
+                .reconstructed_values
+                .iter()
+                .any(|value| value.is_empty())
             || !exact_component(&guard.host_allowlist.component)
             || guard
                 .host_allowlist
@@ -1855,6 +1882,12 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
                     required_return_place,
                 } => field.trim().is_empty() || required_return_place.trim().is_empty(),
                 crate::rule::UrlRedirectGuardSemantics::PostSinkCall { call, .. } => !callable_target(call),
+                crate::rule::UrlRedirectGuardSemantics::CallArgumentFields { required_fields, .. } => {
+                    required_fields.is_empty()
+                        || required_fields.iter().any(|field| {
+                            field.path.is_empty() || field.path.iter().any(|part| part.trim().is_empty())
+                        })
+                }
             })
             || required_names.len() != guard.required_sink_named_arguments.len()
             || required_names.iter().any(|name| name.is_empty())
@@ -1880,6 +1913,7 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
                     Some(("redirect.call", call.as_ref()))
                 }
                 crate::rule::UrlRedirectGuardSemantics::ReceiverFieldExactCallback { .. } => None,
+                crate::rule::UrlRedirectGuardSemantics::CallArgumentFields { .. } => None,
             }))
         {
             if let Some(pattern) = target.regex.as_deref() {

@@ -3589,6 +3589,15 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8], handler: &GrammarHandl
         // compound call arguments retain their value carriers without any
         // rendered-expression parsing.
         if handler.call_ref_kinds.contains(&n.kind()) {
+            // A chained call's receiver may itself be a call whose arguments
+            // determine the outer result (`pattern.matcher(value).replace`).
+            // The receiver-base collector intentionally returns only the
+            // leftmost carrier, so recurse through the parsed receiver
+            // expression to retain those nested argument dependencies while
+            // still excluding method-name syntax.
+            if let Some(receiver) = call_receiver_node(&n, handler) {
+                out.extend(extract_rhs_expr_operands(&receiver, src, handler));
+            }
             for args_node in call_argument_containers(n) {
                 let mut arg_cursor = args_node.walk();
                 for arg in args_node.named_children(&mut arg_cursor) {

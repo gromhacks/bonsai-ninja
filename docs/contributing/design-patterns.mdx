@@ -304,6 +304,13 @@ New source syntax belongs in its adapter's `GrammarHandler`, AST post-pass,
 or capability declaration. Emit a structural fact (`CallKind::Constructor`,
 `FlowEvent::Return`, a type alias, or a `Place`) and match that fact downstream.
 
+Lexical scopes follow the source language's AST, including constructor bodies.
+A constructor-local binding must shadow an instance field exactly as a local
+binding in any other block; lowering must not rewrite a local receiver into
+`this.<field>` merely because both names occur inside a constructor. Receiver
+matching consumes the adapter's declared type facts, and security-sensitive
+provider names remain rulepack data.
+
 ## 13. Workspace-cached facts, never repeated query-time graph walks
 
 Queries validate reusable facts first. A cache miss can build the exact

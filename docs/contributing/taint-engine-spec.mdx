@@ -272,13 +272,28 @@ value-bearing operands, including grammars that split selectors into
 multiple nodes.
 
 Call-site value shape is likewise compiler-owned. Each adapter lowers exact
-scalar literals, complete named aggregate fields, complete positional
+scalar literals, exact named aggregate fields from structurally complete
+spread-free aggregates, complete positional
 sequences, addressable places, and nested expression carriers into
 `CallArgumentValueFact`. Unknown sequence elements remain explicit `None`
 slots, so a rule can prove `['sh', '-c', dynamic]` without guessing the
 dynamic value. Match constraints such as `arg_sequence_items_equal` compare
 those typed facts and fail closed when the adapter did not prove the shape;
 they never parse `CallArg::value_text`.
+
+Named aggregate proofs track each path independently. A dynamic value in an
+unrelated sibling does not erase an exact boolean/string field, but a spread,
+computed key, duplicate path, or unknown aggregate shape rejects the proof.
+This permits exact configuration checks such as `followRedirect: false`
+without pretending a dynamic timeout is constant.
+
+Configured character-transform facts are also compiler-owned and
+security-neutral. An adapter can lower the exact decoded mapping sequence,
+factory identity, operation identity, input, output, and transform span. The
+rulepack selects accepted providers and the complete security-required mapping
+inventory; shared guard analysis only compares the typed records. Extra,
+missing, duplicate, or mismatched mappings fail closed. Neither adapter nor
+engine contains a security API-name or escape-table inventory.
 
 Value-preserving call results are explicit rulepack models, not text
 fallbacks or engine API tables. When a sanitizer/passthrough rule declares

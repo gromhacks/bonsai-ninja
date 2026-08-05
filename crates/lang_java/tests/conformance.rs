@@ -234,6 +234,100 @@ class Storage {
 }
 
 #[test]
+fn constructor_local_receiver_shadows_an_instance_field() {
+    use bonsai_lang_api::{FlowEvent, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "SearchPage.java",
+            r#"
+class Label { void setEscapeModelStrings(boolean enabled) {} }
+class SearchPage {
+  private Label results;
+  SearchPage() {
+    Label results = new Label();
+    results.setEscapeModelStrings(false);
+  }
+  void configureField() { results.setEscapeModelStrings(true); }
+}
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("Java declaration index");
+
+    let receiver_for = |decl_name: &str| {
+        index
+            .defs
+            .iter()
+            .find(|decl| decl.name == decl_name)
+            .unwrap_or_else(|| panic!("{decl_name} declaration"))
+            .flow_events
+            .iter()
+            .find_map(|event| match event {
+                FlowEvent::Call { name, receiver, .. }
+                    if bonsai_common::short_qualified_tail(name) == "setEscapeModelStrings" =>
+                {
+                    Some((name.clone(), receiver.clone()))
+                }
+                _ => None,
+            })
+    };
+
+    let (constructor_call, constructor_receiver) = receiver_for("SearchPage").expect("constructor call");
+    assert_eq!(constructor_call, "results.setEscapeModelStrings");
+    assert_eq!(constructor_receiver.as_deref(), Some("results"));
+
+    let (field_call, field_receiver) = receiver_for("configureField").expect("field call");
+    assert_eq!(field_call, "this.results.setEscapeModelStrings");
+    assert_eq!(field_receiver.as_deref(), Some("this.results"));
+}
+
+#[test]
+fn chained_call_argument_preserves_nested_receiver_call_inputs() {
+    use bonsai_lang_api::{FlowEvent, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Audit.java",
+            r#"
+class Pattern {
+  Matcher matcher(String value) { return new Matcher(); }
+}
+class Matcher { String replaceAll(String replacement) { return replacement; } }
+class MDC { static void put(String key, String value) {} }
+class Audit {
+  private static final Pattern CONTROL = new Pattern();
+  void event(String rid) {
+    MDC.put("rid", CONTROL.matcher(rid).replaceAll("_"));
+  }
+}
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("Java declaration index");
+    let event = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "event")
+        .expect("event declaration");
+    let value = event.flow_events.iter().find_map(|event| match event {
+        FlowEvent::Call { name, args, .. } if name == "MDC.put" => args.get(1),
+        _ => None,
+    });
+    let value = value.expect("MDC value argument");
+    assert!(
+        value.source_names.iter().any(|source| source == "rid"),
+        "nested receiver-call input must reach the outer argument: {value:#?}"
+    );
+}
+
+#[test]
 fn url_guard_syntax_emits_typed_conditions_and_static_scalars() {
     use bonsai_lang_api::{ConditionExpressionFact, LanguageAdapter, StaticScalarValue};
 

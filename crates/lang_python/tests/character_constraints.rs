@@ -459,6 +459,133 @@ def use(name):
 }
 
 #[test]
+fn finite_maps_keep_independent_same_spelled_callable_bindings() {
+    let lowered = index(
+        r#"
+def choose_template(name):
+    choices = {"safe": "template.html"}
+    selected = choices.get(name)
+    return selected
+
+def choose_report(name):
+    choices = {"safe": "report.html"}
+    selected = choices.get(name)
+    return selected
+"#,
+    );
+    assert_eq!(
+        lowered.finite_literal_selections.len(),
+        2,
+        "independent Python locals use lexical binding identity, not one file-wide spelling: {:#?}",
+        lowered.finite_literal_selections
+    );
+}
+
+#[test]
+fn finite_module_map_tracks_cross_callable_mutation_and_local_shadowing() {
+    let mutated = index(
+        r#"
+CHOICES = {"safe": "literal"}
+def mutate():
+    CHOICES.update(load_dynamic_values())
+def choose(name):
+    return CHOICES.get(name)
+"#,
+    );
+    assert!(
+        mutated.finite_literal_selections.is_empty(),
+        "a method call through an unshadowed global binding can mutate the module map"
+    );
+
+    let shadowed = index(
+        r#"
+CHOICES = {"safe": "literal"}
+def local_only(name):
+    CHOICES = {"safe": "other"}
+    selected = CHOICES.get(name)
+    return selected
+def choose(name):
+    selected = CHOICES.get(name)
+    return selected
+"#,
+    );
+    assert_eq!(
+        shadowed.finite_literal_selections.len(),
+        2,
+        "a local shadow neither mutates nor suppresses an independent module binding: {:#?}",
+        shadowed.finite_literal_selections
+    );
+}
+
+#[test]
+fn finite_map_binding_owner_honors_global_and_nonlocal_directives() {
+    let global_read = index(
+        r#"
+CHOICES = {"safe": "literal"}
+def choose(name):
+    global CHOICES
+    selected = CHOICES.get(name)
+    return selected
+"#,
+    );
+    assert_eq!(global_read.finite_literal_selections.len(), 1);
+
+    let nonlocal_read = index(
+        r#"
+def build():
+    choices = {"safe": "literal"}
+    def choose(name):
+        nonlocal choices
+        selected = choices.get(name)
+        return selected
+    return choose
+"#,
+    );
+    assert_eq!(nonlocal_read.finite_literal_selections.len(), 1);
+
+    let global_write = index(
+        r#"
+CHOICES = {"safe": "literal"}
+def mutate():
+    global CHOICES
+    CHOICES = load_dynamic_values()
+def choose(name):
+    selected = CHOICES.get(name)
+    return selected
+"#,
+    );
+    assert!(
+        global_write.finite_literal_selections.is_empty(),
+        "a parsed global reassignment invalidates the module map"
+    );
+}
+
+#[test]
+fn character_substitution_tables_keep_independent_callable_bindings() {
+    let lowered = index(
+        r#"
+def build_filter():
+    escapes = {"*": r"\2a"}
+    def escape(value):
+        return "".join(escapes.get(ch, ch) for ch in value)
+    return escape
+
+def build_dn():
+    escapes = {"(": r"\28"}
+    def escape(value):
+        return "".join(escapes.get(ch, ch) for ch in value)
+    return escape
+"#,
+    );
+    assert_eq!(
+        lowered.character_substitutions.len(),
+        2,
+        "same-spelled transform tables in independent callables remain distinct: {:#?}",
+        lowered.character_substitutions
+    );
+}
+
+#[test]
 fn finite_membership_conditional_is_a_compiler_fact() {
     let lowered = index(
         r#"
@@ -474,6 +601,31 @@ def choose(name):
         );
     };
     assert_eq!(selection.target.as_deref(), Some("name"));
+    assert!(selection.assignment_span.is_some());
+}
+
+#[test]
+fn immutable_map_membership_conditional_is_a_compiler_fact() {
+    let lowered = index(
+        r#"
+_TEMPLATES = {
+    "default": "Hello",
+    "welcome": "Welcome",
+    "receipt": "Receipt",
+}
+
+def render(name):
+    safe = name if name in _TEMPLATES else "default"
+    return render_template_string(_TEMPLATES[safe])
+"#,
+    );
+    let [selection] = lowered.finite_literal_selections.as_slice() else {
+        panic!(
+            "expected the immutable map membership to constrain safe: {:#?}",
+            lowered.finite_literal_selections
+        );
+    };
+    assert_eq!(selection.target.as_deref(), Some("safe"));
     assert!(selection.assignment_span.is_some());
 }
 
@@ -494,6 +646,17 @@ def choose(name):
 def choose(name):
     name = name if name in {"default", dynamic()} else "default"
     return name
+"#,
+        r#"
+_TEMPLATES = {"default": "Hello", "welcome": "Welcome"}
+_TEMPLATES[dynamic()] = dynamic()
+def choose(name):
+    return name if name in _TEMPLATES else "default"
+"#,
+        r#"
+_TEMPLATES = {"default": "Hello", "welcome": "Welcome"}
+def choose(name, _TEMPLATES):
+    return name if name in _TEMPLATES else "default"
 "#,
     ] {
         let lowered = index(source);

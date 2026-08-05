@@ -492,8 +492,9 @@ fn call_configuration_aggregate_uses_exact_language_decoded_scalars() {
         &[(
             "parser.js",
             r#"
-function safe(libxml, xml) {
+function safe(libxml, xml, timeout) {
   return libxml.parseXml(xml, {
+    timeout: timeout,
     noent: false,
     replaceEntities: false,
     nonet: true,

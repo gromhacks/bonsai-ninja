@@ -10,8 +10,8 @@ use bonsai_lang_api::{
     CharacterConstraintFact, CharacterConstraintOutput, CompilerGuardFact, ConditionEquality,
     ConditionExpressionFact, ConditionOperandFact, DeclIndex, ExpressionField, ExpressionFlow, FlowEvent,
     GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    SameOriginPathConstraintFact, StaticScalarValue, StringCompositionFact, StringCompositionPart,
-    TypeAliasBinding, Visibility,
+    SameOriginPathConstraintFact, StaticScalarValue, StaticStringMapEntry, StringCompositionFact,
+    StringCompositionPart, TypeAliasBinding, Visibility,
 };
 use tree_sitter::Node;
 use tree_sitter::{Language, Tree};
@@ -253,7 +253,6 @@ impl LanguageAdapter for GoAdapter {
             let exact_argument_flows = populate_go_call_argument_values(&mut idx, &tree, file, src);
             populate_go_assignment_values(&mut idx, &tree, file, src);
             idx.string_compositions = go_string_compositions(&idx, &tree, file, src);
-            idx.character_constraints = go_character_constraints(&idx, &tree, file, src);
             idx.same_origin_path_constraints = go_same_origin_path_constraints(&idx, &tree, file, src);
             idx.compiler_guards = go_compiler_guards(&tree, file, src);
             let return_value_flows = collect_go_return_value_flows(&tree, file, src);
@@ -350,6 +349,10 @@ impl LanguageAdapter for GoAdapter {
                 &HANDLER,
                 go_static_scalar,
             );
+            // Character transforms consume final rewritten flow events and
+            // adapter-decoded call scalars. Building this table earlier makes
+            // escaped literals and adapter-synthesized calls invisible.
+            idx.character_constraints = go_character_constraints(&idx, &tree, file, src);
         }
         // Append `FlowEvent::Lifecycle` for recognised Go
         // resource transitions (`f.Close()`, `mu.Unlock()`,
@@ -937,17 +940,87 @@ fn go_static_string_literal(node: Node<'_>, src: &[u8]) -> Option<String> {
     match node.kind() {
         "interpreted_string_literal" => {
             let inner = text.strip_prefix('"')?.strip_suffix('"')?;
-            // Exact guard comparison is sound only when no escape decoding is
-            // required. The adapter can add a complete Go decoder later
-            // without changing the shared IR contract.
-            (!inner.contains('\\')).then(|| inner.to_string())
+            decode_go_interpreted_string(inner)
         }
         "raw_string_literal" => text
             .strip_prefix('`')
             .and_then(|inner| inner.strip_suffix('`'))
-            .map(str::to_string),
+            // Go discards carriage returns inside raw string literals.
+            .map(|inner| inner.replace('\r', "")),
         _ => None,
     }
+}
+
+/// Decode Go's specified interpreted-string escapes from the parsed literal
+/// body. Go strings are byte sequences, so byte/octal escapes are assembled
+/// before UTF-8 conversion. A valid multi-byte sequence remains exact while
+/// an arbitrary non-UTF-8 Go string fails closed because `StaticScalarValue`
+/// stores Unicode text.
+fn decode_go_interpreted_string(inner: &str) -> Option<String> {
+    let chars = inner.chars().collect::<Vec<_>>();
+    let mut output = Vec::with_capacity(inner.len());
+    let mut index = 0;
+    while index < chars.len() {
+        let character = chars[index];
+        index += 1;
+        if character != '\\' {
+            let mut encoded = [0_u8; 4];
+            output.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+            continue;
+        }
+        let escape = *chars.get(index)?;
+        index += 1;
+        match escape {
+            'a' => output.push(0x07),
+            'b' => output.push(0x08),
+            'f' => output.push(0x0c),
+            'n' => output.push(b'\n'),
+            'r' => output.push(b'\r'),
+            't' => output.push(b'\t'),
+            'v' => output.push(0x0b),
+            '\\' => output.push(b'\\'),
+            '"' => output.push(b'"'),
+            'x' => {
+                let value = decode_go_escape_digits(&chars, &mut index, 2, 16)?;
+                output.push(u8::try_from(value).ok()?);
+            }
+            'u' => {
+                let value = decode_go_escape_digits(&chars, &mut index, 4, 16)?;
+                let character = char::from_u32(value)?;
+                let mut encoded = [0_u8; 4];
+                output.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+            }
+            'U' => {
+                let value = decode_go_escape_digits(&chars, &mut index, 8, 16)?;
+                let character = char::from_u32(value)?;
+                let mut encoded = [0_u8; 4];
+                output.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+            }
+            first @ '0'..='7' => {
+                let mut value = first.to_digit(8)?;
+                for _ in 0..2 {
+                    value = value
+                        .checked_mul(8)?
+                        .checked_add(chars.get(index)?.to_digit(8)?)?;
+                    index += 1;
+                }
+                output.push(u8::try_from(value).ok()?);
+            }
+            _ => return None,
+        }
+    }
+    String::from_utf8(output).ok()
+}
+
+fn decode_go_escape_digits(chars: &[char], index: &mut usize, count: usize, radix: u32) -> Option<u32> {
+    let mut value = 0_u32;
+    for _ in 0..count {
+        value = value
+            .checked_mul(radix)?
+            .checked_add(chars.get(*index)?.to_digit(radix)?)?;
+        *index += 1;
+    }
+    Some(value)
 }
 
 /// Lower complete Go string concatenations from Tree-sitter expressions.
@@ -1052,6 +1125,7 @@ fn go_character_constraints(
 ) -> Vec<CharacterConstraintFact> {
     let imports = parse_imports(tree, src, file);
     let mut facts = go_guarded_append_character_constraints(index);
+    facts.extend(go_configured_character_substitution_constraints(index));
     if imports.is_empty() {
         return facts;
     }
@@ -1124,6 +1198,279 @@ fn go_character_constraints(
     facts.sort_by_key(|fact| (fact.function_span.start, fact.transform_span.start));
     facts.dedup();
     facts
+}
+
+/// Lower configured, exact pairwise character transformers without assigning
+/// security meaning to their APIs. For a unique binding initialized by a
+/// direct call with complete static string pairs, a later one-argument method
+/// call on that binding carries the provider identities and mapping into the
+/// typed IR. Rules decide whether a particular factory/operation pair and
+/// mapping are a sanitizer for their sink category.
+fn go_configured_character_substitution_constraints(index: &DeclIndex) -> Vec<CharacterConstraintFact> {
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    struct BindingKey {
+        owner_span: Option<Span>,
+        name: String,
+    }
+
+    struct ConfiguredTransform {
+        assignment_span: Span,
+        factory_call: String,
+        mappings: Vec<StaticStringMapEntry>,
+    }
+
+    let mut arguments_by_call = std::collections::HashMap::new();
+    for argument in &index.call_argument_values {
+        arguments_by_call
+            .entry((argument.call_span.start, argument.call_span.end))
+            .or_insert_with(Vec::new)
+            .push(argument);
+    }
+    for arguments in arguments_by_call.values_mut() {
+        arguments.sort_by_key(|argument| argument.argument_index);
+    }
+    let mut call_spans = arguments_by_call.keys().copied().collect::<Vec<_>>();
+    call_spans.sort_unstable();
+    let direct_arguments = |assignment: &bonsai_lang_api::AssignmentValueFact| {
+        // Assignment call sites cover the parsed call expression, while call
+        // argument facts use the adapter-normalized callee span. Select the
+        // first callee contained by the direct RHS value using a sorted span
+        // index. The outer call starts before any nested argument call, so
+        // this preserves the AST relationship without rescanning every call
+        // argument for every assignment.
+        let offset = call_spans.partition_point(|(start, _)| *start < assignment.value_span.start);
+        let call_span = call_spans[offset..]
+            .iter()
+            .take_while(|(start, _)| *start < assignment.value_span.end)
+            .find(|(_, end)| *end <= assignment.value_span.end)?;
+        let arguments = arguments_by_call.get(call_span)?;
+        arguments
+            .iter()
+            .enumerate()
+            .all(|(index, argument)| argument.argument_index == index)
+            .then_some(arguments.as_slice())
+    };
+
+    let mut binding_write_counts = std::collections::HashMap::new();
+    for assignment in &index.assignment_values {
+        let Some(binding) = assignment.target.as_deref() else {
+            continue;
+        };
+        let key = BindingKey {
+            owner_span: go_callable_owner(index, assignment.assignment_span).map(|decl| decl.span),
+            name: binding.to_string(),
+        };
+        *binding_write_counts.entry(key).or_insert(0_usize) += 1;
+    }
+
+    let mut configured = std::collections::HashMap::new();
+    for assignment in &index.assignment_values {
+        let (Some(binding), Some(factory_call), Some(arguments)) = (
+            assignment.target.as_deref(),
+            assignment.direct_call_name.as_deref(),
+            direct_arguments(assignment),
+        ) else {
+            continue;
+        };
+        if arguments.is_empty() || arguments.len() % 2 != 0 {
+            continue;
+        }
+        let scalars = arguments
+            .iter()
+            .map(|argument| argument.static_value.as_ref())
+            .collect::<Option<Vec<_>>>();
+        let Some(scalars) = scalars else {
+            continue;
+        };
+        let mappings = scalars
+            .chunks_exact(2)
+            .map(|pair| match (&pair[0], &pair[1]) {
+                (StaticScalarValue::String(key), StaticScalarValue::String(value)) => {
+                    Some(StaticStringMapEntry {
+                        key: key.clone(),
+                        value: value.clone(),
+                    })
+                }
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(mappings) = mappings else {
+            continue;
+        };
+        let key = BindingKey {
+            owner_span: go_callable_owner(index, assignment.assignment_span).map(|decl| decl.span),
+            name: binding.to_string(),
+        };
+        if binding_write_counts.get(&key) != Some(&1) {
+            continue;
+        }
+        configured.insert(
+            key,
+            ConfiguredTransform {
+                assignment_span: assignment.assignment_span,
+                factory_call: factory_call.to_string(),
+                mappings,
+            },
+        );
+    }
+
+    type AssignmentOutputs<'a> = std::collections::HashMap<
+        &'a str,
+        std::collections::HashMap<&'a str, Vec<&'a bonsai_lang_api::AssignmentValueFact>>,
+    >;
+    let mut assignment_outputs: AssignmentOutputs<'_> = std::collections::HashMap::new();
+    for assignment in &index.assignment_values {
+        let (Some(receiver), Some(call_name)) = (
+            assignment.direct_call_receiver.as_deref(),
+            assignment.direct_call_name.as_deref(),
+        ) else {
+            continue;
+        };
+        if assignment.target.is_some() {
+            assignment_outputs
+                .entry(receiver)
+                .or_default()
+                .entry(call_name)
+                .or_default()
+                .push(assignment);
+        }
+    }
+
+    let mut facts = Vec::new();
+    for owner in &index.defs {
+        let mut calls = Vec::new();
+        collect_go_flow_calls(&owner.flow_events, &mut calls);
+        for call in calls {
+            let FlowEvent::Call {
+                span,
+                name: operation_call,
+                receiver: Some(receiver),
+                args,
+                ..
+            } = call
+            else {
+                continue;
+            };
+            let [argument] = args.as_slice() else {
+                continue;
+            };
+            let local_key = BindingKey {
+                owner_span: Some(owner.span),
+                name: receiver.clone(),
+            };
+            let global_key = BindingKey {
+                owner_span: None,
+                name: receiver.clone(),
+            };
+            let transform = configured
+                .get(&local_key)
+                .filter(|transform| transform.assignment_span.start < span.start)
+                .or_else(|| {
+                    (!binding_write_counts.contains_key(&local_key)
+                        && !owner.params.iter().any(|parameter| parameter == receiver))
+                    .then(|| configured.get(&global_key))
+                    .flatten()
+                });
+            let Some(transform) = transform else {
+                continue;
+            };
+            let input_place = argument
+                .place
+                .as_ref()
+                .or_else(|| argument.source_names.first())
+                .cloned()
+                .unwrap_or_default();
+            let output = assignment_outputs
+                .get(receiver.as_str())
+                .and_then(|calls| calls.get(operation_call.as_str()))
+                .into_iter()
+                .flatten()
+                .filter(|assignment| {
+                    assignment.value_span.start <= span.start && span.end <= assignment.value_span.end
+                })
+                .min_by_key(|assignment| assignment.value_span.len())
+                .and_then(|assignment| assignment.target.clone())
+                .map_or(CharacterConstraintOutput::Expression { span: *span }, |target| {
+                    CharacterConstraintOutput::Assignment { target }
+                });
+            facts.push(CharacterConstraintFact {
+                function_span: owner.span,
+                transform_span: *span,
+                input_param_index: owner
+                    .params
+                    .iter()
+                    .position(|parameter| parameter == &input_place),
+                input_place,
+                output,
+                domain: CharacterConstraintDomain::ProviderBound {
+                    factory_call: transform.factory_call.clone(),
+                    operation_call: operation_call.to_string(),
+                    domain: Box::new(CharacterConstraintDomain::SubstitutesExact {
+                        mappings: transform.mappings.clone(),
+                    }),
+                },
+            });
+        }
+    }
+    facts
+}
+
+fn collect_go_flow_calls<'a>(events: &'a [FlowEvent], calls: &mut Vec<&'a FlowEvent>) {
+    for event in events {
+        match event {
+            FlowEvent::Call { .. } => calls.push(event),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_go_flow_calls(then_events, calls);
+                collect_go_flow_calls(else_events, calls);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_go_flow_calls(body, calls);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_go_flow_calls(body, calls);
+                collect_go_flow_calls(catch_events, calls);
+                collect_go_flow_calls(finally_events, calls);
+            }
+            FlowEvent::Assign { .. }
+            | FlowEvent::AggregateAssign { .. }
+            | FlowEvent::Return { .. }
+            | FlowEvent::Throw { .. }
+            | FlowEvent::Break { .. }
+            | FlowEvent::Continue { .. }
+            | FlowEvent::Yield { .. }
+            | FlowEvent::Await { .. }
+            | FlowEvent::Lifecycle { .. } => {}
+        }
+    }
+}
+
+fn go_span_contains(outer: Span, inner: Span) -> bool {
+    outer.file == inner.file && outer.start <= inner.start && inner.end <= outer.end
+}
+
+fn go_callable_owner(index: &DeclIndex, span: Span) -> Option<&bonsai_lang_api::Decl> {
+    index
+        .defs
+        .iter()
+        .filter(|decl| {
+            matches!(
+                decl.kind,
+                bonsai_lang_api::DeclKind::Function
+                    | bonsai_lang_api::DeclKind::Method
+                    | bonsai_lang_api::DeclKind::Constructor
+            ) && !(decl.name_span == decl.span && decl.body_span == Some(decl.span))
+                && go_span_contains(decl.span, span)
+        })
+        .min_by_key(|decl| decl.span.len())
 }
 
 /// Lower a Go byte/rune loop that constructs a fresh buffer exclusively by
@@ -2897,6 +3244,9 @@ fn collect_go_local_type_aliases(node: Node<'_>, src: &[u8], aliases: &mut Vec<T
         let concrete_type = var_spec
             .child_by_field_name("value")
             .and_then(|value_node| first_go_composite_literal_type(value_node, src));
+        let concrete_qualified_type = var_spec
+            .child_by_field_name("value")
+            .and_then(|value_node| first_go_composite_literal_qualified_type(value_node, src));
         // WS2: `var c = make().(Foo)` — the type assertion is the only
         // type signal; binds the (first) name to the asserted type.
         let assertion_type = var_spec
@@ -2909,6 +3259,9 @@ fn collect_go_local_type_aliases(node: Node<'_>, src: &[u8], aliases: &mut Vec<T
             if let Some(ty) = concrete_type.as_deref() {
                 push_go_type_alias(aliases, name, ty);
             }
+            if let Some(ty) = concrete_qualified_type.as_deref() {
+                push_go_type_alias(aliases, name, ty);
+            }
             if index == 0 {
                 if let Some(ty) = assertion_type.as_deref() {
                     push_go_type_alias(aliases, name, ty);
@@ -2916,28 +3269,39 @@ fn collect_go_local_type_aliases(node: Node<'_>, src: &[u8], aliases: &mut Vec<T
             }
         }
     }
-    // WS2: `c := make().(Foo)` — short var declaration with a type
-    // assertion RHS (not a `var_spec`, so the loop above never sees it).
+    // Short declarations are not `var_spec` nodes. Bind each top-level LHS
+    // to the corresponding AST-proven composite-literal type, and retain the
+    // comma-ok type-assertion handling for the first result. In particular,
+    // `client := &http.Client{}` must produce `client: http.Client`; using
+    // only the composite literal's package receiver (`http`) makes
+    // `client.Get` indistinguishable from the package function `http.Get`.
     for short_var in collect_kinds_under(&node, &["short_var_declaration"]) {
-        let Some(ty) = short_var
-            .child_by_field_name("right")
-            .and_then(|right| go_direct_type_assertion_type(right, src))
-        else {
+        let (Some(left), Some(right)) = (
+            short_var.child_by_field_name("left"),
+            short_var.child_by_field_name("right"),
+        ) else {
             continue;
         };
-        // Bind the FIRST LHS name (the value; a comma-ok `v, ok :=` form
-        // makes `ok` a bool, never the asserted type).
-        if let Some(left) = short_var.child_by_field_name("left") {
-            let mut cursor = left.walk();
-            for child in left.named_children(&mut cursor) {
-                if child.kind() == "identifier" {
-                    let name = node_text(&child, src).trim();
-                    if !name.is_empty() {
-                        push_go_type_alias(aliases, name, &ty);
-                    }
-                    break;
-                }
+        let mut left_cursor = left.walk();
+        let names = left
+            .named_children(&mut left_cursor)
+            .filter(|child| child.kind() == "identifier")
+            .collect::<Vec<_>>();
+        let mut right_cursor = right.walk();
+        let values = right.named_children(&mut right_cursor).collect::<Vec<_>>();
+        for (name_node, value_node) in names.iter().zip(values.iter()) {
+            let name = node_text(name_node, src).trim();
+            if let Some(ty) = first_go_composite_literal_type(*value_node, src) {
+                push_go_type_alias(aliases, name, &ty);
             }
+            if let Some(ty) = first_go_composite_literal_qualified_type(*value_node, src) {
+                push_go_type_alias(aliases, name, &ty);
+            }
+        }
+        // `c := make().(Foo)` — bind only the first LHS value; a comma-ok
+        // second result is a boolean, never the asserted type.
+        if let (Some(name_node), Some(ty)) = (names.first(), go_direct_type_assertion_type(right, src)) {
+            push_go_type_alias(aliases, node_text(name_node, src).trim(), &ty);
         }
     }
 }
@@ -3118,6 +3482,25 @@ fn first_go_composite_literal_type(node: Node<'_>, src: &[u8]) -> Option<String>
         if current.kind() == "composite_literal" {
             if let Some(type_node) = current.child_by_field_name("type") {
                 if let Some(type_name) = canonical_go_type_name(node_text(&type_node, src)) {
+                    return Some(type_name);
+                }
+            }
+        }
+        let mut cursor = current.walk();
+        let children: Vec<_> = current.named_children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            stack.push(child);
+        }
+    }
+    None
+}
+
+fn first_go_composite_literal_qualified_type(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "composite_literal" {
+            if let Some(type_node) = current.child_by_field_name("type") {
+                if let Some(type_name) = qualified_go_type_name(node_text(&type_node, src)) {
                     return Some(type_name);
                 }
             }
