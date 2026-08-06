@@ -312,7 +312,10 @@ pub const LANGS: &[LangExp] = &[
         cmdi_sink: "exec.Command",
         sqli_sink: "db.QueryRow",
         min_findings_micro: 0,
-        min_findings_complex: 50,
+        // Forty-seven distinct source/flow/sink findings remain after the
+        // canonical combiner removed three duplicate Go emissions. Keep this
+        // as a floor so a precision fix cannot be mistaken for lost coverage.
+        min_findings_complex: 47,
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: false,

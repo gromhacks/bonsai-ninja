@@ -6,8 +6,9 @@
 use crate::deps::DependencyInventory;
 use crate::finding::{Finding, TaintFlowRef};
 use crate::matcher::RuntimeDisabledRule;
+use bonsai_common::canonicalize_path_or_existing_parent;
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const CWE_TAXONOMY_GUID: &str = "25F72D7E-8A92-459D-AD67-64853F788765";
 
@@ -646,18 +647,6 @@ fn path_candidates(path: &str) -> Vec<PathBuf> {
         }
     }
     candidates
-}
-
-fn canonicalize_path_or_existing_parent(path: &Path) -> Option<PathBuf> {
-    if let Ok(canonical) = path.canonicalize() {
-        return Some(canonical);
-    }
-    let parent = path.parent()?;
-    let canonical_parent = parent.canonicalize().ok()?;
-    Some(match path.file_name() {
-        Some(file_name) => canonical_parent.join(file_name),
-        None => canonical_parent,
-    })
 }
 
 fn normalize_artifact_uri(value: &str) -> String {

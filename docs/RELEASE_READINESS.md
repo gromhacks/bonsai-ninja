@@ -25,17 +25,16 @@ The analyzer is one compiler-style pipeline:
 
 ## Current validation
 
-Validated on 2026-08-05 (dated measurements below retain their run date):
+Validated on 2026-08-06 (dated measurements below retain their run date):
 
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` passed;
   this strict gate compiled the complete workspace and every test target.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
   --document-private-items --locked` passed.
 - `cargo fmt --all -- --check` and `git diff --check` passed.
-- The last complete `cargo test --workspace --locked` baseline passed across
-  all crates, integration binaries, adapter suites, and doc tests. The final
-  architecture/lifecycle changes were then revalidated through their complete
-  release suites listed below.
+- The final `cargo test --workspace --locked --no-fail-fast` pass completed
+  across all crates, integration binaries, adapter suites, and doc tests after
+  the architecture, lifecycle, packaging, and release-gate changes.
 - Behavioral suites passed for callgraph, resolver, IDG, taint, security, SDK/CLI
   parity, the 1,076-case per-language CLI matrix, the 121-case end-to-end taint
   engine suite, conformance architecture invariants, and the exhaustive
@@ -65,11 +64,23 @@ Validated on 2026-08-05 (dated measurements below retain their run date):
   validation markers remain available to taint propagation but cannot be
   mislabeled by that command surface.
 - Layering, public-API, hardcoded-knowledge, adapter-capability, and adapter
-  `FlowEvent` snapshot audits passed. The hardcoded-knowledge audit excludes
+  `FlowEvent` behavioral audits passed. The hardcoded-knowledge audit excludes
   test fixtures and classifies production literals by ownership: grammar
   syntax in adapters, API/security identities in rule data, and only typed
-  IR/protocol/product constants in shared crates. This gate is zero-tolerance:
-  it has no baseline that can normalize an existing violation.
+  IR/protocol/product constants in shared crates, the SDK, and the CLI. This
+  gate is zero-tolerance: it has no baseline that can normalize an existing
+  violation.
+- Corpus-independence and shared-production clone audits passed. Production
+  Rust and rule YAML contain no benchmark case/snapshot identity or developer
+  home path, and shared production crates contain no exact clone of 20 or more
+  logical lines. Adapter-to-adapter similarities remain legal because each
+  frontend owns its language semantics and can only be generalized after the
+  shared contract is genuinely identical.
+- The locked dependency graph passed unused-edge, advisory, source-integrity,
+  and SPDX license-policy gates: every package declares a reviewed expression
+  with at least one distributable license branch. Release archives are then
+  executed from a relocated temporary working directory so security-rule
+  discovery is proven against the packaged layout rather than the source tree.
 
 The current deep rulepack gate is clean:
 
@@ -86,8 +97,8 @@ The current deep rulepack gate is clean:
 | Rules | 7,159 |
 | Enabled rules | 5,996 |
 | Disabled rules | 1,163 |
-| Match examples | 10,523 |
-| Enabled match examples | 10,088 |
+| Match examples | 10,524 |
+| Enabled match examples | 10,089 |
 | Taint-replay misses | 0 |
 | Errors | 0 |
 | Warnings | 0 |
@@ -132,22 +143,23 @@ seconds with 35,110,912 bytes maximum RSS.
 ## Elasticsearch scale result
 
 The current release pipeline is measured against the sibling 30,055-source
-Elasticsearch checkout. The final 2026-08-05 ABI-v61 exact large-workspace
-integration gate passed 5/5 in 222.95 seconds under a 3 GiB scheduling budget.
+Elasticsearch checkout. The final 2026-08-06 ABI-v61 exact large-workspace
+integration gate passed 5/5 in 213.51 seconds under a 3 GiB scheduling budget.
 It starts fresh
 processes and covers fresh-cache taint planning, warm semantic reuse, nine
 navigation commands, targeted inspect with taint evidence, security inventory,
 and production taint. Its enforced ceilings are 15 seconds for warm semantic
 reuse and 30 seconds for each measured query/analysis command.
 
-The cached generation validation/open phase completed in 5.57 seconds and the
-immediate fresh-process warm reuse completed in 2.58 seconds. Default inspect
-completed in 10.77 seconds. The broad exact
-`inspect execute --taint-flow` regression query completed in 29.68 seconds and
+The semantic generation validation/open phase completed in 5.23 seconds and
+the immediate fresh-process warm reuse completed in 2.35 seconds. Default
+inspect completed in 10.87 seconds. The broad exact
+`inspect execute --taint-flow` regression query completed in 28.70 seconds and
 reported 3,895 declaration hits, 26,047 other syntax hits, 198,718 unique raw
-taint flows, and 12,233/12,233 scoped-IDG entry closures. A matching timed run
-used 3,420,733,440 bytes maximum RSS, a 2,775,017,280-byte peak physical
-footprint, and zero swaps. The scheduler charges the measured non-reclaimable
+taint flows, and 12,233/12,233 scoped-IDG entry closures. A separate
+ABI-v61 RSS-profiled run used 3,420,733,440 bytes maximum RSS, a
+2,775,017,280-byte peak physical footprint, and zero swaps. The scheduler
+charges the measured non-reclaimable
 linkage/output reserve plus 128 MiB per sparse rooted closure; it does not treat
 clean file-backed factstore pages as committed transient memory. Subject to
 CPU availability, 3 GiB permits up to ten workers, 2 GiB up to two, and 1 GiB
@@ -160,7 +172,7 @@ That explicit, opt-in `index --semantic` compiler prewarm completed in
 RSS, exited before IDG replay began, and the IDG worker remained below the
 3 GiB scheduling budget. Normal commands do
 not force that whole-workspace prewarm: fresh-cache production taint completed
-in 30.83 seconds, warm production taint in 26.70 seconds, and exact syntax
+in 28.84 seconds, warm production taint in 26.26 seconds, and exact syntax
 commands hydrate only the product they request. The long explicit prewarm is
 recorded honestly because it remains a bulk cache-publication operation, not
 an interactive-command latency claim.
@@ -189,9 +201,9 @@ callee-name matching cannot manufacture field flow. Regression tests pin
 scalar-to-receiver mapping, sibling-field isolation, clean output-argument
 overwrites, Java record accessors, and C# expression-bodied properties.
 
-The final gate measured source inventory at 3.57 seconds, the exhaustive
-high-severity sink inventory at 22.25 seconds, credit-bearing sanitizer
-inventory at 17.16 seconds, and dependency inventory at 11.02 seconds. These
+The final gate measured source inventory at 3.39 seconds, the exhaustive
+high-severity sink inventory at 21.34 seconds, credit-bearing sanitizer
+inventory at 16.97 seconds, and dependency inventory at 8.65 seconds. These
 are syntax/compiler and rulepack facts, not Elasticsearch-specific name lists.
 
 Production security in the integration gate reports
@@ -314,6 +326,40 @@ and record a new dated snapshot here.
 
 ## Pre-release gate
 
+The tag workflow is the authoritative publish gate. A tag must be an ancestor
+of `main`, use `v<workspace-semver>`, and pass the preflight job before any
+platform build starts. Publishing waits for both all six native build/test
+jobs and the pinned Elasticsearch scale job. The pinned Elasticsearch commit
+is test input only: its names, paths, APIs, and benchmark cases are forbidden
+from production Rust and rule data by `audit-corpus-independence.py`.
+
+The gates cover distinct failure classes:
+
+| Gate | What it prevents |
+|---|---|
+| Provenance and version | Releasing an arbitrary commit or a tag that disagrees with Cargo metadata |
+| Format, compile, Clippy, rustdoc | Broken builds, warnings, malformed public documentation |
+| Full workspace tests and release builds on six native targets | Cross-crate, adapter, platform, and binary integration regressions; optimized binaries are exercised by CLI, package, rulepack, and large-repository gates |
+| Capability, `FlowEvent`, architecture, and taint matrices | Silent language gaps or a second syntax/flow implementation outside adapters |
+| Hardcoded and corpus-independence audits | Shared language/API guesses and benchmark-specific tuning |
+| Rule validation, collision audit, and taint replay | Invalid YAML, warnings, empty audit coverage, ambiguous ownership, or examples the engine cannot reproduce |
+| Public API, layering, dependency, license, and clone audits | Accidental API drift, dependency cycles, stale dependencies, advisories, unreviewed licensing, and copy-paste architecture |
+| Self-security plus JSON/SARIF/HTML and relocated-package smokes | Incomplete self-analysis, broken consumer output contracts, silent rulepack loss, or an archive that only works from the source checkout |
+| Exact Elasticsearch gate under 3 GiB | Cold/warm cache, navigation, inspect, security correctness, latency, or memory-scheduling regressions; release CI fails closed if its corpus or binary is unavailable |
+| Checksums and immutable action pins | Corrupt release archives and mutable CI dependencies |
+
+The compiler/rule boundary is a release invariant, not a style preference.
+Adapters may contain Tree-sitter node kinds and source grammar for their own
+language. Rulepack YAML may contain provider APIs, package identities,
+taxonomy, trust, severity, configuration values, and sanitizer policy. Shared
+analysis may contain only typed IR, generic fixed-point algorithms, persisted
+protocol/schema constants, and product behavior. A new framework or project
+must therefore be supportable by rule data and existing adapter facts; it must
+not require adding its API names to the engine. The hardcoded-knowledge gate
+derives provider-shaped callable identities and the supported-language
+vocabulary from the current rulepack, so adding a framework or language also
+expands the boundary audit automatically.
+
 Before cutting a deployable artifact, run:
 
 ```bash
@@ -325,6 +371,9 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
   --document-private-items --release --locked
 
 cargo build --release -p bonsai_cli --locked
+cargo machete --with-metadata
+cargo audit --deny warnings
+python3 scripts/audit-dependency-licenses.py
 
 ./target/release/bonsai-ninja security . pack --validate --taint-replay \
   --rules-dir security-patterns \
@@ -332,20 +381,30 @@ cargo build --release -p bonsai_cli --locked
   --no-color \
   --no-progress
 
-cargo test -p bonsai_conformance --test architecture_invariants
-cargo test -p bonsai_security --test rulepack_conformance
+cargo test --workspace --locked --no-fail-fast
+cargo test --release --locked -p bonsai_conformance --test architecture_invariants
+cargo test --release --locked -p bonsai_security --test rulepack_conformance
 python3 scripts/sanitizer_credit_audit.py
 python3 scripts/sync_skill.py --check
 scripts/audit-layering.sh
-scripts/audit-hardcoded.sh --check
+scripts/audit-hardcoded.sh --check /tmp/hardcoded-audit
+python3 scripts/audit-corpus-independence.py
+python3 scripts/audit-rust-duplication.py
 scripts/audit-public-api.sh --check
 scripts/audit-adapter-capabilities.sh --check
 scripts/audit-adapter-flow-events.sh --check
+scripts/audit-loop.sh
 
-cargo test --release -p bonsai_cli --test elasticsearch_large_repo -- \
+BONSAI_ELASTICSEARCH_ROOT=../elasticsearch \
+BONSAI_REQUIRE_ELASTICSEARCH_GATE=1 \
+BONSAI_MEMORY_BUDGET_MB=3072 \
+  cargo test --release --locked -p bonsai_cli --test elasticsearch_large_repo -- \
   --nocapture
 ```
 
-Run the Elasticsearch and external benchmark gates when engine, resolver,
-adapter, security, cache, or export semantics change. Documentation-only
-changes still run the documentation, link, formatting, and rustdoc checks.
+The release workflow always fetches the documented pinned Elasticsearch
+snapshot and runs the exact gate. During development, run it whenever engine,
+resolver, adapter, query, security, cache, or export semantics change. External
+security benchmarks remain isolated evidence rather than release logic.
+Documentation-only changes still run the documentation, link, formatting, and
+rustdoc checks.

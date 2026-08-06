@@ -8,7 +8,10 @@
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::ResolvedCallGraph;
-use bonsai_common::{cached_span_map_arc, wire, workspace_bonsai_dir, FileId, Precision, Span, SymbolId};
+use bonsai_common::{
+    cached_span_map_arc, path_filter_matches_with_root, wire, workspace_bonsai_dir, FileId, Precision, Span,
+    SymbolId,
+};
 use bonsai_factstore::{FactStoreReader, FactStoreWriter, LookupHit};
 use bonsai_hash::{fnv1a_bytes64, fnv1a_str_slice64, Hasher as StableHasher};
 use bonsai_lang_api::{
@@ -2707,103 +2710,7 @@ fn invalid_message(message: &'static str) -> std::io::Error {
 }
 
 fn file_path_matches_query(path: &str, filter: &str, workspace_root: Option<&Path>) -> bool {
-    let Some(root) = workspace_root else {
-        if filter_looks_like_absolute_path(filter) {
-            return normalized_path_contains(path, filter);
-        }
-        return path_filter_matches(path, filter);
-    };
-    let relative = workspace_relative_filter_path(root, path);
-    if path_filter_matches(&relative, filter) {
-        return true;
-    }
-    filter_looks_like_absolute_path(filter) && normalized_path_contains(path, filter)
-}
-
-fn workspace_relative_filter_path(root: &Path, path: &str) -> String {
-    let normalized_path = normalize_path_for_filter(path);
-    let path_obj = Path::new(path);
-    if let Ok(relative) = path_obj.strip_prefix(root) {
-        return normalize_path_for_filter(&relative.to_string_lossy());
-    }
-    if let Some(canonical_path) = canonicalize_path_or_existing_parent(path_obj) {
-        if let Ok(relative) = canonical_path.strip_prefix(root) {
-            return normalize_path_for_filter(&relative.to_string_lossy());
-        }
-        if let Some(canonical_root) = canonicalize_path_or_existing_parent(root) {
-            if let Ok(relative) = canonical_path.strip_prefix(canonical_root) {
-                return normalize_path_for_filter(&relative.to_string_lossy());
-            }
-        }
-    }
-    let normalized_root = normalize_path_for_filter(&root.to_string_lossy());
-    let normalized_root = normalized_root.trim_end_matches('/');
-    if normalized_root.is_empty() {
-        return normalized_path;
-    }
-    if normalized_path == normalized_root {
-        return String::new();
-    }
-    let root_prefix = format!("{normalized_root}/");
-    normalized_path
-        .strip_prefix(&root_prefix)
-        .map(ToOwned::to_owned)
-        .unwrap_or(normalized_path)
-}
-
-fn normalized_path_contains(path: &str, filter: &str) -> bool {
-    let filter = normalize_path_for_filter(filter);
-    !filter.is_empty() && normalize_path_for_filter(path).contains(&filter)
-}
-
-fn path_filter_matches(path: &str, filter: &str) -> bool {
-    let path = normalize_path_for_filter(path);
-    let filter = normalize_path_for_filter(filter);
-    if filter.is_empty() {
-        return false;
-    }
-    if filter.contains('/') {
-        return path_filter_with_separator_matches(&path, &filter);
-    }
-    path.contains(filter.as_str())
-}
-
-fn path_filter_with_separator_matches(path: &str, filter: &str) -> bool {
-    let trimmed = filter.trim_matches('/');
-    if trimmed.is_empty() {
-        return false;
-    }
-    let is_component_filter = filter.starts_with('/') || filter.ends_with('/');
-    if is_component_filter {
-        return path == trimmed
-            || path.starts_with(&format!("{trimmed}/"))
-            || path.contains(&format!("/{trimmed}/"));
-    }
-    path.contains(filter)
-}
-
-fn filter_looks_like_absolute_path(filter: &str) -> bool {
-    let normalized = normalize_path_for_filter(filter);
-    if normalized.len() >= 3 && normalized.as_bytes()[1] == b':' && normalized.as_bytes()[2] == b'/' {
-        return true;
-    }
-    Path::new(filter).is_absolute() && normalized.trim_matches('/').contains('/')
-}
-
-fn normalize_path_for_filter(value: &str) -> String {
-    value.replace('\\', "/").trim_start_matches("./").to_string()
-}
-
-fn canonicalize_path_or_existing_parent(path: &Path) -> Option<PathBuf> {
-    if let Ok(canonical) = path.canonicalize() {
-        return Some(canonical);
-    }
-    let parent = path.parent()?;
-    let canonical_parent = parent.canonicalize().ok()?;
-    Some(match path.file_name() {
-        Some(file_name) => canonical_parent.join(file_name),
-        None => canonical_parent,
-    })
+    path_filter_matches_with_root(workspace_root, path, filter)
 }
 
 #[cfg(test)]

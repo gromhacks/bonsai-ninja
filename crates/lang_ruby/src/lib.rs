@@ -373,7 +373,7 @@ impl LanguageAdapter for RubyAdapter {
             vec![bonsai_lang_api::Decl {
                 symbol: bonsai_common::SymbolId::new(0),
                 kind: bonsai_lang_api::DeclKind::Function,
-                name: "__module__".to_string(),
+                name: bonsai_lang_api::MODULE_DECL_NAME.to_string(),
                 qualified_name: None,
                 module_path: bonsai_lang_api::ModulePath::default(),
                 span: module_span,

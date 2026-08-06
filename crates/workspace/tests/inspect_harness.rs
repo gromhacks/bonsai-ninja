@@ -73,24 +73,10 @@ fn callable_names(ws: &Workspace) -> AHashSet<String> {
 /// Mirror of the CLI's `per_file_symbol_aliases` — derives a
 /// {local → original} map from each file's imports. Prefer the per-adapter
 /// extractor (populates `alias` + `original_name` for forms like Python's
-/// `from x import y as z`); fall back to the generic walker when the
-/// adapter hasn't implemented its own.
+/// `from x import y as z`). An empty adapter result is authoritative.
 fn per_file_symbol_aliases(ws: &Workspace, file: bonsai_common::FileId) -> AHashMap<String, String> {
     let mut map: AHashMap<String, String> = AHashMap::new();
-    let imports = ws
-        .db()
-        .import_index(file)
-        .map(|i| i.imports.clone())
-        .filter(|i| !i.is_empty())
-        .unwrap_or_else(|| {
-            let Ok(parsed) = ws.db().parse(file) else {
-                return Vec::new();
-            };
-            let Ok(snap) = ws.vfs().snapshot(file) else {
-                return Vec::new();
-            };
-            bonsai_lang_api::kit::extract_generic_imports(&parsed.tree, file, snap.text.as_bytes())
-        });
+    let imports = ws.db().imports_for(file);
     for imp in &imports {
         if let (Some(local), Some(original)) = (imp.alias.as_deref(), imp.original_name.as_deref()) {
             if local != original && !local.is_empty() && !original.is_empty() {
@@ -803,29 +789,9 @@ fn query_hits_impl(ws: &Workspace, pattern: &str, is_regex: bool) -> Hits {
     let mut hits = Hits::default();
     let global = ws.db().global_index();
     for file in global.all_files() {
-        // Imports: prefer the per-adapter extractor (richer alias /
-        // wildcard / original-name fields). Fall back to the generic
-        // extractor for adapters that haven't implemented their own.
-        let imports = ws
-            .db()
-            .import_index(file)
-            .map(|i| i.imports.clone())
-            .filter(|i| !i.is_empty())
-            .unwrap_or_else(|| {
-                ws.db()
-                    .parse(file)
-                    .ok()
-                    .and_then(|parsed| {
-                        ws.vfs().snapshot(file).ok().map(|snap| {
-                            bonsai_lang_api::kit::extract_generic_imports(
-                                &parsed.tree,
-                                file,
-                                snap.text.as_bytes(),
-                            )
-                        })
-                    })
-                    .unwrap_or_default()
-            });
+        // Imports are exact adapter-lowered compiler facts. Empty means the
+        // adapter found no imports; tests must not invent a parallel parser.
+        let imports = ws.db().imports_for(file);
         for i in &imports {
             // Push the matched field so `has_import(needle)` sees a
             // string containing the needle. Production browse search

@@ -3,14 +3,12 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_modifier_visibility, decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_assign_targets, collect_kinds, collect_receiver_field_writes, first_named_child_of_kind,
-        language_from_pack, node_text, package_module_segments_with_workspace_prefix, parse_with, span_of,
-        walk_flow_events,
+        collect_kinds, collect_receiver_field_writes, first_named_child_of_kind, language_from_pack,
+        node_text, package_module_segments_with_workspace_prefix, parse_with, span_of, walk_flow_events,
     },
-    rewrite_implicit_member_reads, AdapterContext, AdapterError, CallKind, Decl, DeclIndex, DeclKind,
-    FieldWrite, FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasBinding, Visibility,
-    EMPTY_HANDLER,
+    AdapterContext, AdapterError, CallKind, Decl, DeclIndex, DeclKind, FieldWrite, FlowEvent, GrammarHandler,
+    ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
+    LanguageId, ModifierVocabulary, TypeAliasBinding, Visibility, EMPTY_HANDLER,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -535,35 +533,12 @@ fn kotlin_call_tail(name: &str) -> &str {
 }
 
 fn qualify_kotlin_implicit_member_reads(index: &mut DeclIndex) {
-    use std::collections::HashSet;
-    let getter_names: HashSet<String> = index
-        .defs
-        .iter()
-        .filter(|decl| {
-            matches!(decl.kind, DeclKind::Method | DeclKind::Function)
-                && decl.params.is_empty()
-                && !decl.name.is_empty()
-        })
-        .map(|decl| decl.name.clone())
-        .collect();
-    if getter_names.is_empty() {
-        return;
-    }
-    for decl in &mut index.defs {
-        if decl.flow_events.is_empty() {
-            continue;
-        }
-        let mut locals: HashSet<String> = decl.params.iter().cloned().collect();
-        collect_assign_targets(&decl.flow_events, &mut locals);
-        rewrite_implicit_member_reads(&mut decl.flow_events, &getter_names, &locals, |name| {
-            ImplicitMemberReadCall {
-                source_call: format!("this.{name}"),
-                call_name: format!("this.{name}"),
-                receiver: Some("this".to_string()),
-                call_kind: CallKind::Method,
-            }
-        });
-    }
+    bonsai_lang_api::qualify_implicit_member_reads_in_index(index, |name| ImplicitMemberReadCall {
+        source_call: format!("this.{name}"),
+        call_name: format!("this.{name}"),
+        receiver: Some("this".to_string()),
+        call_kind: CallKind::Method,
+    });
 }
 
 /// Qualify an unadorned property root in a zero-argument member return as
@@ -601,82 +576,7 @@ fn qualify_kotlin_receiver_field_getters(index: &mut DeclIndex) {
         let Some(fields) = decl.parent.and_then(|parent| fields_by_parent.get(&parent)) else {
             continue;
         };
-        qualify_kotlin_receiver_field_returns(&mut decl.flow_events, fields);
-    }
-}
-
-fn qualify_kotlin_receiver_field_returns(
-    events: &mut [FlowEvent],
-    fields: &std::collections::HashSet<String>,
-) {
-    for event in events {
-        match event {
-            FlowEvent::Return { value_flow, .. } | FlowEvent::Yield { value_flow, .. } => {
-                qualify_kotlin_receiver_field_flow(value_flow, fields);
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                qualify_kotlin_receiver_field_returns(then_events, fields);
-                qualify_kotlin_receiver_field_returns(else_events, fields);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                qualify_kotlin_receiver_field_returns(body, fields);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                qualify_kotlin_receiver_field_returns(body, fields);
-                qualify_kotlin_receiver_field_returns(catch_events, fields);
-                qualify_kotlin_receiver_field_returns(finally_events, fields);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn qualify_kotlin_receiver_field_flow(
-    flow: &mut bonsai_lang_api::ExpressionFlow,
-    fields: &std::collections::HashSet<String>,
-) {
-    let old_place = flow.place.clone();
-    if let Some(projection) = &mut flow.projection {
-        if fields.contains(&projection.base) {
-            projection.path.insert(0, std::mem::take(&mut projection.base));
-            projection.base = "this".to_string();
-            flow.place = Some(projection.canonical_place());
-        }
-    } else if let Some(place) = flow.place.as_deref() {
-        if fields.contains(place) {
-            flow.projection = Some(bonsai_lang_api::ExpressionProjection {
-                base: "this".to_string(),
-                path: vec![place.to_string()],
-            });
-            flow.place = Some(format!("this.{place}"));
-        }
-    }
-    if let (Some(old_place), Some(new_place)) = (old_place.as_deref(), flow.place.as_deref()) {
-        if old_place != new_place {
-            for source in &mut flow.source_names {
-                if source == old_place {
-                    *source = new_place.to_string();
-                }
-            }
-        }
-    }
-    for field in &mut flow.aggregate_fields {
-        qualify_kotlin_receiver_field_flow(&mut field.value, fields);
-    }
-    for item in &mut flow.tuple_items {
-        qualify_kotlin_receiver_field_flow(item, fields);
-    }
-    for spread in &mut flow.spreads {
-        qualify_kotlin_receiver_field_flow(spread, fields);
+        bonsai_lang_api::qualify_receiver_field_expression_flows(&mut decl.flow_events, fields, "this");
     }
 }
 

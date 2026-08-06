@@ -1493,12 +1493,24 @@ fn syntax_inventory_commands_never_materialize_workspace_bodies() {
     let args = read(&root.join("crates/browse/src/args.rs"));
     for (name, source) in [("calls", calls), ("args", args)] {
         assert!(
-            source.contains("decl_index_uncached(file)")
+            source.contains("filtered_file_decl_index(ws, file, f.file)")
                 && source.contains(".filter(")
                 && source.contains(".push("),
             "{name} must stream file-local Tree-sitter IR and apply query predicates before collecting output rows"
         );
     }
+    let browse_common = read(&root.join("crates/browse/src/common.rs"));
+    let filtered_index = function_body(&browse_common, "filtered_file_decl_index");
+    let path_predicate = filtered_index
+        .find("file_path_matches_filter")
+        .expect("filtered compiler-object helper must apply the path predicate");
+    let body_decode = filtered_index
+        .find("decl_index_uncached(file)")
+        .expect("filtered compiler-object helper must stream the exact file-local body");
+    assert!(
+        path_predicate < body_decode,
+        "browse path predicates must run before a file-local compiler body is decoded"
+    );
 
     let imports = read(&root.join("crates/browse/src/imports.rs"));
     let imports_body = function_body(&imports, "imports");
@@ -5324,6 +5336,9 @@ fn structured_security_guards_are_rulepack_driven() {
     let language_kit = read(&root.join("crates/lang_api/src/kit/mod.rs"));
     let ruby = read(&root.join("crates/lang_ruby/src/lib.rs"));
     let native_export = read(&root.join("crates/browse/src/native_export.rs"));
+    let metadata = read(&root.join("security-patterns/metadata.yml"));
+    let assignment_lowering = read(&root.join("crates/lang_api/src/kit/walker/assignment.rs"));
+    let prototype_guard = read(&root.join("crates/security/src/analysis/prototype_guard.rs"));
 
     for spelling in ["os.path.join", "realpath", "setLocation"] {
         assert!(
@@ -5331,6 +5346,25 @@ fn structured_security_guards_are_rulepack_driven() {
             "security analysis must obtain `{spelling}` roles from rulepack semantics"
         );
     }
+    assert!(
+        !analysis.contains("newdocumentbuilder")
+            && metadata.contains("receiver_factory_lineage_builders:")
+            && metadata.contains("name: newDocumentBuilder"),
+        "factory-to-builder API identity must be rulepack metadata, never shared analysis policy"
+    );
+    assert!(
+        !assignment_lowering.contains("__setitem__")
+            && !prototype_guard.contains("__setitem__")
+            && assignment_lowering.contains("CallKind::IndexWrite")
+            && prototype_guard.contains("CallKind::IndexWrite"),
+        "indexed writes must remain typed compiler operations, not provider pseudo-callees"
+    );
+    assert!(
+        !language_kit.contains("trpc.input")
+            && !language_kit.contains("@trpc/server")
+            && !root.join("crates/lang_api/src/kit/imports.rs").exists(),
+        "framework callback sources and import syntax must stay in rule data and concrete adapters"
+    );
 
     let receiver_flow = function_body(&analysis, "guarded_variable_flows_into_receiver_before_sink");
     assert!(

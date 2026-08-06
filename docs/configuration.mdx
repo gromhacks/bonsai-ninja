@@ -5,7 +5,7 @@ description: "CLI flags, environment variables, rulepack lookup, and precedence.
 
 # Configuration
 
-CLI flags take precedence over environment variables. Environment variables take precedence over built-in defaults. Rulepack lookup checks `--rules-dir`, then `BONSAI_RULES_DIR`, then workspace-local and cwd-relative `security-patterns/` locations.
+CLI flags take precedence over environment variables. Environment variables take precedence over built-in defaults. Rulepack lookup checks `--rules-dir`, then `BONSAI_RULES_DIR`, then workspace-local, workspace-parent, packaged-executable-sibling, and cwd-relative `security-patterns/` locations. This lets an extracted release archive work from any current directory while preserving explicit and project-local overrides.
 
 Generated analysis state lives in `$CACHE_DIR`, a canonical-workspace-keyed
 directory below the operating system cache root. Run `cache stats <workspace>`
@@ -159,7 +159,7 @@ with `--no-progress` for quiet script/LLM runs.
 
 | Setting | Highest precedence | Then | Default |
 |---|---|---|---|
-| Rulepack directory | `--rules-dir` | `BONSAI_RULES_DIR`, workspace/cwd discovery | None |
+| Rulepack directory | `--rules-dir` | `BONSAI_RULES_DIR`, workspace/package/cwd discovery | None |
 | Parse timeout | `--parse-timeout` | `BONSAI_PARSE_TIMEOUT_MS` | uncapped |
 | Theme | `--theme` | `BONSAI_THEME` | `moss` |
 | Context budget | `--context` | `BONSAI_CONTEXT` | 32k |

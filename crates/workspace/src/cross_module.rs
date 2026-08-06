@@ -17,7 +17,8 @@ use bonsai_callgraph::{EdgeKind, ResolvedCallGraph};
 use bonsai_common::{FuncId, Precision, Span, SymbolId, TraceStepId};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
-    AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent, LoopKind, TypeAliasBinding,
+    assignment_trace_message, AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent, LoopKind,
+    TypeAliasBinding,
 };
 use bonsai_resolve::{resolve_callable_with_context, ResolveContext};
 use std::sync::Arc;
@@ -731,6 +732,15 @@ impl<'a> TraceBuilder<'a> {
     }
 
     fn emit_call(&mut self, site: CallSite<'_>, func: FuncId, depth: usize) -> bool {
+        if site.call_kind == CallKind::IndexWrite {
+            return self.emit(
+                StepKind::Assign,
+                func,
+                site.span,
+                Precision::Exact,
+                format!("Indexed write {}", site.name),
+            );
+        }
         // Resolution order:
         //   1. Resolved semantic callgraph edge for this exact call site.
         //   2. Active call-frame parameter/local binding for context-sensitive
@@ -768,6 +778,7 @@ impl<'a> TraceBuilder<'a> {
             CallKind::Operator => format!("Operator {}", site.name),
             CallKind::Indirect => format!("Indirect call {}", site.name),
             CallKind::ChannelSend => format!("Channel send {}", site.name),
+            CallKind::IndexWrite => unreachable!("indexed writes return before call resolution"),
             CallKind::Function => format!("Call {}", site.name),
         };
 
@@ -1054,46 +1065,6 @@ fn types_from_decl(decl: &Decl) -> AHashMap<String, AHashSet<String>> {
             .insert(alias.type_name.clone());
     }
     out
-}
-
-fn assignment_trace_message(
-    prefix: &str,
-    target: &str,
-    source_name: Option<&str>,
-    source_call: Option<&str>,
-    source_call_args: &[String],
-    source_names: &[String],
-) -> String {
-    let rhs = assignment_trace_rhs(source_name, source_call, source_call_args, source_names);
-    match rhs {
-        Some(rhs) => format!("{prefix} {target} = {rhs}"),
-        None => format!("{prefix} {target}"),
-    }
-}
-
-fn assignment_trace_rhs(
-    source_name: Option<&str>,
-    source_call: Option<&str>,
-    source_call_args: &[String],
-    source_names: &[String],
-) -> Option<String> {
-    if let Some(name) = source_name.map(str::trim).filter(|name| !name.is_empty()) {
-        return Some(name.to_string());
-    }
-    if let Some(call) = source_call.map(str::trim).filter(|call| !call.is_empty()) {
-        return Some(if source_call_args.is_empty() {
-            format!("{call}()")
-        } else {
-            format!("{call}({})", source_call_args.join(", "))
-        });
-    }
-    if !source_names.is_empty() {
-        return Some(source_names.join(" + "));
-    }
-    if !source_call_args.is_empty() {
-        return Some(source_call_args.join(", "));
-    }
-    None
 }
 
 fn declares_type_alias(decl: Option<&Decl>, target: &str) -> bool {

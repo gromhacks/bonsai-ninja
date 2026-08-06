@@ -54,7 +54,7 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { emit Seen(input); } }
-  description: "Solidity event emission with attacker-controlled payload - leaks untrusted data onto the on-chain event log. The synthetic `emit` call ref is the only Solidity call shape with this name (no `obj.emit(...)` user code is normally surfaced); the bare-name match is correct here and the mega_flow gate catches FP regressions."
+  description: "Solidity event emission with attacker-controlled payload - leaks untrusted data onto the on-chain event log. The adapter emits the synthetic `emit` call only for an `emit_statement`, so the bare-name match does not match ordinary member calls."
 
 - id: solidity.sink.external_contract_call
   enabled: false

@@ -12,7 +12,8 @@ use crate::finding::{
 };
 use crate::loader::{Rulepack, RulepackMetadata};
 use crate::matcher::{
-    callback_extension_attribution_match, infer_entry_point_sources_for_files_with_progress,
+    callback_extension_attribution_match, dedup_inventory_matches,
+    infer_entry_point_sources_for_files_with_progress,
     match_rules_against_facts_for_inventory_with_progress_on_files,
     match_rules_against_facts_for_sink_inventory_with_progress_on_files,
     match_rules_against_facts_for_taint_support_with_progress_on_files,
@@ -28,7 +29,9 @@ use crate::rule::{
 use crate::sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recognized_non_crediting};
 use ahash::{AHashMap, AHashSet};
 use anyhow::Result;
-use bonsai_common::{FileId, FuncId, Precision, Span, SymbolId};
+use bonsai_common::{
+    path_filter_matches_with_root, workspace_relative_filter_path, FileId, FuncId, Precision, Span, SymbolId,
+};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
     branch_condition_fact_for_span, AssignValueKind, BranchConditionFact, BranchConditionPolarity,
@@ -99,7 +102,6 @@ pub use validation::validate_pack;
 #[cfg(test)]
 use validation::{lowercase_receiver_token_from_regex, regex_prefix_is_receiver_agnostic};
 
-type InventoryMatchIdentity = (String, String, u32, u32, String, Option<String>);
 type SourceMatchDedupeKey = (String, String, u64, u64, String);
 type SourceMatchDedupeValue<'a> = (usize, &'a RuleMatch, FuncId, u64);
 
@@ -4026,90 +4028,6 @@ fn finding_has_excluded_path(
     })
 }
 
-fn workspace_relative_filter_path(root: Option<&Path>, path: &str) -> String {
-    let normalized_path = normalize_path_for_filter(path);
-    let Some(root) = root else {
-        return normalized_path;
-    };
-    if let Ok(relative) = Path::new(path).strip_prefix(root) {
-        return normalize_path_for_filter(&relative.to_string_lossy());
-    }
-    let normalized_root = normalize_path_for_filter(&root.to_string_lossy());
-    let normalized_root = normalized_root.trim_end_matches('/');
-    if normalized_root.is_empty() {
-        return normalized_path;
-    }
-    if normalized_path == normalized_root {
-        return String::new();
-    }
-    let root_prefix = format!("{normalized_root}/");
-    normalized_path
-        .strip_prefix(&root_prefix)
-        .map(ToOwned::to_owned)
-        .unwrap_or(normalized_path)
-}
-
-fn path_filter_matches_with_root(root: Option<&Path>, path: &str, filter: &str) -> bool {
-    let relative = workspace_relative_filter_path(root, path);
-    if path_filter_matches(&relative, filter) {
-        return true;
-    }
-    filter_looks_like_absolute_path(filter) && path_filter_matches(path, filter)
-}
-
-fn filter_looks_like_absolute_path(filter: &str) -> bool {
-    let normalized = normalize_path_for_filter(filter);
-    if normalized.len() >= 3 && normalized.as_bytes()[1] == b':' && normalized.as_bytes()[2] == b'/' {
-        return true;
-    }
-    Path::new(filter).is_absolute() && normalized.trim_matches('/').contains('/')
-}
-
-/// True when `path` matches the CLI path filter `filter`.
-/// Substring match for bare names; component-aware match for
-/// filters containing `/`.
-fn path_filter_matches(path: &str, filter: &str) -> bool {
-    let path = normalize_path_for_filter(path);
-    let filter = normalize_path_for_filter(filter);
-    if filter.is_empty() {
-        return false;
-    }
-    if filter.contains('/') {
-        return path_filter_with_separator_matches(&path, &filter);
-    }
-    path.contains(filter.as_str())
-}
-
-/// Path filter with `/` component awareness. `/foo/` matches `foo` as
-/// a complete path component (start of path, end, or surrounded by
-/// slashes); `foo/bar` matches anywhere as a substring.
-fn path_filter_with_separator_matches(path: &str, filter: &str) -> bool {
-    let trimmed = filter.trim_matches('/');
-    if trimmed.is_empty() {
-        return false;
-    }
-    // Leading or trailing slash on the filter signals "match this as
-    // a directory component", not as raw substring.
-    let is_component_filter = filter.starts_with('/') || filter.ends_with('/');
-    if is_component_filter {
-        // Anchored comparison must strip the path's own leading slash the
-        // same way the filter was trimmed, or an explicit absolute filter
-        // (`/abs/ws/app.py`) can never equal the absolute path it names.
-        let anchored = path.trim_start_matches('/');
-        return anchored == trimmed
-            || anchored.starts_with(&format!("{trimmed}/"))
-            || path.contains(&format!("/{trimmed}/"));
-    }
-    path.contains(filter)
-}
-
-/// Normalise a path for filter comparison: forward slashes only, no
-/// leading `./`. Lets Windows-emitted backslash paths and shell-glob
-/// `./foo` prefixes match the same filter strings.
-fn normalize_path_for_filter(value: &str) -> String {
-    value.replace('\\', "/").trim_start_matches("./").to_string()
-}
-
 /// Stable matcher-output sort: language, file, line, column. Required for
 /// deterministic finding ids and reproducible fixed-point scheduling.
 fn sort_matches(matches: &mut [RuleMatch]) {
@@ -4121,41 +4039,6 @@ fn sort_matches(matches: &mut [RuleMatch]) {
             b.column,
         ))
     });
-}
-
-/// Drop matches whose surface site identity is identical to a
-/// preceding entry. The matcher pipeline can emit the same call
-/// site through more than one fact stream (for example, a real
-/// nested receiver call plus a shortened call fact at the same
-/// span). For inventory output, one rule at one concrete location
-/// should render once; when duplicate streams disagree on text,
-/// keep the longer text because it carries the most receiver context.
-///
-/// Only safe to call on inventory output — the taint-analysis
-/// pipeline consumes the broader match stream where multiple
-/// entries per call site carry distinct downstream context.
-fn dedup_inventory_matches(matches: &mut Vec<RuleMatch>) {
-    let mut seen: AHashMap<InventoryMatchIdentity, usize> = AHashMap::new();
-    let mut deduped: Vec<RuleMatch> = Vec::with_capacity(matches.len());
-    for m in matches.drain(..) {
-        let key = (
-            m.language.clone(),
-            m.file.clone(),
-            m.line,
-            m.column,
-            m.rule_id.clone(),
-            m.enclosing_fn.clone(),
-        );
-        if let Some(&idx) = seen.get(&key) {
-            if m.match_text.len() > deduped[idx].match_text.len() {
-                deduped[idx] = m;
-            }
-            continue;
-        }
-        seen.insert(key, deduped.len());
-        deduped.push(m);
-    }
-    *matches = deduped;
 }
 
 fn combine_source_analysis_candidates(
@@ -4477,17 +4360,11 @@ fn inferred_source_field_name(text: &str) -> Option<&str> {
 }
 
 /// Trust-based source preference, modulated by the sink the source
-/// reaches when known. The flat trust-rank ("remote" beats "local"
-/// always) systematically mis-attributes mega_flow-shape chains
-/// where two sources co-taint a container and only one of them
-/// semantically feeds the sink's matched arg — e.g. PHP's
-/// `['cmd' => $raw, 'user' => $_SERVER, ...]` puts both readline
-/// (`local`) and `$_SERVER` (`remote`) into `$envelope`, and the
-/// downstream `shell_exec($cmd)` sink reaches both. The cmd-channel
-/// source is `readline`, but the flat rank picks `$_SERVER` because
-/// remote-trust outranks local-trust. Use sink semantics
-/// (`category`/`tag`) to break that tie when the rule pack tells us
-/// which input shape is the natural carrier for that sink class.
+/// reaches when known. A flat trust-rank ("remote" beats "local"
+/// always) mis-attributes multi-source aggregate chains where only one source
+/// semantically feeds the sink's matched argument. Use typed sink flow
+/// semantics from the rule pack to break that tie instead of embedding API,
+/// language, category, or tag inventories in the engine.
 fn finding_has_flow_class(pack: &Rulepack, finding: &FindingMatch, class: FlowClass) -> bool {
     pack.find_rule_by_id(&finding.rule_id)
         .and_then(|rule| rule.analysis_semantics.as_ref())
@@ -6529,14 +6406,12 @@ fn xxe_factory_hardening_sanitizes_sink(
     san: &RuleMatch,
     snk: &RuleMatch,
 ) -> bool {
+    let sink_semantics = sink_rule.analysis_semantics.as_ref();
     if !sanitizer_credits_sink_tag(
         metadata,
         sanitizer_rule.and_then(|rule| rule.tag.as_deref()),
         sink_rule.tag.as_deref(),
-    ) || sink_rule
-        .analysis_semantics
-        .as_ref()
-        .and_then(|semantics| semantics.sanitizer_attachment_policy)
+    ) || sink_semantics.and_then(|semantics| semantics.sanitizer_attachment_policy)
         != Some(SanitizerAttachmentPolicy::ReceiverFactoryLineage)
         || san.span.file != snk.span.file
         || !match_precedes_or_same(san, snk)
@@ -6559,6 +6434,9 @@ fn xxe_factory_hardening_sanitizes_sink(
         snk.span,
         sink_receiver,
         factory_receiver,
+        sink_semantics
+            .map(|semantics| semantics.receiver_factory_lineage_builders.as_slice())
+            .unwrap_or_default(),
     )
 }
 
@@ -6575,6 +6453,7 @@ fn builder_created_from_factory_before_sink(
     sink_span: Span,
     builder_receiver: &str,
     factory_receiver: &str,
+    builder_targets: &[RuleTarget],
 ) -> bool {
     if san_span.file != sink_span.file || san_span.end > sink_span.start {
         return false;
@@ -6582,80 +6461,66 @@ fn builder_created_from_factory_before_sink(
     let Some(decl) = ws.exact_decl(SymbolId::new(sink_func.raw())) else {
         return false;
     };
-    builder_available_at_sink(
-        &decl.flow_events,
-        &decl.flow_events,
-        san_span,
+    let context = BuilderLineageContext {
+        all_events: &decl.flow_events,
+        sanitizer_span: san_span,
         sink_span,
         builder_receiver,
         factory_receiver,
-        false,
-    )
-    .unwrap_or(false)
+        builder_targets,
+    };
+    builder_available_at_sink(&decl.flow_events, &context, false).unwrap_or(false)
+}
+
+struct BuilderLineageContext<'a> {
+    all_events: &'a [FlowEvent],
+    sanitizer_span: Span,
+    sink_span: Span,
+    builder_receiver: &'a str,
+    factory_receiver: &'a str,
+    builder_targets: &'a [RuleTarget],
 }
 
 fn builder_available_at_sink(
     events: &[FlowEvent],
-    all_events: &[FlowEvent],
-    sanitizer_span: Span,
-    sink_span: Span,
-    builder_receiver: &str,
-    factory_receiver: &str,
+    context: &BuilderLineageContext<'_>,
     mut available: bool,
 ) -> Option<bool> {
     for event in events {
         match event {
             FlowEvent::Assign { span, target, .. } => {
-                if sanitizer_span.end <= span.start
-                    && span.end <= sink_span.start
-                    && clean_overwrite_target_key(target) == clean_overwrite_target_key(builder_receiver)
-                    && assignment_uses_factory_builder(all_events, *span, factory_receiver)
+                if context.sanitizer_span.end <= span.start
+                    && span.end <= context.sink_span.start
+                    && clean_overwrite_target_key(target)
+                        == clean_overwrite_target_key(context.builder_receiver)
+                    && assignment_uses_factory_builder(
+                        context.all_events,
+                        *span,
+                        context.factory_receiver,
+                        context.builder_targets,
+                    )
                 {
                     available = true;
                 }
             }
-            FlowEvent::Call { span, .. } if spans_overlap(*span, sink_span) => return Some(available),
+            FlowEvent::Call { span, .. } if spans_overlap(*span, context.sink_span) => {
+                return Some(available);
+            }
             FlowEvent::Branch {
                 span,
                 then_events,
                 else_events,
                 ..
-            } if span_contains(*span, sink_span) => {
-                return builder_available_at_sink(
-                    then_events,
-                    all_events,
-                    sanitizer_span,
-                    sink_span,
-                    builder_receiver,
-                    factory_receiver,
-                    available,
-                )
-                .or_else(|| {
-                    builder_available_at_sink(
-                        else_events,
-                        all_events,
-                        sanitizer_span,
-                        sink_span,
-                        builder_receiver,
-                        factory_receiver,
-                        available,
-                    )
-                });
+            } if span_contains(*span, context.sink_span) => {
+                return builder_available_at_sink(then_events, context, available)
+                    .or_else(|| builder_available_at_sink(else_events, context, available));
             }
             FlowEvent::Loop { span, body, .. }
             | FlowEvent::Defer { span, body }
             | FlowEvent::Using { span, body, .. }
-                if span_contains(*span, sink_span) =>
+                if span_contains(*span, context.sink_span) =>
             {
-                return builder_available_at_sink(
-                    body,
-                    all_events,
-                    sanitizer_span,
-                    sink_span,
-                    builder_receiver,
-                    factory_receiver,
-                    available,
-                );
+                return builder_available_at_sink(body, context, available);
             }
             FlowEvent::Try {
                 span,
@@ -6663,38 +6528,10 @@ fn builder_available_at_sink(
                 catch_events,
                 finally_events,
                 ..
-            } if span_contains(*span, sink_span) => {
-                return builder_available_at_sink(
-                    body,
-                    all_events,
-                    sanitizer_span,
-                    sink_span,
-                    builder_receiver,
-                    factory_receiver,
-                    available,
-                )
-                .or_else(|| {
-                    builder_available_at_sink(
-                        catch_events,
-                        all_events,
-                        sanitizer_span,
-                        sink_span,
-                        builder_receiver,
-                        factory_receiver,
-                        available,
-                    )
-                })
-                .or_else(|| {
-                    builder_available_at_sink(
-                        finally_events,
-                        all_events,
-                        sanitizer_span,
-                        sink_span,
-                        builder_receiver,
-                        factory_receiver,
-                        available,
-                    )
-                });
+            } if span_contains(*span, context.sink_span) => {
+                return builder_available_at_sink(body, context, available)
+                    .or_else(|| builder_available_at_sink(catch_events, context, available))
+                    .or_else(|| builder_available_at_sink(finally_events, context, available));
             }
             _ => {}
         }
@@ -6706,6 +6543,7 @@ fn assignment_uses_factory_builder(
     events: &[FlowEvent],
     assignment_span: Span,
     factory_receiver: &str,
+    builder_targets: &[RuleTarget],
 ) -> bool {
     for event in events {
         match event {
@@ -6713,7 +6551,9 @@ fn assignment_uses_factory_builder(
                 span, name, receiver, ..
             } => {
                 if (span_contains(assignment_span, *span) || spans_overlap(assignment_span, *span))
-                    && clean_overwrite_callee_tail(name) == "newdocumentbuilder"
+                    && builder_targets
+                        .iter()
+                        .any(|target| rule_target_matches_call(name, &[], target))
                     && receiver.as_deref().and_then(clean_overwrite_target_key)
                         == clean_overwrite_target_key(factory_receiver)
                 {
@@ -6725,14 +6565,22 @@ fn assignment_uses_factory_builder(
                 else_events,
                 ..
             } => {
-                if assignment_uses_factory_builder(then_events, assignment_span, factory_receiver)
-                    || assignment_uses_factory_builder(else_events, assignment_span, factory_receiver)
-                {
+                if assignment_uses_factory_builder(
+                    then_events,
+                    assignment_span,
+                    factory_receiver,
+                    builder_targets,
+                ) || assignment_uses_factory_builder(
+                    else_events,
+                    assignment_span,
+                    factory_receiver,
+                    builder_targets,
+                ) {
                     return true;
                 }
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if assignment_uses_factory_builder(body, assignment_span, factory_receiver) {
+                if assignment_uses_factory_builder(body, assignment_span, factory_receiver, builder_targets) {
                     return true;
                 }
             }
@@ -6742,9 +6590,19 @@ fn assignment_uses_factory_builder(
                 finally_events,
                 ..
             } => {
-                if assignment_uses_factory_builder(body, assignment_span, factory_receiver)
-                    || assignment_uses_factory_builder(catch_events, assignment_span, factory_receiver)
-                    || assignment_uses_factory_builder(finally_events, assignment_span, factory_receiver)
+                if assignment_uses_factory_builder(body, assignment_span, factory_receiver, builder_targets)
+                    || assignment_uses_factory_builder(
+                        catch_events,
+                        assignment_span,
+                        factory_receiver,
+                        builder_targets,
+                    )
+                    || assignment_uses_factory_builder(
+                        finally_events,
+                        assignment_span,
+                        factory_receiver,
+                        builder_targets,
+                    )
                 {
                     return true;
                 }

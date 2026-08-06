@@ -1181,9 +1181,15 @@
   payload_types: [json]
   packages: ["@trpc/server"]
   match:
-    kind: read
-    target:
-      name: trpc.input
+    kind: call
+    callee:
+      regex: "(^|\\.)procedure\\.input\\(.+\\)\\.(query|mutation|subscription)$"
+  constraints:
+  - min_args: 1
+  taint_semantics:
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices: [0]
   match_examples:
   - name: trpc destructured callback input
     code: |
@@ -1194,8 +1200,8 @@
           return sink(input.q);
         }),
       });
-    expect_match_text: [trpc.input]
-  description: "tRPC procedure callback destructured `input` parameter - attacker-supplied procedure argument."
+    expect_match_text: ["t.procedure.input(z.object({ q: z.string() })).query"]
+  description: "tRPC procedure handler callback parameter - attacker-supplied procedure input. Callback delivery is declared by rule data and stitched through compiler-resolved argument/parameter identities."
 
 - id: typescript.source.trpc_resolver_input_property
   enabled: false

@@ -31,8 +31,8 @@ mod decorators;
 mod direct_calls;
 mod elixir;
 mod expression_flow;
+mod flow_render;
 mod identifiers;
-mod imports;
 mod param_extraction;
 mod pseudo_call;
 mod qualified;
@@ -63,15 +63,17 @@ use elixir::{
 #[cfg(test)]
 pub use expression_flow::expression_flow_from_node;
 pub use expression_flow::expression_flow_from_node_with_handler;
+pub use flow_render::{assignment_trace_message, collect_return_spans, for_each_flow_event};
 pub use identifiers::{
     first_identifier_descendant, first_identifier_like_child, first_named_child, first_named_child_of_kind,
     looks_like_bare_identifier, looks_like_identifier, looks_like_literal_value,
 };
-pub use imports::extract_generic_imports;
 pub use param_extraction::extract_param_annotations;
 pub use receiver_writes::{
     collect_assign_targets, collect_receiver_field_writes, collect_receiver_state_sources,
-    rewrite_implicit_member_reads, ImplicitMemberReadCall,
+    insert_flow_field_assignments, qualify_implicit_member_assign_targets,
+    qualify_implicit_member_reads_in_index, qualify_receiver_field_expression_flows,
+    rewrite_implicit_member_reads, FlowFieldAssignInsertion, ImplicitMemberReadCall,
 };
 pub use return_extraction::{extract_catch_param, extract_return_value_text, extract_throw_value_name};
 #[cfg(test)]
@@ -103,9 +105,7 @@ use syntax_errors::{
 };
 use walker::walk_into;
 
-use crate::{
-    AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent, ImportScope, LoopKind,
-};
+use crate::{AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent, LoopKind};
 use bonsai_common::{FileId, Span};
 use bonsai_vfs::FileSnapshot;
 use std::sync::Arc;
@@ -898,6 +898,68 @@ pub fn node_at_span<'a>(root: Node<'a>, span: Span, expected_kinds: &[&str]) -> 
         }
     }
     exact_typed.or(exact_any).or(tightest_container)
+}
+
+/// Relate an adapter-proven finite selection expression to its enclosing
+/// compiler assignment or call argument. The callback owns all
+/// language-syntax validation.
+pub fn finite_literal_selection_fact_for_span<F>(
+    index: &DeclIndex,
+    tree: &Tree,
+    selection_span: Span,
+    validate_selection: F,
+) -> Option<crate::FiniteLiteralSelectionFact>
+where
+    F: FnOnce(Node<'_>) -> bool,
+{
+    let assignment = index
+        .assignment_values
+        .iter()
+        .filter(|fact| {
+            fact.target.is_some()
+                && fact.value_span.file == selection_span.file
+                && fact.value_span.start <= selection_span.start
+                && selection_span.end <= fact.value_span.end
+        })
+        .min_by_key(|fact| fact.value_span.end.saturating_sub(fact.value_span.start));
+    let argument = index
+        .call_argument_values
+        .iter()
+        .filter(|fact| {
+            fact.argument_span.file == selection_span.file
+                && fact.argument_span.start <= selection_span.start
+                && selection_span.end <= fact.argument_span.end
+        })
+        .min_by_key(|fact| fact.argument_span.len());
+    let value_span = assignment
+        .map(|fact| fact.value_span)
+        .or_else(|| argument.map(|fact| fact.argument_span))?;
+    let value_node = node_at_span(tree.root_node(), value_span, &[])?;
+    validate_selection(value_node).then(|| crate::FiniteLiteralSelectionFact {
+        selection_span,
+        assignment_span: assignment.map(|fact| fact.assignment_span),
+        target: assignment.and_then(|fact| fact.target.clone()),
+        call_span: argument.map(|fact| fact.call_span),
+        argument_index: argument.map(|fact| fact.argument_index),
+    })
+}
+
+/// Sort and deduplicate adapter-emitted finite-selection facts by their
+/// compiler-owned enclosing span.
+pub fn sort_dedup_finite_literal_selections(facts: &mut Vec<crate::FiniteLiteralSelectionFact>) {
+    facts.sort_by_key(|fact| {
+        let owner = fact
+            .assignment_span
+            .or(fact.call_span)
+            .unwrap_or(fact.selection_span);
+        (
+            owner.start,
+            owner.end,
+            fact.selection_span.start,
+            fact.selection_span.end,
+        )
+    });
+    facts.dedup();
 }
 
 /// Return the final identifier-shaped segment of the outer type constructor.
@@ -5209,7 +5271,7 @@ fn lower_module_declaration(lowering: &CallableLowering<'_>, defs: &mut Vec<crat
     defs.push(crate::Decl {
         symbol,
         kind: crate::DeclKind::Function,
-        name: "__module__".to_string(),
+        name: MODULE_DECL_NAME.to_string(),
         qualified_name: None,
         module_path: crate::ModulePath::default(),
         span: module_span,
@@ -7699,17 +7761,6 @@ fn emit_inline_closure_param_bindings(
     source_names: &[String],
     out: &mut Vec<FlowEvent>,
 ) {
-    emit_inline_closure_param_bindings_with_extra_sources(lambda, file, src, source_names, &[], out);
-}
-
-fn emit_inline_closure_param_bindings_with_extra_sources(
-    lambda: Node<'_>,
-    file: FileId,
-    src: &[u8],
-    source_names: &[String],
-    extra_param_sources: &[(String, Vec<String>)],
-    out: &mut Vec<FlowEvent>,
-) {
     let params = extract_param_names(&lambda, src);
     // H11: a single-param Kotlin lambda omits the param list and refers to
     // the implicit `it`. Synthesize it so `xs.forEach { sink(it) }` and
@@ -7728,12 +7779,6 @@ fn emit_inline_closure_param_bindings_with_extra_sources(
             continue;
         }
         let mut sources = source_names.to_vec();
-        if let Some((_, extra_sources)) = extra_param_sources
-            .iter()
-            .find(|(extra_param, _)| extra_param == &param)
-        {
-            sources.extend(extra_sources.iter().cloned());
-        }
         sources.sort();
         sources.dedup();
         if sources.is_empty() {
@@ -7750,34 +7795,6 @@ fn emit_inline_closure_param_bindings_with_extra_sources(
             value_kind: None,
         });
     }
-}
-
-fn inline_closure_param_extra_sources(
-    call_event: Option<&FlowEvent>,
-    lambda: Node<'_>,
-    src: &[u8],
-) -> Vec<(String, Vec<String>)> {
-    let Some(FlowEvent::Call { name, .. }) = call_event else {
-        return Vec::new();
-    };
-    if !call_is_trpc_procedure_handler(name) {
-        return Vec::new();
-    }
-    extract_param_names(&lambda, src)
-        .into_iter()
-        .filter(|param| param == "input")
-        .map(|param| (param, vec!["trpc.input".to_string()]))
-        .collect()
-}
-
-fn call_is_trpc_procedure_handler(name: &str) -> bool {
-    let compact: String = name.chars().filter(|ch| !ch.is_whitespace()).collect();
-    compact
-        .rsplit('.')
-        .next()
-        .is_some_and(|method| matches!(method, "query" | "mutation" | "subscription"))
-        && compact.contains(".procedure")
-        && compact.contains(".input(")
 }
 
 fn emit_inline_closure_param_bindings_from_yield_call(
@@ -8552,7 +8569,7 @@ pub fn strip_syntax_broken_flow_events(idx: &mut crate::DeclIndex, error_spans: 
 
 /// Name of the synthetic module-scope decl emitted in Pass 4 of
 /// [`decl_index_with_handler`].
-const MODULE_DECL_NAME: &str = "__module__";
+pub const MODULE_DECL_NAME: &str = "__module__";
 
 /// Emit exact local callable-alias facts for C-family function-pointer
 /// declarations such as `void (*cb)(char*) = helper;`.

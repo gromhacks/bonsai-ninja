@@ -1049,7 +1049,8 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
         || semantics.url_reconstruction_guard.is_some()
         || semantics.context_flow.is_some()
         || semantics.post_sink_policy.is_some()
-        || semantics.sanitizer_attachment_policy.is_some())
+        || semantics.sanitizer_attachment_policy.is_some()
+        || !semantics.receiver_factory_lineage_builders.is_empty())
         && rule.kind != RuleKind::Sink
     {
         push_validation_issue(
@@ -1068,6 +1069,39 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             Some(rule),
             "sanitizer_guard is only valid on sanitizer rules",
         );
+    }
+    if semantics.sanitizer_attachment_policy == Some(SanitizerAttachmentPolicy::ReceiverFactoryLineage)
+        && semantics.receiver_factory_lineage_builders.is_empty()
+    {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-analysis-semantics",
+            Some(rule),
+            "receiver-factory-lineage requires at least one rulepack-owned receiver_factory_lineage_builders target",
+        );
+    }
+    for (index, target) in semantics.receiver_factory_lineage_builders.iter().enumerate() {
+        if target.is_empty() {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-analysis-semantics",
+                Some(rule),
+                &format!("receiver_factory_lineage_builders[{index}] must be a non-empty callable target"),
+            );
+        }
+        if let Some(pattern) = target.regex.as_deref() {
+            if let Err(error) = Regex::new(pattern) {
+                push_validation_issue(
+                    issues,
+                    "error",
+                    "invalid-analysis-semantics",
+                    Some(rule),
+                    &format!("receiver_factory_lineage_builders[{index}].regex is invalid: {error}"),
+                );
+            }
+        }
     }
     if semantics.sanitizer_guard.as_ref().is_some_and(|guard| {
         let role_count = usize::from(guard.use_receiver)

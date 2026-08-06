@@ -2104,59 +2104,33 @@ fn collect_method_receiver_projections(events: &[FlowEvent]) -> ahash::AHashSet<
 }
 
 fn collect_method_selector_fields(events: &[FlowEvent]) -> ahash::AHashMap<String, ahash::AHashSet<String>> {
-    fn collect(events: &[FlowEvent], out: &mut ahash::AHashMap<String, ahash::AHashSet<String>>) {
-        for event in events {
-            match event {
-                FlowEvent::Call {
-                    name,
-                    receiver: Some(receiver),
-                    call_kind: CallKind::Method,
-                    args,
-                    ..
-                } => {
-                    let Some(key) = args
-                        .first()
-                        .and_then(|arg| quoted_storage_selector(&arg.value_text))
-                    else {
-                        continue;
-                    };
-                    let receiver = receiver.trim();
-                    let name = name.trim();
-                    if receiver.is_empty() || name.is_empty() {
-                        continue;
-                    }
-                    out.entry(name.to_string())
-                        .or_default()
-                        .insert(format!("{receiver}.{key}"));
-                }
-                FlowEvent::Branch {
-                    then_events,
-                    else_events,
-                    ..
-                } => {
-                    collect(then_events, out);
-                    collect(else_events, out);
-                }
-                FlowEvent::Loop { body, .. }
-                | FlowEvent::Defer { body, .. }
-                | FlowEvent::Using { body, .. } => collect(body, out),
-                FlowEvent::Try {
-                    body,
-                    catch_events,
-                    finally_events,
-                    ..
-                } => {
-                    collect(body, out);
-                    collect(catch_events, out);
-                    collect(finally_events, out);
-                }
-                _ => {}
-            }
+    let mut out: ahash::AHashMap<String, ahash::AHashSet<String>> = ahash::AHashMap::default();
+    bonsai_lang_api::for_each_flow_event(events, &mut |event| {
+        let FlowEvent::Call {
+            name,
+            receiver: Some(receiver),
+            call_kind: CallKind::Method,
+            args,
+            ..
+        } = event
+        else {
+            return;
+        };
+        let Some(key) = args
+            .first()
+            .and_then(|arg| quoted_storage_selector(&arg.value_text))
+        else {
+            return;
+        };
+        let receiver = receiver.trim();
+        let name = name.trim();
+        if receiver.is_empty() || name.is_empty() {
+            return;
         }
-    }
-
-    let mut out = ahash::AHashMap::default();
-    collect(events, &mut out);
+        out.entry(name.to_string())
+            .or_default()
+            .insert(format!("{receiver}.{key}"));
+    });
     out
 }
 
@@ -3673,11 +3647,11 @@ fn walk_call(
     }
     let ret_node = ctx.intern_node(Place::CallRet { site });
 
-    // An AST operator expression computes its result from its operands; it
-    // is not an unresolved user function whose return must be guessed. Keep
-    // that syntax semantics explicit in the IDG so assignments, nesting, and
-    // sink arguments all share the same operand -> result dataflow.
-    if matches!(call_kind, CallKind::Operator) {
+    // Compiler-known expression operations compute their result from their
+    // operands; they are not unresolved user functions whose return must be
+    // guessed. Keep that syntax semantics explicit in the IDG so assignments,
+    // nesting, and sink arguments share the same operand -> result dataflow.
+    if matches!(call_kind, CallKind::Operator | CallKind::IndexWrite) {
         let meta = crate::edge::EdgeMeta {
             precision: Precision::Exact,
             kind: IdgEdgeKind::IntraAssign,

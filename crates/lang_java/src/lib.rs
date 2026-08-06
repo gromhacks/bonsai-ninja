@@ -207,7 +207,10 @@ impl LanguageAdapter for JavaAdapter {
         index.string_compositions = java_string_compositions(&tree, file, src);
         index.finite_literal_selections = java_finite_literal_selections(&index, &tree, file, src);
         index.character_substitutions = java_character_substitutions(&index.defs, &tree, file, src);
-        index.character_constraints = java_character_constraints(&index.defs, &index.character_substitutions);
+        index.character_constraints = bonsai_lang_api::character_constraints_from_substitutions(
+            &index.defs,
+            &index.character_substitutions,
+        );
         index.same_origin_path_constraints = java_same_origin_path_constraints(&index, &tree, file, src);
         index
             .character_constraints
@@ -792,35 +795,6 @@ fn java_switch_character_substitution(
     Some((input_param_index, span_of(file, switch_node), mappings))
 }
 
-fn java_character_constraints(
-    defs: &[bonsai_lang_api::Decl],
-    substitutions: &[CharacterSubstitutionFact],
-) -> Vec<CharacterConstraintFact> {
-    substitutions
-        .iter()
-        .filter_map(|fact| {
-            let decl = defs.iter().find(|decl| decl.span == fact.function_span)?;
-            let input_place = decl.params.get(fact.input_param_index)?.clone();
-            let mut characters = fact
-                .exact_mappings
-                .iter()
-                .filter(|mapping| !mapping.value.contains(&mapping.key))
-                .map(|mapping| mapping.key.clone())
-                .collect::<Vec<_>>();
-            characters.sort();
-            characters.dedup();
-            (!characters.is_empty()).then_some(CharacterConstraintFact {
-                function_span: fact.function_span,
-                transform_span: fact.transform_span,
-                input_place,
-                input_param_index: Some(fact.input_param_index),
-                output: CharacterConstraintOutput::Return,
-                domain: CharacterConstraintDomain::ExcludesExact { characters },
-            })
-        })
-        .collect()
-}
-
 fn java_inline_replace_chain(
     expression: Node<'_>,
     params: &[String],
@@ -1113,60 +1087,17 @@ fn java_finite_literal_selections(
             continue;
         }
         let selection_span = span_of(file, &call);
-        let assignment = index
-            .assignment_values
-            .iter()
-            .filter(|fact| {
-                fact.target.is_some()
-                    && fact.value_span.file == selection_span.file
-                    && fact.value_span.start <= selection_span.start
-                    && selection_span.end <= fact.value_span.end
-            })
-            .min_by_key(|fact| fact.value_span.end.saturating_sub(fact.value_span.start));
-        let argument = index
-            .call_argument_values
-            .iter()
-            .filter(|fact| {
-                fact.argument_span.file == selection_span.file
-                    && fact.argument_span.start <= selection_span.start
-                    && selection_span.end <= fact.argument_span.end
-            })
-            .min_by_key(|fact| fact.argument_span.len());
-        let Some(value_span) = assignment
-            .map(|fact| fact.value_span)
-            .or_else(|| argument.map(|fact| fact.argument_span))
-        else {
-            continue;
-        };
-        let Some(value_node) = bonsai_lang_api::kit::node_at_span(tree.root_node(), value_span, &[]) else {
-            continue;
-        };
-        if !java_expression_is_finite_selection(value_node, call) {
-            continue;
-        }
-        selections.push(FiniteLiteralSelectionFact {
+        let Some(fact) = bonsai_lang_api::kit::finite_literal_selection_fact_for_span(
+            index,
+            tree,
             selection_span,
-            assignment_span: assignment.map(|fact| fact.assignment_span),
-            target: assignment.and_then(|fact| fact.target.clone()),
-            call_span: argument.map(|fact| fact.call_span),
-            argument_index: argument.map(|fact| fact.argument_index),
-        });
+            |value_node| java_expression_is_finite_selection(value_node, call),
+        ) else {
+            continue;
+        };
+        selections.push(fact);
     }
-    selections.sort_by_key(|fact| {
-        (
-            fact.assignment_span
-                .or(fact.call_span)
-                .unwrap_or(fact.selection_span)
-                .start,
-            fact.assignment_span
-                .or(fact.call_span)
-                .unwrap_or(fact.selection_span)
-                .end,
-            fact.selection_span.start,
-            fact.selection_span.end,
-        )
-    });
-    selections.dedup();
+    bonsai_lang_api::kit::sort_dedup_finite_literal_selections(&mut selections);
     selections
 }
 

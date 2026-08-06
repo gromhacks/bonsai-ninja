@@ -259,7 +259,7 @@ fn dynamic_sink_key_variables(
     call: &FlowEvent,
     semantics: &DynamicKeyDenylistGuardSemantics,
 ) -> AHashSet<String> {
-    let FlowEvent::Call { name, args, .. } = call else {
+    let FlowEvent::Call { call_kind, args, .. } = call else {
         return AHashSet::new();
     };
     if let Some(index) = semantics.sink_key_argument_index {
@@ -269,7 +269,7 @@ fn dynamic_sink_key_variables(
             .flat_map(call_arg_target_keys)
             .collect();
     }
-    if clean_overwrite_callee_tail(name) == "__setitem__" {
+    if *call_kind == bonsai_lang_api::CallKind::IndexWrite {
         return args
             .first()
             .into_iter()

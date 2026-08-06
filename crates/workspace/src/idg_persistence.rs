@@ -6,7 +6,9 @@
 //! target-specific advisory lock for the entire compiler build and removes
 //! only well-formed staging files after ownership is established.
 
-use crate::factstore_cleanup::{cleanup_valid_sidecar_temp_files, factstore_writer_suffix_is_valid};
+use crate::factstore_cleanup::{
+    cleanup_valid_sidecar_temp_files, factstore_writer_suffix_is_valid, prune_obsolete_versioned_sidecars,
+};
 use fs2::FileExt;
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
@@ -197,81 +199,16 @@ pub(crate) fn maintain_idg_sidecar_cache(target: &Path) -> std::io::Result<()> {
 }
 
 fn prune_obsolete_idg_sidecars(current_target: &Path) -> std::io::Result<usize> {
-    let Some(parent) = current_target.parent() else {
-        return Ok(0);
-    };
-    let Some(current_name) = current_target.file_name().and_then(|name| name.to_str()) else {
-        return Ok(0);
-    };
-    let Some(current_version) = idg_sidecar_version(current_name) else {
-        return Ok(0);
-    };
-    let entries = match std::fs::read_dir(parent) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error),
-    };
-    let mut obsolete = BTreeSet::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        if !file_type.is_file() {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if idg_sidecar_version(name).is_some_and(|version| version < current_version) {
-            obsolete.insert(entry.path());
-        }
-    }
-
-    let mut removed = 0usize;
-    for target in obsolete {
-        let lock_file = match open_lock_file(&target).and_then(|file| {
+    prune_obsolete_versioned_sidecars(
+        current_target,
+        idg_sidecar_version,
+        |target| {
+            let file = open_lock_file(target)?;
             file.try_lock_exclusive()?;
             Ok(file)
-        }) {
-            Ok(lock_file) => lock_file,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
-            Err(error) => {
-                tracing::warn!(
-                    path = %target.display(),
-                    error = %error,
-                    "skipping superseded IDG sidecar cleanup"
-                );
-                continue;
-            }
-        };
-        match std::fs::remove_file(&target) {
-            Ok(()) => removed = removed.saturating_add(1),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                tracing::warn!(
-                    path = %target.display(),
-                    error = %error,
-                    "superseded IDG sidecar cleanup failed"
-                );
-            }
-        }
-        if let Err(error) = FileExt::unlock(&lock_file) {
-            tracing::warn!(
-                path = %target.display(),
-                error = %error,
-                "superseded IDG sidecar cleanup lock release failed"
-            );
-        }
-    }
-    Ok(removed)
+        },
+        "IDG",
+    )
 }
 
 /// Return the versioned IDG family prefix for a final sidecar target.

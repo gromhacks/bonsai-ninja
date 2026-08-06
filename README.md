@@ -170,13 +170,13 @@ coverage is remembered for every exact source snapshot, including clean files,
 so the final `analysis_complete` audit parses only unchecked files and never
 materializes declaration/flow bodies just for diagnostics.
 
-The final 2026-08-05 ABI-v61 release gate completed a fresh-cache exact
-Elasticsearch taint scan in 30.83 seconds under
-`BONSAI_MEMORY_BUDGET_MB=3072`; cached semantic generation validation and warm
-reuse completed in 5.57 seconds and 2.58 seconds. Broad exact
-`inspect execute --taint-flow` completed in 29.68 seconds
+The final 2026-08-06 ABI-v61 release gate completed a fresh-cache exact
+Elasticsearch taint scan in 28.84 seconds under
+`BONSAI_MEMORY_BUDGET_MB=3072`; semantic generation validation and immediate
+fresh-process reuse completed in 5.23 seconds and 2.35 seconds. Broad exact
+`inspect execute --taint-flow` completed in 28.70 seconds
 for 198,718 pageable paths, and exhaustive high-severity sink inventory
-completed in 22.25 seconds. The integration gate protects cold planning, warm
+completed in 21.34 seconds. The integration gate protects cold planning, warm
 production taint, navigation, inspect, and security inventories without
 terminating, skipping, or capping semantic work.
 
@@ -258,8 +258,11 @@ under-fire, and some language frontends are sharper than others.
 The current, dated validation and scale evidence is documented in
 [Release Readiness](docs/RELEASE_READINESS.md). It is the single source
 of truth for build gates, rulepack counts, Elasticsearch measurements,
-and external benchmark snapshots so this overview cannot silently drift
-from the tested binary.
+release provenance, and external benchmark snapshots so this overview cannot
+silently drift from the tested binary. A release tag is publishable only when
+it belongs to `main`, matches the Cargo workspace version, and passes the
+compiler, architecture, rulepack, self-security, cross-platform CLI/output,
+and pinned large-repository gates described there.
 
 We are shipping anyway because the fastest way to make this useful is to
 put it in the hands of maintainers, security teams, researchers,

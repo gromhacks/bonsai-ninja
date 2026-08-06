@@ -276,6 +276,34 @@ fn indexed_field_assignment_does_not_rebind_its_base_object() {
 }
 
 #[test]
+fn indexed_assignment_is_a_typed_operation_not_a_pseudo_api_call() {
+    let src = b"def set_header(response, name, value):\n    response[name] = value\n";
+    let tree = parse_language("python", src);
+    let scope = collect_kinds(&tree, &["block"])
+        .into_iter()
+        .next()
+        .expect("Python function body");
+    let events = walk_flow_events(scope, FileId::new(0), src, &GENERIC_HANDLER, &[]);
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call {
+                name,
+                receiver: Some(receiver),
+                call_kind: crate::CallKind::IndexWrite,
+                args,
+                ..
+            } if name == "response.index_write"
+                && receiver == "response"
+                && args.first().and_then(|arg| arg.place.as_deref()) == Some("name")
+                && args.get(1).and_then(|arg| arg.place.as_deref()) == Some("value")
+        )),
+        "indexed assignment lost its typed index/value facts: {events:#?}"
+    );
+}
+
+#[test]
 fn python_match_patterns_lower_only_ast_binding_positions() {
     let src = br#"match subject:
     case {"value": value, "nested": {"item": item}, **rest} if limit:

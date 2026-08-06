@@ -9,7 +9,7 @@
 //! doesn't reach).
 
 use crate::common::{
-    decl_or_ancestor_name_matches, file_path_matches_filter, format_span, make_callable_name_filter,
+    decl_or_ancestor_name_matches, filtered_file_decl_index, format_span, make_callable_name_filter,
     make_name_filter, textual_relevance_key,
 };
 use bonsai_lang_api::{FlowEvent, RefKind};
@@ -82,22 +82,12 @@ pub fn calls(ws: &Workspace, f: &CallsFilters<'_>) -> Result<Vec<CallOut>, regex
     let mut out: Vec<CallOut> = files
         .par_iter()
         .fold(Vec::new, |mut acc, &file| {
-            if let Some(needle) = f.file {
-                let path = ws
-                    .vfs()
-                    .path(file)
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if !file_path_matches_filter(ws, &path, needle) {
-                    return acc;
-                }
-            }
             // Calls is a syntactic inventory. It does not consume resolved
             // symbols, so stream the exact file-local compiler object instead
             // of constructing a workspace header/linkage table merely to
             // remap unused SymbolIds. This also keeps lazy header construction
             // out of the Rayon body loop.
-            let Some(index) = ws.db().decl_index_uncached(file) else {
+            let Some(index) = filtered_file_decl_index(ws, file, f.file) else {
                 return acc;
             };
             let defs_by_symbol = index

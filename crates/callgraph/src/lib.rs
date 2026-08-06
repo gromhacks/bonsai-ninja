@@ -16,8 +16,8 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_common::{qualified_names_match, short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
-    AliasTarget, AssignValueKind, CallArg, CallKind, CallableDeclarationFamily, Decl, DeclKind, FlowEvent,
-    LanguageCapabilities, ModulePath,
+    collect_return_spans, AliasTarget, AssignValueKind, CallArg, CallKind, CallableDeclarationFamily, Decl,
+    DeclKind, FlowEvent, LanguageCapabilities, ModulePath,
 };
 use bonsai_resolve::{
     build_shared_peer_class_index, callee_without_call_args, class_symbols_share_semantic_identity,
@@ -1920,7 +1920,7 @@ fn add_call_event_edges(
     };
     // Operator applications are compiler-known expression flow, not
     // workspace call targets. Their operand -> result edges live in the IDG.
-    if matches!(call_kind, CallKind::Operator) {
+    if matches!(call_kind, CallKind::Operator | CallKind::IndexWrite) {
         return;
     }
     // Callback arguments are independent callgraph facts. Resolve
@@ -4192,36 +4192,6 @@ fn resolve_returned_lambda_factory_with_alias_index(
         return None;
     };
     Some(*candidate)
-}
-
-fn collect_return_spans(events: &[FlowEvent], out: &mut Vec<Span>) {
-    for event in events {
-        match event {
-            FlowEvent::Return { span, .. } => out.push(*span),
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_return_spans(then_events, out);
-                collect_return_spans(else_events, out);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_return_spans(body, out);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_return_spans(body, out);
-                collect_return_spans(catch_events, out);
-                collect_return_spans(finally_events, out);
-            }
-            _ => {}
-        }
-    }
 }
 
 fn span_contains_or_equal(outer: Span, inner: Span) -> bool {

@@ -154,8 +154,7 @@ pub(super) fn direct_call_wrapper_kind(kind: &str) -> bool {
             // here, `x = await f(arg)` fell through to `source_names` and
             // tokenized the `await` keyword + callee as pseudo-operands,
             // dropping the real `f(arg)` call (and overwriting `x`'s
-            // taint with a clean value — see the async-for `chunk`
-            // regression in examples/python/mega_flow).
+            // taint with a clean value in async assignment chains).
             | "await"
             | "await_expression"
             | "co_await_expression"

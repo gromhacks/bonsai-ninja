@@ -1,9 +1,8 @@
 use super::super::{
     build_call_event, call_argument_containers, call_event_value_source_names,
-    emit_inline_closure_param_bindings_from_yield_call,
-    emit_inline_closure_param_bindings_with_extra_sources, emit_invoked_lambda_param_bindings,
-    first_callee_expression_child, first_named_child_of_kind, immediately_invoked_lambda_callee,
-    inline_closure_param_extra_sources, is_closure_arg, is_comprehension_kind, last_named_child,
+    emit_inline_closure_param_bindings, emit_inline_closure_param_bindings_from_yield_call,
+    emit_invoked_lambda_param_bindings, first_callee_expression_child, first_named_child_of_kind,
+    immediately_invoked_lambda_callee, is_closure_arg, is_comprehension_kind, last_named_child,
     ruby_call_block_uses_yield_result, walk_call_argument_expressions, walk_lambda_body,
     walk_method_chain_receivers, FlowEvent, Node, SyntaxSpecialForm,
 };
@@ -121,15 +120,7 @@ pub(super) fn lower_call(node: Node<'_>, context: LoweringContext<'_>, out: &mut
                 if let Some(closure) = closure_node {
                     walked_closures.insert(arg.id());
                     walked_closures.insert(closure.id());
-                    let extra_sources = inline_closure_param_extra_sources(call_event.as_ref(), closure, src);
-                    emit_inline_closure_param_bindings_with_extra_sources(
-                        closure,
-                        file,
-                        src,
-                        &closure_source_names,
-                        &extra_sources,
-                        out,
-                    );
+                    emit_inline_closure_param_bindings(closure, file, src, &closure_source_names, out);
                     // Inline the lambda body so its calls belong to
                     // the enclosing function. Walks via a helper that
                     // bypasses the is_lambda short-circuit.
@@ -162,15 +153,7 @@ pub(super) fn lower_call(node: Node<'_>, context: LoweringContext<'_>, out: &mut
                         out,
                     );
                 } else {
-                    let extra_sources = inline_closure_param_extra_sources(call_event.as_ref(), child, src);
-                    emit_inline_closure_param_bindings_with_extra_sources(
-                        child,
-                        file,
-                        src,
-                        &closure_source_names,
-                        &extra_sources,
-                        out,
-                    );
+                    emit_inline_closure_param_bindings(child, file, src, &closure_source_names, out);
                 }
                 walk_lambda_body(child, file, src, handler, class_names, out);
             }

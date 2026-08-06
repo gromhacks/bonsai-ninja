@@ -265,9 +265,9 @@
 
 # Generic untrusted-input parameter for shell-handling / path-handling
 # C entry points. Names are deliberately narrow (the more aggressive
-# wider list - user/arg/cmd/name/path/host/url/query/body - caused
-# the c mega_flow fixture to report duplicate findings on construct-
-# coverage param names). Tightened to obviously-untrusted nouns:
+# wider list - user/arg/cmd/name/path/host/url/query/body - reports
+# ordinary construct parameters as duplicate sources). Tightened to
+# obviously-untrusted nouns:
 # `user_input`, `untrusted`, `attacker_input` plus the specific
 # `cshell` shape `user`-prefix patterns. Disabled by default; flip
 # in projects that want the broader audit hint.
@@ -283,4 +283,4 @@
     kind: param
     target:
       regex: "^(user_input|untrusted|attacker_input|tainted)$"
-  description: "Disabled by default - narrow audit hint for C entry-point fns whose param name explicitly states the value is attacker-controlled. The broader `user`/`cmd`/`path`/`host` variant collides with mega_flow construct-coverage param names; enable per-project."
+  description: "Disabled by default - narrow audit hint for C entry-point functions whose parameter name explicitly states that the value is attacker-controlled. Broader generic identifier lists overmatch ordinary parameters; enable per project."

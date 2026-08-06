@@ -614,8 +614,8 @@ fn apply_profile(
 }
 
 /// Resolve the rulepack directory: explicit `--rules-dir` wins; otherwise
-/// fall back to the SDK's centralised discovery, then the conventional
-/// `security-patterns/` next to the workspace.
+/// fall back to the SDK's centralised workspace/package discovery, then the
+/// conventional cwd-relative `security-patterns/` path for a useful error.
 fn resolve_rules_dir(workspace: &Path, rules_dir: Option<&Path>) -> PathBuf {
     if let Some(d) = rules_dir {
         return d.to_path_buf();
@@ -744,15 +744,13 @@ fn literal_anchor_for_rule_target(rule: &Rule) -> Option<String> {
         }
     }
     if let Some(attribute) = target.attribute.as_ref() {
-        if attribute.first().is_some_and(|head| head == "System") && attribute.len() == 2 {
-            let joined = attribute.join(".");
-            if safe_inventory_literal_anchor(&joined) {
-                return Some(joined);
-            }
-        }
-        if let Some(head) = attribute.first() {
-            if safe_inventory_literal_anchor(head) {
-                return Some(head.clone());
+        // The terminal callable/property is the narrowest source-text anchor
+        // that remains valid across imports and aliases. Never special-case a
+        // provider namespace here; exact matching still happens on compiler
+        // facts after candidate retrieval.
+        for part in attribute.iter().rev() {
+            if safe_inventory_literal_anchor(part) {
+                return Some(part.clone());
             }
         }
     }

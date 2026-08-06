@@ -175,7 +175,10 @@ impl LanguageAdapter for ElixirAdapter {
                     augment_elixir_param_pattern_bindings(decl, &param_nodes, src);
                 }
                 inject_elixir_local_callable_invocations(decl, &local_callable_invocations);
-                insert_elixir_map_field_assigns_in_events(&mut decl.flow_events, &map_field_assigns);
+                bonsai_lang_api::kit::insert_flow_field_assignments(
+                    &mut decl.flow_events,
+                    &map_field_assigns,
+                );
                 lower_elixir_value_field_access_events(
                     &mut decl.flow_events,
                     &value_field_accesses,
@@ -487,12 +490,7 @@ fn flow_events_contain_call_span(events: &[FlowEvent], target: bonsai_common::Sp
     })
 }
 
-#[derive(Clone, Debug)]
-struct ElixirMapFieldAssigns {
-    assign_span: bonsai_common::Span,
-    target: String,
-    fields: Vec<FlowEvent>,
-}
+type ElixirMapFieldAssigns = bonsai_lang_api::kit::FlowFieldAssignInsertion;
 
 fn collect_elixir_map_literal_field_assigns(
     tree: &Tree,
@@ -635,60 +633,6 @@ fn elixir_value_source_names(node: Node<'_>, file: FileId, src: &[u8]) -> Vec<St
     out.sort();
     out.dedup();
     out
-}
-
-fn insert_elixir_map_field_assigns_in_events(
-    events: &mut Vec<FlowEvent>,
-    field_assigns: &[ElixirMapFieldAssigns],
-) {
-    let mut index = 0usize;
-    while index < events.len() {
-        match &mut events[index] {
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                insert_elixir_map_field_assigns_in_events(then_events, field_assigns);
-                insert_elixir_map_field_assigns_in_events(else_events, field_assigns);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                insert_elixir_map_field_assigns_in_events(body, field_assigns);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                insert_elixir_map_field_assigns_in_events(body, field_assigns);
-                insert_elixir_map_field_assigns_in_events(catch_events, field_assigns);
-                insert_elixir_map_field_assigns_in_events(finally_events, field_assigns);
-            }
-            _ => {}
-        }
-
-        let inserts = match &events[index] {
-            FlowEvent::Assign { span, target, .. } => field_assigns
-                .iter()
-                .filter(|item| {
-                    item.target == *target
-                        && span.file == item.assign_span.file
-                        && span.start <= item.assign_span.end
-                        && item.assign_span.start <= span.end
-                })
-                .flat_map(|item| item.fields.clone())
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
-        };
-        if inserts.is_empty() {
-            index += 1;
-            continue;
-        }
-        let inserted = inserts.len();
-        events.splice((index + 1)..=index, inserts);
-        index += inserted + 1;
-    }
 }
 
 #[derive(Clone, Debug)]

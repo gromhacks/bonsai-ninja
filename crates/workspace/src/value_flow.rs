@@ -11,6 +11,7 @@ use crate::cache_fingerprint::{
     dependency_metadata_fingerprint_for_sidecar, discard_stale_factstore_sidecar,
     workspace_content_fingerprint, workspace_content_fingerprint_from_paths,
 };
+use crate::factstore_cleanup::map_factstore_io;
 use crate::value_flow_disk::{
     decode as decode_value_flow_entry, encode as encode_value_flow_entry, ValueFlowEntry,
 };
@@ -859,18 +860,6 @@ fn compute_returning_seed_names(graph: &ValueFlowGraph, func: FuncId) -> AHashSe
         }
     }
     out
-}
-
-/// Funnel `bonsai_factstore::FactStoreError` into `std::io::Error`
-/// so callers don't pivot on the inner error variant. The fact-store
-/// errors that bubble up here are I/O-shaped (truncation, bad magic,
-/// pipeline mismatch) and treating them as opaque `Other` is the
-/// right granularity for sidecar consumers.
-fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
-    match err {
-        bonsai_factstore::FactStoreError::Io(e) => e,
-        other => std::io::Error::other(other),
-    }
 }
 
 /// On-disk snapshot. Round-trips via Serde.

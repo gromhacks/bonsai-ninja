@@ -15,8 +15,8 @@ Current `Cargo.lock` / `cargo metadata --locked` graph: 246 packages
 
 | License | Count |
 |---|---|
-| Apache-2.0 OR MIT (equivalent metadata spellings normalized) | 134 |
-| MIT | 83 |
+| Apache-2.0 OR MIT (equivalent metadata spellings normalized) | 131 |
+| MIT | 86 |
 | MIT OR Unlicense (equivalent metadata spellings normalized) | 7 |
 | Apache-2.0 OR Apache-2.0 WITH LLVM-exception OR MIT | 5 |
 | ISC | 3 |
@@ -104,3 +104,10 @@ authoritative resolved graph. License strings above normalize only equivalent
 ordering/separator spellings such as `MIT OR Apache-2.0`,
 `Apache-2.0 OR MIT`, and `MIT/Apache-2.0`. Re-run the audit when adding or
 upgrading dependencies.
+
+`python3 scripts/audit-dependency-licenses.py` is the release gate. It parses
+each locked SPDX expression, requires at least one approved redistribution
+branch, and fails closed on missing or previously unreviewed license ids. The
+policy intentionally permits MPL-2.0 file-level weak copyleft and rejects
+GPL/AGPL/SSPL/EUPL/LGPL-only expressions; dual-licensed dependencies pass only
+when an approved branch is available.

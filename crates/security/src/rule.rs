@@ -190,8 +190,8 @@ pub enum MatchKind {
     Missing,
 }
 
-/// The match target — either a callee (for `call` / `new`) or a read / write
-/// target (for `read` / `write`).
+/// The match target — either a callee (for `call` / `new`) or a place/value
+/// target (for `read` / `write` / `param` and optionally `return`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleTarget {
@@ -284,6 +284,12 @@ pub struct RuleTarget {
     /// `module`, `protected`, `internal`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub visibility_in: Vec<Visibility>,
+    /// Restrict a call-shaped rule to adapter-lowered call kinds. This is a
+    /// compiler fact (for example an indexed write), not an API spelling.
+    /// It lets rulepacks match source-language operations without teaching
+    /// shared lowering or analysis a provider-specific pseudo-callee.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_kind_in: Vec<bonsai_lang_api::CallKind>,
 }
 
 impl RuleTarget {
@@ -307,6 +313,7 @@ impl RuleTarget {
             && self.receiver_type_in.is_empty()
             && self.decl_kind_in.is_empty()
             && self.visibility_in.is_empty()
+            && self.call_kind_in.is_empty()
     }
 }
 
@@ -318,7 +325,7 @@ pub struct MatchSpec {
     /// Call / new callee target. Populated when `kind == Call | New`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callee: Option<RuleTarget>,
-    /// Read / write target. Populated when `kind == Read | Write`.
+    /// Place/value target. Required for read/write/param, optional for return.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<RuleTarget>,
     /// Resolved-call depth for `kind: missing`. `0` (default) is
@@ -1120,6 +1127,11 @@ pub struct AnalysisSemantics {
     pub post_sink_policy: Option<PostSinkPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sanitizer_attachment_policy: Option<SanitizerAttachmentPolicy>,
+    /// Rulepack-owned constructor calls that may connect a hardened factory
+    /// receiver to the eventual sink receiver. Shared analysis proves the
+    /// assignment lineage and never owns the constructor/API vocabulary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub receiver_factory_lineage_builders: Vec<RuleTarget>,
 }
 
 impl AnalysisSemantics {
@@ -1198,6 +1210,10 @@ impl AnalysisSemantics {
             post_sink_policy,
             sanitizer_attachment_policy,
         );
+        if self.receiver_factory_lineage_builders.is_empty() {
+            self.receiver_factory_lineage_builders
+                .clone_from(&defaults.receiver_factory_lineage_builders);
+        }
     }
 }
 

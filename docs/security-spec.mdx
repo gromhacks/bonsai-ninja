@@ -37,9 +37,11 @@ Required for every rule:
 
 - `id` - globally unique within (language, kind).
 - `language` - one of the 21 supported languages.
-- `match.kind` - `call`, `new`, `read`, `write`, `return`, or `param`.
+- `match.kind` - `call`, `new`, `read`, `write`, `return`, `param`, or
+  `missing`.
 - `match.callee` (call/new) or `match.target` (read/write/return/param)
-  - at least one of `name`, `attribute`, `regex`, or `annotation`.
+  - at least one structural selector such as `name`, `attribute`, `regex`,
+    `annotation`, or `call_kind_in`.
 - `description` - at least 15 chars, explains the API and risk.
 - `match_examples` - at least one entry whose `code` triggers the rule.
 
@@ -54,6 +56,12 @@ declare a factory or constructor's result type so `receiver_type_in` can
 resolve a later local receiver. Typing rules never emit findings, source/sink
 inventory rows, or SARIF results; API names and types remain rulepack data
 rather than a hardcoded engine list.
+
+`call_kind_in` selects a typed operation lowered by the active Tree-sitter
+adapter. For example, `[index_write]` represents `receiver[key] = value`
+without inventing a runtime method name. Pair syntax-only call kinds with
+rule-owned receiver/package/type constraints; shared matching never maps them
+to a framework API.
 
 ## Disabled rules
 

@@ -15,7 +15,6 @@
 use bonsai_lang_api::DeclKind;
 use bonsai_workspace::Workspace;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 /// Re-export of the common span type so callers don't need a
 /// separate `bonsai_common` dependency.
@@ -25,6 +24,26 @@ pub type Span = bonsai_common::Span;
 /// / … filter. Named alias keeps `make_name_filter`'s return type
 /// readable.
 pub type NameFilter = Box<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// Stream one exact file-local compiler object after applying a workspace-
+/// relative path filter. Filtering happens before body allocation.
+pub(crate) fn filtered_file_decl_index(
+    ws: &Workspace,
+    file: bonsai_common::FileId,
+    filter: Option<&str>,
+) -> Option<bonsai_lang_api::DeclIndex> {
+    if let Some(filter) = filter {
+        let path = ws
+            .vfs()
+            .path(file)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if !file_path_matches_filter(ws, &path, filter) {
+            return None;
+        }
+    }
+    ws.db().decl_index_uncached(file)
+}
 
 /// Match a declaration or any compiler-owned lexical ancestor by name.
 ///
@@ -106,11 +125,7 @@ pub(crate) fn make_callable_name_filter(
 /// accepted for callers that pass a full path.
 #[must_use]
 pub fn file_path_matches_filter(ws: &Workspace, path: &str, filter: &str) -> bool {
-    let relative = workspace_relative_path(ws, path);
-    if path_filter_matches(&relative, filter) {
-        return true;
-    }
-    filter_looks_like_absolute_path(filter) && normalized_path_contains(path, filter)
+    bonsai_common::path_filter_matches_with_root(ws.db().workspace_root().as_deref(), path, filter)
 }
 
 #[must_use]
@@ -127,92 +142,7 @@ pub fn file_path_excluded_by_filters(ws: &Workspace, path: &str, filters: &[Stri
 /// locators or hierarchical views.
 #[must_use]
 pub fn workspace_relative_path(ws: &Workspace, path: &str) -> String {
-    let normalized_path = normalize_path_for_filter(path);
-    let Some(root) = ws.db().workspace_root() else {
-        return normalized_path;
-    };
-    let path_obj = Path::new(path);
-    if let Ok(relative) = path_obj.strip_prefix(&root) {
-        return normalize_path_for_filter(&relative.to_string_lossy());
-    }
-    if let Some(canonical_path) = canonicalize_path_or_existing_parent(path_obj) {
-        if let Ok(relative) = canonical_path.strip_prefix(&root) {
-            return normalize_path_for_filter(&relative.to_string_lossy());
-        }
-        if let Some(canonical_root) = canonicalize_path_or_existing_parent(&root) {
-            if let Ok(relative) = canonical_path.strip_prefix(canonical_root) {
-                return normalize_path_for_filter(&relative.to_string_lossy());
-            }
-        }
-    }
-    let normalized_root = normalize_path_for_filter(&root.to_string_lossy());
-    let normalized_root = normalized_root.trim_end_matches('/');
-    if normalized_root.is_empty() {
-        return normalized_path;
-    }
-    if normalized_path == normalized_root {
-        return String::new();
-    }
-    let root_prefix = format!("{normalized_root}/");
-    normalized_path
-        .strip_prefix(&root_prefix)
-        .map(ToOwned::to_owned)
-        .unwrap_or(normalized_path)
-}
-
-fn normalized_path_contains(path: &str, filter: &str) -> bool {
-    let filter = normalize_path_for_filter(filter);
-    !filter.is_empty() && normalize_path_for_filter(path).contains(&filter)
-}
-
-fn path_filter_matches(path: &str, filter: &str) -> bool {
-    let path = normalize_path_for_filter(path);
-    let filter = normalize_path_for_filter(filter);
-    if filter.is_empty() {
-        return false;
-    }
-    if filter.contains('/') {
-        return path_filter_with_separator_matches(&path, &filter);
-    }
-    path.contains(filter.as_str())
-}
-
-fn path_filter_with_separator_matches(path: &str, filter: &str) -> bool {
-    let trimmed = filter.trim_matches('/');
-    if trimmed.is_empty() {
-        return false;
-    }
-    let is_component_filter = filter.starts_with('/') || filter.ends_with('/');
-    if is_component_filter {
-        return path == trimmed
-            || path.starts_with(&format!("{trimmed}/"))
-            || path.contains(&format!("/{trimmed}/"));
-    }
-    path.contains(filter)
-}
-
-fn filter_looks_like_absolute_path(filter: &str) -> bool {
-    let normalized = normalize_path_for_filter(filter);
-    if normalized.len() >= 3 && normalized.as_bytes()[1] == b':' && normalized.as_bytes()[2] == b'/' {
-        return true;
-    }
-    Path::new(filter).is_absolute() && normalized.trim_matches('/').contains('/')
-}
-
-fn normalize_path_for_filter(value: &str) -> String {
-    value.replace('\\', "/").trim_start_matches("./").to_string()
-}
-
-fn canonicalize_path_or_existing_parent(path: &Path) -> Option<std::path::PathBuf> {
-    if let Ok(canonical) = path.canonicalize() {
-        return Some(canonical);
-    }
-    let parent = path.parent()?;
-    let canonical_parent = parent.canonicalize().ok()?;
-    Some(match path.file_name() {
-        Some(file_name) => canonical_parent.join(file_name),
-        None => canonical_parent,
-    })
+    bonsai_common::workspace_relative_filter_path(ws.db().workspace_root().as_deref(), path)
 }
 
 /// Query relevance key for browse rows. Lower is better.

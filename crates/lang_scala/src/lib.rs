@@ -1,17 +1,16 @@
 //! Scala language adapter.
 use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
-    collect_assign_targets, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
+    collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
         call_arg_from_node_with_handler, call_arg_from_nodes_with_handler, collect_kinds,
         collect_receiver_field_writes, first_named_child_of_kind, language_from_pack,
         looks_like_bare_identifier, node_at_span, node_text, normalize_call_name_whitespace,
         package_module_segments_with_workspace_prefix, parse_with, span_of, walk_flow_events,
     },
-    rewrite_implicit_member_reads, AdapterContext, AdapterError, CallArg, CallKind, Decl, DeclIndex,
-    DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary,
-    Visibility, EMPTY_HANDLER,
+    AdapterContext, AdapterError, CallArg, CallKind, Decl, DeclIndex, DeclKind, FieldWrite, FlowEvent,
+    GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
+    LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
 };
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
@@ -397,8 +396,7 @@ impl LanguageAdapter for ScalaAdapter {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, SCALA_LIFECYCLE_TRANSITIONS);
         }
-        // Mirror the lang_csharp / lang_dart synthesis passes that
-        // unblocked the parallel mega_flow chains: convert a method
+        // Mirror the lang_csharp / lang_dart synthesis passes: convert a method
         // body that's a simple dotted receiver field read
         // (`def cmd: String = data.cmd`) into a `Call+Return` chain
         // (lets the 1-level receiver-field bridge resolve it through
@@ -1587,9 +1585,8 @@ fn extract_scala_package(root: tree_sitter::Node<'_>, src: &[u8]) -> Option<Vec<
 /// receiver field (`def cmd: String = data.cmd`) into a `Call+Return`
 /// chain so the call dispatches to the receiver-typed member (case-
 /// class accessor / sibling getter) and threads taint through the
-/// 1-level interprocedural receiver-field bridge. Mirrors the
-/// lang_csharp / lang_dart conversion that unblocked the parallel
-/// mega_flow chains.
+/// 1-level interprocedural receiver-field bridge. Mirrors the equivalent
+/// lang_csharp / lang_dart conversion.
 fn rewrite_scala_member_access_accessors(index: &mut DeclIndex) {
     for decl in &mut index.defs {
         if !matches!(decl.kind, DeclKind::Function | DeclKind::Method) {
@@ -1697,35 +1694,12 @@ fn scala_dotted_member_access_parts(
 /// event so `walk_call`'s argless fallback synthesizes a recv-slot
 /// for the interprocedural receiver-field bridge.
 fn qualify_scala_implicit_member_reads(index: &mut DeclIndex) {
-    use std::collections::HashSet;
-    let getter_names: HashSet<String> = index
-        .defs
-        .iter()
-        .filter(|d| {
-            matches!(d.kind, DeclKind::Method | DeclKind::Function)
-                && d.params.is_empty()
-                && !d.name.is_empty()
-        })
-        .map(|d| d.name.clone())
-        .collect();
-    if getter_names.is_empty() {
-        return;
-    }
-    for decl in &mut index.defs {
-        if decl.flow_events.is_empty() {
-            continue;
-        }
-        let mut locals: HashSet<String> = decl.params.iter().cloned().collect();
-        collect_assign_targets(&decl.flow_events, &mut locals);
-        rewrite_implicit_member_reads(&mut decl.flow_events, &getter_names, &locals, |name| {
-            ImplicitMemberReadCall {
-                source_call: name.to_string(),
-                call_name: name.to_string(),
-                receiver: None,
-                call_kind: CallKind::Function,
-            }
-        });
-    }
+    bonsai_lang_api::qualify_implicit_member_reads_in_index(index, |name| ImplicitMemberReadCall {
+        source_call: name.to_string(),
+        call_name: name.to_string(),
+        receiver: None,
+        call_kind: CallKind::Function,
+    });
 }
 
 /// Synthesize per-component accessor `Method` decls for each Scala

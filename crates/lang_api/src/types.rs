@@ -1257,6 +1257,10 @@ pub enum CallKind {
     Indirect,
     /// Language-level channel send lowered from a dedicated AST node.
     ChannelSend,
+    /// Assignment through a parser-proven index/subscript place. The
+    /// operation carries the index and assigned value as arguments without
+    /// pretending that source syntax invoked a provider/runtime method.
+    IndexWrite,
 }
 
 impl CallKind {
@@ -1270,6 +1274,7 @@ impl CallKind {
             CallKind::Operator => "operator",
             CallKind::Indirect => "indirect",
             CallKind::ChannelSend => "channel_send",
+            CallKind::IndexWrite => "index_write",
         }
     }
 }
@@ -2301,6 +2306,39 @@ pub struct CharacterConstraintFact {
     pub input_param_index: Option<usize>,
     pub output: CharacterConstraintOutput,
     pub domain: CharacterConstraintDomain,
+}
+
+/// Convert exact character substitutions into compiler constraints when the
+/// replacement removes the original character. Adapters remain responsible
+/// for proving the substitution syntax; this function only lowers typed IR.
+#[must_use]
+pub fn character_constraints_from_substitutions(
+    defs: &[Decl],
+    substitutions: &[CharacterSubstitutionFact],
+) -> Vec<CharacterConstraintFact> {
+    substitutions
+        .iter()
+        .filter_map(|fact| {
+            let decl = defs.iter().find(|decl| decl.span == fact.function_span)?;
+            let input_place = decl.params.get(fact.input_param_index)?.clone();
+            let mut characters = fact
+                .exact_mappings
+                .iter()
+                .filter(|mapping| !mapping.value.contains(&mapping.key))
+                .map(|mapping| mapping.key.clone())
+                .collect::<Vec<_>>();
+            characters.sort();
+            characters.dedup();
+            (!characters.is_empty()).then_some(CharacterConstraintFact {
+                function_span: fact.function_span,
+                transform_span: fact.transform_span,
+                input_place,
+                input_param_index: Some(fact.input_param_index),
+                output: CharacterConstraintOutput::Return,
+                domain: CharacterConstraintDomain::ExcludesExact { characters },
+            })
+        })
+        .collect()
 }
 
 /// Compiler proof that a predicate guards every dynamic element copied from

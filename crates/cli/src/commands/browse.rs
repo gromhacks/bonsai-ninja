@@ -19,41 +19,10 @@ use crate::{cli_println, ui};
 use super::{
     open_project_index_filtered_paths, open_project_index_matching_literal, open_project_index_matching_path,
     open_project_index_only as open_project, open_project_index_retrieval_candidates,
+    workspace_file_count_exceeds,
 };
 
 const BROWSE_LITERAL_PREFILTER_FILE_LIMIT: usize = 5_000;
-pub(crate) fn workspace_file_count_exceeds(root: &std::path::Path, limit: usize) -> bool {
-    let mut stack = vec![root.to_path_buf()];
-    let mut seen = 0usize;
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-            if matches!(
-                name,
-                ".git" | ".bonsai" | "target" | "node_modules" | ".gradle" | "build" | "dist" | "out"
-            ) {
-                continue;
-            }
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                stack.push(path);
-            } else if file_type.is_file() {
-                seen += 1;
-                if seen > limit {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
 fn browse_literal_prefilter_enabled(root: &std::path::Path, literal: Option<&str>, regex: bool) -> bool {
     literal
         .and_then(|literal| {

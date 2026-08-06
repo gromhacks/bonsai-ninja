@@ -158,7 +158,7 @@ fn await_in_async() {
 #[test]
 fn use_alias_captured() {
     let w = make("use std::collections::HashMap as Map;\nfn f() {}");
-    assert!(has_import_alias(&w, "std::collections::HashMap", "Map"));
+    assert!(has_import_symbol_alias(&w, "std::collections", "HashMap", "Map"));
 }
 
 #[test]

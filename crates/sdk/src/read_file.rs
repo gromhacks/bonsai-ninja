@@ -9,7 +9,7 @@
 //! browse + security + callgraph data.
 
 use bonsai_browse::Locator;
-use bonsai_common::{FuncId, SymbolId};
+use bonsai_common::{normalize_path_for_filter, workspace_relative_filter_path, FuncId, SymbolId};
 use bonsai_security::rule::Severity;
 use bonsai_security::{
     run_taint_analysis, CombinedFindingWithChain, Finding, FindingMatch, FindingStatus, Rulepack,
@@ -600,44 +600,19 @@ fn text_matches_needle(value: &str, needle: &str) -> bool {
 }
 
 fn file_path_matches_requested(ws: &Workspace, file_path: &str, requested: &str) -> bool {
-    let requested = normalize_locator_path(requested);
+    let requested = normalize_path_for_filter(requested);
     if requested.is_empty() {
         return false;
     }
-    let file_path = normalize_locator_path(file_path);
+    let file_path = normalize_path_for_filter(file_path);
     if file_path == requested {
         return true;
     }
-    let relative = workspace_relative_locator_path(ws, &file_path);
+    let relative = workspace_relative_filter_path(ws.db().workspace_root().as_deref(), &file_path);
     if relative == requested {
         return true;
     }
     !Path::new(&requested).is_absolute() && file_path.ends_with(&format!("/{requested}"))
-}
-
-fn workspace_relative_locator_path(ws: &Workspace, path: &str) -> String {
-    let Some(root) = ws.db().workspace_root() else {
-        return normalize_locator_path(path);
-    };
-    if let Ok(relative) = Path::new(path).strip_prefix(&root) {
-        return normalize_locator_path(&relative.to_string_lossy());
-    }
-    let path = normalize_locator_path(path);
-    let root = normalize_locator_path(&root.to_string_lossy());
-    let root = root.trim_end_matches('/');
-    if root.is_empty() {
-        return path;
-    }
-    if path == root {
-        return String::new();
-    }
-    path.strip_prefix(&format!("{root}/"))
-        .map(ToOwned::to_owned)
-        .unwrap_or(path)
-}
-
-fn normalize_locator_path(value: &str) -> String {
-    value.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
 fn dedupe_inlined_decls(decls: &mut Vec<InlinedDecl>) {

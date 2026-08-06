@@ -230,6 +230,122 @@ pub struct ImplicitMemberReadCall {
     pub call_kind: crate::CallKind,
 }
 
+/// Adapter-proven field assignments that belong immediately after one typed
+/// aggregate assignment event.
+#[derive(Clone, Debug)]
+pub struct FlowFieldAssignInsertion {
+    pub assign_span: bonsai_common::Span,
+    pub target: String,
+    pub fields: Vec<crate::FlowEvent>,
+}
+
+/// Insert adapter-lowered aggregate field assignments into matching nested
+/// flow regions without duplicating recursive event mutation in each adapter.
+pub fn insert_flow_field_assignments(
+    events: &mut Vec<crate::FlowEvent>,
+    insertions: &[FlowFieldAssignInsertion],
+) {
+    let mut index = 0usize;
+    while index < events.len() {
+        match &mut events[index] {
+            crate::FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                insert_flow_field_assignments(then_events, insertions);
+                insert_flow_field_assignments(else_events, insertions);
+            }
+            crate::FlowEvent::Loop { body, .. }
+            | crate::FlowEvent::Defer { body, .. }
+            | crate::FlowEvent::Using { body, .. } => insert_flow_field_assignments(body, insertions),
+            crate::FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                insert_flow_field_assignments(body, insertions);
+                insert_flow_field_assignments(catch_events, insertions);
+                insert_flow_field_assignments(finally_events, insertions);
+            }
+            _ => {}
+        }
+
+        let fields = match &events[index] {
+            crate::FlowEvent::Assign { span, target, .. } => insertions
+                .iter()
+                .filter(|insertion| {
+                    insertion.target == *target
+                        && span.file == insertion.assign_span.file
+                        && span.start <= insertion.assign_span.end
+                        && insertion.assign_span.start <= span.end
+                })
+                .flat_map(|insertion| insertion.fields.clone())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        if fields.is_empty() {
+            index += 1;
+            continue;
+        }
+        let inserted = fields.len();
+        events.splice((index + 1)..=index, fields);
+        index += inserted + 1;
+    }
+}
+
+/// Qualify assignment targets that an adapter has proven are implicit member
+/// writes. The callback owns the source-language spelling; this helper only
+/// traverses typed flow regions.
+pub fn qualify_implicit_member_assign_targets<F, SM, SE>(
+    events: &mut [crate::FlowEvent],
+    members: &std::collections::HashSet<String, SM>,
+    excluded: &std::collections::HashSet<String, SE>,
+    qualify: F,
+) where
+    F: Fn(&str) -> Option<String> + Copy,
+    SM: std::hash::BuildHasher,
+    SE: std::hash::BuildHasher,
+{
+    for event in events {
+        match event {
+            crate::FlowEvent::Assign { target, .. } => {
+                let name = target.trim();
+                if members.contains(name) && !excluded.contains(name) {
+                    if let Some(qualified) = qualify(name) {
+                        *target = qualified;
+                    }
+                }
+            }
+            crate::FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                qualify_implicit_member_assign_targets(then_events, members, excluded, qualify);
+                qualify_implicit_member_assign_targets(else_events, members, excluded, qualify);
+            }
+            crate::FlowEvent::Loop { body, .. }
+            | crate::FlowEvent::Defer { body, .. }
+            | crate::FlowEvent::Using { body, .. } => {
+                qualify_implicit_member_assign_targets(body, members, excluded, qualify);
+            }
+            crate::FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                qualify_implicit_member_assign_targets(body, members, excluded, qualify);
+                qualify_implicit_member_assign_targets(catch_events, members, excluded, qualify);
+                qualify_implicit_member_assign_targets(finally_events, members, excluded, qualify);
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn rewrite_implicit_member_reads<F, SG, SL>(
     events: &mut Vec<crate::FlowEvent>,
     getters: &std::collections::HashSet<String, SG>,
@@ -331,6 +447,118 @@ pub fn rewrite_implicit_member_reads<F, SG, SL>(
             },
         );
         idx += 2;
+    }
+}
+
+/// Rewrite bare reads of zero-argument sibling members across one compiler
+/// index. The adapter callback supplies the language-specific implicit
+/// receiver and call kind.
+pub fn qualify_implicit_member_reads_in_index<F>(index: &mut crate::DeclIndex, call_for_name: F)
+where
+    F: Fn(&str) -> ImplicitMemberReadCall + Copy,
+{
+    let getter_names: std::collections::HashSet<String> = index
+        .defs
+        .iter()
+        .filter(|decl| {
+            matches!(decl.kind, crate::DeclKind::Method | crate::DeclKind::Function)
+                && decl.params.is_empty()
+                && !decl.name.is_empty()
+        })
+        .map(|decl| decl.name.clone())
+        .collect();
+    if getter_names.is_empty() {
+        return;
+    }
+    for decl in &mut index.defs {
+        if decl.flow_events.is_empty() {
+            continue;
+        }
+        let mut locals: std::collections::HashSet<String> = decl.params.iter().cloned().collect();
+        collect_assign_targets(&decl.flow_events, &mut locals);
+        rewrite_implicit_member_reads(&mut decl.flow_events, &getter_names, &locals, call_for_name);
+    }
+}
+
+/// Qualify return/yield expression places whose first projection segment is a
+/// compiler-proven receiver field. The adapter supplies the receiver spelling
+/// and field set; the traversal is language neutral.
+pub fn qualify_receiver_field_expression_flows<S: std::hash::BuildHasher>(
+    events: &mut [crate::FlowEvent],
+    fields: &std::collections::HashSet<String, S>,
+    receiver: &str,
+) {
+    for event in events {
+        match event {
+            crate::FlowEvent::Return { value_flow, .. } | crate::FlowEvent::Yield { value_flow, .. } => {
+                qualify_receiver_field_expression_flow(value_flow, fields, receiver);
+            }
+            crate::FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                qualify_receiver_field_expression_flows(then_events, fields, receiver);
+                qualify_receiver_field_expression_flows(else_events, fields, receiver);
+            }
+            crate::FlowEvent::Loop { body, .. }
+            | crate::FlowEvent::Defer { body, .. }
+            | crate::FlowEvent::Using { body, .. } => {
+                qualify_receiver_field_expression_flows(body, fields, receiver);
+            }
+            crate::FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                qualify_receiver_field_expression_flows(body, fields, receiver);
+                qualify_receiver_field_expression_flows(catch_events, fields, receiver);
+                qualify_receiver_field_expression_flows(finally_events, fields, receiver);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn qualify_receiver_field_expression_flow<S: std::hash::BuildHasher>(
+    flow: &mut crate::ExpressionFlow,
+    fields: &std::collections::HashSet<String, S>,
+    receiver: &str,
+) {
+    let old_place = flow.place.clone();
+    if let Some(projection) = &mut flow.projection {
+        if fields.contains(&projection.base) {
+            projection.path.insert(0, std::mem::take(&mut projection.base));
+            projection.base = receiver.to_string();
+            flow.place = Some(projection.canonical_place());
+        }
+    } else if let Some(place) = flow.place.as_deref() {
+        if fields.contains(place) {
+            flow.projection = Some(crate::ExpressionProjection {
+                base: receiver.to_string(),
+                path: vec![place.to_string()],
+            });
+            flow.place = Some(format!("{receiver}.{place}"));
+        }
+    }
+    if let (Some(old_place), Some(new_place)) = (old_place.as_deref(), flow.place.as_deref()) {
+        if old_place != new_place {
+            for source in &mut flow.source_names {
+                if source == old_place {
+                    source.clone_from(&new_place.to_string());
+                }
+            }
+        }
+    }
+    for field in &mut flow.aggregate_fields {
+        qualify_receiver_field_expression_flow(&mut field.value, fields, receiver);
+    }
+    for item in &mut flow.tuple_items {
+        qualify_receiver_field_expression_flow(item, fields, receiver);
+    }
+    for spread in &mut flow.spreads {
+        qualify_receiver_field_expression_flow(spread, fields, receiver);
     }
 }
 

@@ -35,7 +35,7 @@ is_shared_source() {
             return 1 ;;
         crates/lang_api/*)
             return 0 ;;
-        crates/lang_*/*|crates/adapters/*|crates/cli/*|crates/sdk/*|crates/testkit/*|crates/conformance/*)
+        crates/lang_*/*|crates/adapters/*|crates/testkit/*|crates/conformance/*)
             return 1 ;;
         crates/*/src/*.rs|crates/*/src/**/*.rs)
             return 0 ;;
@@ -113,14 +113,30 @@ record_regex_matches() {
     done < <(rg -n --no-messages "$pattern" "$OUT_DIR/stripped" || true)
 }
 
-LANGUAGE_IDS=(
-    python rust java javascript typescript go ruby perl php kotlin swift scala
-    erlang elixir lua dart objc solidity csharp cpp
+# The supported-language vocabulary is owned by the rulepack directory, not
+# duplicated in this audit. Adding a language therefore expands the boundary
+# gate automatically.
+LANGUAGE_IDS=()
+while IFS= read -r language; do
+    [[ -n "$language" ]] && LANGUAGE_IDS+=("$language")
+done < <(
+    find security-patterns/langs -mindepth 1 -maxdepth 1 -type d -exec basename {} \; \
+        | LC_ALL=C sort
 )
 for language in "${LANGUAGE_IDS[@]}"; do
     # `lang_api` type/trait docs legitimately show opaque id examples; the
     # architecture invariant for concrete branches remains on engine crates.
-    record_matches "language-id" "\"$language\"" '^crates/' '^crates/lang_api/'
+    if [[ "$language" == "c" ]]; then
+        # A bare `"c"` is too common in examples to be meaningful. Match the
+        # concrete construction/comparison shapes that would make C special.
+        record_regex_matches \
+            "language-id" \
+            'LanguageId::new\("c"\)|(?:==|!=)[[:space:]]*"c"|"c"[[:space:]]*=>' \
+            '^crates/' \
+            '^crates/lang_api/'
+    else
+        record_matches "language-id" "\"$language\"" '^crates/' '^crates/lang_api/'
+    fi
 done
 
 # Shared crates must not regain a union of source-language punctuation. Exact
@@ -159,10 +175,61 @@ API_IDENTITIES=(
     're.compile' 'urlparse' 'XMLParser' 'resolve_entities' 'no_network'
     'setLocation' 'github.com/golang-jwt' 'encoding/xml' 'CharsetReader'
     'NewDecoder' 'Method.Alg' 'psycopg2-binary' 'djangorestframework'
+    'newDocumentBuilder' '__setitem__' 'trpc.input' '@trpc/server'
 )
 for identity in "${API_IDENTITIES[@]}"; do
     record_matches "api-identity" "$identity"
 done
+record_matches "api-identity" '"System"'
+
+# Provider-shaped exact callable names are derived from the rulepack so a new
+# framework expands this gate without editing the audit. Generic one-word
+# names such as `get` are deliberately omitted: they are normal compiler and
+# product vocabulary, while qualified, sigiled, dunder, and camel-cased names
+# are strong API identities. The explicit historical list above catches
+# important identities expressed through attributes or regexes instead of a
+# target `name`.
+while IFS= read -r identity; do
+    [[ -n "$identity" ]] || continue
+    record_matches "rulepack-api-identity" "\"$identity\""
+done < <(
+    python3 - <<'PY'
+import re
+from pathlib import Path
+
+identities = set()
+for path in Path("security-patterns/langs").glob("**/*.yml"):
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = re.match(r"\s+name:\s*['\"]?([^'\"#\s]+)", line)
+        if match is None:
+            continue
+        value = match.group(1)
+        provider_shaped = (
+            len(value) >= 4
+            and (
+                any(character in value for character in "./:@$")
+                or any(character.isupper() for character in value[1:])
+                or value.startswith("__")
+            )
+        )
+        if provider_shaped:
+            identities.add(value)
+for identity in sorted(identities):
+    print(identity)
+PY
+)
+
+# A direct comparison between a compiler call/callee value and a source
+# literal is an API inventory in disguise. Rule targets must own that value;
+# shared analysis joins the target against typed call facts.
+record_regex_matches \
+    "api-comparison" \
+    '(callee|call_name|method_name|callee_tail\([^)]*\)|callee_spelling_tail\([^)]*\))[[:space:]]*(==|!=)[[:space:]]*"[A-Za-z_$][A-Za-z0-9_$.-]{2,}"' \
+    '^crates/(security|taint|idg|workspace|callgraph)/'
+record_regex_matches \
+    "api-comparison" \
+    '(callee|call_name|method_name|callee_tail|callee_spelling_tail).{0,80}eq_ignore_ascii_case\("[A-Za-z_$][A-Za-z0-9_$.-]{2,}"\)' \
+    '^crates/(security|taint|idg|workspace|callgraph)/'
 
 # Language/ecosystem import spellings and review-profile path inventories are
 # metadata too. Match source literals/normalization calls rather than prose so

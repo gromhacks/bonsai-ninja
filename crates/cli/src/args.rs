@@ -2490,6 +2490,7 @@ pub(crate) enum Cmd {
         /// `BONSAI_RULES_DIR` env var, then
         /// `<workspace>/security-patterns/`, then
         /// `<workspace>/../security-patterns/`, then
+        /// `<executable-dir>/security-patterns/`, then
         /// `./security-patterns/` (cwd-relative).
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
@@ -2528,6 +2529,7 @@ pub(crate) enum SecurityAction {
         /// Lookup when omitted: `BONSAI_RULES_DIR` env var, then
         /// `<workspace>/security-patterns/`, then
         /// `<workspace>/../security-patterns/`, then
+        /// `<executable-dir>/security-patterns/`, then
         /// `./security-patterns/` (cwd-relative).
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
@@ -2621,6 +2623,7 @@ pub(crate) enum SecurityAction {
         /// Lookup when omitted: `BONSAI_RULES_DIR` env var, then
         /// `<workspace>/security-patterns/`, then
         /// `<workspace>/../security-patterns/`, then
+        /// `<executable-dir>/security-patterns/`, then
         /// `./security-patterns/` (cwd-relative).
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
@@ -2727,6 +2730,7 @@ pub(crate) enum SecurityAction {
         /// Lookup when omitted: `BONSAI_RULES_DIR` env var, then
         /// `<workspace>/security-patterns/`, then
         /// `<workspace>/../security-patterns/`, then
+        /// `<executable-dir>/security-patterns/`, then
         /// `./security-patterns/` (cwd-relative).
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
@@ -2807,6 +2811,7 @@ pub(crate) enum SecurityAction {
         /// Lookup when omitted: `BONSAI_RULES_DIR` env var, then
         /// `<workspace>/security-patterns/`, then
         /// `<workspace>/../security-patterns/`, then
+        /// `<executable-dir>/security-patterns/`, then
         /// `./security-patterns/` (cwd-relative).
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
@@ -2897,6 +2902,7 @@ pub(crate) enum SecurityAction {
         /// Lookup when omitted: `BONSAI_RULES_DIR` env var, then
         /// `<workspace>/security-patterns/`, then
         /// `<workspace>/../security-patterns/`, then
+        /// `<executable-dir>/security-patterns/`, then
         /// `./security-patterns/` (cwd-relative).
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
@@ -3097,6 +3103,7 @@ pub(crate) enum SecurityAction {
         /// Lookup when omitted: `BONSAI_RULES_DIR` env var, then
         /// `<workspace>/security-patterns/`, then
         /// `<workspace>/../security-patterns/`, then
+        /// `<executable-dir>/security-patterns/`, then
         /// `./security-patterns/` (cwd-relative).
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
@@ -3204,6 +3211,7 @@ pub(crate) enum SecurityAction {
         /// Lookup when omitted: `BONSAI_RULES_DIR` env var, then
         /// `<workspace>/security-patterns/`, then
         /// `<workspace>/../security-patterns/`, then
+        /// `<executable-dir>/security-patterns/`, then
         /// `./security-patterns/` (cwd-relative).
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,

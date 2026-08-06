@@ -14,6 +14,7 @@ pub mod atomic_file;
 pub mod dependency_metadata;
 pub mod ids;
 pub mod names;
+pub mod path_filter;
 pub mod policy;
 pub mod precision;
 pub mod resources;
@@ -29,6 +30,11 @@ pub use names::{
     qualified_names_match, short_qualified_tail, split_qualified_name_head_tail,
     split_qualified_name_owner_tail, starts_at_qualified_name_boundary, trim_leading_name_punctuation,
     workspace_bonsai_dir, BONSAI_CASE_PROBE_PREFIX,
+};
+pub use path_filter::{
+    canonicalize_path_or_existing_parent, filter_looks_like_absolute_path, normalize_path_for_filter,
+    normalized_path_contains, path_filter_matches, path_filter_matches_with_root, scoped_path_filter_matches,
+    workspace_relative_filter_path,
 };
 pub use policy::MATCHER_POLICY_FINGERPRINT;
 pub use precision::Precision;

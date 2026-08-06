@@ -1,14 +1,14 @@
 //! Dart language adapter.
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
-    collect_assign_targets, decl_index_with_handler, extract_imports_via,
+    decl_index_with_handler, extract_imports_via,
     kit::{
         call_arg_from_nodes_with_handler, collect_kinds, first_named_child, first_named_child_of_kind,
         language_from_pack, node_text, parse_with, span_of,
     },
-    rewrite_implicit_member_reads, AdapterContext, AdapterError, CallKind, DeclIndex, DeclKind, FieldWrite,
-    FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
-    LanguageCapabilities, LanguageId, Ref, RefKind, SyntaxSpecialForm, TypeAliasBinding, Visibility,
+    AdapterContext, AdapterError, CallKind, DeclIndex, DeclKind, FieldWrite, FlowEvent, GrammarHandler,
+    ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
+    LanguageId, Ref, RefKind, SyntaxSpecialForm, TypeAliasBinding, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -767,35 +767,12 @@ fn qualify_dart_member_access_getters(index: &mut DeclIndex) {
 /// receiver-field bridge can't propagate caller-receiver taint into
 /// the getter's body.
 fn qualify_dart_implicit_member_reads(index: &mut DeclIndex) {
-    use std::collections::HashSet;
-    let getter_names: HashSet<String> = index
-        .defs
-        .iter()
-        .filter(|d| {
-            matches!(d.kind, DeclKind::Method | DeclKind::Function)
-                && d.params.is_empty()
-                && !d.name.is_empty()
-        })
-        .map(|d| d.name.clone())
-        .collect();
-    if getter_names.is_empty() {
-        return;
-    }
-    for decl in &mut index.defs {
-        if decl.flow_events.is_empty() {
-            continue;
-        }
-        let mut locals: HashSet<String> = decl.params.iter().cloned().collect();
-        collect_assign_targets(&decl.flow_events, &mut locals);
-        rewrite_implicit_member_reads(&mut decl.flow_events, &getter_names, &locals, |name| {
-            ImplicitMemberReadCall {
-                source_call: name.to_string(),
-                call_name: name.to_string(),
-                receiver: None,
-                call_kind: CallKind::Function,
-            }
-        });
-    }
+    bonsai_lang_api::qualify_implicit_member_reads_in_index(index, |name| ImplicitMemberReadCall {
+        source_call: name.to_string(),
+        call_name: name.to_string(),
+        receiver: None,
+        call_kind: CallKind::Function,
+    });
 }
 
 fn dart_expression_return_for_decl<'a>(

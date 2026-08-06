@@ -82,6 +82,7 @@ pub mod atomic_file;
 pub mod dependency_metadata;
 pub mod ids;
 pub mod names;
+pub mod path_filter;
 pub mod policy;
 pub mod precision;
 pub mod resources;
@@ -91,6 +92,7 @@ pub mod wire;
 pub use atomic_file::write_atomic_bytes;
 pub use ids::{BasicBlockId, FileId, FuncId, PackageId, SymbolId, TraceStepId, TypeId, ValueId};
 pub use names::{
+pub use path_filter::{
 pub use policy::MATCHER_POLICY_FINGERPRINT;
 pub use precision::Precision;
 pub use resources::callgraph_worker_count;
@@ -253,6 +255,7 @@ pub const LANG_ID: LanguageId = LanguageId::new("java");
 pub struct JavaAdapter;
 
 === lang_javascript ===
+pub const ECMASCRIPT_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
 pub const JS_TS_MODULE_RESOLUTION_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs"];
 pub const LANG_ID: LanguageId = LanguageId::new("javascript");
 pub fn apply_javascript_getter_property_sources(
