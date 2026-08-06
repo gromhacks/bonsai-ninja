@@ -32,7 +32,7 @@ use super::{
     format_span, nearest_names, open_project_index_matching_literal, open_project_index_matching_path,
     open_project_index_only as open_project, open_project_index_retrieval_candidate_union,
     open_project_index_retrieval_candidates, page_info_to_json, paged_json_incomplete_reasons, short_file,
-    truncate,
+    truncate, workspace_file_count_exceeds,
 };
 
 /// Above this size, default inspect stays on the indexed syntax surface.
@@ -452,38 +452,6 @@ impl Default for InspectRenderOptions {
             structural_drilldown: false,
         }
     }
-}
-
-fn workspace_file_count_exceeds(root: &std::path::Path, limit: usize) -> bool {
-    let mut stack = vec![root.to_path_buf()];
-    let mut seen = 0usize;
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-            if matches!(
-                name,
-                ".git" | ".bonsai" | "target" | "node_modules" | ".gradle" | "build" | "dist" | "out"
-            ) {
-                continue;
-            }
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                stack.push(path);
-            } else if file_type.is_file() {
-                seen += 1;
-                if seen > limit {
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }
 
 #[cfg(test)]

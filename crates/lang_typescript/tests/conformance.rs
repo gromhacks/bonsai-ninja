@@ -567,52 +567,6 @@ fn arrow_iife_params_bind_to_corresponding_arguments() {
 }
 
 #[test]
-fn trpc_procedure_callback_input_gets_precise_source_token() {
-    use bonsai_lang_api::{FlowEvent, LanguageAdapter};
-
-    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
-    let ws = bonsai_testkit::workspace_with(
-        vec![adapter],
-        &[(
-            "router.ts",
-            r#"
-import { initTRPC } from "@trpc/server";
-const t = initTRPC.create();
-export const appRouter = t.router({
-  list: t.procedure.input(z.object({ q: z.string() })).query(async ({ input }) => {
-    return sink(input.q);
-  }),
-});
-"#,
-        )],
-    );
-    for file in ws.db().vfs().all_files() {
-        let _ = ws.db().decl_index(file);
-    }
-    let global = ws.db().global_index();
-    let module = global
-        .all_files()
-        .flat_map(|file| global.decls_in(file))
-        .find(|decl| decl.name == "__module__")
-        .expect("module declaration");
-
-    assert!(
-        flow_events_contain(&module.flow_events, &|event| {
-            matches!(
-                event,
-                FlowEvent::Assign {
-                    target,
-                    source_names,
-                    ..
-                } if target == "input" && source_names.iter().any(|name| name == "trpc.input")
-            )
-        }),
-        "tRPC callback input binding should carry the synthetic source token: {:?}",
-        module.flow_events
-    );
-}
-
-#[test]
 fn graphql_root_value_dispatches_variable_values_to_resolver() {
     use bonsai_lang_api::{FlowEvent, LanguageAdapter};
 

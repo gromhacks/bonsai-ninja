@@ -8,7 +8,7 @@
 //! refactor scoping.
 
 use crate::common::{
-    decl_or_ancestor_name_matches, file_path_matches_filter, format_span, make_callable_name_filter,
+    decl_or_ancestor_name_matches, filtered_file_decl_index, format_span, make_callable_name_filter,
     make_name_filter, textual_relevance_key,
 };
 use bonsai_common::Span;
@@ -104,19 +104,9 @@ pub fn args(ws: &Workspace, f: &ArgsFilters<'_>) -> Result<Vec<ArgOut>, regex::E
     let mut facts: Vec<ArgFact> = files
         .par_iter()
         .fold(Vec::new, |mut acc, &file| {
-            if let Some(needle) = f.file {
-                let path = ws
-                    .vfs()
-                    .path(file)
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if !file_path_matches_filter(ws, &path, needle) {
-                    return acc;
-                }
-            }
             // Argument inventory consumes file-local AST facts only. Avoid a
             // global symbol remap and stream the immutable compiler object.
-            let Some(index) = ws.db().decl_index_uncached(file) else {
+            let Some(index) = filtered_file_decl_index(ws, file, f.file) else {
                 return acc;
             };
             let defs_by_symbol = index

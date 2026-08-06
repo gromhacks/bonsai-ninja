@@ -49,7 +49,9 @@ Elasticsearch gate after building release:
 ```bash
 cargo build --release --locked -p bonsai_cli
 BONSAI_ELASTICSEARCH_ROOT=../elasticsearch \
-  cargo test --release -p bonsai_cli \
+BONSAI_REQUIRE_ELASTICSEARCH_GATE=1 \
+BONSAI_MEMORY_BUDGET_MB=3072 \
+  cargo test --release --locked -p bonsai_cli \
   --test elasticsearch_large_repo -- --nocapture
 ```
 
@@ -100,10 +102,10 @@ a regression pass: record the host, source-file count, cold/warm cache state,
 wall time, physical footprint/RSS, swaps, and completeness, then review the
 phase/allocation change.
 
-The final 2026-08-05 ABI-v61 reference pass completed all five tests in 222.95
-seconds: fresh-cache production taint 30.83 seconds, semantic generation
-validation 5.57 seconds, warm reuse 2.58 seconds, default inspect 10.77
-seconds, broad raw taint inspect 29.68 seconds, warm production taint 26.70
+The final 2026-08-06 ABI-v61 reference pass completed all five tests in 213.51
+seconds: fresh-cache production taint 28.84 seconds, semantic generation
+validation 5.23 seconds, warm reuse 2.35 seconds, default inspect 10.87
+seconds, broad raw taint inspect 28.70 seconds, warm production taint 26.26
 seconds, and every
 navigation/inventory command below 30 seconds. The explicit empty-cache
 `index --semantic` bulk prewarm is measured separately because normal commands

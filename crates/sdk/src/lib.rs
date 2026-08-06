@@ -887,11 +887,16 @@ impl Bonsai {
     /// Find the rulepack directory for a workspace.
     ///
     /// Probes in order: `BONSAI_RULES_DIR`, `<root>/security-patterns`,
-    /// `<root>/../security-patterns`, `./security-patterns`. Returns
-    /// the first existing path, or `None`. `--rules-dir` overrides.
+    /// `<root>/../security-patterns`, the rulepack beside the current
+    /// executable, and `./security-patterns`. Returns the first existing
+    /// directory, or `None`. `--rules-dir` overrides.
     #[must_use]
     pub fn discover_rulepack_root(workspace_root: &Path) -> Option<PathBuf> {
-        Self::discover_rulepack_root_with(workspace_root, |key| std::env::var_os(key).map(PathBuf::from))
+        Self::discover_rulepack_root_with_executable(
+            workspace_root,
+            |key| std::env::var_os(key).map(PathBuf::from),
+            std::env::current_exe().ok().as_deref(),
+        )
     }
 
     /// Test variant of [`Self::discover_rulepack_root`] that takes a
@@ -902,21 +907,39 @@ impl Bonsai {
     where
         F: Fn(&str) -> Option<PathBuf>,
     {
+        Self::discover_rulepack_root_with_executable(
+            workspace_root,
+            env_lookup,
+            std::env::current_exe().ok().as_deref(),
+        )
+    }
+
+    fn discover_rulepack_root_with_executable<F>(
+        workspace_root: &Path,
+        env_lookup: F,
+        executable: Option<&Path>,
+    ) -> Option<PathBuf>
+    where
+        F: Fn(&str) -> Option<PathBuf>,
+    {
         if let Some(env_path) = env_lookup("BONSAI_RULES_DIR") {
-            if env_path.exists() {
+            if env_path.is_dir() {
                 return Some(env_path);
             }
         }
         // The parent-less case is silently skipped (root filesystem,
         // single-segment relative path) — fabricating a path would
         // surface as a confusing "no such file" later.
-        let mut candidates: Vec<PathBuf> = Vec::with_capacity(3);
+        let mut candidates: Vec<PathBuf> = Vec::with_capacity(4);
         candidates.push(workspace_root.join("security-patterns"));
         if let Some(parent) = workspace_root.parent() {
             candidates.push(parent.join("security-patterns"));
         }
+        if let Some(executable_dir) = executable.and_then(Path::parent) {
+            candidates.push(executable_dir.join("security-patterns"));
+        }
         candidates.push(PathBuf::from("security-patterns"));
-        candidates.into_iter().find(|path| path.exists())
+        candidates.into_iter().find(|path| path.is_dir())
     }
 
     /// Wrap an opened workspace in the [`Project`] facade with the

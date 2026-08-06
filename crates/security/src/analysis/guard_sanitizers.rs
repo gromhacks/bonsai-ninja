@@ -4000,7 +4000,7 @@ pub(super) fn configured_argument_factory_guard_sanitizer(
     let assignment_span = local_assignment.or_else(|| {
         file_decls
             .iter()
-            .filter(|candidate| candidate.name == "__module__")
+            .filter(|candidate| candidate.name == bonsai_lang_api::MODULE_DECL_NAME)
             .filter_map(|candidate| {
                 latest_structured_assignment_to(&candidate.flow_events, sink.span, &guarded_place)
             })

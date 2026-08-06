@@ -610,10 +610,7 @@ fn return_sink_rulepack(lang: &str) -> Rulepack {
         match_spec: MatchSpec {
             kind: MatchKind::Return,
             callee: None,
-            target: Some(RuleTarget {
-                name: Some("return".to_string()),
-                ..Default::default()
-            }),
+            target: None,
             search_depth: 0,
         },
         analysis_semantics: None,

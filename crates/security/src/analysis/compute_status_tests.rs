@@ -6,6 +6,7 @@
 use super::*;
 use crate::finding::{FindingMatch, TaintedArgInfo};
 use crate::loader::LanguagePack;
+use bonsai_common::path_filter_matches;
 use bonsai_taint::TaintedCallKind;
 
 fn sanitizer(tag: Option<&str>) -> FindingMatch {
@@ -1080,6 +1081,10 @@ fn xxe_builder_creation_uses_structured_assignment_and_call_facts() {
            builder = factory.newDocumentBuilder();
            builder.parse(input);"#,
     );
+    let builder_targets = [RuleTarget {
+        name: Some("newDocumentBuilder".to_string()),
+        ..RuleTarget::default()
+    }];
     assert!(builder_created_from_factory_before_sink(
         &ws,
         func,
@@ -1087,6 +1092,7 @@ fn xxe_builder_creation_uses_structured_assignment_and_call_facts() {
         sink_span,
         "builder",
         "factory",
+        &builder_targets,
     ));
 }
 
@@ -1097,6 +1103,10 @@ fn conditional_xxe_builder_creation_does_not_dominate_later_sink() {
            if (flag) { builder = factory.newDocumentBuilder(); }
            builder.parse(input);"#,
     );
+    let builder_targets = [RuleTarget {
+        name: Some("newDocumentBuilder".to_string()),
+        ..RuleTarget::default()
+    }];
     assert!(!builder_created_from_factory_before_sink(
         &ws,
         func,
@@ -1104,6 +1114,7 @@ fn conditional_xxe_builder_creation_does_not_dominate_later_sink() {
         sink_span,
         "builder",
         "factory",
+        &builder_targets,
     ));
 }
 

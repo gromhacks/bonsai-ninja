@@ -1,17 +1,16 @@
 //! Swift language adapter.
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
-    collect_assign_targets, collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler,
-    extract_imports_via,
+    collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
         canonical_simple_type_name, collect_kinds, collect_receiver_field_writes,
         collect_receiver_state_sources, first_named_child_of_kind, language_from_pack, node_text, parse_with,
         span_of, walk_flow_events,
     },
-    rewrite_implicit_member_reads, AdapterContext, AdapterError, ArgumentPassingMode, CallKind, Decl,
-    DeclIndex, DeclKind, FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, SyntaxSpecialForm,
-    TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
+    AdapterContext, AdapterError, ArgumentPassingMode, CallKind, Decl, DeclIndex, DeclKind, FlowEvent,
+    GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
+    LanguageCapabilities, LanguageId, ModifierVocabulary, SyntaxSpecialForm, TypeAliasBinding,
+    TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
 };
 use tree_sitter::Node;
 
@@ -190,7 +189,7 @@ impl LanguageAdapter for SwiftAdapter {
             // decl with `receiver_field_writes` for each stored
             // property, `new Envelope(...)` never field-projects
             // `envelope.cmd ← arg` onto the caller's allocation and
-            // the entire mega_flow chain stalls at handle_request.
+            // interprocedural member flow stalls at the constructor caller.
             synthesize_swift_memberwise_struct_inits(&mut idx, file, &tree, src);
             // Swift computed properties (`var cmd: String { data.cmd }`)
             // are wrapped in `property_declaration` with a
@@ -1388,35 +1387,12 @@ fn swift_lookup_member_type(prop: Node<'_>, member: &str, src: &[u8]) -> Option<
 /// explicitly so resolution and receiver-field flow use the AST's lexical
 /// class context rather than treating the getter as a free function.
 fn qualify_swift_implicit_member_reads(index: &mut DeclIndex) {
-    use std::collections::HashSet;
-    let getter_names: HashSet<String> = index
-        .defs
-        .iter()
-        .filter(|d| {
-            matches!(d.kind, DeclKind::Method | DeclKind::Function)
-                && d.params.is_empty()
-                && !d.name.is_empty()
-        })
-        .map(|d| d.name.clone())
-        .collect();
-    if getter_names.is_empty() {
-        return;
-    }
-    for decl in &mut index.defs {
-        if decl.flow_events.is_empty() {
-            continue;
-        }
-        let mut locals: HashSet<String> = decl.params.iter().cloned().collect();
-        collect_assign_targets(&decl.flow_events, &mut locals);
-        rewrite_implicit_member_reads(&mut decl.flow_events, &getter_names, &locals, |name| {
-            ImplicitMemberReadCall {
-                source_call: format!("self.{name}"),
-                call_name: format!("self.{name}"),
-                receiver: Some("self".to_string()),
-                call_kind: CallKind::Method,
-            }
-        });
-    }
+    bonsai_lang_api::qualify_implicit_member_reads_in_index(index, |name| ImplicitMemberReadCall {
+        source_call: format!("self.{name}"),
+        call_name: format!("self.{name}"),
+        receiver: Some("self".to_string()),
+        call_kind: CallKind::Method,
+    });
 }
 
 /// Synthesize a memberwise initializer (Constructor decl) for each

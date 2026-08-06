@@ -337,7 +337,11 @@ impl LanguageAdapter for CppAdapter {
                     decl.flow_events = ordered;
                 }
                 if let Some(fields) = decl.parent.and_then(|parent| fields_by_parent.get(&parent)) {
-                    qualify_cpp_member_expression_flows(&mut decl.flow_events, fields);
+                    bonsai_lang_api::qualify_receiver_field_expression_flows(
+                        &mut decl.flow_events,
+                        fields,
+                        "this",
+                    );
                 }
                 if let Some(visibility) = access_by_span.get(&decl.span).copied() {
                     decl.visibility = visibility;
@@ -662,78 +666,6 @@ fn cpp_fields_by_parent_symbol(
                 .map(|(_, _, fields)| (decl.symbol, fields.iter().cloned().collect()))
         })
         .collect()
-}
-
-fn qualify_cpp_member_expression_flows(events: &mut [FlowEvent], fields: &std::collections::HashSet<String>) {
-    for event in events {
-        match event {
-            FlowEvent::Return { value_flow, .. } | FlowEvent::Yield { value_flow, .. } => {
-                qualify_cpp_member_expression_flow(value_flow, fields);
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                qualify_cpp_member_expression_flows(then_events, fields);
-                qualify_cpp_member_expression_flows(else_events, fields);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                qualify_cpp_member_expression_flows(body, fields);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                qualify_cpp_member_expression_flows(body, fields);
-                qualify_cpp_member_expression_flows(catch_events, fields);
-                qualify_cpp_member_expression_flows(finally_events, fields);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn qualify_cpp_member_expression_flow(
-    flow: &mut bonsai_lang_api::ExpressionFlow,
-    fields: &std::collections::HashSet<String>,
-) {
-    let old_place = flow.place.clone();
-    if let Some(projection) = &mut flow.projection {
-        if fields.contains(&projection.base) {
-            projection.path.insert(0, std::mem::take(&mut projection.base));
-            projection.base = "this".to_string();
-            flow.place = Some(projection.canonical_place());
-        }
-    } else if let Some(place) = flow.place.as_deref() {
-        if fields.contains(place) {
-            flow.projection = Some(bonsai_lang_api::ExpressionProjection {
-                base: "this".to_string(),
-                path: vec![place.to_string()],
-            });
-            flow.place = Some(format!("this.{place}"));
-        }
-    }
-    if let (Some(old_place), Some(new_place)) = (old_place.as_deref(), flow.place.as_deref()) {
-        if old_place != new_place {
-            for source in &mut flow.source_names {
-                if source == old_place {
-                    source.clone_from(&new_place.to_string());
-                }
-            }
-        }
-    }
-    for field in &mut flow.aggregate_fields {
-        qualify_cpp_member_expression_flow(&mut field.value, fields);
-    }
-    for item in &mut flow.tuple_items {
-        qualify_cpp_member_expression_flow(item, fields);
-    }
-    for spread in &mut flow.spreads {
-        qualify_cpp_member_expression_flow(spread, fields);
-    }
 }
 
 /// Collect every C++ function name that's TU-private:

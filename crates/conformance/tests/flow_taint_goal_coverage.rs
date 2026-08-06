@@ -366,6 +366,8 @@ fn adapter_flow_event_audit_tracks_current_flow_event_enum() {
         &[
             "Call Branch Loop Assign Return Throw Try Break Continue Yield Await Defer Using Lifecycle",
             "fields on `FlowEvent::Loop` / `FlowEvent::Try`",
+            "--test flow_event_conformance",
+            "--test async_yield_coverage",
         ],
     );
     assert!(
@@ -373,25 +375,9 @@ fn adapter_flow_event_audit_tracks_current_flow_event_enum() {
         "adapter audit script must not look for stale FlowEvent variants"
     );
 
-    let snapshot = read(".snapshots/ADAPTER_FLOW_EVENT_COVERAGE.snapshot");
-    assert_contains_all(
-        "adapter FlowEvent audit snapshot",
-        &snapshot,
-        &[
-            "Loop",
-            "Try",
-            "Break",
-            "Continue",
-            "Yield",
-            "Await",
-            "Defer",
-            "Using",
-            "Lifecycle",
-        ],
-    );
     assert!(
-        !snapshot.lines().next().unwrap_or_default().contains("ForEach"),
-        "adapter FlowEvent snapshot must use current FlowEvent names"
+        !script.contains("grep -rcE") && !script.contains("ADAPTER_FLOW_EVENT_COVERAGE.snapshot"),
+        "adapter FlowEvent coverage must inspect emitted compiler facts, not source spellings"
     );
 }
 

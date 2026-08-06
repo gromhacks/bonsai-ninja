@@ -12,9 +12,9 @@ use crate::progress;
 use crate::{cli_println, ui};
 
 use super::{
-    browse::workspace_file_count_exceeds, open_project_index_matching_any_literal,
-    open_project_index_retrieval_candidate_union, open_project_path_query, page_info_to_json,
-    paged_json_incomplete_reasons, short_file,
+    open_project_index_matching_any_literal, open_project_index_retrieval_candidate_union,
+    open_project_path_query, page_info_to_json, paged_json_incomplete_reasons, short_file,
+    workspace_file_count_exceeds,
 };
 
 const PATH_ENDPOINT_PREFILTER_FILE_LIMIT: usize = 5_000;

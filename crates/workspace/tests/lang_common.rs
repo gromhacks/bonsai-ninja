@@ -367,18 +367,11 @@ pub fn has_decorator(ws: &Workspace, name: &str) -> bool {
     false
 }
 
-/// Does any file in the workspace carry an import whose module text contains
-/// `needle`? Imports are extracted generically from the top-level import/use/
-/// include statements, so we match by substring to tolerate quoting and
-/// alias syntax.
+/// Does any adapter-lowered import have a module containing `needle`?
 pub fn has_import(ws: &Workspace, needle: &str) -> bool {
     let global = ws.db().global_index();
     for f in global.all_files() {
-        let Ok(parsed) = ws.db().parse(f) else { continue };
-        let Some(snap) = ws.vfs().snapshot(f).ok() else {
-            continue;
-        };
-        let imports = bonsai_lang_api::kit::extract_generic_imports(&parsed.tree, f, snap.text.as_bytes());
+        let imports = ws.db().imports_for(f);
         if imports.iter().any(|imp| imp.module.contains(needle)) {
             return true;
         }
@@ -390,11 +383,7 @@ pub fn has_import(ws: &Workspace, needle: &str) -> bool {
 pub fn has_import_alias(ws: &Workspace, module_sub: &str, alias: &str) -> bool {
     let global = ws.db().global_index();
     for f in global.all_files() {
-        let Ok(parsed) = ws.db().parse(f) else { continue };
-        let Some(snap) = ws.vfs().snapshot(f).ok() else {
-            continue;
-        };
-        let imports = bonsai_lang_api::kit::extract_generic_imports(&parsed.tree, f, snap.text.as_bytes());
+        let imports = ws.db().imports_for(f);
         if imports
             .iter()
             .any(|imp| imp.module.contains(module_sub) && imp.alias.as_deref() == Some(alias))
@@ -405,15 +394,25 @@ pub fn has_import_alias(ws: &Workspace, module_sub: &str, alias: &str) -> bool {
     false
 }
 
+/// Does an adapter-lowered member import preserve namespace, exported symbol,
+/// and local alias as three distinct compiler fields?
+pub fn has_import_symbol_alias(ws: &Workspace, module: &str, original_name: &str, alias: &str) -> bool {
+    let global = ws.db().global_index();
+    let found = global.all_files().any(|file| {
+        ws.db().imports_for(file).iter().any(|import| {
+            import.module == module
+                && import.original_name.as_deref() == Some(original_name)
+                && import.alias.as_deref() == Some(alias)
+        })
+    });
+    found
+}
+
 /// Is there a wildcard import that targets the given module substring?
 pub fn has_wildcard_import(ws: &Workspace, module_sub: &str) -> bool {
     let global = ws.db().global_index();
     for f in global.all_files() {
-        let Ok(parsed) = ws.db().parse(f) else { continue };
-        let Some(snap) = ws.vfs().snapshot(f).ok() else {
-            continue;
-        };
-        let imports = bonsai_lang_api::kit::extract_generic_imports(&parsed.tree, f, snap.text.as_bytes());
+        let imports = ws.db().imports_for(f);
         if imports
             .iter()
             .any(|imp| imp.is_wildcard && imp.module.contains(module_sub))

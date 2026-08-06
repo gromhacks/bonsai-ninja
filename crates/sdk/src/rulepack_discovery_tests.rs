@@ -99,3 +99,23 @@ fn no_env_no_local_doesnt_panic_or_invent_path() {
 
     fs::remove_dir_all(&workspace).ok();
 }
+
+#[test]
+fn executable_sibling_rulepack_is_discovered_from_an_unrelated_cwd() {
+    let workspace = fresh_tempdir("ws-packaged");
+    let package = fresh_tempdir("package");
+    let executable = package.join("bonsai-ninja");
+    let packaged_rules = package.join("security-patterns");
+    fs::create_dir_all(&packaged_rules).unwrap();
+
+    let resolved =
+        Bonsai::discover_rulepack_root_with_executable(&workspace, |_| None, Some(&executable)).unwrap();
+    assert_eq!(
+        resolved.canonicalize().unwrap(),
+        packaged_rules.canonicalize().unwrap(),
+        "a relocated distribution must discover its bundled rulepack beside the executable"
+    );
+
+    fs::remove_dir_all(&workspace).ok();
+    fs::remove_dir_all(&package).ok();
+}

@@ -32,6 +32,11 @@ fn release_bin() -> Option<PathBuf> {
     // production behavior, so never silently substitute the debug artifact.
     let path = repo_root().join("target/release/bonsai-ninja");
     if !path.exists() {
+        assert!(
+            !large_repo_gate_required(),
+            "required Elasticsearch gate has no release binary ({}); run `cargo build --release --locked -p bonsai_cli`",
+            path.display()
+        );
         eprintln!(
             "skipping elasticsearch large-repo test: release binary not built ({})",
             path.display()
@@ -41,6 +46,10 @@ fn release_bin() -> Option<PathBuf> {
     match release_binary_is_fresh(&path, &repo_root()) {
         Ok(true) => Some(path),
         Ok(false) => {
+            assert!(
+                !large_repo_gate_required(),
+                "required Elasticsearch gate release binary is stale; run `cargo build --release --locked -p bonsai_cli`"
+            );
             eprintln!(
                 "skipping elasticsearch large-repo test: release binary is stale; \
                  run `cargo build --release --locked -p bonsai_cli`"
@@ -48,12 +57,22 @@ fn release_bin() -> Option<PathBuf> {
             None
         }
         Err(error) => {
+            assert!(
+                !large_repo_gate_required(),
+                "required Elasticsearch gate cannot verify release binary freshness: {error}"
+            );
             eprintln!(
                 "skipping elasticsearch large-repo test: cannot verify release binary freshness: {error}"
             );
             None
         }
     }
+}
+
+fn large_repo_gate_required() -> bool {
+    std::env::var("BONSAI_REQUIRE_ELASTICSEARCH_GATE")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
 }
 
 fn release_binary_is_fresh(binary: &Path, root: &Path) -> std::io::Result<bool> {
@@ -111,6 +130,10 @@ fn elasticsearch_root() -> Option<PathBuf> {
     if path.exists() {
         Some(path.canonicalize().unwrap_or(path))
     } else {
+        assert!(
+            !large_repo_gate_required(),
+            "required Elasticsearch gate corpus is unavailable; set BONSAI_ELASTICSEARCH_ROOT to a checkout"
+        );
         eprintln!(
             "skipping elasticsearch large-repo test: checkout not found ({})",
             path.display()

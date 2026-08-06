@@ -154,7 +154,10 @@ impl LanguageAdapter for ErlangAdapter {
                     snapshot.text.as_ref(),
                     &assignment_values,
                 );
-                insert_erlang_map_field_assigns_in_events(&mut decl.flow_events, &map_field_assigns);
+                bonsai_lang_api::kit::insert_flow_field_assignments(
+                    &mut decl.flow_events,
+                    &map_field_assigns,
+                );
                 inject_erlang_fun_ref_aliases(
                     &mut decl.flow_events,
                     snapshot.text.as_ref(),
@@ -227,12 +230,7 @@ impl LanguageAdapter for ErlangAdapter {
     }
 }
 
-#[derive(Clone, Debug)]
-struct ErlangMapFieldAssigns {
-    assign_span: bonsai_common::Span,
-    target: String,
-    fields: Vec<FlowEvent>,
-}
+type ErlangMapFieldAssigns = bonsai_lang_api::kit::FlowFieldAssignInsertion;
 
 fn collect_erlang_map_literal_field_assigns(
     tree: &Tree,
@@ -299,60 +297,6 @@ fn erlang_map_key(node: Node<'_>, src: &[u8]) -> Option<String> {
         return None;
     }
     Some(key.to_string())
-}
-
-fn insert_erlang_map_field_assigns_in_events(
-    events: &mut Vec<FlowEvent>,
-    field_assigns: &[ErlangMapFieldAssigns],
-) {
-    let mut index = 0usize;
-    while index < events.len() {
-        match &mut events[index] {
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                insert_erlang_map_field_assigns_in_events(then_events, field_assigns);
-                insert_erlang_map_field_assigns_in_events(else_events, field_assigns);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                insert_erlang_map_field_assigns_in_events(body, field_assigns);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                insert_erlang_map_field_assigns_in_events(body, field_assigns);
-                insert_erlang_map_field_assigns_in_events(catch_events, field_assigns);
-                insert_erlang_map_field_assigns_in_events(finally_events, field_assigns);
-            }
-            _ => {}
-        }
-
-        let inserts = match &events[index] {
-            FlowEvent::Assign { span, target, .. } => field_assigns
-                .iter()
-                .filter(|item| {
-                    item.target == *target
-                        && span.file == item.assign_span.file
-                        && span.start <= item.assign_span.end
-                        && item.assign_span.start <= span.end
-                })
-                .flat_map(|item| item.fields.clone())
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
-        };
-        if inserts.is_empty() {
-            index += 1;
-            continue;
-        }
-        let inserted = inserts.len();
-        events.splice((index + 1)..=index, inserts);
-        index += inserted + 1;
-    }
 }
 
 /// Extract Erlang `-import` attributes and `-include` / `-include_lib`

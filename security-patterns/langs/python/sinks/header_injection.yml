@@ -80,9 +80,8 @@
   match:
     kind: call
     callee:
-      attribute:
-      - HttpResponse
-      - __setitem__
+      receiver_type_in: [HttpResponse]
+      call_kind_in: [index_write]
   constraints:
   - any_arg_tainted: true
   match_examples:
@@ -94,7 +93,7 @@
           name = request.GET.get('h')
           response[name] = "x"
           return response
-    expect_match_text: ["response.__setitem__"]
+    expect_match_text: ["response.index_write"]
   - name: django response setitem literal negative
     code: |
       from django.http import HttpResponse
@@ -103,7 +102,7 @@
           response["Content-Type"] = "text/html"
           return response
     expect_no_match: true
-  description: "Django `response[name] = value` (HttpResponse.__setitem__) - a tainted header name or value is CRLF/header injection. Subscript-assign is surfaced as a synthetic __setitem__ call on the typed HttpResponse receiver."
+  description: "Django `response[name] = value` on a typed HttpResponse receiver - a tainted header name or value is CRLF/header injection. The adapter lowers subscript assignment as a typed indexed-write operation; no provider API spelling is embedded in shared analysis."
 - id: python.header.fastapi_response_headers
   enabled: false
   disabled_reason:

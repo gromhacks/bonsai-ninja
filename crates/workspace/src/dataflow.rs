@@ -16,6 +16,7 @@ use crate::cache_fingerprint::{
     dependency_metadata_fingerprint_for_sidecar, discard_stale_factstore_sidecar,
     workspace_content_fingerprint, workspace_content_fingerprint_from_paths,
 };
+use crate::factstore_cleanup::{forward_port_unwritten_entries, map_factstore_io};
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{workspace_bonsai_dir, FileId, FuncId, SymbolId, MATCHER_POLICY_FINGERPRINT};
 use bonsai_db::AnalyzerDb;
@@ -558,18 +559,7 @@ impl DataFlowCache {
         if let Some(error) = write_error.lock().take() {
             return Err(error);
         }
-        if let Some(reader) = disk_clone {
-            for item in reader.iter() {
-                let (key, hit) = item.map_err(map_factstore_io)?;
-                if written_keys.lock().contains(&key) {
-                    continue;
-                }
-                writer
-                    .add(key, hit.body_hash, &hit.payload)
-                    .map_err(map_factstore_io)?;
-                written_keys.lock().insert(key);
-            }
-        }
+        forward_port_unwritten_entries(disk_clone.as_deref(), &writer, &written_keys)?;
         let written = writer.finish().map_err(map_factstore_io)?;
         let reader = bonsai_factstore::FactStoreReader::open(
             path,
@@ -1018,15 +1008,6 @@ fn current_file_hashes(db: &AnalyzerDb) -> AHashMap<FileId, u64> {
             Some((file, content_hash(snap.text.as_bytes())))
         })
         .collect()
-}
-
-/// Funnel `bonsai_factstore::FactStoreError` into `std::io::Error`
-/// so the dataflow API exposes ordinary I/O failures to callers.
-fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
-    match err {
-        bonsai_factstore::FactStoreError::Io(e) => e,
-        other => std::io::Error::other(other),
-    }
 }
 
 impl DataFlowCache {

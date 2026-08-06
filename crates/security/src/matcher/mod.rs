@@ -915,14 +915,8 @@ fn call_rule_match_passes_constraints_at_expected_hit(
             .filter(|call| call.span == expected.span || spans_overlap(call.span, expected.span))
         {
             let receiver_types = expanded_receiver_types(&call.receiver_types, receiver_base_map);
-            let Some(matched_callee) = callee_or_alias_matches(
-                &call.callee,
-                &receiver_types,
-                prepared.name,
-                prepared.attribute,
-                prepared.regex.as_ref(),
-                &facts.alias_map,
-            ) else {
+            let Some(matched_callee) = prepared.call_target_matches(call, &receiver_types, &facts.alias_map)
+            else {
                 continue;
             };
             if !prepared.call_context_allows(
@@ -1579,7 +1573,7 @@ where
         };
         scan_file_rules(&ctx, &file_rules, &mut file_out);
         if dedup_file_matches {
-            dedup_inventory_matches_in_place(&mut file_out);
+            dedup_inventory_matches(&mut file_out);
         }
         (file_out, true)
     };
@@ -1693,7 +1687,9 @@ fn matcher_worker_count() -> usize {
         .min(available)
 }
 
-fn dedup_inventory_matches_in_place(matches: &mut Vec<RuleMatch>) {
+/// Keep one inventory row per rule and concrete call site, preferring the
+/// match text with the most receiver context.
+pub(crate) fn dedup_inventory_matches(matches: &mut Vec<RuleMatch>) {
     type InventoryDedupKey = (String, String, u32, u32, String, Option<String>);
 
     let mut seen: AHashMap<InventoryDedupKey, usize> = AHashMap::new();
@@ -1947,6 +1943,7 @@ struct PreparedRule<'a> {
     call_text_anchor: Option<String>,
     base_name_in: &'a [String],
     base_name_not_in: &'a [String],
+    call_kind_in: &'a [CallKind],
     requires_call_package_signal: bool,
     constraint_regexes: Vec<Option<Regex>>,
     /// The rule's `packages` ∪ `imports` ∪ `modules`, in the
@@ -1964,7 +1961,12 @@ impl<'a> PreparedRule<'a> {
             MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param => {
                 rule.match_spec.target.as_ref()
             }
-        }?;
+        };
+        let target = match target {
+            Some(target) => target,
+            None if rule.match_spec.kind == MatchKind::Return => empty_rule_target(),
+            None => return None,
+        };
         let mut package_signals: Vec<&str> = Vec::new();
         for signal in rule
             .packages
@@ -2011,6 +2013,7 @@ impl<'a> PreparedRule<'a> {
             call_text_anchor,
             base_name_in: target.base_name_in.as_slice(),
             base_name_not_in: target.base_name_not_in.as_slice(),
+            call_kind_in: target.call_kind_in.as_slice(),
             requires_call_package_signal,
             constraint_regexes,
             package_signals,
@@ -2028,6 +2031,32 @@ impl<'a> PreparedRule<'a> {
             return false;
         }
         !self.base_name_not_in.iter().any(|blocked| blocked == base)
+    }
+
+    fn call_kind_allows(&self, call_kind: CallKind) -> bool {
+        self.call_kind_in.is_empty() || self.call_kind_in.contains(&call_kind)
+    }
+
+    fn call_target_matches(
+        &self,
+        call: &CallFact,
+        receiver_types: &[String],
+        alias_map: &std::collections::HashMap<String, AliasTarget>,
+    ) -> Option<String> {
+        if !self.call_kind_allows(call.call_kind) {
+            return None;
+        }
+        if self.name.is_none() && self.attribute.is_none() && self.regex.is_none() {
+            return Some(call.callee.clone());
+        }
+        callee_or_alias_matches(
+            &call.callee,
+            receiver_types,
+            self.name,
+            self.attribute,
+            self.regex.as_ref(),
+            alias_map,
+        )
     }
 
     #[cfg(test)]
@@ -2317,6 +2346,11 @@ impl<'a> PreparedRule<'a> {
     }
 }
 
+fn empty_rule_target() -> &'static RuleTarget {
+    static EMPTY: std::sync::OnceLock<RuleTarget> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(RuleTarget::default)
+}
+
 fn text_anchor_groups_for_rule(rule: &Rule, target: &RuleTarget) -> Vec<Vec<String>> {
     let mut groups = Vec::new();
     groups.extend(text_anchor_groups_for_target(target, rule.match_spec.kind));
@@ -2507,27 +2541,19 @@ fn text_anchor_groups_for_target(target: &RuleTarget, match_kind: MatchKind) -> 
         }
     }
     if let Some(attribute) = target.attribute.as_ref() {
-        if attribute.first().is_some_and(|head| head == "System") && attribute.len() == 2 {
+        for (idx, part) in attribute.iter().enumerate() {
+            if attribute.len() == 2 && idx == 0 && looks_like_type_anchor(part) {
+                continue;
+            }
             let mut out = Vec::new();
-            push_text_anchor(&mut out, &attribute.join("."));
+            push_text_anchor(&mut out, part);
+            if idx > 0 && part.len() < 3 {
+                push_exact_text_anchor(&mut out, &format!(".{part}"));
+                push_exact_text_anchor(&mut out, &format!("::{part}"));
+                push_exact_text_anchor(&mut out, &format!("->{part}"));
+            }
             if !out.is_empty() {
                 groups.push(out);
-            }
-        } else {
-            for (idx, part) in attribute.iter().enumerate() {
-                if attribute.len() == 2 && idx == 0 && looks_like_type_anchor(part) {
-                    continue;
-                }
-                let mut out = Vec::new();
-                push_text_anchor(&mut out, part);
-                if idx > 0 && part.len() < 3 {
-                    push_exact_text_anchor(&mut out, &format!(".{part}"));
-                    push_exact_text_anchor(&mut out, &format!("::{part}"));
-                    push_exact_text_anchor(&mut out, &format!("->{part}"));
-                }
-                if !out.is_empty() {
-                    groups.push(out);
-                }
             }
         }
     }
@@ -3160,14 +3186,25 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
             }
             let mut rule_matches = false;
             for call in &syntax.calls {
-                let matched_callee = callee_or_alias_matches(
-                    &call.name,
-                    &call.receiver_types,
-                    prepared.name,
-                    prepared.attribute,
-                    prepared.regex.as_ref(),
-                    &alias_map,
-                );
+                let call_kind_matches = prepared.call_kind_allows(call.call_kind);
+                let matched_callee = if call_kind_matches
+                    && prepared.name.is_none()
+                    && prepared.attribute.is_none()
+                    && prepared.regex.is_none()
+                {
+                    Some(call.name.clone())
+                } else if call_kind_matches {
+                    callee_or_alias_matches(
+                        &call.name,
+                        &call.receiver_types,
+                        prepared.name,
+                        prepared.attribute,
+                        prepared.regex.as_ref(),
+                        &alias_map,
+                    )
+                } else {
+                    None
+                };
                 let direct_match = matched_callee.as_ref().is_some_and(|matched_callee| {
                     prepared.base_name_allows(matched_callee)
                         && (prepared.rule.match_spec.kind != MatchKind::New
@@ -3579,15 +3616,6 @@ fn return_rule_match(
     value_name: Option<&str>,
     span_text: &str,
 ) -> Option<String> {
-    if prepared.name == Some("return") {
-        return Some(
-            value_text
-                .or(value_name)
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or("return")
-                .to_string(),
-        );
-    }
     if let Some(regex) = prepared.regex.as_ref() {
         for candidate in [value_text, value_name, Some(span_text)].into_iter().flatten() {
             if regex.is_match(candidate) {
@@ -3599,6 +3627,14 @@ fn return_rule_match(
         if value_name == Some(name) || value_text.is_some_and(|value| value.trim() == name) {
             return Some(name.to_string());
         }
+    }
+    if prepared.name.is_none() && prepared.regex.is_none() && prepared.attribute.is_none() {
+        return [value_text, value_name, Some(span_text)]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .find(|candidate| !candidate.is_empty())
+            .map(str::to_string);
     }
     None
 }
@@ -3946,14 +3982,9 @@ fn scan_calls_batch(
                 ) {
                     continue;
                 }
-                let Some(matched_callee) = callee_or_alias_matches(
-                    &call.callee,
-                    &receiver_types,
-                    prepared.name,
-                    prepared.attribute,
-                    prepared.regex.as_ref(),
-                    &facts.alias_map,
-                ) else {
+                let Some(matched_callee) =
+                    prepared.call_target_matches(call, &receiver_types, &facts.alias_map)
+                else {
                     continue;
                 };
                 if !prepared.base_name_allows(&matched_callee) {
@@ -4037,6 +4068,11 @@ fn scan_calls_batch(
         let mut candidate_rules = Vec::new();
         push_call_candidate_rules(&mut candidate_rules, rules, &r.name, &import_aliases);
         for prepared in candidate_rules {
+            if !prepared.call_kind_in.is_empty() {
+                // Ref fallbacks do not carry the adapter-lowered call kind;
+                // fail closed rather than guessing a typed operation.
+                continue;
+            }
             if mode == ConstraintMode::Strict && !prepared.rule.constraints.0.is_empty() {
                 continue;
             }
@@ -4316,15 +4352,9 @@ fn scan_missing_batch(
             // rule-declared depth) match the expected target? Cross-procedure
             // traversal only runs when the rule opts in.
             let target_present = facts.calls.iter().any(|call| {
-                callee_or_alias_matches(
-                    &call.callee,
-                    &call.receiver_types,
-                    prepared.name,
-                    prepared.attribute,
-                    prepared.regex.as_ref(),
-                    &facts.alias_map,
-                )
-                .is_some()
+                prepared
+                    .call_target_matches(call, &call.receiver_types, &facts.alias_map)
+                    .is_some()
                     && prepared.call_context_allows(
                         &call.callee,
                         &call.receiver_types,
@@ -4479,15 +4509,9 @@ fn missing_target_in_reachable_callees(
                 (std::borrow::Cow::Owned(calls), &callee_alias_owned)
             };
             for call in calls_view.iter() {
-                if callee_or_alias_matches(
-                    &call.callee,
-                    &call.receiver_types,
-                    prepared.name,
-                    prepared.attribute,
-                    prepared.regex.as_ref(),
-                    callee_alias_ref,
-                )
-                .is_some()
+                if prepared
+                    .call_target_matches(call, &call.receiver_types, callee_alias_ref)
+                    .is_some()
                     && prepared.call_context_allows(
                         &call.callee,
                         &call.receiver_types,
@@ -4543,15 +4567,9 @@ fn matching_call_has_arg_index(
             if call.origin != CallFactOrigin::RealCall || call.args.get(wanted_index).is_none() {
                 continue;
             }
-            if callee_or_alias_matches(
-                &call.callee,
-                &call.receiver_types,
-                prepared.name,
-                prepared.attribute,
-                prepared.regex.as_ref(),
-                &alias_map,
-            )
-            .is_none()
+            if prepared
+                .call_target_matches(&call, &call.receiver_types, &alias_map)
+                .is_none()
             {
                 continue;
             }
@@ -5711,7 +5729,7 @@ fn build_decl_match_facts_bundle(
     let module_type_aliases: Vec<TypeAliasBinding> = file_index
         .defs
         .iter()
-        .filter(|decl| decl.name == "__module__")
+        .filter(|decl| decl.name == bonsai_lang_api::MODULE_DECL_NAME)
         .flat_map(|decl| decl.type_aliases.iter().cloned())
         .collect();
     let assignment_values = AssignmentValueIndex::new(&file_index.assignment_values);
@@ -7261,9 +7279,11 @@ pub(crate) fn rule_target_matches_call(callee: &str, receiver_types: &[String], 
         || !target.base_param_index_in.is_empty()
         || !target.decl_kind_in.is_empty()
         || !target.visibility_in.is_empty()
+        || !target.call_kind_in.is_empty()
     {
-        // This helper has call facts but no declaration context. Contextual
-        // constraints must fail closed instead of being silently ignored.
+        // This helper has a callee and receiver types, but no declaration or
+        // typed call-kind context. Contextual constraints must fail closed
+        // instead of being silently ignored.
         return false;
     }
     let base_name_allowed = match_base_name(callee).map_or(target.base_name_in.is_empty(), |base| {

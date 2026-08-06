@@ -317,13 +317,11 @@ pub(super) fn lower_assignment(
                         .or(assignment_value_kind),
                 });
             }
-            // Subscript-assign `obj[key] = value` is semantically
-            // `obj.__setitem__(key, value)`. Emit a synthetic Call so
-            // `kind: call` rules can match the item-set with the RHS value
-            // as a tainted arg (e.g. Django `response[name] = tainted`
-            // header injection). Gated to a simple `<ident>[...]` LHS so it
-            // never fires on member/nested-subscript shapes. Harmless for
-            // languages with no `__setitem__` rule — nothing matches it.
+            // Preserve a parser-proven indexed write as a typed operation.
+            // Its arguments are the index and assigned value, so rulepacks
+            // can select this source-language shape without a fake runtime
+            // API name in shared lowering. Gated to a simple `<ident>[...]`
+            // LHS so it never fires on member/nested-subscript shapes.
             if let (Some(target_node), Some(value_node)) = (target_node, rhs) {
                 if let Some((base_node, key_node)) = subscript_place_parts(target_node) {
                     let base = node_text(&base_node, src).trim();
@@ -336,8 +334,8 @@ pub(super) fn lower_assignment(
                                 span,
                                 receiver: Some(base.to_string()),
                                 receiver_types: Vec::new(),
-                                name: format!("{base}.__setitem__"),
-                                call_kind: crate::CallKind::Method,
+                                name: format!("{base}.{}", crate::CallKind::IndexWrite.as_str()),
+                                call_kind: crate::CallKind::IndexWrite,
                                 args: vec![key_arg, value_arg],
                             });
                         }

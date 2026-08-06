@@ -164,15 +164,14 @@ fn kotlin_filter_rejects_unrelated_hits() {
 ///
 /// And `bonsai_resolve::alias_map_for_file(&imports)` MUST produce
 /// `Z → z`, NOT `Z → "x.y.z"`. The latter is the
-/// `bonsai_lang_api::kit::extract_generic_imports` shape — re-routing
-/// through the generic extractor would fail this test.
+/// a grammar-agnostic fallback shape — re-routing outside the adapter would
+/// fail this test.
 ///
 /// This pinned both:
 ///   1. that the kotlin adapter still produces the corrected
 ///      pass-8 import shape, AND
 ///   2. that callers continue to source aliases from the cached
-///      adapter ImportIndex (via `db.imports_for`), not the
-///      grammar-agnostic generic extractor.
+///      adapter ImportIndex (via `db.imports_for`), not a shared syntax parser.
 ///
 /// If a future refactor regresses either piece, this test fails
 /// before any downstream taint / inspect test does.

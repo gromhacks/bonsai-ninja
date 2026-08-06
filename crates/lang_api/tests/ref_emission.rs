@@ -26,8 +26,8 @@
 
 use bonsai_common::FileId;
 use bonsai_lang_api::kit::{
-    alias_map_from_imports, extract_call_refs, extract_generic_imports, extract_read_write_refs,
-    language_from_pack, GrammarHandler, SyntaxSpecialForm, EMPTY_HANDLER,
+    alias_map_from_imports, extract_call_refs, extract_read_write_refs, language_from_pack, GrammarHandler,
+    SyntaxSpecialForm, EMPTY_HANDLER,
 };
 use bonsai_lang_api::{AliasTarget, ImportIndex, ImportScope, ImportSpec, RefKind};
 
@@ -427,21 +427,6 @@ fn alias_map_shorthand_destructure_is_member_local_scope() {
         map.get("exec"),
         Some(&member("child_process", "exec")),
         "Local-scope entries must participate in alias resolution"
-    );
-}
-
-#[test]
-fn generic_imports_capture_commonjs_destructured_rename() {
-    let src = r#"const { persist: persistEnvelope } = require("./storage");"#;
-    let tree = parse("javascript", src);
-    let imports = extract_generic_imports(&tree, FileId::INVALID, src.as_bytes());
-    assert!(
-        imports.iter().any(|spec| {
-            spec.module == "./storage"
-                && spec.alias.as_deref() == Some("persistEnvelope")
-                && spec.original_name.as_deref() == Some("persist")
-        }),
-        "CommonJS destructured rename missing from generic imports: {imports:?}"
     );
 }
 

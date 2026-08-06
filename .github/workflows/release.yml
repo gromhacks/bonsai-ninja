@@ -14,9 +14,203 @@ env:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  preflight:
+    name: release preflight
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.88"
+          components: clippy,rustfmt
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: release-preflight
+
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
+        with:
+          tool: cargo-audit,cargo-machete
+          fallback: none
+
+      - name: Verify tag provenance and version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          python3 - "$GITHUB_REF_NAME" <<'PY'
+          import json
+          import re
+          import subprocess
+          import sys
+
+          tag = sys.argv[1]
+          match = re.fullmatch(r"v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)", tag)
+          if match is None:
+              raise SystemExit(f"release tag must be v<semver>, got {tag!r}")
+          metadata = json.loads(
+              subprocess.check_output(
+                  ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+                  text=True,
+              )
+          )
+          versions = {package["version"] for package in metadata["packages"]}
+          if versions != {match.group(1)}:
+              raise SystemExit(
+                  f"tag version {match.group(1)!r} does not match workspace versions {sorted(versions)!r}"
+              )
+          PY
+
+      - name: Verify formatting, compilation, lint, and rustdoc
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          git diff --check
+          cargo check --workspace --all-targets --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
+            --document-private-items --release --locked
+
+      - name: Verify dependencies and architecture boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo machete --with-metadata
+          cargo audit --deny warnings
+          python3 scripts/audit-dependency-licenses.py
+          bash scripts/audit-github-actions.sh
+          bash scripts/audit-layering.sh
+          bash scripts/audit-hardcoded.sh --check /tmp/hardcoded-audit
+          python3 scripts/audit-corpus-independence.py
+          python3 scripts/audit-rust-duplication.py
+          python3 scripts/sync_skill.py --check
+          bash scripts/audit-adapter-capabilities.sh --check
+          bash scripts/audit-adapter-flow-events.sh --check
+          bash scripts/audit-public-api.sh --check
+
+      - name: Build and verify the release analysis surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p bonsai_cli
+          ./target/release/bonsai-ninja security . pack --validate --taint-replay \
+            --rules-dir security-patterns --format json --no-color --no-progress \
+            > /tmp/bonsai-pack-validation.json
+          ./target/release/bonsai-ninja security . pack --audit \
+            --rules-dir security-patterns --format json --no-color --no-progress \
+            > /tmp/bonsai-pack-audit.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          validation = json.loads(Path("/tmp/bonsai-pack-validation.json").read_text())
+          if validation.get("valid") is not True:
+              raise SystemExit("rulepack validation did not report valid=true")
+          if validation.get("errors") != 0 or validation.get("warnings") != 0:
+              raise SystemExit(
+                  "rulepack validation reported "
+                  f"{validation.get('errors')} error(s) and "
+                  f"{validation.get('warnings')} warning(s)"
+              )
+          audit = json.loads(Path("/tmp/bonsai-pack-audit.json").read_text())
+          if not audit.get("languages"):
+              raise SystemExit("rulepack audit did not report any language rows")
+          PY
+          scripts/audit-loop.sh --quick
+
+      - name: Verify self-security and output contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./target/release/bonsai-ninja security . taint-analysis \
+            --profile production --format json --all --no-color --no-progress \
+            > /tmp/bonsai-self-security.json
+          ./target/release/bonsai-ninja security examples/python/micro taint-analysis \
+            --format sarif --all --no-color --no-progress \
+            > /tmp/bonsai-smoke.sarif.json
+          ./target/release/bonsai-ninja defs examples/python/micro \
+            --html-output /tmp/bonsai-smoke.html --no-color --no-progress
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          self_report = json.loads(Path("/tmp/bonsai-self-security.json").read_text())
+          if self_report.get("analysis_complete") is not True:
+              raise SystemExit(
+                  f"self-security incomplete: {self_report.get('analysis_incomplete_reasons')}"
+              )
+          if self_report.get("rows"):
+              raise SystemExit(
+                  f"production self-security emitted {len(self_report['rows'])} high-severity finding(s)"
+              )
+          sarif = json.loads(Path("/tmp/bonsai-smoke.sarif.json").read_text())
+          if sarif.get("version") != "2.1.0" or not sarif.get("runs"):
+              raise SystemExit("SARIF smoke did not emit a valid SARIF 2.1.0 run")
+          html = Path("/tmp/bonsai-smoke.html").read_text()
+          if not html.lstrip().lower().startswith("<!doctype html>") or "</html>" not in html.lower():
+              raise SystemExit("HTML smoke did not emit a complete HTML document")
+          PY
+
+  large-repository:
+    name: exact Elasticsearch scale gate
+    needs: preflight
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          path: bonsai-ninja
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.88"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: bonsai-ninja
+          key: release-elasticsearch
+
+      - name: Fetch the pinned Elasticsearch corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init elasticsearch
+          git -C elasticsearch remote add origin https://github.com/elastic/elasticsearch.git
+          git -C elasticsearch fetch --depth 1 --filter=blob:none origin \
+            e9741368da0cb5465f5cf76c668a09fd780583be
+          git -C elasticsearch -c advice.detachedHead=false checkout FETCH_HEAD
+
+      - name: Build the production binary
+        working-directory: bonsai-ninja
+        run: cargo build --release --locked -p bonsai_cli
+
+      - name: Run exact large-repository correctness and performance gates
+        working-directory: bonsai-ninja
+        env:
+          BONSAI_ELASTICSEARCH_ROOT: ${{ github.workspace }}/elasticsearch
+          BONSAI_REQUIRE_ELASTICSEARCH_GATE: "1"
+          BONSAI_MEMORY_BUDGET_MB: "3072"
+          MIMALLOC_PURGE_DELAY: "0"
+        run: |
+          cargo test --release --locked -p bonsai_cli \
+            --test elasticsearch_large_repo -- --nocapture
+
   build:
     name: build ${{ matrix.target }}
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -62,7 +256,7 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
-      - name: Test
+      - name: Test the native target
         run: cargo test --workspace --locked --no-fail-fast
 
       - name: Build release binary
@@ -76,12 +270,39 @@ jobs:
           bin="target/${{ matrix.target }}/release/${{ matrix.bin }}"
           "$bin" --version
           "$bin" --help >/dev/null
-          "$bin" index examples/python/micro >/tmp/bonsai-index.json
-          "$bin" diagnostics examples/python/micro >/tmp/bonsai-diagnostics.txt
-          "$bin" inspect examples/python/micro --query os.system --context 4k >/tmp/bonsai-inspect.txt
-          "$bin" trace examples/python/micro handle_request --format json >/tmp/bonsai-trace.json
-          "$bin" security examples/python/micro taint-analysis --format json >/tmp/bonsai-taint.json
-          "$bin" export examples/python/micro --format networkx >/tmp/bonsai-networkx.json
+          "$bin" index examples/python/micro --format json --no-color --no-progress \
+            >/tmp/bonsai-index.json
+          "$bin" diagnostics examples/python/micro --format json --no-color --no-progress \
+            >/tmp/bonsai-diagnostics.json
+          "$bin" inspect examples/python/micro --query os.system --context 4k \
+            --format json --no-color --no-progress >/tmp/bonsai-inspect.json
+          "$bin" trace examples/python/micro handle_request --format json \
+            --no-color --no-progress >/tmp/bonsai-trace.json
+          "$bin" security examples/python/micro taint-analysis --format sarif --all \
+            --no-color --no-progress >/tmp/bonsai-taint.sarif.json
+          "$bin" export examples/python/micro --format networkx --all \
+            --no-color --no-progress >/tmp/bonsai-networkx.json
+          "$bin" defs examples/python/micro --html-output /tmp/bonsai-defs.html \
+            --no-color --no-progress
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          for path in [
+              "/tmp/bonsai-index.json",
+              "/tmp/bonsai-diagnostics.json",
+              "/tmp/bonsai-inspect.json",
+              "/tmp/bonsai-trace.json",
+              "/tmp/bonsai-networkx.json",
+          ]:
+              json.loads(Path(path).read_text())
+          sarif = json.loads(Path("/tmp/bonsai-taint.sarif.json").read_text())
+          if sarif.get("version") != "2.1.0" or not sarif.get("runs"):
+              raise SystemExit("invalid SARIF 2.1.0 smoke output")
+          html = Path("/tmp/bonsai-defs.html").read_text().lower()
+          if not html.lstrip().startswith("<!doctype html>") or "</html>" not in html:
+              raise SystemExit("invalid HTML smoke output")
+          PY
 
       - name: Verify CLI smoke tests (Windows)
         if: matrix.package == 'zip'
@@ -94,18 +315,34 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $bin --help | Out-Null
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $bin index examples/python/micro > "$env:RUNNER_TEMP/bonsai-index.json"
+          & $bin index examples/python/micro --format json --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-index.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $bin diagnostics examples/python/micro > "$env:RUNNER_TEMP/bonsai-diagnostics.txt"
+          & $bin diagnostics examples/python/micro --format json --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-diagnostics.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $bin inspect examples/python/micro --query os.system --context 4k > "$env:RUNNER_TEMP/bonsai-inspect.txt"
+          & $bin inspect examples/python/micro --query os.system --context 4k --format json --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-inspect.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $bin trace examples/python/micro handle_request --format json > "$env:RUNNER_TEMP/bonsai-trace.json"
+          & $bin trace examples/python/micro handle_request --format json --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-trace.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $bin security examples/python/micro taint-analysis --format json > "$env:RUNNER_TEMP/bonsai-taint.json"
+          & $bin security examples/python/micro taint-analysis --format sarif --all --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-taint.sarif.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $bin export examples/python/micro --format networkx > "$env:RUNNER_TEMP/bonsai-networkx.json"
+          & $bin export examples/python/micro --format networkx --all --no-color --no-progress > "$env:RUNNER_TEMP/bonsai-networkx.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $bin defs examples/python/micro --html-output "$env:RUNNER_TEMP/bonsai-defs.html" --no-color --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          @(
+            "$env:RUNNER_TEMP/bonsai-index.json",
+            "$env:RUNNER_TEMP/bonsai-diagnostics.json",
+            "$env:RUNNER_TEMP/bonsai-inspect.json",
+            "$env:RUNNER_TEMP/bonsai-trace.json",
+            "$env:RUNNER_TEMP/bonsai-networkx.json"
+          ) | ForEach-Object { Get-Content $_ -Raw | ConvertFrom-Json | Out-Null }
+          $sarif = Get-Content "$env:RUNNER_TEMP/bonsai-taint.sarif.json" -Raw | ConvertFrom-Json
+          if ($sarif.version -ne "2.1.0" -or $sarif.runs.Count -eq 0) { throw "invalid SARIF 2.1.0 smoke output" }
+          $html = Get-Content "$env:RUNNER_TEMP/bonsai-defs.html" -Raw
+          if (-not $html.TrimStart().StartsWith("<!doctype html>") -or -not $html.Contains("</html>")) {
+            throw "invalid HTML smoke output"
+          }
 
       - name: Package tarball
         if: matrix.package == 'tar'
@@ -115,11 +352,33 @@ jobs:
           artifact="bonsai-ninja-${{ matrix.target }}"
           mkdir -p "dist/$artifact"
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/$artifact/"
-          cp README.md SKILLS.md AGENTS.md LICENSE docs.json "dist/$artifact/"
+          cp README.md SKILLS.md AGENTS.md LICENSE Cargo.lock docs.json "dist/$artifact/"
           mkdir -p "dist/$artifact/.agents/skills"
           cp -R .agents/skills/bonsai-ninja "dist/$artifact/.agents/skills/bonsai-ninja"
           cp -R docs "dist/$artifact/docs"
           cp -R security-patterns "dist/$artifact/security-patterns"
+          smoke_dir="$(mktemp -d)"
+          trap 'rm -rf "$smoke_dir"' EXIT
+          (
+            cd "$smoke_dir"
+            "$GITHUB_WORKSPACE/dist/$artifact/${{ matrix.bin }}" \
+              security "$GITHUB_WORKSPACE/examples/python/micro" taint-analysis \
+              --format json --all --no-color --no-progress \
+              > packaged-security.json
+          )
+          python3 - "$smoke_dir/packaged-security.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report = json.loads(Path(sys.argv[1]).read_text())
+          if report.get("analysis_complete") is not True:
+              raise SystemExit(
+                  f"relocated package security smoke incomplete: {report.get('analysis_incomplete_reasons')}"
+              )
+          if not report.get("rows"):
+              raise SystemExit("relocated package security smoke emitted no findings")
+          PY
           tar -czf "$artifact.tar.gz" -C dist "$artifact"
           shasum -a 256 "$artifact.tar.gz" > "$artifact.tar.gz.sha256"
 
@@ -131,11 +390,27 @@ jobs:
           $artifact = "bonsai-ninja-${{ matrix.target }}"
           New-Item -ItemType Directory -Force "dist/$artifact" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/$artifact/"
-          Copy-Item README.md, SKILLS.md, AGENTS.md, LICENSE, docs.json "dist/$artifact/"
+          Copy-Item README.md, SKILLS.md, AGENTS.md, LICENSE, Cargo.lock, docs.json "dist/$artifact/"
           New-Item -ItemType Directory -Force "dist/$artifact/.agents/skills" | Out-Null
           Copy-Item .agents/skills/bonsai-ninja "dist/$artifact/.agents/skills/bonsai-ninja" -Recurse
           Copy-Item docs "dist/$artifact/docs" -Recurse
           Copy-Item security-patterns "dist/$artifact/security-patterns" -Recurse
+          $repo = (Get-Location).Path
+          $smoke = "$env:RUNNER_TEMP/bonsai-packaged-security.json"
+          Push-Location $env:RUNNER_TEMP
+          try {
+            & "$repo/dist/$artifact/${{ matrix.bin }}" security "$repo/examples/python/micro" taint-analysis --format json --all --no-color --no-progress > $smoke
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Pop-Location
+          }
+          $report = Get-Content $smoke -Raw | ConvertFrom-Json
+          if ($report.analysis_complete -ne $true) {
+            throw "relocated package security smoke was incomplete: $($report.analysis_incomplete_reasons)"
+          }
+          if ($report.rows.Count -eq 0) {
+            throw "relocated package security smoke emitted no findings"
+          }
           Compress-Archive -Path "dist/$artifact" -DestinationPath "$artifact.zip" -Force
           $hash = (Get-FileHash "$artifact.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $artifact.zip" | Out-File -Encoding ascii "$artifact.zip.sha256"
@@ -152,7 +427,7 @@ jobs:
 
   publish:
     name: publish GitHub release
-    needs: build
+    needs: [build, large-repository]
     runs-on: ubuntu-22.04
     if: startsWith(github.ref, 'refs/tags/')
     permissions:

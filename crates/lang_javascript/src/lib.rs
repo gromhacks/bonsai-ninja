@@ -6,8 +6,7 @@ use bonsai_lang_api::{
         call_arg_from_nodes_with_handler, collect_kinds, first_named_child_of_kind, language_from_pack,
         node_text, normalize_call_name_whitespace, parse_with, span_of,
     },
-    AdapterContext, AdapterError, CharacterConstraintDomain, CharacterConstraintFact,
-    CharacterConstraintOutput, CharacterSubstitutionDomain, CharacterSubstitutionFact, ConditionEquality,
+    AdapterContext, AdapterError, CharacterSubstitutionDomain, CharacterSubstitutionFact, ConditionEquality,
     ConditionExpressionFact, ConditionOperandFact, DeclIndex, DynamicKeyFilterFact,
     FiniteLiteralSelectionFact, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
     LanguageCapabilities, LanguageId, SameOriginPathConstraintFact, StaticScalarValue, StaticStringMapEntry,
@@ -21,6 +20,40 @@ use tree_sitter::{Language, Node, Tree};
 pub const LANG_ID: LanguageId = LanguageId::new("javascript");
 pub const JS_TS_MODULE_RESOLUTION_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs"];
 const PACK_NAME: &str = "javascript";
+/// Lifecycle transitions shared by JavaScript and TypeScript, which execute
+/// on the same ECMAScript runtime API surface.
+pub const ECMASCRIPT_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
+    bonsai_lang_api::LifecycleTransition {
+        call_match: "close",
+        transition: "closed",
+        arg_index: 0,
+    },
+    bonsai_lang_api::LifecycleTransition {
+        call_match: "destroy",
+        transition: "freed",
+        arg_index: 0,
+    },
+    bonsai_lang_api::LifecycleTransition {
+        call_match: "abort",
+        transition: "cancelled",
+        arg_index: 0,
+    },
+    bonsai_lang_api::LifecycleTransition {
+        call_match: "unsubscribe",
+        transition: "cancelled",
+        arg_index: 0,
+    },
+    bonsai_lang_api::LifecycleTransition {
+        call_match: "cancel",
+        transition: "cancelled",
+        arg_index: 0,
+    },
+    bonsai_lang_api::LifecycleTransition {
+        call_match: "release",
+        transition: "unlocked",
+        arg_index: 0,
+    },
+];
 const HANDLER: GrammarHandler = GrammarHandler {
     fn_kinds: &[
         "function_declaration",
@@ -233,41 +266,9 @@ impl LanguageAdapter for JavaScriptAdapter {
         // `destroy`), `AbortController` (`abort`), RxJS-style
         // observables (`unsubscribe`), promises / animations
         // (`cancel`), and pooled resources (`release`).
-        const JAVASCRIPT_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "close",
-                transition: "closed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "destroy",
-                transition: "freed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "abort",
-                transition: "cancelled",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "unsubscribe",
-                transition: "cancelled",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "cancel",
-                transition: "cancelled",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "release",
-                transition: "unlocked",
-                arg_index: 0,
-            },
-        ];
         for decl in &mut decl_index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, JAVASCRIPT_LIFECYCLE_TRANSITIONS);
+            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, ECMASCRIPT_LIFECYCLE_TRANSITIONS);
         }
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             rewrite_javascript_object_destructuring_sources(
@@ -338,8 +339,10 @@ pub fn populate_ecmascript_compiler_facts(index: &mut DeclIndex, tree: &Tree, fi
     index.static_string_maps = ecmascript_static_string_maps(index, tree, file, src);
     index.finite_literal_selections = ecmascript_finite_literal_selections(index, tree, file, src);
     index.character_substitutions = ecmascript_character_substitutions(&index.defs, tree, file, src);
-    index.character_constraints =
-        ecmascript_character_constraints(&index.defs, &index.character_substitutions);
+    index.character_constraints = bonsai_lang_api::character_constraints_from_substitutions(
+        &index.defs,
+        &index.character_substitutions,
+    );
     index.string_compositions = ecmascript_string_compositions(tree, file, src);
     index.same_origin_path_constraints = ecmascript_same_origin_path_constraints(index, tree, file, src);
     index.dynamic_key_filters = ecmascript_dynamic_key_filters(index, tree, file, src);
@@ -665,35 +668,6 @@ fn ecmascript_starts_with_literal(
         return false;
     };
     ecmascript_static_string_literal(*argument, src).as_deref() == Some(literal)
-}
-
-fn ecmascript_character_constraints(
-    defs: &[bonsai_lang_api::Decl],
-    substitutions: &[CharacterSubstitutionFact],
-) -> Vec<CharacterConstraintFact> {
-    substitutions
-        .iter()
-        .filter_map(|fact| {
-            let decl = defs.iter().find(|decl| decl.span == fact.function_span)?;
-            let input_place = decl.params.get(fact.input_param_index)?.clone();
-            let mut characters = fact
-                .exact_mappings
-                .iter()
-                .filter(|mapping| !mapping.value.contains(&mapping.key))
-                .map(|mapping| mapping.key.clone())
-                .collect::<Vec<_>>();
-            characters.sort();
-            characters.dedup();
-            (!characters.is_empty()).then_some(CharacterConstraintFact {
-                function_span: fact.function_span,
-                transform_span: fact.transform_span,
-                input_place,
-                input_param_index: Some(fact.input_param_index),
-                output: CharacterConstraintOutput::Return,
-                domain: CharacterConstraintDomain::ExcludesExact { characters },
-            })
-        })
-        .collect()
 }
 
 fn ecmascript_dynamic_key_filters(
@@ -1347,60 +1321,17 @@ fn ecmascript_finite_literal_selections(
             continue;
         }
         let selection_span = span_of(file, &node);
-        let assignment = index
-            .assignment_values
-            .iter()
-            .filter(|fact| {
-                fact.target.is_some()
-                    && fact.value_span.file == selection_span.file
-                    && fact.value_span.start <= selection_span.start
-                    && selection_span.end <= fact.value_span.end
-            })
-            .min_by_key(|fact| fact.value_span.end.saturating_sub(fact.value_span.start));
-        let argument = index
-            .call_argument_values
-            .iter()
-            .filter(|fact| {
-                fact.argument_span.file == selection_span.file
-                    && fact.argument_span.start <= selection_span.start
-                    && selection_span.end <= fact.argument_span.end
-            })
-            .min_by_key(|fact| fact.argument_span.len());
-        let Some(value_span) = assignment
-            .map(|fact| fact.value_span)
-            .or_else(|| argument.map(|fact| fact.argument_span))
-        else {
-            continue;
-        };
-        let Some(value_node) = bonsai_lang_api::kit::node_at_span(tree.root_node(), value_span, &[]) else {
-            continue;
-        };
-        if !ecmascript_expression_is_finite_selection(value_node, node, src, &bindings) {
-            continue;
-        }
-        selections.push(FiniteLiteralSelectionFact {
+        let Some(fact) = bonsai_lang_api::kit::finite_literal_selection_fact_for_span(
+            index,
+            tree,
             selection_span,
-            assignment_span: assignment.map(|fact| fact.assignment_span),
-            target: assignment.and_then(|fact| fact.target.clone()),
-            call_span: argument.map(|fact| fact.call_span),
-            argument_index: argument.map(|fact| fact.argument_index),
-        });
+            |value_node| ecmascript_expression_is_finite_selection(value_node, node, src, &bindings),
+        ) else {
+            continue;
+        };
+        selections.push(fact);
     }
-    selections.sort_by_key(|fact| {
-        (
-            fact.assignment_span
-                .or(fact.call_span)
-                .unwrap_or(fact.selection_span)
-                .start,
-            fact.assignment_span
-                .or(fact.call_span)
-                .unwrap_or(fact.selection_span)
-                .end,
-            fact.selection_span.start,
-            fact.selection_span.end,
-        )
-    });
-    selections.dedup();
+    bonsai_lang_api::kit::sort_dedup_finite_literal_selections(&mut selections);
     selections
 }
 

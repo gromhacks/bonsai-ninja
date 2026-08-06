@@ -1,10 +1,8 @@
 //! `bonsai-ninja imports` data layer.
 //!
-//! Returns every `import` / `use` / `include` in the workspace.
-//! Falls back to the parser's generic extractor (`bonsai_lang_api::
-//! kit::extract_generic_imports`) for adapters that don't ship a
-//! dedicated import index, so coverage is uniform across the
-//! supported languages.
+//! Returns every adapter-lowered `import` / `use` / `include` fact in the
+//! workspace. There is no shared syntax fallback: each language frontend owns
+//! its import grammar, aliases, and module identity.
 
 use crate::common::{
     best_textual_relevance_key, file_path_matches_filter, format_span, make_name_filter,

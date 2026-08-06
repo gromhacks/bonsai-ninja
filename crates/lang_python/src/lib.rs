@@ -1093,7 +1093,7 @@ fn python_lexical_owner(index: &DeclIndex, span: bonsai_common::Span) -> Option<
         .defs
         .iter()
         .filter(|decl| {
-            decl.name != "__module__"
+            decl.name != bonsai_lang_api::MODULE_DECL_NAME
                 && matches!(
                     decl.kind,
                     DeclKind::Function | DeclKind::Method | DeclKind::Constructor | DeclKind::Class
@@ -1148,7 +1148,7 @@ impl<'a, 'tree> PythonLexicalBindingResolver<'a, 'tree> {
             .defs
             .iter()
             .filter(|decl| {
-                decl.name != "__module__"
+                decl.name != bonsai_lang_api::MODULE_DECL_NAME
                     && matches!(
                         decl.kind,
                         DeclKind::Function | DeclKind::Method | DeclKind::Constructor | DeclKind::Class

@@ -614,9 +614,8 @@ impl AnalyzerDb {
     }
 
     /// Import index for `file`, computed once per `(file, version)`.
-    /// Most callers should use [`Self::imports_for`] instead — that
-    /// helper falls back to the generic syntactic extractor when an
-    /// adapter doesn't provide its own index.
+    /// Most callers should use [`Self::imports_for`] instead. Both surfaces
+    /// preserve the adapter's authoritative result, including an empty index.
     pub fn import_index(&self, file: FileId) -> Option<Arc<ImportIndex>> {
         let snap = self.inner.vfs.snapshot(file).ok()?;
         let key = (file, snap.version);
@@ -663,9 +662,8 @@ impl AnalyzerDb {
     /// adapter's grammar-aware [`ImportIndex`] (cached on
     /// `(FileId, version)`) when the registered adapter provides one.
     /// An empty adapter index is authoritative: it means the adapter ran
-    /// and found no imports. The generic
-    /// [`bonsai_lang_api::kit::extract_generic_imports`] fallback only
-    /// runs when no adapter import index can be built at all.
+    /// and found no imports. There is intentionally no shared syntax
+    /// fallback: import grammar and lowering belong to the concrete adapter.
     ///
     /// Every consumer that needs a file's imports — alias resolution,
     /// browse-imports rendering, taint reachability — should call this
@@ -681,39 +679,19 @@ impl AnalyzerDb {
             self.release_syntax(file);
             return imports;
         }
-        let Ok(parsed) = self.parse(file) else {
-            return Vec::new();
-        };
-        let imports = bonsai_lang_api::kit::extract_generic_imports(
-            &parsed.tree,
-            file,
-            parsed.source_text().as_bytes(),
-        );
-        drop(parsed);
-        self.release_syntax(file);
-        imports
+        Vec::new()
     }
 
     /// Grammar-aware imports for one streaming compiler pass without retaining
     /// a workspace-sized import-index cache. Semantics are identical to
-    /// [`Self::imports_for`], including the generic Tree-sitter fallback.
+    /// [`Self::imports_for`], including adapter ownership of empty results.
     #[must_use]
     pub fn imports_for_uncached(&self, file: FileId) -> Vec<ImportSpec> {
         if let Some(idx) = self.import_index_uncached(file) {
             let imports = idx.imports;
             return imports;
         }
-        let Ok(parsed) = self.parse(file) else {
-            return Vec::new();
-        };
-        let imports = bonsai_lang_api::kit::extract_generic_imports(
-            &parsed.tree,
-            file,
-            parsed.source_text().as_bytes(),
-        );
-        drop(parsed);
-        self.release_syntax(file);
-        imports
+        Vec::new()
     }
 
     /// Workspace-wide global declaration index. Built lazily on first

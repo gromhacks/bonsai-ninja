@@ -679,8 +679,12 @@ pub enum LoadError {
         path: String,
         kind: MatchKind,
     },
-    #[error("rule `{id}` in `{path}`: every match target must set name, attribute, or regex")]
-    EmptyTarget { id: String, path: String },
+    #[error("rule `{id}` in `{path}`: `call_kind_in` is only valid for call-shaped matches, not `{kind:?}`")]
+    InvalidCallKindConstraint {
+        id: String,
+        path: String,
+        kind: MatchKind,
+    },
     #[error(
         "rule `{id}` in `{path}`: YAML `language: {yaml}` does not match directory-derived language `{dir}`"
     )]
@@ -989,7 +993,7 @@ fn validate_rule(rule: &Rule) -> Result<(), LoadError> {
                 });
             }
         }
-        MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param => {
+        MatchKind::Read | MatchKind::Write | MatchKind::Param => {
             // Place-shaped rules need a target; an empty target is unusable.
             let target = rule
                 .match_spec
@@ -1004,6 +1008,11 @@ fn validate_rule(rule: &Rule) -> Result<(), LoadError> {
                 });
             }
         }
+        MatchKind::Return => {
+            // A return rule without a target matches every compiler-lowered
+            // return expression. Optional name/regex targets narrow the
+            // returned expression; no pseudo-callee spelling is required.
+        }
     }
     // Loader lint: any rule whose `target.regex` is a tautology
     // (`.*`, `.+`, `^.*$`, ...) matches every site of the chosen
@@ -1017,6 +1026,15 @@ fn validate_rule(rule: &Rule) -> Result<(), LoadError> {
         .as_ref()
         .or(rule.match_spec.target.as_ref())
     {
+        if !rule_target.call_kind_in.is_empty()
+            && !matches!(rule.match_spec.kind, MatchKind::Call | MatchKind::Missing)
+        {
+            return Err(LoadError::InvalidCallKindConstraint {
+                id: rule.id.clone(),
+                path: rule.source_path.clone(),
+                kind: rule.match_spec.kind,
+            });
+        }
         if let Some(regex) = rule_target.regex.as_deref() {
             if is_tautological_regex(regex) {
                 return Err(LoadError::TautologicalRegex {

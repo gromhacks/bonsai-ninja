@@ -55,6 +55,57 @@ pub(crate) use path::{cmd_path, PathCommandOptions};
 pub(crate) use slice::cmd_slice;
 pub(crate) use trace::{cmd_trace, nearest_names, not_found_with_suggestions};
 
+/// Return as soon as a workspace contains more than `limit` source-tree
+/// entries. This cheap probe selects retrieval-backed command plans without
+/// building compiler state merely to estimate repository size.
+pub(crate) fn workspace_file_count_exceeds(root: &std::path::Path, limit: usize) -> bool {
+    let mut stack = vec![root.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            if is_internal_workspace_entry_name(name) {
+                continue;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file() {
+                seen += 1;
+                if seen > limit {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Product metadata and generated build roots omitted from direct filesystem
+/// navigation and its cheap repository-size probe. This is CLI lifecycle
+/// policy, not source-language or security-pattern knowledge.
+pub(crate) fn is_internal_workspace_entry_name(name: &str) -> bool {
+    matches!(
+        name,
+        ".git"
+            | ".bonsai"
+            | ".bonsai-agent"
+            | "target"
+            | "node_modules"
+            | ".gradle"
+            | "build"
+            | "dist"
+            | "out"
+            | ".idea"
+    ) || name.starts_with(".bonsai.pre-")
+}
+
 /// Resolve the symbol for commands that accept either a positional
 /// argument (`bonsai-ninja trace ./src handle_request`) or a named
 /// flag (`--symbol` / `--query` depending on the subcommand). The

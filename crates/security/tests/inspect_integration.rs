@@ -22,12 +22,12 @@ fn repo_root() -> PathBuf {
 }
 
 fn bin_path() -> Option<PathBuf> {
-    let release = repo_root().join("target/release/bonsai-ninja");
-    if release.exists() {
-        return Some(release);
-    }
     let debug = repo_root().join("target/debug/bonsai-ninja");
-    debug.exists().then_some(debug)
+    if debug.exists() {
+        return Some(debug);
+    }
+    let release = repo_root().join("target/release/bonsai-ninja");
+    release.exists().then_some(release)
 }
 
 fn run(args: &[&str]) -> Option<String> {

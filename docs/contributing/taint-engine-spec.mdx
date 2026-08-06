@@ -525,7 +525,9 @@ The taint stack is layered:
 
 - **Layer 1 — compiler facts** (language adapters, index, resolver, and
   callgraph): CST/AST nodes become typed declarations, calls, arguments,
-  assignments, imports, receiver types, and semantic call edges.
+  assignments, indexed writes, imports, receiver types, and semantic call
+  edges. Syntax-only operations use typed `CallKind` values; shared lowering
+  never invents a provider pseudo-callee.
 - **Layer 2 — canonical dataflow** (`crates/idg`): `builder.rs`,
   `transfer.rs`, and `workspace_adapter.rs` lower those facts into one graph
   containing intra-function, cross-call, return, field, capture, callback,
@@ -578,6 +580,12 @@ rulepack/config transfer semantics. Package-gated rules require adapter import
 facts, resolved workspace-import facts, or dependency-manifest evidence;
 directory names and conventional parameter spellings do not manufacture a
 framework identity.
+
+Sanitizer attachment follows the same boundary. Generic lineage policies may
+prove that a hardened factory constructs the eventual sink receiver, but the
+builder/factory targets are `RuleTarget` values inherited from rulepack
+metadata (`receiver_factory_lineage_builders`). Shared analysis compares only
+typed calls against those targets and contains no constructor-name list.
 
 `InterTaintResult` returns:
 
@@ -672,8 +680,11 @@ Engine semantics are pinned by snapshots under `.snapshots/`:
 
 - `COVERAGE_BASELINE.snapshot` — per-language capability matrix.
 - `ADAPTER_CAPABILITIES.snapshot` — adapter-claimed coverage.
-- `ADAPTER_FLOW_EVENT_COVERAGE.snapshot` — which `FlowEvent` variants
-  each adapter emits.
 
-CI rebuilds these and fails on drift unless the corresponding `.md` file
-is updated in the same PR. That keeps the docs honest with the code.
+`scripts/audit-adapter-flow-events.sh --check` complements those declarations
+with behavioral conformance. It parses canonical valid programs through every
+adapter and inspects the emitted `FlowEvent` trees, including async/yield
+shapes. It intentionally does not count enum spellings in source: shared
+walkers inspect events too, and extracting common lowering code must not look
+like a semantic coverage loss. CI fails on either declared-capability drift or
+behavioral fact drift.

@@ -259,41 +259,12 @@ impl LanguageAdapter for TypeScriptAdapter {
         }
         // Recognised TypeScript lifecycle transitions — same call
         // names as JavaScript since TS shares the JS runtime surface.
-        const TYPESCRIPT_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "close",
-                transition: "closed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "destroy",
-                transition: "freed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "abort",
-                transition: "cancelled",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "unsubscribe",
-                transition: "cancelled",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "cancel",
-                transition: "cancelled",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "release",
-                transition: "unlocked",
-                arg_index: 0,
-            },
-        ];
         for decl in &mut decl_index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, TYPESCRIPT_LIFECYCLE_TRANSITIONS);
+            bonsai_lang_api::inject_lifecycle_events(
+                &mut decl.flow_events,
+                bonsai_lang_javascript::ECMASCRIPT_LIFECYCLE_TRANSITIONS,
+            );
         }
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-

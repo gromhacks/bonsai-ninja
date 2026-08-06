@@ -466,44 +466,19 @@ fn augment_php_quoted_callable_literals(
 /// callables. A quoted string is a normal literal unless the CST-derived call
 /// event proves that the assigned variable is used in callable position.
 fn php_invoked_variables(events: &[FlowEvent]) -> BTreeSet<String> {
-    fn collect(events: &[FlowEvent], out: &mut BTreeSet<String>) {
-        for event in events {
-            match event {
-                FlowEvent::Call {
-                    name,
-                    call_kind: CallKind::Function | CallKind::Indirect,
-                    ..
-                } if name.starts_with('$') => {
-                    out.insert(name.clone());
-                }
-                FlowEvent::Branch {
-                    then_events,
-                    else_events,
-                    ..
-                } => {
-                    collect(then_events, out);
-                    collect(else_events, out);
-                }
-                FlowEvent::Loop { body, .. }
-                | FlowEvent::Defer { body, .. }
-                | FlowEvent::Using { body, .. } => collect(body, out),
-                FlowEvent::Try {
-                    body,
-                    catch_events,
-                    finally_events,
-                    ..
-                } => {
-                    collect(body, out);
-                    collect(catch_events, out);
-                    collect(finally_events, out);
-                }
-                _ => {}
+    let mut invoked = BTreeSet::new();
+    bonsai_lang_api::for_each_flow_event(events, &mut |event| {
+        if let FlowEvent::Call {
+            name,
+            call_kind: CallKind::Function | CallKind::Indirect,
+            ..
+        } = event
+        {
+            if name.starts_with('$') {
+                invoked.insert(name.clone());
             }
         }
-    }
-
-    let mut invoked = BTreeSet::new();
-    collect(events, &mut invoked);
+    });
     invoked
 }
 

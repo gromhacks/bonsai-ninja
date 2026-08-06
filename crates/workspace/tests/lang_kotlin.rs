@@ -125,7 +125,7 @@ fn break_and_continue() {
 #[test]
 fn import_alias() {
     let w = make("package p\nimport kotlin.io.println as p\nfun f() {}");
-    assert!(has_import_alias(&w, "kotlin.io.println", "p"));
+    assert!(has_import_symbol_alias(&w, "kotlin.io", "println", "p"));
 }
 
 #[test]

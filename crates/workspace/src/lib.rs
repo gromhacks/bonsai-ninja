@@ -33,7 +33,9 @@ pub mod value_flow;
 pub mod value_flow_disk;
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{FileId, FuncId, Precision, SymbolId};
+use bonsai_common::{
+    normalize_path_for_filter, scoped_path_filter_matches, FileId, FuncId, Precision, SymbolId,
+};
 use bonsai_db::{AnalyzerDb, AnalyzerDbOptions, DbStats};
 use bonsai_diagnostics::Diagnostic;
 use bonsai_hash::Hasher as StableHasher;
@@ -6032,68 +6034,11 @@ fn source_path_allowed(root: &Path, path: &Path, filter: PathFilterSpec<'_>) -> 
         || filter
             .include_filters
             .iter()
-            .any(|include| path_filter_matches_scoped(&relative, &absolute, include)))
+            .any(|include| scoped_path_filter_matches(&relative, &absolute, include)))
         && !filter
             .exclude_filters
             .iter()
-            .any(|exclude| path_filter_matches_scoped(&relative, &absolute, exclude))
-}
-
-fn path_filter_matches_scoped(relative: &str, absolute: &str, filter: &str) -> bool {
-    if path_filter_matches(relative, filter) {
-        return true;
-    }
-    filter_looks_like_absolute_path(filter) && path_filter_matches(absolute, filter)
-}
-
-fn filter_looks_like_absolute_path(filter: &str) -> bool {
-    let normalized = normalize_path_for_filter(filter);
-    if normalized.len() >= 3 && normalized.as_bytes()[1] == b':' && normalized.as_bytes()[2] == b'/' {
-        return true;
-    }
-    Path::new(filter).is_absolute() && normalized.trim_matches('/').contains('/')
-}
-
-fn path_filter_matches(path: &str, filter: &str) -> bool {
-    let path = normalize_path_for_filter(path);
-    let filter = normalize_path_for_filter(filter);
-    if filter.is_empty() {
-        return false;
-    }
-    if let Some(root_relative) = filter.strip_prefix('^') {
-        let root_relative = root_relative.trim_start_matches('/');
-        if root_relative.is_empty() {
-            return false;
-        }
-        let path = path.trim_start_matches('/');
-        let root_relative = root_relative.trim_end_matches('/');
-        return path == root_relative || path.starts_with(&format!("{root_relative}/"));
-    }
-    if filter.contains('/') {
-        return path_filter_with_separator_matches(&path, &filter);
-    }
-    path.contains(filter.as_str())
-}
-
-fn path_filter_with_separator_matches(path: &str, filter: &str) -> bool {
-    let trimmed = filter.trim_matches('/');
-    if trimmed.is_empty() {
-        return false;
-    }
-    if filter.starts_with('/') || filter.ends_with('/') {
-        // Anchored comparison must strip the path's own leading slash the
-        // same way the filter was trimmed, or an explicit absolute filter
-        // (`/abs/ws/app.py`) can never equal the absolute path it names.
-        let anchored = path.trim_start_matches('/');
-        return anchored == trimmed
-            || anchored.starts_with(&format!("{trimmed}/"))
-            || path.contains(&format!("/{trimmed}/"));
-    }
-    path.contains(filter)
-}
-
-fn normalize_path_for_filter(path: &str) -> String {
-    path.replace('\\', "/")
+            .any(|exclude| scoped_path_filter_matches(&relative, &absolute, exclude))
 }
 
 fn text_contains_literal_query(text: &str, literal: &str, literal_lower: &str) -> bool {

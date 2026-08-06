@@ -7,11 +7,14 @@
 //! to `security taint-analysis`.
 
 use anyhow::Result;
-use bonsai_common::is_bonsai_case_probe_path;
+use bonsai_common::{
+    filter_looks_like_absolute_path, is_bonsai_case_probe_path, normalize_path_for_filter,
+    normalized_path_contains,
+};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-use super::emit_json_value_paged_cached;
+use super::{emit_json_value_paged_cached, is_internal_workspace_entry_name};
 use crate::args::BrowseFormat;
 use crate::cli_println;
 use crate::footer::render_paging_footer;
@@ -357,23 +360,7 @@ fn fast_tree_should_skip(path: &Path, build: &FastTreeBuild) -> bool {
     }
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(is_internal_tree_entry_name)
-}
-
-fn is_internal_tree_entry_name(name: &str) -> bool {
-    matches!(
-        name,
-        ".git"
-            | ".bonsai"
-            | ".bonsai-agent"
-            | "target"
-            | "node_modules"
-            | ".gradle"
-            | "build"
-            | "dist"
-            | "out"
-            | ".idea"
-    ) || name.starts_with(".bonsai.pre-")
+        .is_some_and(is_internal_workspace_entry_name)
 }
 
 fn fast_tree_file_matches(path: &Path, build: &FastTreeBuild) -> bool {
@@ -393,23 +380,6 @@ fn fast_tree_path_matches_filter(root: &Path, path: &Path, filter: &str) -> bool
     }
     filter_looks_like_absolute_path(filter)
         && normalized_path_contains(&normalize_path_for_filter(&path.to_string_lossy()), filter)
-}
-
-fn normalized_path_contains(path: &str, filter: &str) -> bool {
-    let filter = normalize_path_for_filter(filter);
-    !filter.is_empty() && normalize_path_for_filter(path).contains(&filter)
-}
-
-fn filter_looks_like_absolute_path(filter: &str) -> bool {
-    let normalized = normalize_path_for_filter(filter);
-    if normalized.len() >= 3 && normalized.as_bytes()[1] == b':' && normalized.as_bytes()[2] == b'/' {
-        return true;
-    }
-    Path::new(filter).is_absolute() && normalized.trim_matches('/').contains('/')
-}
-
-fn normalize_path_for_filter(value: &str) -> String {
-    value.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
 fn tree_filters_hash(args: &TreeArgs<'_>) -> u64 {
@@ -514,14 +484,14 @@ fn render_node_lines(node: &StructuralTreeNode, prefix: &str, is_last: bool, lin
 
 #[cfg(test)]
 mod tests {
-    use super::is_internal_tree_entry_name;
+    use super::is_internal_workspace_entry_name;
 
     #[test]
     fn scanner_state_and_pre_upgrade_backups_are_not_user_tree_entries() {
         for name in [".bonsai", ".bonsai-agent", ".bonsai.pre-20260730-120000"] {
-            assert!(is_internal_tree_entry_name(name), "{name}");
+            assert!(is_internal_workspace_entry_name(name), "{name}");
         }
-        assert!(!is_internal_tree_entry_name(".bonsaiignore"));
-        assert!(!is_internal_tree_entry_name(".bonsai-notes"));
+        assert!(!is_internal_workspace_entry_name(".bonsaiignore"));
+        assert!(!is_internal_workspace_entry_name(".bonsai-notes"));
     }
 }

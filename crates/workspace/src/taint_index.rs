@@ -18,7 +18,10 @@ use crate::cache_fingerprint::{
     dependency_metadata_fingerprint_for_sidecar, discard_stale_factstore_sidecar,
     workspace_content_fingerprint,
 };
-use crate::factstore_cleanup::{cleanup_valid_sidecar_temp_files, factstore_writer_suffix_is_valid};
+use crate::factstore_cleanup::{
+    cleanup_valid_sidecar_temp_files, factstore_writer_suffix_is_valid, map_factstore_io,
+    prune_obsolete_versioned_sidecars,
+};
 use crate::taint_index_disk::{
     decode_verified, encode as encode_taint_graph_entry, factstore_key,
     TaintGraphEntry as DiskTaintGraphEntry,
@@ -914,79 +917,12 @@ fn cleanup_abandoned_taint_graph_temp_files(owned_path: &Path) -> std::io::Resul
 }
 
 fn prune_obsolete_taint_graph_sidecars(current_path: &Path) -> std::io::Result<usize> {
-    let Some(parent) = current_path.parent() else {
-        return Ok(0);
-    };
-    let Some(current_version) = current_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(taint_graph_sidecar_version)
-    else {
-        return Ok(0);
-    };
-    let entries = match std::fs::read_dir(parent) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error),
-    };
-    let mut obsolete = BTreeSet::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        if !file_type.is_file() {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if taint_graph_sidecar_version(name).is_some_and(|version| version < current_version) {
-            obsolete.insert(entry.path());
-        }
-    }
-
-    let mut removed = 0usize;
-    for target in obsolete {
-        let lock_file = match acquire_persistence_lock(&target) {
-            Ok(lock_file) => lock_file,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
-            Err(error) => {
-                tracing::warn!(
-                    path = %target.display(),
-                    error = %error,
-                    "skipping superseded taint-graph sidecar cleanup"
-                );
-                continue;
-            }
-        };
-        match std::fs::remove_file(&target) {
-            Ok(()) => removed = removed.saturating_add(1),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                tracing::warn!(
-                    path = %target.display(),
-                    error = %error,
-                    "superseded taint-graph sidecar cleanup failed"
-                );
-            }
-        }
-        if let Err(error) = FileExt::unlock(&lock_file) {
-            tracing::warn!(
-                path = %target.display(),
-                error = %error,
-                "superseded taint-graph sidecar cleanup lock release failed"
-            );
-        }
-    }
-    Ok(removed)
+    prune_obsolete_versioned_sidecars(
+        current_path,
+        taint_graph_sidecar_version,
+        acquire_persistence_lock,
+        "taint graph",
+    )
 }
 
 fn taint_graph_sidecar_version(name: &str) -> Option<u32> {
@@ -1088,14 +1024,6 @@ fn persist_graph_entry(
     };
     writer.add_owned(key, 0, payload).map_err(map_factstore_io)?;
     Ok(())
-}
-
-/// Funnel `bonsai_factstore::FactStoreError` into `std::io::Error`.
-fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
-    match err {
-        bonsai_factstore::FactStoreError::Io(e) => e,
-        other => std::io::Error::other(other),
-    }
 }
 
 #[cfg(test)]

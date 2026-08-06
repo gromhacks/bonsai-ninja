@@ -31,7 +31,7 @@ use ahash::AHashSet;
 use bonsai_common::{qualified_names_match, short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId};
 use bonsai_db::AnalyzerDb;
 use bonsai_index::GlobalIndex;
-use bonsai_lang_api::FlowEvent;
+use bonsai_lang_api::{collect_return_spans, FlowEvent};
 
 /// Alias for the token set the reachability pass produces. Using a
 /// set (not a vec) on the return boundary lets consumers query
@@ -2852,39 +2852,6 @@ fn collect_write_event_summaries(events: &[bonsai_lang_api::FlowEvent], out: &mu
     }
 }
 
-/// Walk a function's flow events and collect every `Return` event's source
-/// span, including nested control-flow regions.
-fn collect_return_spans(events: &[bonsai_lang_api::FlowEvent], out: &mut Vec<bonsai_common::Span>) {
-    use bonsai_lang_api::FlowEvent;
-    for event in events {
-        match event {
-            FlowEvent::Return { span, .. } => out.push(*span),
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_return_spans(then_events, out);
-                collect_return_spans(else_events, out);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_return_spans(body, out);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_return_spans(body, out);
-                collect_return_spans(catch_events, out);
-                collect_return_spans(finally_events, out);
-            }
-            _ => {}
-        }
-    }
-}
-
 /// Recompute a transfer fixpoint only inside the compiler-derived function
 /// corridor when one is available. This keeps each iteration from walking
 /// unrelated workspace branches while preserving the ordinary unrestricted
@@ -4591,7 +4558,10 @@ fn tainted_arg_is_clean_nested_call_return(
     let Some((nested_span, nested_summary)) = nested else {
         return false;
     };
-    if matches!(nested_summary.call_kind, bonsai_lang_api::CallKind::Operator) {
+    if matches!(
+        nested_summary.call_kind,
+        bonsai_lang_api::CallKind::Operator | bonsai_lang_api::CallKind::IndexWrite
+    ) {
         return false;
     }
     // A compound argument may contain both a nested call and an independent

@@ -3242,7 +3242,7 @@ fn module_prefixes_by_file(global: &GlobalIndex) -> AHashMap<FileId, String> {
         if let Some(prefix) = global
             .decls_in(file)
             .iter()
-            .find(|decl| decl.name == "__module__")
+            .find(|decl| decl.name == bonsai_lang_api::MODULE_DECL_NAME)
             .and_then(qname_module_prefix)
         {
             prefixes.insert(file, prefix.to_string());

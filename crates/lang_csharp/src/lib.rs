@@ -7,9 +7,9 @@ use bonsai_lang_api::{
         collect_receiver_field_writes, language_from_pack, node_text,
         package_module_segments_with_workspace_prefix, parse_with, span_of,
     },
-    AdapterContext, AdapterError, ArgumentPassingMode, AssignValueKind, CallArg, CallKind, DeclIndex,
-    DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
-    LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
+    AdapterContext, AdapterError, ArgumentPassingMode, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite,
+    FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
+    LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
 };
 
 const CSHARP_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
@@ -537,8 +537,8 @@ fn synthesize_csharp_expression_bodied_properties(
 /// `data` param forwarded to `base`) bridges to `Place::Return`. The
 /// caller's `new R(envelope)` site then connects via the standard
 /// callee-Return → caller-CallRet edge, tainting `repo` whole-object
-/// — which is exactly how Java's identical mega_flow propagates
-/// (Java's `constructor_body` kind falls into the kit's implicit-
+/// — matching the Java adapter's constructor propagation
+/// (`constructor_body` falls into the kit's implicit-
 /// return path automatically; C#'s `block` doesn't).
 fn synthesize_csharp_constructor_implicit_returns(
     index: &mut DeclIndex,
@@ -907,142 +907,23 @@ fn qualify_csharp_implicit_member_accesses(
         }
         member_names.extend(getter_names.iter().cloned());
         let params: HashSet<String> = decl.params.iter().cloned().collect();
-        rewrite_csharp_member_accesses(
+        bonsai_lang_api::qualify_implicit_member_assign_targets(
+            &mut decl.flow_events,
+            &member_names,
+            &params,
+            |name| csharp_bare_identifier(name).map(|_| format!("this.{name}")),
+        );
+        bonsai_lang_api::rewrite_implicit_member_reads(
             &mut decl.flow_events,
             &getter_names,
-            &member_names,
             &locals,
-            &params,
-        );
-    }
-}
-
-/// Rewrite each bare-property read (`var c = Cmd;`) into the Java-
-/// shaped `Call{name:"Cmd"} + Assign{source_call:"Cmd"}` pair so the
-/// interprocedural receiver-field bridge can route caller-receiver
-/// taint through the getter. It also qualifies implicit field/property
-/// writes (`Data = data`) as `this.Data = data` so constructor receiver
-/// writes describe the object state being initialized.
-fn rewrite_csharp_member_accesses(
-    events: &mut Vec<FlowEvent>,
-    getters: &std::collections::HashSet<String>,
-    members: &std::collections::HashSet<String>,
-    locals: &std::collections::HashSet<String>,
-    params: &std::collections::HashSet<String>,
-) {
-    // Pass 1: recurse into nested-vec variants. We do this BEFORE
-    // walking this level so insertions below don't shift indices the
-    // recursive call would have used.
-    for event in events.iter_mut() {
-        match event {
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                rewrite_csharp_member_accesses(then_events, getters, members, locals, params);
-                rewrite_csharp_member_accesses(else_events, getters, members, locals, params);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                rewrite_csharp_member_accesses(body, getters, members, locals, params);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                rewrite_csharp_member_accesses(body, getters, members, locals, params);
-                rewrite_csharp_member_accesses(catch_events, getters, members, locals, params);
-                rewrite_csharp_member_accesses(finally_events, getters, members, locals, params);
-            }
-            _ => {}
-        }
-    }
-    // Pass 2: walk this level with an explicit index so we can
-    // `events.insert(idx, ...)` without invalidating the loop.
-    let mut idx = 0usize;
-    while idx < events.len() {
-        if let FlowEvent::Assign { target, .. } = &mut events[idx] {
-            let name = target.trim().to_string();
-            if csharp_bare_identifier(&name).is_some() && members.contains(&name) && !params.contains(&name) {
-                *target = format!("this.{name}");
-            }
-        }
-        // Decide whether THIS event is a qualify-eligible Assign,
-        // without holding a mutable borrow into `events` yet.
-        let (qualify_name, span) = match &events[idx] {
-            FlowEvent::Assign {
-                target,
-                source_name,
-                source_call,
-                span,
-                ..
-            } => {
-                if source_call.is_some() {
-                    // Already converted — leave it alone.
-                    (None, *span)
-                } else if let Some(name) = source_name.as_deref().map(str::trim).map(str::to_string) {
-                    // Eligible only when the bare RHS name resolves
-                    // to a zero-arg member of the class, isn't
-                    // shadowed by a local, and isn't a self-assign.
-                    if getters.contains(&name) && !locals.contains(&name) && name != target.trim() {
-                        (Some(name), *span)
-                    } else {
-                        (None, *span)
-                    }
-                } else {
-                    (None, *span)
-                }
-            }
-            _ => {
-                idx += 1;
-                continue;
-            }
-        };
-        let Some(name) = qualify_name else {
-            idx += 1;
-            continue;
-        };
-        // Step A — convert the Assign to a `source_call` shape so the
-        // value-flow side sees `c ← CallRet(cmd-call)`.
-        if let FlowEvent::Assign {
-            source_name,
-            source_call,
-            source_call_args,
-            source_names,
-            value_kind,
-            ..
-        } = &mut events[idx]
-        {
-            let call_name = format!("this.{name}");
-            *source_call = Some(call_name.clone());
-            *source_call_args = Vec::new();
-            *source_name = None;
-            source_names.retain(|s| {
-                let trimmed = s.trim();
-                trimmed != name && trimmed != call_name
-            });
-            *value_kind = Some(AssignValueKind::CallResult);
-        }
-        // Step B — insert the explicit Call event before the Assign.
-        // walk_call's `args.is_empty()` fallback turns this into a
-        // synthetic `CallArg{idx=0}` recv-slot that
-        // `recv_slots_for_call_span` can find. Java's `String c =
-        // cmd();` emits the same Assign+Call pair natively.
-        events.insert(
-            idx,
-            FlowEvent::Call {
-                span,
-                name: format!("this.{name}"),
+            |name| bonsai_lang_api::ImplicitMemberReadCall {
+                source_call: format!("this.{name}"),
+                call_name: format!("this.{name}"),
                 receiver: Some("this".to_string()),
-                receiver_types: Vec::new(),
                 call_kind: CallKind::Method,
-                args: Vec::new(),
             },
         );
-        // Skip past both the inserted Call and the modified Assign.
-        idx += 2;
     }
 }
 

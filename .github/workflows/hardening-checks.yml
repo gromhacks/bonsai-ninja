@@ -57,6 +57,19 @@ jobs:
       - name: Reject vulnerabilities and new maintenance warnings
         run: cargo audit --deny warnings
 
+  dependency-licenses:
+    name: Locked dependency license policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.88"
+      - name: Reject missing, copyleft-only, or unreviewed licenses
+        run: python3 scripts/audit-dependency-licenses.py
+
   layering:
     name: Layering DAG audit
     runs-on: ubuntu-latest
@@ -76,6 +89,26 @@ jobs:
           persist-credentials: false
       - name: Run hardcoded audit
         run: bash scripts/audit-hardcoded.sh --check /tmp/hardcoded-audit
+
+  corpus-independence:
+    name: Corpus-independent production logic
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Reject benchmark and host identities in production
+        run: python3 scripts/audit-corpus-independence.py
+
+  shared-production-clones:
+    name: Shared production clone audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Reject large shared production clones
+        run: python3 scripts/audit-rust-duplication.py
 
   agent-skill-sync:
     name: Agent skill copies
@@ -112,13 +145,17 @@ jobs:
         run: cargo test --locked -p bonsai_conformance --test coverage_baseline
 
   flow-event-coverage:
-    name: Adapter FlowEvent emission drift
+    name: Adapter FlowEvent behavior
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
-      - name: Verify FlowEvent emission snapshot
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Verify typed FlowEvent emission
         run: bash scripts/audit-adapter-flow-events.sh --check
 
   taint-coverage-matrix:
