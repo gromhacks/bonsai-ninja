@@ -3,7 +3,7 @@
 
 use bonsai_security::{
     load_rulepack, match_rule_against_facts,
-    rule::{MatchKind, RuleKind},
+    rule::{MatchKind, RuleKind, Severity},
     run_taint_analysis, Rule, TaintAnalysisOptions,
 };
 use rayon::prelude::*;
@@ -697,6 +697,50 @@ fn xssfworkbook_input_stream_is_not_misclassified_as_an_xxe_sink() {
             "{rule_id} must preserve the versioned Apache POI boundary rationale"
         );
     }
+}
+
+#[test]
+fn go_http_error_requires_exception_shaped_detail_and_is_medium_severity() {
+    let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
+    let rule = pack
+        .find_rule_by_id("go.info_disclosure.http_error_exception")
+        .expect("Go http.Error exception-disclosure rule");
+
+    assert_eq!(
+        rule.severity,
+        Some(Severity::Medium),
+        "generic err.Error exposure does not prove secret-bearing detail"
+    );
+
+    let exception_ws = example_workspace(
+        "go",
+        Some("main.go"),
+        r#"package main
+import "net/http"
+func handler(w http.ResponseWriter, err error) {
+    http.Error(w, err.Error(), http.StatusInternalServerError)
+}
+"#,
+    );
+    assert!(
+        !match_rule_against_facts(&exception_ws, rule).is_empty(),
+        "err.Error() response detail must remain detectable"
+    );
+
+    let public_message_ws = example_workspace(
+        "go",
+        Some("main.go"),
+        r#"package main
+import "net/http"
+func handler(w http.ResponseWriter, publicMessage string) {
+    http.Error(w, publicMessage, http.StatusBadRequest)
+}
+"#,
+    );
+    assert!(
+        match_rule_against_facts(&public_message_ws, rule).is_empty(),
+        "ordinary public response text is not internal-error disclosure"
+    );
 }
 
 #[test]

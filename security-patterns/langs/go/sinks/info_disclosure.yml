@@ -37,7 +37,7 @@
   enabled: true
   language: go
   tag: information-disclosure
-  severity: high
+  severity: medium
   packages:
   - net/http
   cwe:
@@ -48,6 +48,10 @@
       attribute:
       - http
       - Error
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: '(?i)(\.Error\s*\(|debug\.Stack\s*\(|stack(?:trace)?\b)'
   match_examples:
   - name: http error exception
     code: |
@@ -62,7 +66,15 @@
     code: "package main\nimport (\n  \"net/http\"\n  \"github.com/go-chi/chi/v5\"\n)\nfunc handler(w http.ResponseWriter, r *http.Request, err error) {\n  _ = chi.URLParam(r, \"id\")\n  http.Error(w, \"debug: \"+err.Error(), 500)\n}\n"
     expect_match_text:
     - http.Error
-  description: "http.Error(w, err.Error/stack) - returns internal exception details to the client."
+  - name: public http error message negative
+    code: |
+      import "net/http"
+      package main
+      func handler(w http.ResponseWriter, publicMessage string) {
+        http.Error(w, publicMessage, http.StatusBadRequest)
+      }
+    expect_no_match: true
+  description: "http.Error(w, err.Error/stack) returns internal exception details to the client. Medium by default because the call proves detail exposure but not that the exposed error contains secrets."
 - id: go.info_disclosure.pprof_index
   enabled: true
   language: go
