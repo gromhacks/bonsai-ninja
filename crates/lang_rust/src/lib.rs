@@ -130,11 +130,10 @@ const HANDLER: GrammarHandler = GrammarHandler {
     return_kinds: &["return_expression"],
     throw_kinds: &[],
     lambda_kinds: &["closure_expression"],
-    // Constructs beyond the core-flow set: Rust try expressions use `?`
-    // postfix rather than a named kind, so the try set is empty. Control and
-    // suspension syntax is declared exactly here; shared lowering supplies no
-    // cross-language node-kind fallback.
-    try_kinds: &[],
+    // Rust's postfix `?` is a `try_expression`, while the unstable
+    // `try { ... }` construct is a distinct `try_block`. Only the latter owns
+    // a structured body and therefore lowers to the shared Try event.
+    try_kinds: &["try_block"],
     catch_kinds: &[],
     finally_kinds: &[],
     break_kinds: &["break_expression"],

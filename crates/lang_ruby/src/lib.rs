@@ -65,7 +65,12 @@ const BASE_HANDLER: GrammarHandler = GrammarHandler {
     try_kinds: &["begin", "begin_block"],
     catch_kinds: &["rescue"],
     finally_kinds: &["ensure"],
-    break_kinds: &["break", "next", "redo", "retry"],
+    break_kinds: &["break"],
+    // `next` advances to the next iteration; `redo` restarts the current
+    // iteration without reevaluating its condition. Both map to the shared
+    // loop-continue edge. Ruby's rescue-only `retry` has no equivalent in the
+    // current neutral IR and is intentionally not mislabeled as loop control.
+    continue_kinds: &["next", "redo"],
     yield_kinds: &["yield"],
     implicit_receiver_names: &["self", "super"],
     implicit_receiver_prefixes: &["@"],

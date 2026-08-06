@@ -22,21 +22,10 @@ pub(super) fn lower_control_and_scope(
             .child_by_field_name("label")
             .map(|n| node_text(&n, src).trim().to_string())
             .filter(|s| !s.is_empty());
-        // Perl's `loopex_expression` is a bucket for `last`, `next`, and
-        // `redo` — sort by the leading keyword so the flow surfaces the
-        // right event.
-        let leading = node_text(&node, src).trim_start();
-        if leading.starts_with("next") {
-            out.push(FlowEvent::Continue {
-                span: span_of(file, &node),
-                label,
-            });
-        } else {
-            out.push(FlowEvent::Break {
-                span: span_of(file, &node),
-                label,
-            });
-        }
+        out.push(FlowEvent::Break {
+            span: span_of(file, &node),
+            label,
+        });
         return true;
     }
 

@@ -278,10 +278,11 @@ class and verify each box.
       reuses exact parser coverage in the completion audit. Unchecked files
       receive a Tree-sitter diagnostic pass only; declarations and flow bodies
       are not lowered for `analysis_complete`. On the reference Elasticsearch
-      checkout, compare against the recorded 2026-08-03 fresh-cache baseline
-      (30.90 s, 3 GiB scheduling budget) and investigate material regressions
+      checkout, compare against the recorded final 2026-08-05 ABI-v61
+      fresh-cache baseline (30.83 s, 3 GiB scheduling budget) and investigate
+      material regressions
       rather than loosening the gate. The same checkout's exhaustive
-      `security sinks --severity high --context 4k` baseline is 21.42 s process
+      `security sinks --severity high --context 4k` baseline is 22.25 s process
       wall time under the same budget.
 - [ ] **Large native export gate passes when relevant.** Export the complete
       sibling Elasticsearch checkout under a recorded scheduling budget,

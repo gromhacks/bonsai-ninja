@@ -25,11 +25,12 @@ The analyzer is one compiler-style pipeline:
 
 ## Current validation
 
-Validated on 2026-08-04 (dated measurements below retain their run date):
+Validated on 2026-08-05 (dated measurements below retain their run date):
 
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` passed;
   this strict gate compiled the complete workspace and every test target.
-- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --release --locked` passed.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+  --document-private-items --locked` passed.
 - `cargo fmt --all -- --check` and `git diff --check` passed.
 - The last complete `cargo test --workspace --locked` baseline passed across
   all crates, integration binaries, adapter suites, and doc tests. The final
@@ -103,8 +104,8 @@ with:
 
 - `analysis_complete: true` and no incomplete reasons.
 - 0 findings at the production profile's severity threshold.
-- 41.58 seconds wall time.
-- 441,139,200 bytes maximum resident memory (about 420.7 MiB).
+- 1.90 seconds wall time from an empty workspace cache.
+- 682,590,208 bytes maximum resident memory (about 651.0 MiB).
 - 0 swaps under `BONSAI_MEMORY_BUDGET_MB=3072`.
 
 This is a correctness smoke, not a claim that an empty finding set proves the
@@ -131,18 +132,18 @@ seconds with 35,110,912 bytes maximum RSS.
 ## Elasticsearch scale result
 
 The current release pipeline is measured against the sibling 30,055-source
-Elasticsearch checkout. The final 2026-08-04 ABI-v60 exact large-workspace
-integration gate passed 5/5 in 221.29 seconds under a 3 GiB scheduling budget.
+Elasticsearch checkout. The final 2026-08-05 ABI-v61 exact large-workspace
+integration gate passed 5/5 in 222.95 seconds under a 3 GiB scheduling budget.
 It starts fresh
 processes and covers fresh-cache taint planning, warm semantic reuse, nine
 navigation commands, targeted inspect with taint evidence, security inventory,
 and production taint. Its enforced ceilings are 15 seconds for warm semantic
 reuse and 30 seconds for each measured query/analysis command.
 
-The cached generation validation/open phase completed in 5.37 seconds and the
-immediate fresh-process warm reuse completed in 2.45 seconds. Default inspect
-completed in 10.21 seconds. The broad exact
-`inspect execute --taint-flow` regression query completed in 29.26 seconds and
+The cached generation validation/open phase completed in 5.57 seconds and the
+immediate fresh-process warm reuse completed in 2.58 seconds. Default inspect
+completed in 10.77 seconds. The broad exact
+`inspect execute --taint-flow` regression query completed in 29.68 seconds and
 reported 3,895 declaration hits, 26,047 other syntax hits, 198,718 unique raw
 taint flows, and 12,233/12,233 scoped-IDG entry closures. A matching timed run
 used 3,420,733,440 bytes maximum RSS, a 2,775,017,280-byte peak physical
@@ -155,11 +156,11 @@ closure, or output.
 
 The same current generation was also built once from an empty semantic cache.
 That explicit, opt-in `index --semantic` compiler prewarm completed in
-1,621.89 seconds (27m02s). The compiler-object worker remained near 1.0 GiB
+1,727.39 seconds (28m47s). The compiler-object worker remained near 1.0 GiB
 RSS, exited before IDG replay began, and the IDG worker remained below the
 3 GiB scheduling budget. Normal commands do
-not force that whole-workspace prewarm: cold production taint completed in
-33.79 seconds, warm production taint in 27.21 seconds, and exact syntax
+not force that whole-workspace prewarm: fresh-cache production taint completed
+in 30.83 seconds, warm production taint in 26.70 seconds, and exact syntax
 commands hydrate only the product they request. The long explicit prewarm is
 recorded honestly because it remains a bulk cache-publication operation, not
 an interactive-command latency claim.
@@ -189,8 +190,8 @@ scalar-to-receiver mapping, sibling-field isolation, clean output-argument
 overwrites, Java record accessors, and C# expression-bodied properties.
 
 The final gate measured source inventory at 3.57 seconds, the exhaustive
-high-severity sink inventory at 20.30 seconds, credit-bearing sanitizer
-inventory at 17.12 seconds, and dependency inventory at 8.84 seconds. These
+high-severity sink inventory at 22.25 seconds, credit-bearing sanitizer
+inventory at 17.16 seconds, and dependency inventory at 11.02 seconds. These
 are syntax/compiler and rulepack facts, not Elasticsearch-specific name lists.
 
 Production security in the integration gate reports
@@ -270,13 +271,15 @@ external implementations cannot be presented as resolved compiler facts.
 
 ## External benchmark snapshot
 
-The final 2026-08-04 ABI-v60 CVEBench-SAST artifact used isolated copies of
-every vulnerable and fixed repository. All 460 scans exited successfully in
-208.6 seconds with no incomplete analysis: vulnerable-repository latency was
-0.456 seconds mean, 0.558 seconds p95, and 0.758 seconds maximum. Its verified report
-records 229/230 primary detections, 100% sanitizer recognition, 0 duplicate
-findings, 84.81% precision, 95.67% precision excluding off-chain findings,
-91.30% fix validation, 0.70 false positives per kLOC, and a 4.8815 mean score.
+The final 2026-08-05 ABI-v61 CVEBench-SAST artifact used isolated copies of
+every vulnerable and fixed repository, disabled analyzer caches between cases,
+and requested uncapped SARIF. All 460 scans exited successfully in 208.4
+seconds with no incomplete analysis: per-scan latency was 0.456 seconds mean,
+0.571 seconds p95, and 0.705 seconds maximum. Its verified report records
+229/230 primary detections, 100% sanitizer recognition, 0 duplicate findings,
+92.71% precision, 100% precision excluding off-chain findings, 100% fix
+validation, zero decoy trips, zero false positives per kLOC, 100% cross-file
+and hard-case recall, and a 4.9565 mean score.
 
 The sole empty vulnerable scan is the documented `XSSFWorkbook` case: the
 benchmark labels normal spreadsheet construction as an XXE sink even though

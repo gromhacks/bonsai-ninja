@@ -30,6 +30,9 @@ use std::sync::Arc;
 /// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
 /// or the object validation contract changes in a way that can alter compiler
 /// facts.
+// v61: Java compilation units without a package declaration use the unnamed
+// package rather than a filename-derived namespace; Perl, Ruby, and Rust
+// structured control facts track their current Tree-sitter grammar nodes.
 // v60: Go interpreted strings assemble exact byte/octal escapes before UTF-8
 // conversion, retaining valid multi-byte static scalar values while invalid
 // byte strings still fail closed.
@@ -120,7 +123,7 @@ use std::sync::Arc;
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 60;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 61;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;

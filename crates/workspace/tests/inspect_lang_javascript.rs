@@ -269,7 +269,9 @@ fn resolved_graph_links_commonjs_default_require_callable_module_exports_functio
             ),
         ],
     );
-    assert_resolved_edge(&w, "handle", "default");
+    // The public `default` alias remains in the declaration index, but the
+    // resolved callgraph points at the canonical named function body.
+    assert_resolved_edge(&w, "handle", "render");
 }
 
 fn assert_resolved_edge(w: &bonsai_workspace::Workspace, caller: &str, callee: &str) {

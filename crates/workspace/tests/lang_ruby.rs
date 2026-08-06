@@ -133,3 +133,11 @@ fn break_and_next_in_while_loop() {
     assert!(has_break(&w, "f"));
     assert!(has_continue(&w, "f"));
 }
+
+#[test]
+fn next_in_each_block_is_continue_in_enclosing_flow() {
+    let w = make(
+        "def f(items)\n  items.split(\" \").each do |item|\n    next if item.empty?\n    consume(item)\n  end\nend\n",
+    );
+    assert!(has_continue(&w, "f"));
+}

@@ -33,6 +33,27 @@ use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("perl");
 const PACK_NAME: &str = "perl";
+
+/// Lower Perl's shared `loopex_expression` CST bucket from the leading
+/// language keyword. Tree-sitter uses the same node kind for `last`, `next`,
+/// and `redo`, so the adapter must classify the runtime control effect rather
+/// than asking shared analysis to interpret Perl tokens.
+fn extract_perl_syntax_event(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    _handler: &GrammarHandler,
+) -> Option<FlowEvent> {
+    if node.kind() != "loopex_expression" {
+        return None;
+    }
+    let span = span_of(file, &node);
+    match node_text(&node, src).split_whitespace().next()? {
+        "last" => Some(FlowEvent::Break { span, label: None }),
+        "next" | "redo" => Some(FlowEvent::Continue { span, label: None }),
+        _ => None,
+    }
+}
 // Perl5 OO uses bare `package Foo;` declarations as class
 // boundaries; tree-sitter-perl exposes them as `package_statement`
 // nodes with a `name:` field. The grammar's `class_statement` form
@@ -70,6 +91,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "for_statement_1",
         "for_statement_2",
         "for_simple_statement",
+        "cstyle_for_statement",
     ],
     foreach_kinds: &[],
     while_kinds: &[
@@ -77,6 +99,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "until_statement",
         "while_simple_statement",
         "until_simple_statement",
+        "loop_statement",
     ],
     do_kinds: &[],
     loop_kinds: &[],
@@ -89,14 +112,14 @@ const HANDLER: GrammarHandler = GrammarHandler {
     ],
     nested_call_component_kinds: &[],
     pseudo_call_extractor: Some(extract_perl_pseudo_call),
-    syntax_event_extractor: None,
+    syntax_event_extractor: Some(extract_perl_syntax_event),
     pseudo_call_receiver_extractor: None,
     argument_passing_mode_extractor: None,
     assignment_kinds: &["assignment_expression", "variable_declaration"],
     return_kinds: &["return_expression"],
     throw_kinds: &[],
     lambda_kinds: &["anonymous_subroutine_expression"],
-    try_kinds: &[],
+    try_kinds: &["try_statement"],
     catch_kinds: &[],
     finally_kinds: &[],
     break_kinds: &["loop_control_statement"],

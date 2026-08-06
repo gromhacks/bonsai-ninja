@@ -106,13 +106,10 @@ fn solidity_library_is_a_type_owner_for_class_side_dispatch() {
         .find(|decl| decl.name == "helper")
         .expect("library function");
     assert_eq!(helper.parent, Some(library.symbol));
-    assert!(
-        helper
-            .qualified_name
-            .as_deref()
-            .is_some_and(|name| name.ends_with("::Util::helper")),
-        "library function should carry lexical owner identity: {:?}",
-        helper.qualified_name
+    assert_eq!(
+        helper.qualified_name.as_deref(),
+        Some("Demo.Util::helper"),
+        "library function should carry its file module and exact lexical owner identity"
     );
 
     let entry = idx

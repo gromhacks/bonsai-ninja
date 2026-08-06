@@ -293,13 +293,17 @@ impl LanguageAdapter for JavaAdapter {
                 decl.visibility = vis;
             }
         }
-        // Module path from `package com.foo.bar;` declaration.
-        // When absent (default package), fall back to file-stem.
+        // Module path from `package com.foo.bar;` declaration. A compilation
+        // unit without a package declaration belongs to Java's unnamed
+        // package; its filename is not a namespace. Keeping the module path
+        // empty lets exact receiver-type resolution link peer types in that
+        // package while still rejecting duplicate type identities as invalid
+        // Java source.
         if let Some(segments) = extract_java_package(tree.root_node(), src) {
             let segments = package_module_segments_with_workspace_prefix(file, ctx, segments);
             bonsai_lang_api::apply_module_path_semantic_identity(&mut index, segments);
         } else {
-            bonsai_lang_api::apply_file_stem_semantic_identity(&mut index, ctx);
+            bonsai_lang_api::apply_module_path_semantic_identity(&mut index, Vec::new());
         }
         // Append `FlowEvent::Lifecycle` for recognised Java
         // resource transitions (`Closeable.close`, `Future.cancel`,
