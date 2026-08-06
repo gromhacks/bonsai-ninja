@@ -100,14 +100,16 @@ a regression pass: record the host, source-file count, cold/warm cache state,
 wall time, physical footprint/RSS, swaps, and completeness, then review the
 phase/allocation change.
 
-The 2026-08-03 reference pass completed all five tests in 221.99 seconds:
-fresh-cache production taint 30.90 seconds, semantic generation validation
-5.40 seconds, warm reuse 2.44 seconds, default inspect 9.86 seconds, broad raw
-taint inspect 29.48 seconds, warm production taint 28.56 seconds, and every
+The final 2026-08-05 ABI-v61 reference pass completed all five tests in 222.95
+seconds: fresh-cache production taint 30.83 seconds, semantic generation
+validation 5.57 seconds, warm reuse 2.58 seconds, default inspect 10.77
+seconds, broad raw taint inspect 29.68 seconds, warm production taint 26.70
+seconds, and every
 navigation/inventory command below 30 seconds. The explicit empty-cache
 `index --semantic` bulk prewarm is measured separately because normal commands
-do not force it; the current reference is 1,603.47 seconds at about 1.06 GiB
-maximum RSS.
+do not force it; the current reference is 1,727.39 seconds. Compiler lowering
+remained near 1 GiB RSS, released its bodies before IDG replay, and the IDG
+worker remained below the 3 GiB scheduling budget.
 
 The integration test deliberately does not write the multi-gigabyte native
 Elasticsearch artifact on every CI runner. Changes to native export, compiler
@@ -133,6 +135,9 @@ timeout or reintroduce a materialized path-prefix option.
 ## GitHub Release Artifacts
 
 Repository releases are built from `v*.*.*` tags by `.github/workflows/release.yml`. The workflow builds Linux x64, Linux arm64, macOS Intel, macOS Apple Silicon, Windows x64, and Windows arm64 archives, includes `security-patterns/`, `docs/`, `README.md`, `AGENTS.md`, `SKILLS.md`, and checksum files, then publishes them with `softprops/action-gh-release`.
+The installable `.agents/skills/bonsai-ninja/SKILL.md` package is included as
+well, so extracting a release preserves both human documentation and the
+agent-discoverable workflow.
 
 For source-build target checks outside that release artifact matrix, use
 `scripts/check-targets.sh`; see

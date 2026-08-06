@@ -73,13 +73,8 @@ fn die_is_a_call() {
 fn last_and_next_are_break_continue() {
     // Perl's `last` = break, `next` = continue.
     let w = make("sub f { for (my $i = 0; $i < 10; $i++) { next if $i == 0; last if $i == 5; } }\n");
-    // At minimum one of these should register.
-    let got_break = has_break(&w, "f");
-    let got_cont = has_continue(&w, "f");
-    assert!(
-        got_break || got_cont,
-        "neither last nor next surfaced as break/continue"
-    );
+    assert!(has_break(&w, "f"), "Perl `last` must lower as Break");
+    assert!(has_continue(&w, "f"), "Perl `next` must lower as Continue");
 }
 
 #[test]
