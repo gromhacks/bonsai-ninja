@@ -499,6 +499,8 @@ pub(crate) struct InspectCommandOptions<'a> {
 struct TaintCandidates {
     entries: ahash::AHashSet<bonsai_common::FuncId>,
     target_spans: Vec<(bonsai_common::FuncId, bonsai_common::Span)>,
+    declaration_targets: ahash::AHashSet<bonsai_common::FuncId>,
+    declaration_targets_complete: bool,
 }
 
 impl TaintCandidates {
@@ -506,6 +508,8 @@ impl TaintCandidates {
         Self {
             entries,
             target_spans: Vec::new(),
+            declaration_targets: ahash::AHashSet::default(),
+            declaration_targets_complete: false,
         }
     }
 
@@ -516,6 +520,14 @@ impl TaintCandidates {
     fn insert_target(&mut self, entry: bonsai_common::FuncId, span: bonsai_common::Span) {
         self.entries.insert(entry);
         self.target_spans.push((entry, span));
+    }
+
+    fn record_complete_declaration_targets(
+        &mut self,
+        declarations: impl IntoIterator<Item = bonsai_common::FuncId>,
+    ) {
+        self.declaration_targets.extend(declarations);
+        self.declaration_targets_complete = true;
     }
 }
 
@@ -581,6 +593,22 @@ fn collect_decl_hits(
         DeclKind::Class | DeclKind::Struct => 1,
         _ => 2,
     });
+    if options.taint_flow {
+        // This header pass already found every callable declaration matched by
+        // the query. Preserve that exact compiler result for the later IDG
+        // lineage phase instead of rescanning every workspace declaration.
+        taint_candidates.record_complete_declaration_targets(
+            matched_decls
+                .iter()
+                .filter(|decl| {
+                    matches!(
+                        decl.kind,
+                        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                    )
+                })
+                .map(|decl| bonsai_common::FuncId::new(decl.symbol.raw())),
+        );
+    }
 
     let mut hits = Vec::new();
     let decl_bar = progress::progress_bar("inspecting decls", matched_decls.len() as u64);
@@ -2676,20 +2704,24 @@ fn inspect_taint_flows(
     };
     let lineage_started = std::time::Instant::now();
     let lineage_targets = if prefer_warmed_idg && pattern.is_some() {
-        let headers = ws.compiler_header_index();
-        let mut targets = headers
-            .all_files()
-            .flat_map(|file| headers.decls_in(file))
-            .filter(|decl| {
-                matches!(
-                    decl.kind,
-                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-                ) && matcher
-                    .as_ref()
-                    .is_some_and(|matcher| matcher.is_declaration_match(decl))
-            })
-            .map(|decl| bonsai_common::FuncId::new(decl.symbol.raw()))
-            .collect::<Vec<_>>();
+        let mut targets = if candidates.declaration_targets_complete {
+            candidates.declaration_targets.iter().copied().collect::<Vec<_>>()
+        } else {
+            let headers = ws.compiler_header_index();
+            headers
+                .all_files()
+                .flat_map(|file| headers.decls_in(file))
+                .filter(|decl| {
+                    matches!(
+                        decl.kind,
+                        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                    ) && matcher
+                        .as_ref()
+                        .is_some_and(|matcher| matcher.is_declaration_match(decl))
+                })
+                .map(|decl| bonsai_common::FuncId::new(decl.symbol.raw()))
+                .collect::<Vec<_>>()
+        };
         targets.sort_unstable_by_key(|func| func.raw());
         targets.dedup();
         Some(targets)
@@ -2725,6 +2757,7 @@ fn inspect_taint_flows(
         prefer_warmed_idg && lineage_funcs.is_none(),
         lineage_started.elapsed().as_secs_f64()
     );
+    let display_started = std::time::Instant::now();
     let display_stage = progress::ScopedSpinner::new("preparing taint symbol display");
     let mut display_funcs = lineage_funcs
         .as_ref()
@@ -2736,6 +2769,13 @@ fn inspect_taint_flows(
     }
     let display_index = TaintDisplayIndex::new(ws, display_funcs);
     display_stage.finish();
+    bonsai_diagnostics::debug_log!(
+        "compiler-cache",
+        "inspect taint display index: functions={} elapsed={:.3}s",
+        display_index.functions.len(),
+        display_started.elapsed().as_secs_f64()
+    );
+    let target_nodes_started = std::time::Instant::now();
     let session = if prefer_warmed_idg {
         (!fallback_target_funcs.is_empty())
             .then(|| ws.syntax_flow_session(&entries, &fallback_target_funcs))
@@ -2773,6 +2813,14 @@ fn inspect_taint_flows(
     let source_rooted_targets = prefer_warmed_idg
         && !candidates.target_spans.is_empty()
         && lineage_funcs.as_ref().is_some_and(|funcs| !funcs.is_empty());
+    bonsai_diagnostics::debug_log!(
+        "compiler-cache",
+        "inspect taint target attribution: target_nodes={} unresolved_funcs={} elapsed={:.3}s",
+        target_nodes.len(),
+        target_funcs.len(),
+        target_nodes_started.elapsed().as_secs_f64()
+    );
+    let target_relevance_started = std::time::Instant::now();
     let target_relevance = if prefer_warmed_idg {
         ws.syntax_flow_target_relevance_with_session(
             &target_nodes,
@@ -2783,12 +2831,45 @@ fn inspect_taint_flows(
     } else {
         None
     };
+    bonsai_diagnostics::debug_log!(
+        "compiler-cache",
+        "inspect taint target relevance: available={} elapsed={:.3}s",
+        target_relevance.is_some(),
+        target_relevance_started.elapsed().as_secs_f64()
+    );
     let unfiltered_entry_count = entries.len();
+    let source_filter_started = std::time::Instant::now();
     if let Some(relevance) = target_relevance.as_ref() {
-        if let Some(relevant_entries) =
-            ws.syntax_flow_relevant_sources_with_session(&entries, relevance, session.as_ref())
-        {
-            entries = relevant_entries;
+        // An entry that owns an exact target node (or the conservative
+        // unresolved-function fallback for one of its target spans) is
+        // already admitted by construction: those nodes/functions seeded the
+        // backward relation immediately above. Rechecking every node owned by
+        // those entries against the external-memory relevance set is pure
+        // duplicate work on broad syntax queries. Ask the header prefilter
+        // only about entries that do not themselves own a target, then merge
+        // that proof with the direct compiler ownership facts. This changes
+        // neither target demand nor forward-closure scope.
+        let owns_direct_target = |entry: &bonsai_common::FuncId| {
+            source_rooted_targets
+                && (target_nodes_by_source
+                    .get(entry)
+                    .is_some_and(|nodes| !nodes.is_empty())
+                    || unresolved_target_funcs.contains(entry))
+        };
+        let entries_needing_proof = entries
+            .iter()
+            .copied()
+            .filter(|entry| !owns_direct_target(entry))
+            .collect::<Vec<_>>();
+        if !entries_needing_proof.is_empty() {
+            if let Some(relevant_entries) = ws.syntax_flow_relevant_sources_with_session(
+                &entries_needing_proof,
+                relevance,
+                session.as_ref(),
+            ) {
+                let relevant_entries = relevant_entries.into_iter().collect::<ahash::AHashSet<_>>();
+                entries.retain(|entry| owns_direct_target(entry) || relevant_entries.contains(entry));
+            }
         }
     }
     bonsai_diagnostics::debug_log!(
@@ -2796,7 +2877,7 @@ fn inspect_taint_flows(
         "inspect taint source demand: candidates={} relevant={} elapsed={:.3}s",
         unfiltered_entry_count,
         entries.len(),
-        lineage_started.elapsed().as_secs_f64()
+        source_filter_started.elapsed().as_secs_f64()
     );
     target_stage.finish();
     let mut flows = Vec::new();
@@ -2840,6 +2921,7 @@ fn inspect_taint_flows(
     };
     let workers = bonsai_common::rooted_semantic_query_worker_count(rayon::current_num_threads());
     bonsai_diagnostics::debug_log!("compiler-cache", "inspect rooted taint workers: {}", workers);
+    let closures_started = std::time::Instant::now();
     let results = if workers == 1 {
         entries.iter().copied().map(&analyze_entry).collect::<Vec<_>>()
     } else {
@@ -2861,7 +2943,7 @@ fn inspect_taint_flows(
         "compiler-cache",
         "inspect taint closures: entries={} elapsed={:.3}s",
         results.len(),
-        inspect_taint_started.elapsed().as_secs_f64()
+        closures_started.elapsed().as_secs_f64()
     );
     for (mut entry_flows, plan) in results {
         semantic_flow_stats.record_plan(&plan);

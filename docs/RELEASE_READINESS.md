@@ -82,6 +82,10 @@ Validated through 2026-08-07 (dated measurements below retain their run date):
   Rulepack-compatible passthrough transfers and generic non-crediting
   validation markers remain available to taint propagation but cannot be
   mislabeled by that command surface.
+- Dart `Uri.http` and `Uri.https` constructors are audit-only rather than SSRF
+  sinks: constructing a URI performs no network I/O. A live rulepack regression
+  test requires both constructor shapes to remain finding-free until an actual
+  network client consumes the value.
 - Layering, public-API, hardcoded-knowledge, adapter-capability, and adapter
   `FlowEvent` behavioral audits passed. The hardcoded-knowledge audit excludes
   test fixtures and classifies production literals by ownership: grammar
@@ -100,6 +104,12 @@ Validated through 2026-08-07 (dated measurements below retain their run date):
   with at least one distributable license branch. Release archives are then
   executed from a relocated temporary working directory so security-rule
   discovery is proven against the packaged layout rather than the source tree.
+- The release workflow's native CLI smoke was executed command-for-command on
+  the current binary. `index` and `diagnostics` remain intentional text-only
+  commands, while inspect/trace/export JSON, SARIF, and HTML outputs are parsed
+  as their declared formats. Repository policy now rejects unsupported
+  `--format`/`--all` combinations in that workflow, semantic gate timeouts, or
+  omission of documentation and deep rulepack audits.
 
 The current deep rulepack gate is clean:
 
@@ -114,10 +124,10 @@ The current deep rulepack gate is clean:
 | Measure | Result |
 |---|---:|
 | Rules | 7,053 |
-| Enabled rules | 5,915 |
-| Disabled rules | 1,138 |
+| Enabled rules | 5,913 |
+| Disabled rules | 1,140 |
 | Match examples | 10,403 |
-| Enabled match examples | 9,969 |
+| Enabled match examples | 9,965 |
 | Taint-replay misses | 0 |
 | Errors | 0 |
 | Warnings | 0 |
@@ -234,6 +244,16 @@ rendering flags. Earlier cold timings in the thousands of seconds and broad
 query timings above 150 seconds describe superseded architectures that
 reparsed bodies or rebuilt workspace graphs; they are retained only in
 historical goal documents.
+
+The 2026-08-07 final warm-generation release repeat passed the complete 5/5
+gate in 234.09 seconds under the same 3 GiB schedule. Immediate semantic reuse
+took 2.48 seconds, default inspect 10.02 seconds, exact broad raw-taint inspect
+29.53 seconds, fresh-cache production taint 34.28 seconds, and warm production
+taint 27.74 seconds. The broad query retained 12,233/12,233 entry closures and
+198,025 unique pageable paths. Reusing callable declarations already selected
+by the compiler pass and accepting direct AST/IDG target owners without a
+second relevance proof changes only duplicate lookup work; the target-demand
+relation and every forward fixed point remain unchanged.
 
 The same multi-file compiler flow was also run with 512 MiB and 3,072 MiB
 scheduling budgets. Both runs completed with no incomplete reasons and

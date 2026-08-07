@@ -283,7 +283,9 @@ class and verify each box.
       material regressions
       rather than loosening the gate. The same checkout's exhaustive
       `security sinks --severity high --context 4k` baseline is 22.63 s process
-      wall time under the same budget.
+      wall time under the same budget. The 2026-08-07 final warm-generation
+      repeat completed fresh-cache taint in 34.28 s, warm taint in 27.74 s, and
+      broad raw-taint inspect in 29.53 s with all 12,233 entry closures retained.
 - [ ] **Large native export gate passes when relevant.** Export the complete
       sibling Elasticsearch checkout under a recorded scheduling budget,
       validate with `jq --stream`, and record bytes, wall time, physical
