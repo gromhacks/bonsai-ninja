@@ -66,7 +66,6 @@ const LANG_TABLE: &[(&str, Expected)] = &[
     ("ruby", Expected::Pass),
     ("rust", Expected::Pass),
     ("scala", Expected::Pass),
-    ("solidity", Expected::Pass),
     ("swift", Expected::Pass),
     ("typescript", Expected::Pass),
 ];

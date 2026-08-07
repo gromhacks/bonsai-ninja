@@ -8,7 +8,7 @@ description: "Core analyzer primitives used by bonsai-ninja security rules and f
 ## Compiler Frontends And Shared IR
 
 bonsai-ninja treats Tree-sitter as the syntax layer of a compiler pipeline.
-Each of the 21 adapters owns its grammar and converts language syntax into
+Each of the 20 adapters owns its grammar and converts language syntax into
 `Decl`, `ImportSpec`, `FlowEvent`, `Place`, type, module, receiver,
 constructor, and capability facts. Shared passes operate on that typed IR.
 They do not select behavior by language name, scan a cross-language token
@@ -38,7 +38,7 @@ without introducing another parser or lowering path.
 
 ## Sources
 
-A source is a rule-matched fact that introduces untrusted data: request parameters, headers, CLI input, queue messages, environment values, calldata, database rows, or other boundary values. Source rules live under `security-patterns/langs/<lang>/sources/`.
+A source is a rule-matched fact that introduces untrusted data: request parameters, headers, CLI input, queue messages, environment values, database rows, or other boundary values. Source rules live under `security-patterns/langs/<lang>/sources/`.
 
 <Note>
 Inferred sources are opt-in. `--inferred-sources` creates synthetic entry-point parameter sources for audit coverage, but normal security scans seed only real source rules.

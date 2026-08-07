@@ -233,7 +233,7 @@ fn fixture_file_count(test_body: &str) -> usize {
     const EXTENSIONS: &[&str] = &[
         ".c", ".cc", ".cpp", ".cs", ".cxx", ".dart", ".erl", ".ex", ".go", ".h", ".hh", ".hpp", ".hxx",
         ".java", ".js", ".kt", ".lua", ".m", ".mm", ".php", ".pl", ".pm", ".py", ".rb", ".rs", ".scala",
-        ".sol", ".swift", ".ts",
+        ".swift", ".ts",
     ];
 
     let bytes = test_body.as_bytes();
@@ -717,7 +717,7 @@ fn applicable_count_per_language_matches_doc_estimate() {
     // half the matrix as n/a/deferred. Smaller languages legitimately
     // have fewer applicable cells because they lack exceptions, OO,
     // async, imports, or other scenario families.
-    let minimums = BTreeMap::from([("c", 35), ("erlang", 35), ("solidity", 35)]);
+    let minimums = BTreeMap::from([("c", 35), ("erlang", 35)]);
 
     for &lang in LANGUAGES {
         let applicable = SCENARIOS

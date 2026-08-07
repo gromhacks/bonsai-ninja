@@ -79,7 +79,7 @@ pub(super) fn lower_assignment(
         // If the picked target is itself a declarator wrapper —
         // tree-sitter emits `variable_declarator` in C# /
         // JavaScript / TypeScript / Java, `init_declarator` in C /
-        // C++, and similar in Solidity / Swift — descend into its
+        // C++, and similar in Swift — descend into its
         // identifier child so the emitted `target` is the variable
         // name rather than the whole `name = rhs` expression. Also
         // the downstream walker will visit the declarator anyway
@@ -93,12 +93,12 @@ pub(super) fn lower_assignment(
         // *named* node inside `variable_declarator` — `action` in
         // `action = req.Query["action"].ToString()` is anonymous, so every
         // named-child walker picks up the RHS instead and the target
-        // becomes `action = req.Query…`. Same pattern surfaces in Solidity
-        // (`bytes32 t`), Perl (`my $query`), Lua (full statement), and Go
+        // becomes `action = req.Query…`. The same pattern surfaces in Perl
+        // (`my $query`), Lua (full statement), and Go
         // multi-return destructuring (`result, _`). When the picked target
         // text has shape `LHS = RHS`, keep just the LHS; when it has a
-        // space, keep the last whitespace-delimited token (types on
-        // Solidity / Perl stay off the target). The underlying identifier
+        // space, keep the last whitespace-delimited token (types and Perl
+        // declaration markers stay off the target). The underlying identifier
         // is still reachable through the structured `target` field on
         // downstream analyses — we just display the clean name.
         let target = sanitize_assign_target(&raw_target);

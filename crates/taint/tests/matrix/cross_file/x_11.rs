@@ -358,24 +358,6 @@ fn x_11_scala() {
 }
 
 #[test]
-fn x_11_solidity() {
-    run_negative_cell(
-        "X_11",
-        LangFixture {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            files: &[
-                ("Util.sol", "library Util { function helper(string memory p) private { sink(p); } }\n"),
-                ("Entry.sol", "import './Util.sol';\ncontract Entry { function entry(string memory args) public { Util.helper(args); } }\n"),
-            ],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
-
-#[test]
 fn x_11_swift() {
     run_negative_cell(
         "X_11",

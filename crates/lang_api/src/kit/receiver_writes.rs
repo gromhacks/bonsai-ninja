@@ -729,7 +729,6 @@ fn argument_node_is_place(node: &Node<'_>, text: &str) -> bool {
             | "var"
             | "varname"
             | "identifier_dollar_escaped"
-            | "yul_identifier"
             | "field_identifier"
             | "member_expression"
             | "member_access_expression"

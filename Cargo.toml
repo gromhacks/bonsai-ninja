@@ -42,7 +42,6 @@ members = [
     "crates/lang_lua",
     "crates/lang_elixir",
     "crates/lang_erlang",
-    "crates/lang_solidity",
     "crates/adapters",
     "crates/cli",
     "crates/security",
@@ -56,7 +55,7 @@ edition = "2021"
 rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/gromhacks/bonsai-ninja"
-description = "Local 21-language code intelligence and security analysis engine"
+description = "Local 20-language code intelligence and security analysis engine"
 
 [workspace.dependencies]
 # External parsing / tree-sitter
@@ -148,7 +147,6 @@ bonsai_lang_objc = { path = "crates/lang_objc" }
 bonsai_lang_lua = { path = "crates/lang_lua" }
 bonsai_lang_elixir = { path = "crates/lang_elixir" }
 bonsai_lang_erlang = { path = "crates/lang_erlang" }
-bonsai_lang_solidity = { path = "crates/lang_solidity" }
 bonsai_adapters = { path = "crates/adapters" }
 bonsai_security = { path = "crates/security" }
 bonsai_factstore = { path = "crates/factstore" }
@@ -206,7 +204,7 @@ codegen-units = 1
 opt-level = 3
 
 # The workspace has hundreds of standalone integration-test executables, each
-# linking the complete 21-language analysis graph. Embedded debug information
+# linking the complete 20-language analysis graph. Embedded debug information
 # makes those artifacts hundreds of MiB and turns macOS policy scanning into a
 # multi-minute cost per batch. Panic locations and test names remain available
 # without DWARF; use `CARGO_PROFILE_TEST_DEBUG=2` for an intentional debugger

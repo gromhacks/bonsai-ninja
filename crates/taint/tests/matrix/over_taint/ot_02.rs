@@ -381,15 +381,3 @@ fn ot_02_erlang() {
         "X",
     );
 }
-
-#[test]
-fn ot_02_solidity() {
-    run_ot_02(LangFixture {
-        lang: "solidity",
-        adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-        files: &[("Demo.sol", "contract Demo { function entry(string memory user) public { string memory x = \"user_data\"; sink(x); } }\n")],
-        entry: "entry",
-        seed: &["user"],
-        sink: "sink",
-    }, "x");
-}

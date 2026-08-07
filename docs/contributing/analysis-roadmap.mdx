@@ -27,7 +27,7 @@ constraint).
 | **P3 — Constants / value-range tracking** | **Shipped (shared domain)** — `bonsai_abstract_interp::AbstractValue` carries constants, bounded integer ranges, boolean domains, string length ranges, nullness / nullable values, bounded literal sets, and simple path relations. Rule-level `arg_lt` / `arg_le` / `arg_gt` / `arg_ge` constraints still use literal parsing until individual analyses consume the shared domain. | n/a — adapters already emit `FlowEvent` operands; shared `Operation` facts can feed the same domain. | Adopted by weak-crypto-strength rules for literal checks; broader range/nullness adoption is pending. |
 | **P4 — Missing-call detection** | **Shipped (intra-procedural)** — `MatchKind::Missing` fires on declarations that do not call the expected target. A resolved cross-procedural closure over the canonical call graph is the remaining lift. | n/a. | Available; pack adoption pending. |
 | **P5 — Must-alias / points-to** | **Shipped (intra-procedural)** — `MustAlias` constraint resolves simple rename chains (`y = x`) within a decl. Compound RHS is not aliasing; cross-procedure aliasing is conservative. Foundation for P6. | n/a. | Available; opt-in. |
-| **P6 — Lifecycle state machine** | **Shipped** — flow-sensitive lattice consumes `FlowEvent::Lifecycle { name, transition }` events; `RequiresState` constraint queries the state at each call site. Canonical states: `freed`, `closed`, `unlocked`, `cancelled`, `moved`. | **All 21 langs** emit lifecycle events for their idiomatic free / close / unlock / cancel / move calls via `bonsai_lang_api::inject_lifecycle_events`. | Available; pack-side promotion of audit-pair rules in flight. |
+| **P6 — Lifecycle state machine** | **Shipped** — flow-sensitive lattice consumes `FlowEvent::Lifecycle { name, transition }` events; `RequiresState` constraint queries the state at each call site. Canonical states: `freed`, `closed`, `unlocked`, `cancelled`, `moved`. | **All 20 languages** emit lifecycle events for their idiomatic free / close / unlock / cancel / move calls via `bonsai_lang_api::inject_lifecycle_events`. | Available; pack-side promotion of audit-pair rules in flight. |
 | **P7 — Expression / use-site operations** | **Shipped (shared facts)** — `bonsai_lang_api::operations_from_flow_events` derives first-class `Operation` facts for reads, writes, calls, allocation, returns, throws, awaits, branch conditions, catch bindings, resource scopes, lifecycle releases, and normalized place shapes. `BranchConditionFact` separately retains exact condition spans and syntactic polarity. | Adapters emit the shared `FlowEvent` contract; the common Tree-sitter frontend derives operations and branch-condition facts once. | Available through CLI/SDK `operations` and native export; analysis adoption is in progress. |
 
 `MATCHER_POLICY_FINGERPRINT` in `bonsai_common::policy` is bumped each
@@ -118,7 +118,7 @@ the false-branch.
 | Erlang | guard `is_atom/1`, record `#x{}` | 1d |
 | Objective-C | `[obj isKindOfClass:[X class]]` | 1d |
 | C / C++ | `dynamic_cast<T>`, C casts | 2d |
-| Lua / Perl / Solidity | minimal/none | 0d |
+| Lua / Perl | minimal/none | 0d |
 
 **Engine ship.** ~5d. Adapter ship: ~20d, parallelisable across adapters.
 
@@ -312,10 +312,9 @@ file.Close()`, Swift `defer { ... }`, C++ destructors).
 | Erlang | Same as Elixir | 1d |
 | Lua | `io.close`, `coroutine.close`, `os.exit` | 1d |
 | Perl | `close $fh`, file-handle scope-end | 1d |
-| Solidity | `selfdestruct`, contract-state finalisation | 1d |
 
 **Engine ship.** ~7d after primitive 5 lands. Adapter ship: ~30d total
-across 21 langs, parallelisable.
+across 20 languages, parallelisable.
 
 **Rule-pack already in place.** The recent UAF / lifecycle additions
 (Rust `Box::from_raw` / `ptr::drop_in_place` / `ManuallyDrop::drop`,
@@ -327,7 +326,7 @@ adding a `requires_state: Live` (or `requires_state: !Freed`) constraint
 to the existing rule.
 
 **Bug classes unlocked.** Everything in the list at the top of this
-section, across all 21 adapters that surface the relevant transition.
+section, across all 20 adapters that surface the relevant transition.
 
 ---
 
@@ -385,7 +384,7 @@ UAF track total: ~6 calendar weeks (after primitive 5 ships, primitive
 6's adapter work runs in parallel).
 
 **Combined total**: ~12–14 calendar weeks for one engineer to ship all
-six primitives end-to-end across all 21 adapters, plus the rule-pack
+six primitives end-to-end across all 20 adapters, plus the rule-pack
 expansion. The two tracks are independent — primitives 5+6 don't block
 1–4 and vice versa, so two engineers could parallelise the work to
 ~6–7 weeks wall-clock.
@@ -416,7 +415,7 @@ expansion. The two tracks are independent — primitives 5+6 don't block
 | Auth check absent | ✗ | — | ✅ | — |
 | Output escaping missing on a path | partial | — | ✅ | — |
 | Polymorphic dispatch precision | partial | — | — | ✅ |
-| Typed catch arm narrowing | ✅ J/K/C# | — | — | ✅ all 21 |
+| Typed catch arm narrowing | ✅ J/K/C# | — | — | ✅ all 20 |
 | Discriminated-union narrowed sinks | ✗ | — | — | ✅ |
 
 ### UAF / lifecycle bug classes

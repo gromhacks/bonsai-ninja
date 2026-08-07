@@ -31,7 +31,6 @@ const SUPPORTED_LANGS: &[&str] = &[
     "ruby",
     "rust",
     "scala",
-    "solidity",
     "swift",
     "typescript",
 ];
@@ -606,7 +605,7 @@ fn generated_capability_docs_and_diagnostics_stay_linked() {
         &conformance,
         &[
             "write_matrix_to_build",
-            "21 * Capability::ALL.len()",
+            "20 * Capability::ALL.len()",
             "assert_capability_universal",
         ],
     );

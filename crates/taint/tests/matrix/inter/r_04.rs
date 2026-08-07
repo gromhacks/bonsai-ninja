@@ -122,8 +122,3 @@ fn r_04_lua() {
         },
     );
 }
-
-#[test]
-fn r_04_solidity() {
-    run_positive_cell("R_04", LangFixture { lang:"solidity", adapter:Arc::new(bonsai_lang_solidity::SolidityAdapter::new()), files:&[("Demo.sol","contract Demo { function entry(string memory args) public { method(args); } function method(string memory p) internal { sink(p); } }\n")], entry:"entry", seed:&["args"], sink:"sink" });
-}

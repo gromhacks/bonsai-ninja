@@ -14,7 +14,7 @@ analysis scope was complete.
 
 The analyzer is one compiler-style pipeline:
 
-- 21 Tree-sitter adapters own source syntax and lower it into typed compiler
+- 20 Tree-sitter adapters own source syntax and lower it into typed compiler
   facts.
 - Resolver, callgraph, IDG, security, SDK, and export consume those facts
   without shared language-name dispatch or cross-language token inventories.
@@ -104,11 +104,11 @@ The current deep rulepack gate is clean:
 
 | Measure | Result |
 |---|---:|
-| Rules | 7,159 |
-| Enabled rules | 5,996 |
-| Disabled rules | 1,163 |
-| Match examples | 10,524 |
-| Enabled match examples | 10,089 |
+| Rules | 7,053 |
+| Enabled rules | 5,915 |
+| Disabled rules | 1,138 |
+| Match examples | 10,403 |
+| Enabled match examples | 9,969 |
 | Taint-replay misses | 0 |
 | Errors | 0 |
 | Warnings | 0 |
@@ -320,7 +320,7 @@ even when Bonsai reports the downstream `FileResponse` emission sink; that
 location mismatch does not change the detected source-to-filesystem flow.
 
 Benchmark metrics are evidence about the checked corpus, not a substitute for
-the 21-language adapter/rule conformance gates. Dataset corrections must be
+the 20-language adapter/rule conformance gates. Dataset corrections must be
 versioned and rescored separately; they must never be encoded as shared-engine
 API guesses.
 

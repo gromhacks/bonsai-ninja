@@ -443,25 +443,3 @@ fn x_15_erlang() {
         decoy_sink: "decoy_sink",
     });
 }
-
-#[test]
-fn x_15_solidity() {
-    run_shadow_cell(ShadowFixture {
-        lang: "solidity",
-        adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-        files: &[
-            (
-                "Helper.sol",
-                "contract Helper { function helper(string memory p) public { decoySink(p); } }\n",
-            ),
-            (
-                "Demo.sol",
-                "contract Demo { function helper(string memory p) internal { sink(p); } function entry(string memory args) public { helper(args); } }\n",
-            ),
-        ],
-        entry: "entry",
-        seed: &["args"],
-        sink: "sink",
-        decoy_sink: "decoySink",
-    });
-}

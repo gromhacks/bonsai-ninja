@@ -1,4 +1,4 @@
-//! Over-taint regression matrix across all 21 supported languages.
+//! Over-taint regression matrix across all 20 supported languages.
 //!
 //! Each test seeds the engine with a tainted entry-point param,
 //! then verifies that downstream code paths whose data is
@@ -236,15 +236,6 @@ fn over_taint_all_languages_second_tainted_arg_does_not_taint_first_arg() {
             seed: &["Args"],
             sink: "sink",
         },
-        Case {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            file: "Demo.sol",
-            src: "contract Demo { function entry(string memory args) public { sink(\"safe\", args); } }\n",
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
     ];
 
     cases.into_par_iter().for_each(|case| {
@@ -458,15 +449,6 @@ fn over_taint_all_languages_tainted_helper_param_does_not_taint_independent_sink
             src: "-module(demo).\n-export([entry/1, helper/1]).\nentry(Args) -> helper(Args).\nhelper(C) -> audit(C), Cap = 32, sink(Cap).\n",
             entry: "entry",
             seed: &["Args"],
-            sink: "sink",
-        },
-        Case {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            file: "Demo.sol",
-            src: "contract Demo { function entry(string memory args) public { helper(args); } function helper(string memory c) internal { audit(c); uint cap = 32; sink(cap); } }\n",
-            entry: "entry",
-            seed: &["args"],
             sink: "sink",
         },
     ];
@@ -755,15 +737,6 @@ fn over_taint_all_languages_literal_containing_seed_name_stays_clean() {
             seed: &["Args"],
             sink: "sink",
         },
-        Case {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            file: "Demo.sol",
-            src: "contract Demo { function entry(string memory args) public { audit(args); sink(\"args\"); } }\n",
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
     ];
 
     cases.into_par_iter().for_each(|case| {
@@ -970,15 +943,6 @@ fn over_taint_all_languages_clean_overwrite_before_sink_clears_taint() {
             src: "-module(demo).\n-export([entry/1]).\nentry(Args) -> audit(Args), Value0 = Args, Value = \"safe\", sink(Value).\n",
             entry: "entry",
             seed: &["Args"],
-            sink: "sink",
-        },
-        Case {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            file: "Demo.sol",
-            src: "contract Demo { function entry(string memory args) public { audit(args); string memory value = args; value = \"safe\"; sink(value); } }\n",
-            entry: "entry",
-            seed: &["args"],
             sink: "sink",
         },
     ];
@@ -1207,16 +1171,6 @@ fn over_taint_all_languages_lifecycle_field_and_guard_paths_stay_clean() {
             src: "-module(demo).\n-export([entry/1, carrier/1, lifecycle/1, stage/1, cleanup/2]).\nentry(Args) -> audit(Args), carrier(Args), lifecycle(Args).\ncarrier(C) -> audit(C), sink_carrier(C.capacity).\nlifecycle(C) -> stage(C).\nstage(C) -> cleanup(C, 1).\ncleanup(C, FreeArray) -> audit(C), if FreeArray == 0 -> sink_lifecycle(C.capacity); true -> release(C) end.\n",
             entry: "entry",
             seed: &["Args"],
-            carrier_sink: "sink_carrier",
-            lifecycle_sink: "sink_lifecycle",
-        },
-        Case {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            file: "Demo.sol",
-            src: "contract Demo { struct Client { uint capacity; } function entry(Client memory args) public { audit(args); carrier(args); lifecycle(args); } function carrier(Client memory c) internal { audit(c); sink_carrier(c.capacity); } function lifecycle(Client memory c) internal { stage(c); } function stage(Client memory c) internal { cleanup(c, true); } function cleanup(Client memory c, bool freeArray) internal { audit(c); if (!freeArray) { sink_lifecycle(c.capacity); } else { release(c); } } }\n",
-            entry: "entry",
-            seed: &["args"],
             carrier_sink: "sink_carrier",
             lifecycle_sink: "sink_lifecycle",
         },
@@ -1468,16 +1422,6 @@ fn over_taint_all_languages_field_taint_passed_as_carrier_stays_field_scoped() {
             src: "-module(demo).\n-export([entry/1, cleanup/1]).\nentry(Args) -> C = #{cmd => Args, capacity => \"clean\"}, cleanup(C).\ncleanup(C) -> sink_cmd(maps:get(cmd, C)), sink_clean(maps:get(capacity, C)).\n",
             entry: "entry",
             seed: &["Args"],
-            cmd_sink: "sink_cmd",
-            clean_sink: "sink_clean",
-        },
-        Case {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            file: "Demo.sol",
-            src: "contract Demo { struct Client { bytes cmd; bytes capacity; } function entry(bytes memory args) public { Client memory c; c.cmd = args; cleanup(c); } function cleanup(Client memory c) internal { sink_cmd(c.cmd); sink_clean(c.capacity); } }\n",
-            entry: "entry",
-            seed: &["args"],
             cmd_sink: "sink_cmd",
             clean_sink: "sink_clean",
         },
@@ -1754,15 +1698,6 @@ derived(C) -> audit(C), Size = C.capacity * 2, sink_derived(Size).
 "#,
             entry: "entry",
             seed: &["Args"],
-        },
-        Case {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            file: "Demo.sol",
-            src: r#"contract Demo { struct Client { uint capacity; } function entry(Client memory args) public { audit(args); derived(args); } function derived(Client memory c) internal { audit(c); uint size = c.capacity * 2; sink_derived(size); } }
-"#,
-            entry: "entry",
-            seed: &["args"],
         },
     ];
 
@@ -2045,18 +1980,6 @@ fn entry(args: String) { let x = helper(args); sink(x); }
             seed: &["args"],
         },
         Case {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            file: "Demo.sol",
-            src: r#"contract Demo {
-  function helper(string memory v) internal returns (string memory) { audit(v); return "clean"; }
-  function entry(string memory args) public { string memory x = helper(args); sink(x); }
-}
-"#,
-            entry: "entry",
-            seed: &["args"],
-        },
-        Case {
             lang: "swift",
             adapter: Arc::new(bonsai_lang_swift::SwiftAdapter::new()),
             file: "a.swift",
@@ -2322,17 +2245,6 @@ end
             adapter: Arc::new(bonsai_lang_scala::ScalaAdapter::new()),
             file: "a.scala",
             src: r#"object Demo { def entry(args: String): Unit = { audit(args); opaque(args); val cap = 32; sink(cap) } }
-"#,
-            entry: "entry",
-            seed: &["args"],
-            audit: "audit",
-            sink: "sink",
-        },
-        Case {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            file: "Demo.sol",
-            src: r#"contract Demo { function entry(string memory args) public { audit(args); opaque(args); uint cap = 32; sink(cap); } }
 "#,
             entry: "entry",
             seed: &["args"],
@@ -2626,17 +2538,6 @@ fn entry(args: String) { audit(args); let mut b = Box { tainted: String::new(), 
             file: "a.scala",
             src: r#"class Box { var tainted: String = ""; var clean: String = "" }
 object Demo { def entry(args: String): Unit = { audit(args); val b = new Box(); b.tainted = args; b.clean = "safe"; sink(b.clean) } }
-"#,
-            entry: "entry",
-            seed: &["args"],
-            audit: "audit",
-            sink: "sink",
-        },
-        Case {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            file: "Demo.sol",
-            src: r#"contract Demo { struct Box { string tainted; string clean; } function entry(string memory args) public { audit(args); Box memory b = Box({tainted: args, clean: "safe"}); sink(b.clean); } }
 "#,
             entry: "entry",
             seed: &["args"],

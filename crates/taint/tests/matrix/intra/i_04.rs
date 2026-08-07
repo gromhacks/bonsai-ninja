@@ -322,7 +322,3 @@ fn i_04_objc() {
         },
     );
 }
-#[test]
-fn i_04_solidity() {
-    run_positive_cell("I_04", LangFixture { lang:"solidity", adapter:Arc::new(bonsai_lang_solidity::SolidityAdapter::new()), files:&[("Demo.sol","contract Demo { function entry(string memory args) public { string memory a = args; string memory b = \"ok\"; sink(a); } }\n")], entry:"entry", seed:&["args"], sink:"sink" });
-}

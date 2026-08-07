@@ -31,11 +31,9 @@ The table summarizes bundled security coverage and the most important dynamic
 syntax that remains inherently approximate. "Lifecycle" means lifecycle or
 state-machine rules are supported when rules exist.
 
-Security support is not one flat claim across every adapter. The
-canonical app/web source-sink-sanitizer taxonomy applies to the
-general-purpose languages. Solidity is supported as a parser/navigation
-adapter and as a smart-contract security pack; its rule taxonomy is
-on-chain-specific rather than web-family-specific.
+Security coverage is rulepack-driven. Each supported language uses the same
+source-sink-sanitizer contracts while its adapter remains solely responsible
+for recognizing and lowering that language's syntax.
 
 | Language | Sources | Sinks | Lifecycle | Adapter-owned dispatch facts | Inherent limitations |
 |---|---|---|---|---|---|
@@ -57,6 +55,5 @@ on-chain-specific rather than web-family-specific.
 | Ruby | Yes | Yes | Limited | Modules, classes, blocks, closures, method dispatch | `method_missing` and runtime metaprogramming can be unresolved |
 | Rust | Yes | Yes | Yes | Modules, impls, traits, closures, tuples, async calls | Unexpanded procedural macros and trait objects can be unresolved |
 | Scala | Yes | Yes | Limited | Packages, objects, classes, inheritance, lambdas | Runtime reflection and compiler-expanded implicits can be unresolved |
-| Solidity | Contract globals/params | Smart-contract taxonomy | Yes | Contracts, inheritance, modifiers, external calls | Uses on-chain hazard rules rather than app/web taxonomy |
 | Swift | Yes | Yes | Limited | Modules, classes, protocols, closures, async calls | Dynamic Objective-C bridging can be unresolved |
 | TypeScript | Yes | Yes | Limited | ES modules, types, classes, closures, async calls | Type erasure and computed runtime properties can be unresolved |

@@ -1262,63 +1262,6 @@ example(Server) ->
     );
 }
 
-// --------------------------------------------------------------- Solidity
-
-#[test]
-fn solidity_use_after_selfdestruct_fires_with_requires_state() {
-    let tmp = TempDir::new("sol_selfdestruct");
-    write(
-        &tmp.path().join("langs/solidity/sinks/selfdestruct.yml"),
-        r#"- id: solidity.test.use_after_selfdestruct
-  enabled: true
-  language: solidity
-  tag: use-after-free
-  severity: high
-  cwe: [CWE-416]
-  match:
-    kind: call
-    callee:
-      name: emit_event
-  constraints:
-  - requires_state:
-      name: target
-      expected: freed
-  description: "test rule"
-  match_examples:
-  - name: positive
-    code: |
-      contract Foo {
-          function example(address target) public {
-              selfdestruct(target);
-              emit_event(target);
-          }
-      }
-"#,
-    );
-    let pack = load_rulepack(tmp.path()).expect("rulepack loads");
-    let rule = pack
-        .find_rule_by_id("solidity.test.use_after_selfdestruct")
-        .expect("rule");
-    let bad = ws_with(
-        bonsai_lang_solidity::SolidityAdapter::new(),
-        "App.sol",
-        r#"
-contract Foo {
-    function example(address target) public {
-        selfdestruct(target);
-        emit_event(target);
-    }
-}
-"#,
-    );
-    let matches = match_rule_against_facts(&bad, rule);
-    assert!(
-        !matches.is_empty(),
-        "Solidity use-after-selfdestruct must fire; got {:?}",
-        matches
-    );
-}
-
 // --------------------------------------------------------------- helpers
 
 struct TempDir {

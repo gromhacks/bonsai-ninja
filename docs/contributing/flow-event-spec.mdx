@@ -22,7 +22,7 @@ Every variant declared "supported" by an adapter is exercised by the
 (`crates/conformance/tests/flow_event_conformance.rs`), which runs
 canonical fixtures through every bundled adapter and asserts the
 shape contract documented below. The suite also requires canonical valid
-fixtures to be parser/adapter-diagnostic-free for all 21 languages. Its
+fixtures to be parser/adapter-diagnostic-free for all 20 languages. Its
 malformed-source companion proves that each frontend reports a syntax error,
 and marks the parser scope incomplete. Adapters may conservatively withhold
 facts from a damaged file or retain facts outside the exact error span, but

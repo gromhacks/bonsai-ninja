@@ -329,10 +329,6 @@ For CI artifacts:
   --no-color --no-progress > findings.sarif.json
 ```
 
-Solidity is an on-chain security pack. Expect contract hazards such as
-reentrancy, delegatecall, selfdestruct, oracle/randomness misuse, token
-hazards, and access control—not fake web SQLi/XSS/SSRF parity.
-
 ## Rulepack Work
 
 Rules live under:

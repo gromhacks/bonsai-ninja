@@ -101,7 +101,6 @@ const LANG_TABLE: &[(&str, Expected)] = &[
     ("ruby", Expected::Pass),
     ("rust", Expected::Pass),
     ("scala", Expected::Pass),
-    ("solidity", Expected::Pass),
     ("swift", Expected::Pass),
     ("typescript", Expected::Pass),
 ];
@@ -126,7 +125,7 @@ fn forbidden_for(_lang: &str) -> &'static [&'static str] {
 
 fn run_taint_for(lang: &str) -> Result<bonsai_security::TaintAnalysisReport, String> {
     let ws_root = fixture_root(lang).ok_or_else(|| "missing fixture".to_string())?;
-    // Build a workspace using the bundled 21-language registry. We
+    // Build a workspace using the bundled 20-language registry. We
     // bypass `bonsai_sdk` to avoid a dev-dep cycle (sdk depends on
     // security); the shape of this code mirrors what
     // `bonsai_sdk::Bonsai::index` does internally.

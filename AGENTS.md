@@ -312,12 +312,6 @@ taint-path group ids; reopen them with `show F:<id>` / `show G:<id>` or
 `inspect --flow` / `inspect --group` for structural ids printed by
 code-navigation commands.
 
-Solidity is a smart-contract security pack, not an app/web taint parity
-language. Treat its findings as on-chain hazards such as reentrancy,
-delegatecall, selfdestruct, oracle/randomness misuse, token hazards, and
-access control. Do not expect or add fake SQLi/XSS/SSRF/path/cmdi
-coverage for Solidity.
-
 ## Rulepack Work
 
 Rules live under `security-patterns/langs/<lang>/{sources,sinks,sanitizers,typing}`.

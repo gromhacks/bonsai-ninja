@@ -38,7 +38,6 @@ const LANGS: &[&str] = &[
     "ruby",
     "rust",
     "scala",
-    "solidity",
     "swift",
     "typescript",
 ];

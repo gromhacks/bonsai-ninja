@@ -46,8 +46,6 @@ fn example_workspace(language: &str, path: Option<&str>, code: &str) -> bonsai_w
 fn documented_sink_tags() -> BTreeSet<&'static str> {
     BTreeSet::from([
         "access-control",
-        "address-squatting",
-        "abi-encoding",
         "auth-bypass",
         "atom-exhaustion",
         "cache-poisoning",
@@ -62,18 +60,15 @@ fn documented_sink_tags() -> BTreeSet<&'static str> {
         "dos",
         "env-leak",
         "ets-match-dos",
-        "external-call",
         "file-upload",
         "format-string",
         "graphql",
         "graphql-injection",
         "hash-collision",
         "header-injection",
-        "information-exposure",
         "information-disclosure",
         "host-header",
         "insecure-deserialization",
-        "integer-overflow",
         "insecure-temp-file",
         "intent-redirection",
         "jndi-injection",
@@ -86,16 +81,11 @@ fn documented_sink_tags() -> BTreeSet<&'static str> {
         "nosql-injection",
         "oauth",
         "open-redirect",
-        "oracle-manipulation",
         "path-traversal",
         "prototype-pollution",
         "queue-injection",
         "race",
-        "readonly-reentrancy",
         "redos",
-        "reentrancy",
-        "signature-replay",
-        "slippage",
         "smtp-injection",
         "sql-injection",
         "sqli",
@@ -104,7 +94,6 @@ fn documented_sink_tags() -> BTreeSet<&'static str> {
         "ssti",
         "timeout-bypass",
         "timing-attack",
-        "unchecked-return",
         "untrusted-token",
         "weak-auth",
         "weak-crypto",
@@ -122,12 +111,8 @@ fn documented_sink_tags() -> BTreeSet<&'static str> {
 fn documented_source_tags() -> BTreeSet<&'static str> {
     BTreeSet::from([
         "archive-input",
-        "block-context",
         "browser-input",
-        "calldata",
-        "caller-identity",
         "caller-input",
-        "caller-value",
         "cli-input",
         "clipboard-input",
         "cloud-event",
@@ -172,16 +157,12 @@ fn documented_sink_files() -> BTreeSet<&'static str> {
         "cookie.yml",
         "cors.yml",
         "cors_csrf.yml",
-        "create2.yml",
         "csrf.yml",
-        "dex.yml",
         "log_injection.yml",
         "mass_assignment.yml",
         "request_smuggling.yml",
         "crypto.yml",
-        "delegatecall.yml",
         "deserialization.yml",
-        "downstream.yml",
         "eval.yml",
         "file_upload.yml",
         "format.yml",
@@ -195,32 +176,24 @@ fn documented_sink_files() -> BTreeSet<&'static str> {
         "ldap.yml",
         "ldapi.yml",
         "llm.yml",
-        "math.yml",
         "memory.yml",
         "nosql.yml",
         "oauth.yml",
         "open_redirect.yml",
-        "oracle.yml",
         "path.yml",
         "prototype_pollution.yml",
         "queue.yml",
         "race.yml",
-        "randomness.yml",
         "redis.yml",
         "redos.yml",
-        "reentrancy.yml",
         "regex_dos.yml",
-        "selfdestruct.yml",
         "securecookie.yml",
-        "signature.yml",
         "smtp_inject.yml",
         "sqli.yml",
         "ssrf.yml",
         "template.yml",
         "tls.yml",
-        "token.yml",
         "trustbound.yml",
-        "unchecked_return.yml",
         "xpath.yml",
         "xss.yml",
         "xxe.yml",
@@ -236,9 +209,7 @@ fn enabled_sink_family_tags(file_name: &str) -> Option<BTreeSet<&'static str>> {
         "cmdi.yml" => vec!["command-injection", "env-leak"],
         "cookie.yml" => vec!["cookie-misconfig"],
         "cors.yml" | "cors_csrf.yml" => vec!["cors"],
-        "create2.yml" => vec!["access-control", "address-squatting"],
         "csrf.yml" => vec!["csrf"],
-        "dex.yml" => vec!["slippage"],
         "log_injection.yml" => vec![
             "code-injection",
             "format-string",
@@ -248,14 +219,12 @@ fn enabled_sink_family_tags(file_name: &str) -> Option<BTreeSet<&'static str>> {
         "mass_assignment.yml" => vec!["mass-assignment"],
         "request_smuggling.yml" => vec!["header-injection"],
         "crypto.yml" => vec!["timing-attack", "weak-crypto", "weak-randomness"],
-        "delegatecall.yml" => vec!["access-control", "code-injection"],
         "deserialization.yml" => vec![
             "atom-exhaustion",
             "ets-match-dos",
             "hash-collision",
             "insecure-deserialization",
         ],
-        "downstream.yml" => vec!["information-exposure", "external-call", "state-manipulation"],
         "eval.yml" => vec!["code-injection", "dos", "format-string"],
         "file_upload.yml" => vec!["file-upload"],
         "format.yml" => vec!["format-string"],
@@ -264,12 +233,11 @@ fn enabled_sink_family_tags(file_name: &str) -> Option<BTreeSet<&'static str>> {
         "hardware.yml" => vec!["state-manipulation"],
         "header_injection.yml" => vec!["cache-poisoning", "header-injection", "smtp-injection"],
         "host_header.yml" => vec!["host-header"],
-        "info_disclosure.yml" => vec!["information-disclosure", "information-exposure"],
-        "jwt.yml" => vec!["jwt", "untrusted-token", "signature-replay"],
+        "info_disclosure.yml" => vec!["information-disclosure"],
+        "jwt.yml" => vec!["jwt", "untrusted-token"],
         "ldap.yml" => vec!["auth-bypass", "ldap-injection"],
         "ldapi.yml" => vec!["ldap-injection"],
         "llm.yml" => vec!["web-llm"],
-        "math.yml" => vec!["integer-overflow", "weak-crypto"],
         "memory.yml" => vec!["memory-safety"],
         "nosql.yml" => vec![
             "code-injection",
@@ -280,7 +248,6 @@ fn enabled_sink_family_tags(file_name: &str) -> Option<BTreeSet<&'static str>> {
         ],
         "oauth.yml" => vec!["oauth"],
         "open_redirect.yml" => vec!["open-redirect", "intent-redirection"],
-        "oracle.yml" => vec!["oracle-manipulation", "readonly-reentrancy"],
         "path.yml" => vec![
             "insecure-temp-file",
             "lfi",
@@ -291,22 +258,16 @@ fn enabled_sink_family_tags(file_name: &str) -> Option<BTreeSet<&'static str>> {
         "prototype_pollution.yml" => vec!["prototype-pollution"],
         "queue.yml" => vec!["queue-injection"],
         "race.yml" => vec!["race", "timeout-bypass"],
-        "randomness.yml" => vec!["weak-randomness"],
         "redis.yml" => vec!["nosql-injection"],
-        "reentrancy.yml" => vec!["reentrancy"],
         "redos.yml" => vec!["redos"],
         "regex_dos.yml" => vec!["redos"],
-        "selfdestruct.yml" => vec!["access-control"],
         "securecookie.yml" => vec!["cookie-misconfig"],
-        "signature.yml" => vec!["abi-encoding", "signature-replay", "hash-collision"],
         "smtp_inject.yml" => vec!["smtp-injection"],
         "sqli.yml" => vec!["sql-injection", "sqli"],
         "ssrf.yml" => vec!["ssrf"],
         "template.yml" => vec!["format-string", "open-redirect", "ssti", "xss"],
         "tls.yml" => vec!["address-squatting", "cors", "weak-tls"],
-        "token.yml" => vec!["context-injection", "env-leak", "untrusted-token"],
         "trustbound.yml" => vec!["access-control"],
-        "unchecked_return.yml" => vec!["unchecked-return"],
         "xpath.yml" => vec!["xpath-injection"],
         "xss.yml" => vec!["xss", "open-redirect"],
         "xxe.yml" => vec!["xxe"],
@@ -423,7 +384,6 @@ fn source_files_match_trust_boundary_split() {
             "database.yml" => matches!(trust, bonsai_security::rule::TrustClass::Database),
             "ipc.yml" => matches!(trust, bonsai_security::rule::TrustClass::Ipc),
             "physical.yml" => matches!(trust, bonsai_security::rule::TrustClass::Physical),
-            "tx.yml" | "block.yml" | "calldata.yml" => rule.language == "solidity",
             "embedded.yml" | "windows.yml" | "linux.yml" | "macos.yml" | "android.yml" | "ios.yml" => true,
             other => {
                 violations.push(format!("{} lives in unexpected source file `{other}`", rule.id));
@@ -445,7 +405,7 @@ fn source_files_match_trust_boundary_split() {
 }
 
 #[test]
-fn non_solidity_languages_keep_canonical_source_files() {
+fn languages_keep_canonical_source_files() {
     let langs_dir = rules_dir().join("langs");
     let required: BTreeSet<&str> = BTreeSet::from(["cli.yml", "cloud.yml", "queue.yml", "remote.yml"]);
     let mut missing = Vec::new();
@@ -457,9 +417,6 @@ fn non_solidity_languages_keep_canonical_source_files() {
             continue;
         }
         let lang = entry.file_name().to_string_lossy().into_owned();
-        if lang == "solidity" {
-            continue;
-        }
         let sources = path.join("sources");
         let present: BTreeSet<String> = std::fs::read_dir(&sources)
             .expect("read sources dir")
@@ -478,7 +435,7 @@ fn non_solidity_languages_keep_canonical_source_files() {
 
     assert!(
         missing.is_empty(),
-        "non-solidity languages drifted from the canonical sources/ split:\n{}",
+        "languages drifted from the canonical sources/ split:\n{}",
         missing.join("\n")
     );
 }
@@ -1057,7 +1014,6 @@ fn canonical_sanitizer_tags_stay_canonical() {
         "char-allowlist",
         "constant-time",
         "constant-time-compare",
-        "controlled-exposure",
         "cookie-secure",
         "crypto-bounds",
         "crypto-mode",
@@ -1090,7 +1046,6 @@ fn canonical_sanitizer_tags_stay_canonical() {
         "same-origin-path",
         "schema-validate",
         "shell-escape",
-        "signature-sanitizer",
         "signature-verify",
         "signed-token-verify",
         "sql-escape",

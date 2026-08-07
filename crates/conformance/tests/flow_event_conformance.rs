@@ -803,35 +803,6 @@ f(A) -> A.
                 CanonicalShape::CatchBind,
             ],
         },
-        "solidity" => Conformance {
-            lang: "solidity",
-            fixture_path: "Shape.sol",
-            fixture_source: r#"// SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.0;
-
-contract Shape {
-  function shapes(uint256 x, uint256[] memory items, uint256 t) public returns (uint256) {
-    uint256 y = x;
-    uint256 lit = 0;
-    uint256 z = f(x);
-    if (x != 0) { F(t); }
-    for (uint256 i = 0; i < items.length; i++) {
-      G(items[i]);
-    }
-    return y;
-  }
-  function f(uint256 a) internal pure returns (uint256) { return a; }
-  function F(uint256 a) internal pure {}
-  function G(uint256 a) internal pure {}
-}
-"#,
-            function_name: "shapes",
-            branch_callee: "F",
-            loop_callee: "G",
-            // Solidity has no try/catch in the catch-bind form used
-            // here.
-            skip: &[CanonicalShape::CatchBind],
-        },
         "c" => Conformance {
             lang: "c",
             fixture_path: "shape.c",

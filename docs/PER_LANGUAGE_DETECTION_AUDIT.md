@@ -1,6 +1,6 @@
 # Per-language detection-correctness audit matrix
 
-Systematic per-language probe of the shared taint engine across all 21 supported
+Systematic per-language probe of the shared taint engine across all 20 supported
 languages, covering the workstream dimensions from the detection-correctness
 goal. Each cell was probed with the release binary:
 
@@ -22,7 +22,7 @@ authoritative.
 ## Authoritative rule-example coverage
 
 `security <pack> pack --validate --taint-replay` replays every taint-dependent
-rule's positive `match_example` through live taint across all 21 languages.
+rule's positive `match_example` through live taint across all 20 languages.
 
 - **Recorded 2026-07-25 result:** 0 misses, 0 errors, and 0 warnings across
   7,152 rules and 10,499 examples (5,999 rules and 10,084 examples enabled).
@@ -61,7 +61,6 @@ Dimensions:
 | swift | PASS | PASS | PASS | N/A |
 | objc | PASS | PASS | PASS | N/A |
 | dart | PASS | PASS | PASS | N/A |
-| solidity | PASS | N/A⁴ | PASS | N/A |
 | elixir | PASS | PASS | FIXED⁵ | PASS |
 | erlang | PASS | FIXED² | PASS | PASS |
 
@@ -89,7 +88,7 @@ Dimensions:
    assignment RHS that IS a direct `std::string(...)` constructor call contributed
    no source. FIXED with a scoped rulepack passthrough `cpp.passthrough.std_string`
    (`attribute:[std, string]`, `call_result_passthrough_args:[0]`) rather than the
-   broad shared-kit change (which would alter taint semantics for all 21 langs).
+   broad shared-kit change (which would alter taint semantics for all 20 languages).
    Safe: the cpp micro fixture has no `std::string(` constructor *call* (only type
    declarations, which are not calls) so `min_sanitizers_micro: 0` holds; only
    propagates when arg0 is tainted. Now → 1 finding.
@@ -103,13 +102,6 @@ Dimensions:
    form by whether `do` is immediately followed by `:` and captures the branch text
    after `do:` (the condition, before `do:`, is excluded). Now → 1 finding;
    all-literal-branch control correctly stays 0 (no false positive).
-
-### Remaining (genuinely N/A, not a failure)
-
-5. **solidity** — no enabled injection sink consumes a string argument (the
-   `call`/`delegatecall`/inline-assembly sinks key on an address operand/receiver),
-   so there is no string-arg sink to route a coerced string into. Coercion is
-   genuinely N/A.
 
 Notes: go/c are intentionally excluded from constructor-type inference (uppercase
 exported funcs / no constructor convention); their baselines use direct sinks.
@@ -142,7 +134,6 @@ path, so there is no import to omit.
 | cpp | no | N/A | same |
 | objc | no | N/A | `[Class selector:]` / C funcs; package is never the call qualifier |
 | dart | no | N/A | class-member calls (`Process.run`); imports are `package:`/`dart:` URIs |
-| solidity | no | N/A | receiver-member calls; `@scope/pkg` import path never a call qualifier |
 | ruby | yes | by-design MISS | `Open3.capture2` / `Net::HTTP` — PascalCase qualifier vs lowercase gem (`open3`); matching it needs case-folding = a gate LOOSENING (forbidden by the do-not-loosen directive). NOT a validator miss — the rule's example has `require`, so real ruby fires; only the artificial no-require probe misses. |
 
 Two low-frequency residual misses, both intentionally unfixed (fixing either
@@ -156,7 +147,7 @@ requires loosening the gate, against the standing directive):
   calls the short form, which fires. Reconstructing last-two-segments would touch
   shared candidate generation + the gate's deliberately case-sensitive tail-match.
 **Conclusion: the package gate is sound and complete for every realistic
-FQN-no-import case across all 21 languages.** The residuals are precision-over-
+FQN-no-import case across all 20 languages.** The residuals are precision-over-
 recall choices mandated by the do-not-loosen directive.
 
 ### Cross-file (dep imported in a different module than the sink)
@@ -179,7 +170,7 @@ union; left undone — precision wins per the directive.
 | DONE | Rust | `let c = make() as Foo` (kit vocab; verified `as Foo`→fires, `as Bar`→0) |
 | DONE (this audit) | C++ | declared `Foo c`/`Foo* c` + **`auto c = static_cast<Foo>(x)`** + **`auto c = (Foo) x`** (collect_cpp_cast_aliases) |
 | DONE (this audit) | Objective-C | declared `Foo *f = (Foo *)x` + **`id f = (Foo *)x`** (cast-into-`id`) |
-| N/A | python `(T)x`=tuple, php casts scalar-only, JS/Ruby/Perl/Lua/Elixir/Erlang/Solidity dynamic | no nominal-receiver cast syntax; receiver typing comes from constructor + factory-return inference |
+| N/A | python `(T)x`=tuple, php casts scalar-only, JS/Ruby/Perl/Lua/Elixir/Erlang dynamic | no nominal-receiver cast syntax; receiver typing comes from constructor + factory-return inference |
 
 Each cast fix only fires on the inferred/dynamic LHS (`var`/`auto`/`id`) so a real
 declared type is never clobbered, and reads the initializer's DIRECT value so a

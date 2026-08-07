@@ -16,7 +16,7 @@ security-patterns/langs/<lang>/{sources,sinks,sanitizers,typing}/<family>.yml
 security-patterns/metadata.yml
 ```
 
-The directory determines the rule kind. `<lang>` matches one of the 21
+The directory determines the rule kind. `<lang>` matches one of the 20
 supported language IDs. `<family>` is a free-form filename that groups
 related rules - `cmdi.yml`, `sqli.yml`, `xss.yml`, etc.
 
@@ -255,9 +255,8 @@ constraints:
 ```
 
 Use this when the vulnerable operand is the call receiver rather than a
-syntactic argument. Examples include Scala `cmd.!`, Solidity
-`target.delegatecall("")`, and fluent APIs where the dangerous value sits
-to the left of the method call. Do not model these as `arg_tainted`;
+syntactic argument. Examples include Scala `cmd.!` and fluent APIs where the
+dangerous value sits to the left of the method call. Do not model these as `arg_tainted`;
 zero-argument receiver calls have no argument slot to prove.
 
 ### `any_arg_tainted`

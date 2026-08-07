@@ -387,15 +387,3 @@ fn i_02_erlang() {
         &["X2"],
     );
 }
-
-#[test]
-fn i_02_solidity() {
-    run_i_02(LangFixture {
-        lang: "solidity",
-        adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-        files: &[("Demo.sol", "contract Demo { function entry(string memory args) public { string memory x = args; x = \"clean\"; sink(x); } }\n")],
-        entry: "entry",
-        seed: &["args"],
-        sink: "sink",
-    }, &["x"]);
-}

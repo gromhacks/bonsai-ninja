@@ -45,7 +45,6 @@ Every language now has BOTH raw and sanitizer-evidence coverage
 | ruby | `@db.execute` (SQLi), `system` (cmdi), `render inline` (XSS) | `Shellwords.escape`, `?-bindings`, `CGI.escapeHTML` |
 | rust | `Command::new("sh").arg("-c", …)` (cmdi) | `percent_encoding`, `ammonia::clean`, `constant_time_eq` |
 | scala | `stmt.executeQuery` (SQLi) | `PreparedStatement.setString`, `HtmlUtils.htmlEscape` |
-| solidity | `selfdestruct`, `mint`, `burn`, `transferOwnership` (access-control) | `require`, `onlyOwner` modifier |
 | swift | `sqlite3_prepare_v2` (SQLi), `Process.launch` (cmdi via /bin/sh) | `sqlite3_bind_text`, `addingPercentEncoding` |
 | typescript | `execSync` (cmdi), `res.redirect` (open-redirect) | `shell-quote.quote`, `encodeURIComponent` |
 

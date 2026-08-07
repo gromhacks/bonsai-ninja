@@ -8,7 +8,7 @@
 //! call site — surfaces here as a `DUP` line in the failing assertion.
 //!
 //! One parameterised test per (command, fixture) cell, iterated over the
-//! 21 languages. JSON output is the source of truth because text rendering
+//! 20 languages. JSON output is the source of truth because text rendering
 //! adds folding / suppression that hides true duplicates the engine emits.
 //! Identity keys are command-specific (see each `dedup_*` helper).
 //!
@@ -38,7 +38,6 @@ const LANGS: &[(&str, &str)] = &[
     ("ruby", "mega_flow"),
     ("rust", "mega_flow"),
     ("scala", "mega_flow"),
-    ("solidity", "mega_flow"),
     ("swift", "mega_flow"),
     ("typescript", "mega_flow"),
 ];

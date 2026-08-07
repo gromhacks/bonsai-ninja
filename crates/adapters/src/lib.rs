@@ -30,7 +30,6 @@ pub fn all_adapters() -> Vec<AdapterArc> {
         Arc::new(bonsai_lang_lua::LuaAdapter::new()),
         Arc::new(bonsai_lang_elixir::ElixirAdapter::new()),
         Arc::new(bonsai_lang_erlang::ErlangAdapter::new()),
-        Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
     ]
 }
 

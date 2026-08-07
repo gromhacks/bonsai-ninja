@@ -40,7 +40,6 @@ LANGS = [
     "ruby",
     "rust",
     "scala",
-    "solidity",
     "swift",
     "typescript",
 ]
@@ -59,9 +58,8 @@ EXPECTED_FINDINGS = {
     # local inferred callable-object paths grouped into one combined
     # row while the concrete Flask source row stayed intact; python
     # 2→1 once the concrete Flask source and equivalent inferred entry
-    # chain became member ids on one grouped row; erlang 2→1 and
-    # solidity 3→2 after equivalent inferred/member paths are grouped
-    # into one real report row.
+    # chain became member ids on one grouped row; erlang 2→1 after
+    # equivalent inferred/member paths were grouped into one report row.
     "c": 1,
     "cpp": 1,
     "csharp": 1,
@@ -85,7 +83,6 @@ EXPECTED_FINDINGS = {
     "ruby": 1,
     "rust": 1,
     "scala": 1,
-    "solidity": 2,
     "swift": 1,
     "typescript": 1,
 }

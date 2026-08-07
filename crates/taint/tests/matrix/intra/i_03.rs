@@ -319,21 +319,3 @@ fn i_03_dart() {
         },
     );
 }
-
-#[test]
-fn i_03_solidity() {
-    run_positive_cell(
-        "I_03",
-        LangFixture {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            files: &[(
-                "Demo.sol",
-                "contract Demo { function entry(uint args) public { uint x = 0; x += args; sink(x); } }\n",
-            )],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}

@@ -3,7 +3,7 @@
 //! Validates that every adapter whose source language has explicit
 //! `await` / `yield` syntax emits the corresponding `FlowEvent::Await`
 //! / `FlowEvent::Yield` events. Languages without async/await
-//! (Erlang, Lua, Elixir, Solidity, Perl, Go's goroutines-don't-count,
+//! (Erlang, Lua, Elixir, Perl, Go's goroutines-don't-count,
 //! C, Objective-C, Ruby fibers are out of scope) are skipped.
 
 use bonsai_lang_api::{Decl, FlowEvent, LanguageAdapter};

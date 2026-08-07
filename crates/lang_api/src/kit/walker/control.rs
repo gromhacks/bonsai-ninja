@@ -236,11 +236,9 @@ pub(super) fn lower_try(node: Node<'_>, context: LoweringContext<'_>, out: &mut 
             } else if ck == "block" || ck == "compound_statement" {
                 block_children.push(child);
             } else {
-                // Solidity: `try <call_expression> returns (r) <body> catch
-                // { ... }` parses the tried expression as a sibling of the
-                // body block. The expression IS the protected operation,
-                // so walk its calls into body so callgraph sees them as
-                // part of the try scope.
+                // A grammar may parse the protected expression as a sibling
+                // of the body block. The expression is part of the try scope,
+                // so lower its calls into the body.
                 walk_into(child, file, src, handler, class_names, &mut body, false);
             }
             prev_was_catch_marker = false;

@@ -378,10 +378,6 @@ g5_test!(g5_cpp_entry, "g5-cpp", "cpp", "app.cpp",
     "void sink(const char *s);\nvoid handle(const char *token) { sink(token); }\nvoid sink(const char *s) {}\n",
     "cpp.sink", "sink");
 
-g5_test!(g5_solidity_entry, "g5-sol", "solidity", "A.sol",
-    "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.0;\ncontract A { function handle(bytes calldata token) external { sink(token); } function sink(bytes calldata) internal {} }\n",
-    "sol.sink", "sink");
-
 // ===========================================================================
 // G1 — Return-value taint. `y = transform(token); sink(y)` fires when
 // token is tainted at the caller's scope.
@@ -782,9 +778,6 @@ g1_test!(g1_objc_return, "g1-objc", "objc", "app.m",
 g1_test!(g1_perl_return, "g1-pl", "perl", "app.pl",
     "sub transform { my ($x) = @_; return $x; }\nsub handle { my ($token) = @_; my $y = transform($token); sink($y); }\nsub sink {}\n1;\n",
     "pl.sink", "sink");
-g1_test!(g1_solidity_return, "g1-sol", "solidity", "A.sol",
-    "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.0;\ncontract A { function transform(bytes calldata x) internal pure returns (bytes memory) { return x; } function handle(bytes calldata token) external { bytes memory y = transform(token); sink(y); } function sink(bytes memory) internal {} }\n",
-    "sol.sink", "sink");
 
 // ===========================================================================
 // G2 — Expression-level RHS taint: every idiomatic compound-expression

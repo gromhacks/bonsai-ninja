@@ -342,15 +342,3 @@ fn i_01_erlang() {
         },
     );
 }
-
-#[test]
-fn i_01_solidity() {
-    run_positive_cell("I_01", LangFixture {
-        lang: "solidity",
-        adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-        files: &[("Demo.sol", "contract Demo { function entry(string memory args) public { string memory x = args; sink(x); } }\n")],
-        entry: "entry",
-        seed: &["args"],
-        sink: "sink",
-    });
-}

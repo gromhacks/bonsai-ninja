@@ -56,13 +56,11 @@ CANONICAL_SINK_FAMILIES: dict[str, tuple[str, ...]] = {
     "header_injection": ("header_injection", "header", "hdr"),
 }
 
-ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS = {"solidity"}
 FAMILY_NOT_APPLICABLE = {("c", "deserialization")}
 
 FAMILY_FILE_ALIASES: dict[str, tuple[str, ...]] = {
     "cache_poisoning": ("cache",),
     "cors_csrf": ("cors",),
-    "delegatecall": ("code",),
     "deserialization": ("deser",),
     "downstream": ("sink",),
     "file_upload": (
@@ -142,7 +140,6 @@ REVIEWED_BARE_NAME_RULES = {
     "ruby.eval.builtin_eval",
     "ruby.memory.io_close",
     "ruby.memory.file_close",
-    "solidity.reentrancy.send",
 }
 
 
@@ -509,7 +506,7 @@ def fragile_rules(rules: list[dict]) -> list[dict]:
 def missing_canonical_families(
     lang: str, category: str, families: Counter[str]
 ) -> list[str]:
-    if category != "sinks" or lang in ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS:
+    if category != "sinks":
         return []
     return [
         canonical

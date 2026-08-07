@@ -2,11 +2,10 @@ use super::*;
 
 #[test]
 fn bundled_registry_includes_every_supported_adapter() {
-    assert_eq!(all_adapters().len(), 21);
+    assert_eq!(all_adapters().len(), 20);
     let registry = all_languages_registry();
     assert!(registry.adapter_for_extension("py").is_some());
     assert!(registry.adapter_for_extension("ts").is_some());
-    assert!(registry.adapter_for_extension("sol").is_some());
     let header_candidates = registry.adapters_for_extension("h");
     assert_eq!(
         header_candidates

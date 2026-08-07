@@ -271,15 +271,3 @@ fn ot_07_erlang() {
         sink: "sink",
     }, "X2");
 }
-
-#[test]
-fn ot_07_solidity() {
-    run_ot_07(LangFixture {
-        lang: "solidity",
-        adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-        files: &[("Demo.sol", "contract Demo { function cond() internal pure returns (bool) { return true; } function entry(string memory args) public { string memory x = args; if (cond()) { x = \"clean1\"; } else { x = \"clean2\"; } sink(x); } }\n")],
-        entry: "entry",
-        seed: &["args"],
-        sink: "sink",
-    }, "x");
-}

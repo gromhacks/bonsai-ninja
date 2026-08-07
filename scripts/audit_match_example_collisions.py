@@ -75,7 +75,6 @@ DEFAULT_EXT = {
     "ruby": "rb",
     "rust": "rs",
     "scala": "scala",
-    "solidity": "sol",
     "swift": "swift",
     "typescript": "ts",
 }

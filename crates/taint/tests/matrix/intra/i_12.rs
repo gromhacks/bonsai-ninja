@@ -330,7 +330,3 @@ fn i_12_erlang() {
         },
     );
 }
-#[test]
-fn i_12_solidity() {
-    run_positive_cell("I_12", LangFixture { lang:"solidity", adapter:Arc::new(bonsai_lang_solidity::SolidityAdapter::new()), files:&[("Demo.sol","contract Demo { function entry(string memory args) public { while (true) { sink(args); break; } } }\n")], entry:"entry", seed:&["args"], sink:"sink" });
-}

@@ -404,18 +404,6 @@ const IMPORT_CONTRACT_CASES: &[ImportContractCase] = &[
         is_wildcard: false,
     },
     ImportContractCase {
-        lang: "solidity",
-        file_suffix: "App.sol",
-        module: "./Pipeline.sol",
-        alias: Some("FlowPipeline"),
-        // `import {Pipeline as FlowPipeline} from "./Pipeline.sol"`
-        // is a renamed import — the unaliased symbol IS "Pipeline",
-        // matching the TypeScript `{ persist as persistEnvelope }`
-        // shape directly below.
-        original_name: Some("Pipeline"),
-        is_wildcard: false,
-    },
-    ImportContractCase {
         lang: "swift",
         file_suffix: "App.swift",
         module: "Foundation",
@@ -599,7 +587,6 @@ fn taint_crate_has_no_language_name_branches() {
         "csharp",
         "dart",
         "objc",
-        "solidity",
         "cpp",
         "php",
     ];
@@ -688,7 +675,6 @@ fn compiler_engines_do_not_branch_on_concrete_languages() {
         "ruby",
         "rust",
         "scala",
-        "solidity",
         "swift",
         "typescript",
     ];
@@ -933,7 +919,7 @@ fn taint_crate_has_no_concrete_adapter_imports_in_runtime() {
 fn concrete_adapter_runtime_deps_are_isolated_to_registry_and_facades() {
     // architecture.mdx: "Concrete adapter registration is isolated in
     // crates/adapters; both the CLI and SDK consumers can opt into
-    // the same 21-language registry via
+    // the same 20-language registry via
     // bonsai_adapters::all_languages_registry()." Runtime concrete
     // adapter deps outside these crates let language implementations
     // leak into service/engine crates. Dev-dependencies are allowed
@@ -2196,7 +2182,7 @@ fn every_language_adapter_owns_its_tree_sitter_lowering() {
         "GrammarHandler classification must use only the active adapter's exact syntax inventory"
     );
 
-    assert_eq!(checked, 21, "expected every bundled language compiler frontend");
+    assert_eq!(checked, 20, "expected every bundled language compiler frontend");
     assert!(
         violations.is_empty(),
         "each lang_* crate must own its Tree-sitter syntax lowering:\n  {}",
@@ -2299,7 +2285,7 @@ fn every_adapter_populates_visibility_from_syntax() {
     // Adapters whose languages don't carry per-decl visibility
     // syntax — visibility flows from the export list / module
     // structure / `local` keyword instead.
-    let no_per_decl_syntax = ["lang_lua", "lang_solidity"];
+    let no_per_decl_syntax = ["lang_lua"];
     let mut violations: Vec<String> = Vec::new();
     for entry in fs::read_dir(&crates_dir).expect("read crates dir") {
         let path = entry.expect("crate entry").path();

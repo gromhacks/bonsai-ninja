@@ -80,7 +80,7 @@ pub(crate) fn extract_direct_call_info(
     } else {
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            if !matches!(child.kind(), "argument" | "call_argument") {
+            if child.kind() != "argument" {
                 continue;
             }
             let t = normalize_call_name_whitespace(node_text(&child, src));

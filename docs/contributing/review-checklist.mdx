@@ -21,7 +21,7 @@ class and verify each box.
       does_not_propagate` and `concept_1_source_model_empty_seed_no_
       propagation` both pass.
 - [ ] **Over-taint matrix passes.** `cargo test -p bonsai_taint --test
-      over_taint_matrix` is green for all 21 languages.
+      over_taint_matrix` is green for all 20 languages.
 - [ ] **Determinism holds.** `finding_ids_deterministic_across_runs`
       passes.
 - [ ] **Quoted-literal short-circuit unchanged.** `arg_text_is_tainted` /
@@ -157,7 +157,7 @@ class and verify each box.
       command_coverage`.
 - [ ] **Per-language command matrix passes.** `cargo test -p bonsai_cli
       --test per_lang_cli_matrix` must pass. This is the semantic command
-      gate across all 21 supported languages: browse commands, navigation
+      gate across all 20 supported languages: browse commands, navigation
       commands, debug dumps, export, `comments`, `security sources`,
       `security sinks`, `security sanitizers`, `security deps`,
       `security source-analysis`, `security taint-analysis`, and SARIF
@@ -341,7 +341,7 @@ class and verify each box.
 - [ ] `cargo build --release` is warning-free.
 - [ ] `cargo test --workspace` passes (full sweep before merging).
 - [ ] `[profile.test] debug = 0` remains enabled. The full workspace creates
-      hundreds of executables that each link the 21-language graph; opt in to
+      hundreds of executables that each link the 20-language graph; opt in to
       `CARGO_PROFILE_TEST_DEBUG=2` only for a focused debugger session.
 - [ ] No `panic!` / `unwrap()` introduced on user input.
 - [ ] No `unsafe_code` introduced.

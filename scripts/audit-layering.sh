@@ -23,7 +23,7 @@ declare -a TIER_3=(
     bonsai_lang_swift bonsai_lang_javascript bonsai_lang_typescript
     bonsai_lang_php bonsai_lang_python bonsai_lang_perl bonsai_lang_ruby
     bonsai_lang_dart bonsai_lang_objc bonsai_lang_lua bonsai_lang_elixir
-    bonsai_lang_erlang bonsai_lang_solidity
+    bonsai_lang_erlang
 )
 declare -a TIER_4=(bonsai_index bonsai_resolve bonsai_cfg bonsai_callgraph bonsai_abstract_interp bonsai_idg bonsai_db)
 declare -a TIER_5=(bonsai_taint)

@@ -237,7 +237,6 @@ fn calls_repeats_adjacent_same_code_rows() {
 //   * Go: multi-return `result, _ := foo()` kept the whole tuple as
 //     the target.
 //   * Perl: `my $query = ...` kept the `my` keyword in the target.
-//   * Solidity: `bytes32 t` kept the type in the target.
 //   * Rust: multi-line method chains kept embedded newlines +
 //     indentation in the callee name.
 //   * Rust / Scala: multi-line arg values kept newlines.
@@ -311,7 +310,6 @@ fn var_targets_never_contain_assignment_rhs() {
         "ruby",
         "rust",
         "scala",
-        "solidity",
         "swift",
         "typescript",
     ] {
@@ -357,7 +355,6 @@ fn callee_names_never_contain_newlines() {
         "ruby",
         "rust",
         "scala",
-        "solidity",
         "swift",
         "typescript",
     ] {
@@ -396,7 +393,6 @@ fn arg_values_never_contain_newlines() {
         "ruby",
         "rust",
         "scala",
-        "solidity",
         "swift",
         "typescript",
     ] {
@@ -519,7 +515,6 @@ fn args_no_duplicate_entries_at_same_site() {
         "ruby",
         "rust",
         "scala",
-        "solidity",
         "swift",
         "typescript",
     ] {

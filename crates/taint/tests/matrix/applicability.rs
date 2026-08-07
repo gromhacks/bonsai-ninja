@@ -34,7 +34,6 @@ pub const LANGUAGES: &[&str] = &[
     "ruby",
     "rust",
     "scala",
-    "solidity",
     "swift",
     "typescript",
 ];
@@ -181,16 +180,6 @@ const OVERRIDES: &[(&str, &[&str], Status)] = &[
     ),
     // --- Scala: full FP/OO mix. Generics, pattern match, async via library, no out-params.
     ("scala", &["R_08", "X_05", "X_08", "X_10"], Status::NotApplicable),
-    // --- Solidity: contracts only. No async, no generics, no FFI, very limited stdlib.
-    (
-        "solidity",
-        &[
-            "I_05", "I_14", "I_15", "I_16", "I_17", "I_18", "I_19", "I_20", "R_05", "R_08", "R_11", "R_12",
-            "R_13", "R_14", "R_17", "R_19", "R_20", "X_02", "X_03", "X_04", "X_05", "X_06", "X_07", "X_08",
-            "X_09", "X_10", "OT_05", "OT_06", "OT_18",
-        ],
-        Status::NotApplicable,
-    ),
     // --- Swift: full OO + protocols + async/await. No out-params, no macros, no FFI on language level.
     (
         "swift",
@@ -266,15 +255,14 @@ const COVERAGE_GAP_OVERRIDES: &[(&str, &[&str], Status)] = &[
         Status::NotApplicable,
     ),
     ("scala", &["I_17", "R_12"], Status::NotApplicable),
-    ("solidity", &["R_18"], Status::NotApplicable),
     ("swift", &["R_12"], Status::NotApplicable),
 ];
 
 /// Total scenarios = 76. Used in coverage reporting.
 pub const TOTAL_SCENARIOS: usize = 76;
 
-/// Total languages = 21.
-pub const TOTAL_LANGUAGES: usize = 21;
+/// Total languages = 20.
+pub const TOTAL_LANGUAGES: usize = 20;
 
 /// Computed at runtime: total `Applicable` cells across the matrix.
 pub fn total_applicable_cells() -> usize {

@@ -55,7 +55,6 @@ const ALL_LANGS: &[&str] = &[
     "ruby",
     "rust",
     "scala",
-    "solidity",
     "swift",
     "typescript",
 ];
@@ -199,12 +198,6 @@ fn expected_mega_flow_findings_with_inferred_sources(lang: &str) -> usize {
         // explicit `Call` event; case-class component accessors
         // synthesized for cross-class field-projection).
         "scala" => 1,
-        // In inferred-source mode Solidity reports one combined
-        // audit-event information-exposure finding plus the external
-        // `handle(raw) -> target.call(cmd)` reentrancy flow. The latter
-        // starts at an inferred entry-point param because the concrete
-        // bytes-calldata source rule is intentionally name-narrow.
-        "solidity" => 2,
         // readLine() → Envelope (struct memberwise init) → Pipeline.orchestrate
         // (Optional/guard/case match) → Storage.persist → AuditedRepository
         // (inherits Repository.init via class chain) → super.run → Repository.run
@@ -460,7 +453,6 @@ fn required_mega_flow_event_kinds(lang: &str) -> &'static [&'static str] {
         "ruby" => &["Assign", "Call", "Continue", "Try", "Yield"],
         "rust" => &["Assign", "Branch", "Call", "Loop", "Return"],
         "scala" => &["Assign", "Branch", "Call"],
-        "solidity" => &["Assign", "Branch", "Call", "Loop", "Return", "Try"],
         "swift" => &["Assign", "Branch", "Call", "Loop", "Return", "Try"],
         "typescript" => &["Assign", "Await", "Branch", "Call", "Loop", "Return", "Try"],
         _ => &[],
@@ -1735,19 +1727,6 @@ fn scheduler_filter_fixture(lang: &str, unreachable_count: usize) -> Vec<(String
                 "object App {{\n  def source(): String = \"\"\n  def sink(value: String): Unit = ()\n  def handle(): Unit = sink(source())\n{} }}\n",
                 render_unreachable_defs(&unreachable_names, |out, name| {
                     writeln!(out, "  def {name}(): String = source()").unwrap();
-                })
-            ),
-        )],
-        "solidity" => vec![(
-            "/app/App.sol".to_string(),
-            format!(
-                "pragma solidity ^0.8.0;\ncontract App {{\n  function source() internal pure returns (bytes memory) {{ return \"\"; }}\n  function sink(bytes memory value) internal pure {{}}\n  function handle() external {{ sink(source()); }}\n{} }}\n",
-                render_unreachable_defs(&unreachable_names, |out, name| {
-                    writeln!(
-                        out,
-                        "  function {name}() external pure returns (bytes memory) {{ return source(); }}"
-                    )
-                    .unwrap();
                 })
             ),
         )],

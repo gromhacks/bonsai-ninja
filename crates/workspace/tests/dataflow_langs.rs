@@ -312,15 +312,3 @@ fn erlang_dataflow_prewarm() {
         &["handle_request"],
     );
 }
-
-#[test]
-fn solidity_dataflow_prewarm() {
-    run_prewarm_for(
-        || Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-        &[(
-            "/w/m.sol",
-            "pragma solidity ^0.8.0;\ncontract M {\n  function sink(string memory y) public returns (string memory) { return y; }\n  function updateUser(string memory x) public returns (string memory) { return sink(x); }\n  function handleRequest(string memory token) public returns (string memory) { return updateUser(token); }\n}\n",
-        )],
-        &["handleRequest"],
-    );
-}

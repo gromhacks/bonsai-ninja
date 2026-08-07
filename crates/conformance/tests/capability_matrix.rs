@@ -172,17 +172,6 @@ fn fixture_for(lang: &str) -> (&'static str, &'static str, &'static [Capability]
                 Capability::CallReceiverTypes,
             ],
         ),
-        "solidity" => (
-            "App.sol",
-            "// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.0;\n\ncontract Base {}\n\ncontract Repo is Base {\n  address conn;\n  constructor(address _conn) { conn = _conn; }\n  function run(uint256[] memory items) public {\n    for (uint256 i = 0; i < items.length; i++) {\n      if (items[i] != 0) {\n        handle(items[i]);\n      }\n    }\n  }\n  function handle(uint256 x) internal returns (uint256) {\n    uint256 y = transform(x);\n    return y;\n  }\n  function transform(uint256 x) internal pure returns (uint256) { return x; }\n}\n",
-            &[
-                Capability::ParamAnnotations,
-                Capability::TypeAliases,
-                Capability::TryEvents,
-                Capability::ReceiverParamIndex,
-                Capability::ImplicitReturns,
-            ],
-        ),
         "c" => (
             "app.c",
             "#include <stdio.h>\n\ntypedef struct {\n  const char *conn;\n} Repo;\n\nRepo *repo_new(const char *conn) {\n  Repo *r = (Repo *)malloc(sizeof(Repo));\n  r->conn = conn;\n  return r;\n}\n\nint repo_run(Repo *r, const char **items, int n) {\n  for (int i = 0; i < n; i++) {\n    if (items[i]) { repo_handle(r, items[i]); }\n  }\n  return 0;\n}\n\nconst char *repo_handle(Repo *r, const char *x) {\n  const char *y = repo_transform(r, x);\n  return y;\n}\n",
@@ -239,12 +228,12 @@ fn capability_matrix_report() {
         .filter(|c| matches!(c.status, CellStatus::Supported))
         .count();
     assert!(total_supported > 0, "no capabilities reported as supported");
-    // Sanity: 21 languages × Capability::ALL.len() cells.
+    // Sanity: 20 languages × Capability::ALL.len() cells.
     assert_eq!(
         cells.len(),
-        21 * Capability::ALL.len(),
+        20 * Capability::ALL.len(),
         "expected {} cells, got {}",
-        21 * Capability::ALL.len(),
+        20 * Capability::ALL.len(),
         cells.len()
     );
     let missing: Vec<_> = cells

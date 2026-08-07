@@ -33,11 +33,8 @@ imports/includes, call and string refs, per-language `FlowEvent`
 families, resolved call edges, reachable facts, argument/write refs,
 import/symbol alias maps where the fixture uses aliases, assignment
 chains, and intraprocedural taint. Dedicated cross-file and assignment
-audit tests pin source-to-sink chains across all 21 adapters. This is an
-engine/adapter correctness fixture, not a promise that every language
-shares the same security taxonomy: Solidity remains a smart-contract
-analysis pack rather than an app/web taint-family parity pack. The
-complete release-binary CLI/switch sweep lives in
+audit tests pin source-to-sink chains across all 20 adapters. The complete
+release-binary CLI/switch sweep lives in
 `scripts/validate-mega-cli.py`; it runs every command family, output mode,
 public switch, stable-id drilldown, and cache command against every
 language's `mega_flow`.
@@ -86,7 +83,6 @@ Generated with the release CLI:
 | ruby       |        2 | wrap -> persist -> run -> execute                                                                   |
 | rust       |        0 | No default finding                                                                                  |
 | scala      |        1 | handle -> orchestrate -> persist -> run -> execute                                                  |
-| solidity   |        0 | No default finding (real flow detected with `--inferred-sources`)                                   |
 | swift      |        1 | handle_request -> orchestrate -> persist -> run@Storage.swift:30 -> run@Storage.swift:23 -> execute |
 | typescript |        1 | handle_request -> orchestrate -> persist -> run -> execute                                          |
 
@@ -141,9 +137,6 @@ reliably follows. Representative coverage:
   dispatch, with-clause, try/rescue, structs.
 - **Erlang**  - list comprehensions, lists:foldl + anonymous-fun,
   pattern match on records, try/catch.
-- **Solidity**- inheritance, modifiers, library calls, if/else,
-  bounded loops, unchecked blocks, try/catch on external calls, events.
-
 ## Adapter constraints we hit
 
 Not every construct survives the chain builder. Where an idiom breaks

@@ -267,22 +267,3 @@ fn r_03_elixir() {
 }
 
 // R_03 not applicable to Erlang (no methods) — skipped via applicability table
-
-#[test]
-fn r_03_solidity() {
-    run_positive_cell(
-        "R_03",
-        LangFixture {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            files: &[(
-                "Demo.sol",
-                "contract Demo { function entry(string memory args) public { sink(args); } }
-",
-            )],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}

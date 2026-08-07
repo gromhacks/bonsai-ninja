@@ -83,7 +83,6 @@ no equivalent construct.
 | lang_ruby | ✓ | ✓ | ✓ | ✓ | ✓ | partial | n/a | ✓ |
 | lang_rust | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
 | lang_scala | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | partial |
-| lang_solidity | ✓ | ✓ | ✓ | ✓ | ✓ | — | n/a | n/a |
 | lang_swift | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | partial |
 | lang_typescript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
@@ -124,8 +123,7 @@ Visible from the matrix above:
   binder shape is not normalized yet.** Java, Kotlin, C#, Python,
   Dart, Objective-C, PHP, Rust, Scala, Swift, and TypeScript emit
   adapter-visible parameter annotation facts for the common grammar
-  shapes; Ruby is partial. Solidity modifiers remain candidates for
-  route/source inference without per-language YAML.
+  shapes; Ruby is partial.
 - **`super_dispatch` is partial in several adapters that have
   inheritance.** JavaScript/TypeScript, Java/Kotlin/PHP/Python/Ruby/Rust,
   C#/Dart, and the tested `super`/`parent`/`base` receiver shapes have full

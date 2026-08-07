@@ -21,7 +21,6 @@
         "pages": [
           "docs/concepts",
           "docs/language-support",
-          "docs/solidity-support",
           "docs/PER_LANGUAGE_DETECTION_AUDIT",
           "docs/MEGA_FLOW_COVERAGE",
           "docs/COVERAGE_BASELINE",

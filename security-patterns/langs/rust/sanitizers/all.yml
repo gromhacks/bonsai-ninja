@@ -599,20 +599,6 @@
     expect_match_text: [query_as.bind]
   description: "sqlx query/query_as builder `.bind(value)` - binds a value to a placeholder instead of concatenating it into
     SQL."
-- id: rust.sanitizer.secrecy_secret_new
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: rust
-  tag: controlled-exposure
-  packages: [secrecy]
-  match:
-    kind: new
-    callee:
-      attribute: [secrecy, Secret]
-  description: "Disabled - `Secret::new` wraps a value in a zeroising container that blocks accidental Debug / serialise leaks,
-    but the underlying bytes still flow to sinks via expose_secret(). Treating the wrap as a sanitizer would hide real flows;
-    enable only for leak-surface (logging/serialisation) audits."
 - id: rust.sanitizer.regex_escape
   enabled: true
   language: rust

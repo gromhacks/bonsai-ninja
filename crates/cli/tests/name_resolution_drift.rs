@@ -35,7 +35,6 @@ const LANGS: &[&str] = &[
     "ruby",
     "rust",
     "scala",
-    "solidity",
     "swift",
     "typescript",
 ];
@@ -109,7 +108,7 @@ fn defs_and_inspect_agree_on_function_locations() {
         let defs_rows = defs_json.as_array().cloned().unwrap_or_default();
         let Some((name, expected_file, expected_line)) = first_function(&defs_rows) else {
             // Adapter emits no plain functions in micro fixture
-            // (rare; e.g. Solidity micro is method-only) — skip.
+            // (rare for method-only fixtures) — skip.
             continue;
         };
 

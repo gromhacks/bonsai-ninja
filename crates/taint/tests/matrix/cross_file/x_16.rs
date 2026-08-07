@@ -533,31 +533,3 @@ fn x_16_erlang() {
         },
     );
 }
-
-#[test]
-fn x_16_solidity() {
-    run_positive_cell(
-        "X_16",
-        LangFixture {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            files: &[
-                (
-                    "Helper.sol",
-                    "pragma solidity ^0.8.0;\ncontract Helper { function helper(string memory p) public { sink(p); } }\n",
-                ),
-                (
-                    "Entry.sol",
-                    "pragma solidity ^0.8.0;\nimport './Helper.sol';\ncontract Entry { Helper helperContract; function entry(string memory args) public { helperContract.helper(args); } }\n",
-                ),
-                (
-                    "Sibling.sol",
-                    "pragma solidity ^0.8.0;\nimport './Helper.sol';\ncontract Sibling { Helper helperContract; function sibling(string memory clean) public { helperContract.helper(clean); } }\n",
-                ),
-            ],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}

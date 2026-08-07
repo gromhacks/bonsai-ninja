@@ -1198,8 +1198,6 @@ pub struct GrammarHandler {
     /// Call-shaped grammar identifiers that are declarations/directives, not
     /// runtime calls.
     pub non_call_ref_names: &'static [&'static str],
-    /// Dedicated grammar nodes that emit a canonical pseudo-call reference.
-    pub synthetic_call_ref_names: &'static [(&'static str, &'static str)],
     /// Adapter-declared punctuation appended to a callee identifier by the
     /// surrounding call node (for example a macro marker).
     pub call_name_suffix_tokens: &'static [&'static str],
@@ -1301,7 +1299,6 @@ pub const EMPTY_HANDLER: GrammarHandler = GrammarHandler {
     global_variable_kinds: &[],
     subscript_base_call_refs: false,
     non_call_ref_names: &[],
-    synthetic_call_ref_names: &[],
     call_name_suffix_tokens: &[],
     syntax_error_tolerant_call_names: &[],
     callable_reference_kinds: &[],
@@ -1628,7 +1625,6 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
     global_variable_kinds: &[],
     subscript_base_call_refs: false,
     non_call_ref_names: &[],
-    synthetic_call_ref_names: &[],
     call_name_suffix_tokens: &[],
     syntax_error_tolerant_call_names: &[],
     callable_reference_kinds: &[],
@@ -1671,15 +1667,6 @@ pub const COMMON_CALL_KINDS: &[&str] = &[
     // exposes `receiver` + `method` fields, which `method_receiver_name`
     // already understands. Unique to ObjC; no conflict with other grammars.
     "message_expression",
-    // Solidity `emit EventName(args)` — treated as a call to the event
-    // so rulepack sink rules targeting event emission (information
-    // disclosure, state-change notifications) can fire.
-    "emit_statement",
-    // Solidity `revert / require / assert(...)` and similar assertion
-    // forms — the grammar exposes them as dedicated statement kinds
-    // rather than plain calls. Keep them in the call-ref stream so
-    // security rules on require-bypass / assert-on-user-input hit.
-    "revert_statement",
     // Erlang `Mod:fn(args)` — the WhatsApp tree-sitter grammar tags
     // remote-qualified calls as `remote` rather than wrapping them in
     // `call`. Without this entry top-level remote calls produce no
@@ -1930,7 +1917,7 @@ fn walk_deep_sequence_executable_nodes(
 }
 
 /// Recursive flow-event emitter. The biggest single function in the
-/// kit — drives all per-event emission across 21 languages.
+/// kit — drives all per-event emission across 20 languages.
 ///
 /// ## Dispatch order
 ///
@@ -2332,12 +2319,12 @@ fn implicit_return_expression_node<'tree>(
         return implicit_return_expression_node(&first, handler);
     }
     // A statement-shaped single child is control flow, not a tail
-    // expression. Swift `func f() { if … }`, Kotlin `fun f() { when … }`,
-    // and Solidity `function f() { if (…) {…} }` must NOT synthesize a
-    // Return whose `value_text` unions the whole block — that fabricates
+    // expression. Swift `func f() { if … }` and Kotlin
+    // `fun f() { when … }` must NOT synthesize a Return whose `value_text`
+    // unions the whole block — that fabricates
     // an over-tainted return (and a bogus return in a void function). The
     // `_statement` suffix rule fails closed for unseen statement kinds;
-    // `statement` alone is Solidity's generic per-statement wrapper; the
+    // A generic `statement` wrapper is equally non-expressive. The
     // `statements`-only expression list catches Kotlin control-flow
     // expressions in block-statement position while leaving
     // `fun f() = if (c) a else b` (which reaches the `if_expression`
@@ -3030,17 +3017,6 @@ fn build_call_event(
         .or_else(|| first_named_child_of_kind(&node, "literal_value"))
         .or_else(|| first_named_child_of_kind(&node, "tuple_expression")); // swift
 
-    // Solidity's `call_expression` has each argument as a direct
-    // `call_argument` child rather than a wrapper — synthesize a virtual
-    // container by collecting them. Same shape works for any grammar that
-    // uses direct `call_argument` children.
-    let solidity_args: Vec<Node<'_>> = {
-        let mut cursor = node.walk();
-        node.named_children(&mut cursor)
-            .filter(|c| c.kind() == "call_argument")
-            .collect()
-    };
-
     // Erlang's `call` node has `args: expr_args` (field name is "args").
     let erlang_args_field = node
         .child_by_field_name("args")
@@ -3106,15 +3082,6 @@ fn build_call_event(
             {
                 args.push(argument);
             }
-        }
-    }
-
-    // Solidity: direct `call_argument` siblings on the call_expression.
-    // Each call_argument contains an `expression` with the actual value.
-    for arg in &solidity_args {
-        let inner = first_named_child(arg).unwrap_or(*arg);
-        if let Some(argument) = call_arg_from_nodes_with_handler(*arg, inner, file, src, None, handler) {
-            args.push(argument);
         }
     }
 
@@ -3389,7 +3356,6 @@ fn argument_value_node(argument: Node<'_>) -> Node<'_> {
     if !matches!(
         argument.kind(),
         "argument"
-            | "call_argument"
             | "keyword_argument"
             | "named_argument"
             | "named_expression"
@@ -3427,11 +3393,7 @@ fn argument_value_node(argument: Node<'_>) -> Node<'_> {
 }
 
 /// Peel parser-declared, single-child expression wrappers while preserving
-/// the actual operator/member/call node that proves value semantics. The
-/// Solidity grammar uses this shape for every call argument
-/// (`call_argument -> expression -> member_expression`); classifying the
-/// generic wrapper instead of its child loses an otherwise exact static
-/// access path such as `env.command`.
+/// the actual operator/member/call node that proves value semantics.
 fn unwrap_transparent_expression(mut node: Node<'_>) -> Node<'_> {
     while node.kind() == "expression" {
         let mut cursor = node.walk();
@@ -3594,7 +3556,6 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8], handler: &GrammarHandl
         "scope_resolution",
         "interpolated_identifier",
         "identifier_dollar_escaped",
-        "yul_identifier",
     ];
     if is_large_literal_initializer_node(node.kind(), node)
         || node_is_value_free_expression(*node, src, handler)
@@ -4486,7 +4447,6 @@ pub const fn with_fn_kinds_and_implicit_receivers(
         global_variable_kinds: GENERIC_HANDLER.global_variable_kinds,
         subscript_base_call_refs: GENERIC_HANDLER.subscript_base_call_refs,
         non_call_ref_names: GENERIC_HANDLER.non_call_ref_names,
-        synthetic_call_ref_names: GENERIC_HANDLER.synthetic_call_ref_names,
         call_name_suffix_tokens: GENERIC_HANDLER.call_name_suffix_tokens,
         syntax_error_tolerant_call_names: GENERIC_HANDLER.syntax_error_tolerant_call_names,
         callable_reference_kinds: GENERIC_HANDLER.callable_reference_kinds,
@@ -6155,12 +6115,7 @@ pub fn extract_call_refs(
     handler: &GrammarHandler,
 ) -> Vec<crate::Ref> {
     let mut out = Vec::new();
-    let mut call_ref_kinds = handler.call_ref_kinds.to_vec();
-    for (kind, _) in handler.synthetic_call_ref_names {
-        if !call_ref_kinds.contains(kind) {
-            call_ref_kinds.push(kind);
-        }
-    }
+    let call_ref_kinds = handler.call_ref_kinds.to_vec();
     let remote_call_syntax = handler
         .special_forms
         .contains(&SyntaxSpecialForm::RemoteCallExpression);
@@ -6191,16 +6146,8 @@ pub fn extract_call_refs(
             .or_else(|| first_identifier_like_child(&node))
             .or_else(|| first_identifier_descendant(node));
         let Some(callee) = callee_node else { continue };
-        // Tree-sitter-grammar-grounded callee names. Solidity's
-        // `emit_statement` / `revert_statement` are dedicated node
-        // kinds — the grammar ALREADY identifies them for us, so
-        // we emit TWO Call refs per occurrence: the event / reason
-        // name itself (so `callee.name: AdminAction` matches the
-        // user-declared rule), PLUS a synthetic `emit` / `revert`
-        // ref at the same span so rulepack writers who want to
-        // catch "any emit" / "any revert" keep `callee.name: emit`
-        // as the matcher. Everything is tree-sitter derived — no
-        // regex.
+        // The callee identity is derived from adapter-declared Tree-sitter
+        // node shapes; no source-text API inventories are consulted here.
         let mut inner_name = erlang_remote
             .as_ref()
             .or(erlang_call.as_ref())
@@ -6225,19 +6172,6 @@ pub fn extract_call_refs(
         }
         if handler.non_call_ref_names.contains(&inner_name.as_str()) {
             continue;
-        }
-        if let Some((_, synthetic_name)) = handler
-            .synthetic_call_ref_names
-            .iter()
-            .find(|(kind, _)| *kind == node.kind())
-        {
-            out.push(crate::Ref {
-                span: span_of(file, &node),
-                name: (*synthetic_name).to_string(),
-                kind: crate::RefKind::Call,
-                scope: None,
-                resolved: None,
-            });
         }
         let name = inner_name;
         if name.is_empty() {
@@ -7122,10 +7056,7 @@ fn method_receiver_name<'tree>(node: &Node<'tree>, src: &[u8]) -> Option<(Node<'
         };
         return Some((nm, format!("{}{sep}{}", receiver, node_text(&nm, src))));
     }
-    // Solidity: `object` + `property`. member_expression wraps the
-    // dotted access inside a function-field expression for calls, so
-    // we also unwrap one level of `expression` / `member_expression`
-    // if the call's `function` field is what we were handed.
+    // Member expressions commonly expose `object` + `property` fields.
     if let (Some(obj), Some(prop)) = (
         node.child_by_field_name("object"),
         node.child_by_field_name("property"),
@@ -7135,9 +7066,8 @@ fn method_receiver_name<'tree>(node: &Node<'tree>, src: &[u8]) -> Option<(Node<'
             format!("{}.{}", node_text(&obj, src), node_text(&prop, src)),
         ));
     }
-    // Solidity `call_expression.function: expression > member_expression`.
-    // Walk one step down through a single `expression` or `member_expression`
-    // wrapper attached to the `function` field.
+    // Walk one step through a transparent expression wrapper attached to the
+    // call's `function` field before extracting a member receiver.
     if let Some(func) = node.child_by_field_name("function") {
         let inner = if func.kind() == "expression" {
             first_named_child(&func).unwrap_or(func)
@@ -7580,12 +7510,8 @@ fn call_argument_containers(node: Node<'_>) -> Vec<Node<'_>> {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
-            // `call_argument` — Solidity exposes each argument as a
-            // direct `call_argument` child (no `arguments` wrapper);
-            // without it, a nested call arg like `sink(source())` never
-            // surfaces its inner `source()` Call.
             "arguments" | "argument_list" | "value_arguments" | "call_suffix" | "expr_args"
-            | "call_argument" | "token_tree" => {
+            | "token_tree" => {
                 v.push(child);
             }
             _ => {}

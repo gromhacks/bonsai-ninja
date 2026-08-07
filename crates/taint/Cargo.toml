@@ -44,7 +44,6 @@ bonsai_lang_objc = { workspace = true }
 bonsai_lang_lua = { workspace = true }
 bonsai_lang_elixir = { workspace = true }
 bonsai_lang_erlang = { workspace = true }
-bonsai_lang_solidity = { workspace = true }
 bonsai_lang_perl = { workspace = true }
 rayon = { workspace = true }
 

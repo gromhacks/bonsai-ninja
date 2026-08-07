@@ -135,7 +135,7 @@ fn ws(lang: &str, fixture: &str) -> String {
 
 /// One language's expected-content signals. Names are substrings —
 /// matched against JSON field content or stdout text — so mixed-case
-/// conventions across the 21 languages all line up.
+/// conventions across the 20 languages all line up.
 #[derive(Copy, Clone)]
 pub struct LangExp {
     pub lang: &'static str,
@@ -581,25 +581,6 @@ pub const LANGS: &[LangExp] = &[
         min_sources_micro: 2,
         min_source_flows_micro: 4,
         min_deps_micro: 4,
-        min_sanitizers_micro: 0,
-    },
-    LangExp {
-        lang: "solidity",
-        verify_token: "verifyToken",
-        get_user: "getUser",
-        handle_request: "handleRequest",
-        run_admin_command: "runAdminCommand",
-        update_user: "updateUser",
-        cmdi_sink: "emit",
-        sqli_sink: "balances",
-        min_findings_micro: 1,
-        min_findings_complex: 1,
-        min_complex_decls: 5,
-        refs_populated: true,
-        has_classes: true,
-        min_sources_micro: 3,
-        min_source_flows_micro: 2,
-        min_deps_micro: 0,
         min_sanitizers_micro: 0,
     },
     LangExp {
@@ -1249,8 +1230,7 @@ fn expected_default_mega_flow_findings(lang: &str) -> usize {
     // security_pipeline_regressions.rs). The cpp/csharp/dart/elixir/java/
     // scala/swift entries went 0→1 when d332009 closed the FN-language
     // construct gaps; objc went 2→1 when the xxe over-claim was removed;
-    // solidity went 1→0 once its concrete-source FP was dropped (its real
-    // flow seeds from an inferred entry param); dart settled at 1 after
+    // dart settled at 1 after
     // the combiner's group_id dedup collapsed a duplicate entry-chain row.
     match lang {
         "c" => 1,
@@ -1284,12 +1264,6 @@ fn expected_default_mega_flow_findings(lang: &str) -> usize {
         // command argument sink through the full mega-flow chain.
         "rust" => 1,
         "scala" => 1,
-        // One concrete information-exposure finding from `msg.sender`
-        // in the audit modifier. The reentrancy chain through
-        // `handle -> orchestrate -> persist` still needs
-        // `--inferred-sources` because its payload starts at an entry
-        // parameter.
-        "solidity" => 1,
         "swift" => 1,
         "typescript" => 1,
         other => panic!("missing mega_flow expected finding count for {other}"),
@@ -1605,15 +1579,7 @@ fn check_security_source_analysis(ws: &str, lang: &str, expected_min: usize, han
         "[{lang}] security source-analysis = {}, want >= {expected_min}",
         rows.len()
     );
-    // Solidity's micro source model is caller identity (`msg.sender`)
-    // inside AuthService / modifiers rather than Gateway.handleRequest
-    // HTTP-style entry data. Still require a concrete source-flow anchor,
-    // but use the contract that owns the source.
-    let expected_anchor = if lang == "solidity" {
-        "AuthService"
-    } else {
-        handler
-    };
+    let expected_anchor = handler;
     let mut mentions_handler = false;
     for row in &rows {
         assert!(
@@ -1718,22 +1684,10 @@ fn check_mega_flow_source_analysis(ws: &str, lang: &str) {
             "[{lang}] mega_flow source-analysis row missing incomplete reasons: {row}"
         );
     }
-    if lang == "solidity" {
-        assert!(
-            rows.iter().any(|row| {
-                row.get("source")
-                    .and_then(|source| source.get("rule_id"))
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|rule| rule == "solidity.msg.sender")
-            }),
-            "[{lang}] mega_flow source-analysis must keep exact caller-identity source rows: {rows:?}"
-        );
-    } else {
-        assert!(
-            has_multi_hop_semantic_flow,
-            "[{lang}] mega_flow source-analysis did not render any multi-hop semantic flow: {rows:?}"
-        );
-    }
+    assert!(
+        has_multi_hop_semantic_flow,
+        "[{lang}] mega_flow source-analysis did not render any multi-hop semantic flow: {rows:?}"
+    );
 }
 
 /// Assert `security deps` ties rulepack package keys back to real
@@ -2153,7 +2107,7 @@ macro_rules! lang_matrix_tests {
                 //
                 // Complex fixtures are larger, multi-module codebases. For
                 // languages where complex ≈ micro (dart/elixir/erlang/lua/
-                // objc/perl/solidity all have ~10 decls in complex too),
+                // objc/perl all have ~10 decls in complex too),
                 // these become equivalent to the micro tests; for the big
                 // languages they verify behaviour at scale (200+ decls,
                 // 50+ findings).
@@ -2307,9 +2261,8 @@ lang_matrix_tests! {
     ruby_matrix => 15,
     rust_matrix => 16,
     scala_matrix => 17,
-    solidity_matrix => 18,
-    swift_matrix => 19,
-    typescript_matrix => 20,
+    swift_matrix => 18,
+    typescript_matrix => 19,
 }
 
 // =============================================================================
@@ -3366,7 +3319,6 @@ fn imports_whole_module_resolve_to_flows() {
         "typescript",
         "dart",
         "lua",
-        "solidity",
         "perl",
         "php",
     ] {

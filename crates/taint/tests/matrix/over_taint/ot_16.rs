@@ -243,16 +243,3 @@ fn ot_16_lua() {
         sink: "sink",
     });
 }
-
-#[test]
-fn ot_16_solidity() {
-    run_ot_16(LangFixture {
-        lang: "solidity",
-        adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-        files:&[("Demo.sol","contract Demo { function entry(string memory args) public { string memory _ignore = args; sink(\"clean\"); } }
-")],
-        entry: "entry",
-        seed: &["args"],
-        sink: "sink",
-    });
-}

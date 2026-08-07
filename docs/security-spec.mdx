@@ -36,7 +36,7 @@ derived from the directory - never declared in YAML.
 Required for every rule:
 
 - `id` - globally unique within (language, kind).
-- `language` - one of the 21 supported languages.
+- `language` - one of the 20 supported languages.
 - `match.kind` - `call`, `new`, `read`, `write`, `return`, `param`, or
   `missing`.
 - `match.callee` (call/new) or `match.target` (read/write/return/param)
@@ -172,18 +172,9 @@ disabled with this rationale. Archive bombs and duplicate ZIP entries require
 separate version/configuration-aware rules; neither is evidence of CWE-611.
 
 Use `receiver_tainted: true` for receiver-state sinks where the security
-operand is left of the call operator, such as `cmd.!` or
-`target.delegatecall("")`. Use `any_arg_tainted: true` only when every
+operand is left of the call operator, such as Scala `cmd.!`. Use
+`any_arg_tainted: true` only when every
 argument is an equivalent payload surface.
-
-Solidity is intentionally outside the canonical app/web sink-family
-audit. Its adapter participates in parsing, navigation, flow facts, and
-rule matching, but the bundled Solidity security pack is a smart-contract
-taxonomy: reentrancy, delegatecall, selfdestruct, oracle manipulation,
-block randomness, signature replay, token hazards, access control, and
-unchecked low-level calls. Do not add placeholder web families such as
-SQL injection, XSS, SSRF, path traversal, or command injection for
-Solidity unless the rule models a real EVM/on-chain security boundary.
 
 Rules whose risk names a specific argument **must** constrain that
 argument:

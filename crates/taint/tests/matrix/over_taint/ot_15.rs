@@ -289,18 +289,3 @@ fn ot_15_erlang() {
         sink: "sink",
     });
 }
-
-#[test]
-fn ot_15_solidity() {
-    run_ot_15(LangFixture {
-        lang: "solidity",
-        adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-        files: &[(
-            "Demo.sol",
-            "contract Demo { function entry(string memory args) public { sink(0, args); } }\n",
-        )],
-        entry: "entry",
-        seed: &["args"],
-        sink: "sink",
-    });
-}

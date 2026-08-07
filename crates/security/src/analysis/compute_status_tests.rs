@@ -59,27 +59,6 @@ fn validation_rule_from_yaml(yaml: &str) -> Rule {
 }
 
 #[test]
-fn pack_audit_security_model_marks_solidity_as_smart_contract() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../security-patterns");
-    let pack = crate::loader::load_rulepack(&root).expect("bundled rulepack");
-    let report = pack_audit(&pack, None);
-    let solidity = report
-        .languages
-        .iter()
-        .find(|language| language.language == "solidity")
-        .expect("Solidity audit row");
-    assert_eq!(solidity.security_model, "smart-contract");
-    assert!(!solidity.canonical_sink_families_applicable);
-    let java = report
-        .languages
-        .iter()
-        .find(|language| language.language == "java")
-        .expect("Java audit row");
-    assert_eq!(java.security_model, "app-web-taint");
-    assert!(java.canonical_sink_families_applicable);
-}
-
-#[test]
 fn strict_source_text_matching_does_not_seed_receivers_or_siblings() {
     assert!(security_text_matches_source_strict("os.getenv", "os.getenv"));
     assert!(security_text_matches_source_strict("getenv", "os.getenv"));
