@@ -123,6 +123,7 @@ paths.
 | `BONSAI_RULES_DIR` | path | Auto-discover | Rulepack directory. |
 | `BONSAI_PARSE_TIMEOUT_MS` | integer milliseconds | unset (uncapped) | Optional per-file tree-sitter parse timeout. `0` disables the timeout guard. |
 | `BONSAI_MEMORY_BUDGET_MB` | positive integer MiB | detected host/container limit | Lower the compiler's scheduling/spill budget. Linux resolves the current process's nested cgroup v1/v2 memory controller, not only the root controller. Weighted phases subtract measured process RSS and safety headroom before admitting transient units; the exact-body hot cache derives from the same value. This is not an OS hard-RSS limit: clean memory-mapped factstore pages, allocator arenas, stacks, the binary, and output buffers can make RSS/physical footprint exceed it and are reclaimed or paged by the OS under pressure. A smaller value serializes work, evicts bodies sooner, and can cause exact recomputation/I/O; it cannot reduce analyzed files, facts, or graph closure. |
+| `BONSAI_DEBUG` | comma-separated categories | unset | Emit selected diagnostic categories to stderr; `*` enables all categories. Equivalent to global `--debug`. Common categories include `idg-closure`, `idg-resolve`, `recv-state`, `find-group`, `taint-graph`, and `xcall`; security progress notes also use categories such as `security-progress` and `security-phase`. |
 | `BONSAI_COMPILER_JOBS` | positive integer | available CPU count | Upper bound on compiler-object workers before file-size/memory weighting. Every file is still compiled. |
 | `BONSAI_IDG_TRANSFER_BATCH_SEGMENTS` | positive integer | available Rayon workers | Upper bound on concurrently lowered IDG source-file segments before exact VFS-size/memory weighting. Every segment and transfer fact is still compiled. |
 | `BONSAI_SECURITY_JOBS` | positive integer | available CPU count | Upper bound on concurrent Tree-sitter matcher units before the shared syntax-memory scheduler. It changes throughput only, never the scanned file or rule set. |
@@ -137,6 +138,7 @@ paths.
 | `BONSAI_CONTEXT` | token budget | `32k` for text and JSON | Default paging/context budget. |
 | `BONSAI_NO_CACHE` | boolean-like | unset | Disable in-process caches. |
 | `BONSAI_TAINT_GRAPH_PERSIST` | boolean-like | enabled | Persist exact taint/source graph entries to mode/config-specific `$CACHE_DIR/taint_graph.v*.<mode>.<config>.factstore` files. Set to `0`, `false`, `no`, or `off` to opt out. |
+| `BONSAI_INCLUDE_MINIFIED` | boolean-like | unset | Include `.min.*` assets in `read-file` path and symbol resolution. Minified assets are excluded from that navigation command by default. |
 | `BONSAI_RAYON_STACK_BYTES` | integer bytes | internal default | Rayon worker stack size override for very deep syntax trees. |
 | `NO_COLOR` | boolean-like | unset | Disable color output. |
 | `NO_PROGRESS` | boolean-like | unset | Disable progress output. |
@@ -161,6 +163,8 @@ with `--no-progress` for quiet script/LLM runs.
 |---|---|---|---|
 | Rulepack directory | `--rules-dir` | `BONSAI_RULES_DIR`, workspace/package/cwd discovery | None |
 | Parse timeout | `--parse-timeout` | `BONSAI_PARSE_TIMEOUT_MS` | uncapped |
+| Compiler memory budget | `--memory-budget` | `BONSAI_MEMORY_BUDGET_MB` | detected host/container limit |
+| Debug categories | `--debug` | `BONSAI_DEBUG` | disabled |
 | Theme | `--theme` | `BONSAI_THEME` | `moss` |
 | Context budget | `--context` | `BONSAI_CONTEXT` | 32k |
 | Cache behavior | `--no-cache` | `BONSAI_NO_CACHE` | enabled |

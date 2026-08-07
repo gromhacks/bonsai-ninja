@@ -278,11 +278,11 @@ class and verify each box.
       reuses exact parser coverage in the completion audit. Unchecked files
       receive a Tree-sitter diagnostic pass only; declarations and flow bodies
       are not lowered for `analysis_complete`. On the reference Elasticsearch
-      checkout, compare against the recorded final 2026-08-06 ABI-v61
-      fresh-cache baseline (33.02 s, 3 GiB scheduling budget) and investigate
+      checkout, compare against the recorded final 2026-08-06 ABI-v62
+      fresh-cache baseline (30.22 s, 3 GiB scheduling budget) and investigate
       material regressions
       rather than loosening the gate. The same checkout's exhaustive
-      `security sinks --severity high --context 4k` baseline is 24.09 s process
+      `security sinks --severity high --context 4k` baseline is 22.63 s process
       wall time under the same budget.
 - [ ] **Large native export gate passes when relevant.** Export the complete
       sibling Elasticsearch checkout under a recorded scheduling budget,
@@ -301,7 +301,7 @@ class and verify each box.
 - [ ] **Code references match.** File paths, function names, type
       signatures referenced in docs match the current code.
 - [ ] **Cross-links resolve.** Markdown links point at existing files
-      and sections.
+      and sections; `python3 scripts/audit-docs.py` passes.
 - [ ] **Command surface checked against the binary.** Run
       `./target/release/bonsai-ninja --help` and the affected
       `<command> --help` output before updating CLI docs.

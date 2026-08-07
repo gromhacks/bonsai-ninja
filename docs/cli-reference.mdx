@@ -7,7 +7,11 @@ description: "Command and flag reference for security analysis, flow inspection,
 
 Global options accepted before the command include `--no-color`,
 `--theme`, `--no-cache`, `--no-progress`, `--html-output`, `--contains`,
-`--not-contains`, `--parse-timeout`, `--help`, and `--version`.
+`--not-contains`, `--parse-timeout`, `--memory-budget`, `--debug`, `--help`,
+and `--version`. `--memory-budget <MIB>` controls exact compiler-work
+scheduling and spill/retention policy; it never caps files, graph depth,
+fixed-point iterations, or results. `--debug <CATEGORIES>` emits selected
+diagnostic categories to stderr and is equivalent to `BONSAI_DEBUG`.
 `--theme` and `BONSAI_THEME` accept exactly `moss`, `earthy-dark`,
 `dracula`, or `retro-amber`; unknown values are errors.
 
@@ -114,6 +118,9 @@ bonsai-ninja context ./src --output-path workspace-context.json
 | Flag | Default | Description |
 |---|---:|---|
 | `<WORKSPACE>` | Required | Workspace root to analyze. |
+| `--context <BUDGET>` | 32k | Token-budget ceiling for paged context rows. `0`, `all`, or `uncapped` disables paging. |
+| `--page <PAGE>` | 1 | Page number, `P:xxxxxxxx` cursor, or `next`. |
+| `--all` | false | Emit the complete canonical SDK context object without paging. |
 | `--output-path <PATH>` | stdout | Write the JSON payload to a file. |
 
 ## security
@@ -475,8 +482,8 @@ cache hit/miss notes on stderr while progress is enabled. JSON stdout and
 `--output-path` payloads remain clean.
 
 JSON rows include `analysis_complete`, `analysis_incomplete_reasons`, and
-`lineage` so capped representative lineage is machine-readable even when
-`--all` emits the backward-compatible bare array shape.
+`lineage`, so any bounded representative-lineage status is machine-readable.
+`--all` removes both row paging and source-lineage path limits.
 
 | Flag | Default | Description |
 |---|---:|---|
@@ -581,12 +588,14 @@ Common browse output flags:
 | `--context <BUDGET>` | 32k | Token-budget paging, e.g. `4k`, `16k`, `128k`, `all`. |
 | `--page <PAGE>` | 1 | Page number, `next`, or a printed `P:xxxxxxxx` cursor. |
 | `--all` | false | Emit all rows with no paging/context cap. |
-| `--no-flows` | false | Hide flow-id columns on commands that include them. |
+| `--flows` | false | Opt in to structural flow-id columns on browse commands that support them. This explicitly hydrates semantic graph facts. |
 | `--format <FORMAT>` | text | `text` or native `json`. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
-Flow columns are semantic-only navigation labels: exact/narrowed facts only,
-never unresolved fan-out. Dense text tables render compact local labels
+Flow columns are opt-in semantic navigation labels: exact/narrowed facts
+only, never unresolved fan-out. `defs`, `calls`, `imports`, `vars`, `strings`,
+`args`, `operations`, `classes`, `refs`, and `search` support `--flows`;
+lightweight syntax rows remain the default. Dense text tables render compact local labels
 (`F1`, `F2`, ...) and print a `flow ids:` legend below the table with the
 complete copyable `F:<16-hex>` ids. If a rendered flow cell ends in `…`, the
 command also prints `semantic-only flows column incomplete`; those IDs are a
@@ -616,11 +625,13 @@ JSON includes top-level `analysis_complete` and
 `analysis_incomplete_reasons`. Structural `tree` marks depth and child limits
 incomplete; use `--all` and avoid restrictive `--max-depth` when you need every
 node. `read-file`
-finding digests repeat their own completion fields. If caller/callee bodies
-are omitted by the default inline-body cap, the view is marked incomplete;
-use `--max-inlined-bodies 0` when you need every cross-file body. `--all`
-only disables output pagination; it does not enable semantic work or widen
-the body set.
+finding digests repeat their own completion fields. Semantic overlays are
+enabled only by `--rules-dir`, `--from`, `--to`, or
+`--max-inlined-bodies`. Once enabled, connected caller/callee bodies are
+uncapped by default; `--max-inlined-bodies <N>` is the explicit body cap and
+`0` is uncapped. `--all` only disables output pagination; it does not enable
+semantic work or change the body scope. Set `BONSAI_INCLUDE_MINIFIED=1` only
+when `read-file` path/symbol resolution should include `.min.*` assets.
 
 ## Debug Dumps
 

@@ -169,13 +169,14 @@ coverage is remembered for every exact source snapshot, including clean files,
 so the final `analysis_complete` audit parses only unchecked files and never
 materializes declaration/flow bodies just for diagnostics.
 
-The final 2026-08-06 ABI-v61 release gate completed a fresh-cache exact
-Elasticsearch taint scan in 28.84 seconds under
-`BONSAI_MEMORY_BUDGET_MB=3072`; semantic generation validation and immediate
-fresh-process reuse completed in 5.23 seconds and 2.35 seconds. Broad exact
-`inspect execute --taint-flow` completed in 28.70 seconds
+The final 2026-08-06 ABI-v62 release gate completed a fresh-cache exact
+Elasticsearch taint scan in 30.22 seconds under
+`BONSAI_MEMORY_BUDGET_MB=3072`; the required one-time ABI-v61-to-v62 semantic
+generation rebuild took 1,541.88 seconds and immediate fresh-process reuse
+completed in 2.32 seconds. Broad exact
+`inspect execute --taint-flow` completed in 29.58 seconds
 for 198,718 pageable paths, and exhaustive high-severity sink inventory
-completed in 21.34 seconds. The integration gate protects cold planning, warm
+completed in 22.63 seconds. The integration gate protects cold planning, warm
 production taint, navigation, inspect, and security inventories without
 terminating, skipping, or capping semantic work.
 

@@ -102,14 +102,14 @@ a regression pass: record the host, source-file count, cold/warm cache state,
 wall time, physical footprint/RSS, swaps, and completeness, then review the
 phase/allocation change.
 
-The final 2026-08-06 ABI-v61 reference pass completed all five tests in 213.51
-seconds: fresh-cache production taint 28.84 seconds, semantic generation
-validation 5.23 seconds, warm reuse 2.35 seconds, default inspect 10.87
-seconds, broad raw taint inspect 28.70 seconds, warm production taint 26.26
-seconds, and every
-navigation/inventory command below 30 seconds. The explicit empty-cache
-`index --semantic` bulk prewarm is measured separately because normal commands
-do not force it; the current reference is 1,727.39 seconds. Compiler lowering
+The final 2026-08-06 ABI-v62 reference pass completed all five tests in
+1,760.06 seconds, including the required one-time rebuild from the incompatible
+ABI-v61 generation. That explicit empty-cache `index --semantic` bulk prewarm
+took 1,541.88 seconds; normal commands do not force it. Immediate fresh-process
+reuse took 2.32 seconds, default inspect 10.33 seconds, broad raw-taint inspect
+29.58 seconds, fresh-cache production taint 30.22 seconds, and warm production
+taint 25.90 seconds. Source, sink, sanitizer, and dependency inventories took
+3.85, 22.63, 18.32, and 10.42 seconds respectively. Compiler lowering
 remained near 1 GiB RSS, released its bodies before IDG replay, and the IDG
 worker remained below the 3 GiB scheduling budget.
 
