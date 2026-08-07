@@ -5750,6 +5750,7 @@ mod wrapper_dedup_tests {
             argument_index,
             argument_span: nested_span,
             direct_call_span: Some(nested_span),
+            inline_callback_params: Vec::new(),
             value_flow: bonsai_lang_api::ExpressionFlow {
                 call_sites: vec![nested_span],
                 ..bonsai_lang_api::ExpressionFlow::default()

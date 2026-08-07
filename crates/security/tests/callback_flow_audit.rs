@@ -272,6 +272,110 @@ fn node_source_callback_named_function_reaches_sink() {
     );
 }
 
+#[test]
+fn node_source_callback_inline_function_reaches_sink() {
+    let dir = std::env::temp_dir().join("bonsai_node_inline_source_callback_audit");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("m.js"),
+        "const fs = require('fs');\n\
+         function load(path) {\n\
+           fs.readFile(path, (err, data) => {\n\
+             eval(data);\n\
+           });\n\
+         }\n",
+    )
+    .expect("write");
+    let registry = bonsai_adapters::all_languages_registry();
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack");
+    let ws = bonsai_workspace::Workspace::index(&dir, registry).expect("index");
+    let report = bonsai_security::run_taint_analysis(&ws, &pack, Default::default()).expect("taint");
+    let matching = report.findings.iter().any(|finding| {
+        finding.finding.source.rule_id == "javascript.source.fs_readfile_callback"
+            && finding.finding.sink.rule_id == "javascript.eval.builtin_eval"
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        matching,
+        "fs.readFile must deliver its rule-declared data parameter into an inline callback: {:#?}",
+        report.findings
+    );
+}
+
+#[test]
+fn typescript_trpc_inline_destructured_input_reaches_prisma_sink() {
+    let dir = std::env::temp_dir().join("bonsai_typescript_trpc_inline_callback_audit");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("router.ts"),
+        r#"
+import { initTRPC } from "@trpc/server";
+import { PrismaClient } from "@prisma/client";
+const t = initTRPC.create();
+const prisma = new PrismaClient();
+const schema = {};
+export const appRouter = t.router({
+  list: t.procedure.input(schema).query(async ({ input }) => {
+    return prisma.$queryRawUnsafe("SELECT * FROM reports ORDER BY " + input.column);
+  }),
+});
+"#,
+    )
+    .expect("write");
+    let registry = bonsai_adapters::all_languages_registry();
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack");
+    let ws = bonsai_workspace::Workspace::index(&dir, registry).expect("index");
+    let report = bonsai_security::run_taint_analysis(&ws, &pack, Default::default()).expect("taint");
+    let matching = report.findings.iter().find(|finding| {
+        finding.finding.source.rule_id == "typescript.source.trpc_callback_input"
+            && finding.finding.sink.rule_id == "typescript.sqli.prisma_query_raw_unsafe"
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        matching.is_some(),
+        "tRPC inline callback input must reach the Prisma raw-query sink: {:#?}",
+        report.findings
+    );
+}
+
+#[test]
+fn typescript_callback_without_a_declared_source_shape_stays_clean() {
+    let dir = std::env::temp_dir().join("bonsai_typescript_non_source_inline_callback_audit");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("router.ts"),
+        r#"
+import { initTRPC } from "@trpc/server";
+import { PrismaClient } from "@prisma/client";
+const t = initTRPC.create();
+const prisma = new PrismaClient();
+export const appRouter = t.router({
+  list: t.procedure.query(async ({ input }) => {
+    return prisma.$queryRawUnsafe("SELECT * FROM reports ORDER BY " + input.column);
+  }),
+});
+"#,
+    )
+    .expect("write");
+    let registry = bonsai_adapters::all_languages_registry();
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack");
+    let ws = bonsai_workspace::Workspace::index(&dir, registry).expect("index");
+    let report = bonsai_security::run_taint_analysis(&ws, &pack, Default::default()).expect("taint");
+    let unexpected = report.findings.iter().any(|finding| {
+        finding.finding.source.rule_id == "typescript.source.trpc_callback_input"
+            && finding.finding.sink.rule_id == "typescript.sqli.prisma_query_raw_unsafe"
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !unexpected,
+        "an inline callback compiler fact is not itself a source: {:#?}",
+        report.findings
+    );
+}
+
 /// WS3 coercion passthrough (Go). A Go type conversion `string(b)` /
 /// `string([]byte(input))` changes representation but preserves
 /// attacker-controlled content — the analogue of Python `str()`/`bytes()`

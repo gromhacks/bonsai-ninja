@@ -73,9 +73,9 @@
 use bonsai_common::{FuncId, Precision, Span};
 use bonsai_factstore::{StrId, StringPoolBuilder};
 use bonsai_lang_api::{
-    call_receiver_fact_for_span, kit::SYNTHETIC_TUPLE_RESULT_PREFIX, AssignValueKind, AssignmentValueFact,
-    CallArg, CallKind, CallReceiverFact, Decl, DeclKind, ExpressionFlow, ExpressionProjection,
-    FiniteLiteralSelectionFact, FlowEvent,
+    call_argument_value_fact, call_receiver_fact_for_span, kit::SYNTHETIC_TUPLE_RESULT_PREFIX,
+    AssignValueKind, AssignmentValueFact, CallArg, CallArgumentValueFact, CallKind, CallReceiverFact, Decl,
+    DeclKind, ExpressionFlow, ExpressionProjection, FiniteLiteralSelectionFact, FlowEvent,
 };
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -1034,6 +1034,7 @@ pub fn transfer_function_for_with_options_and_syntax_facts(
         assignment_values,
         call_receivers,
         &[],
+        &[],
     )
 }
 
@@ -1048,6 +1049,7 @@ pub fn transfer_function_for_with_options_and_compiler_facts(
     options: &TransferOptions,
     assignment_values: &[AssignmentValueFact],
     call_receivers: &[CallReceiverFact],
+    call_argument_values: &[CallArgumentValueFact],
     finite_literal_selections: &[FiniteLiteralSelectionFact],
 ) -> TransferOutput {
     let matchers = CompiledTransferMatchers::new(options);
@@ -1057,6 +1059,7 @@ pub fn transfer_function_for_with_options_and_compiler_facts(
         &matchers,
         assignment_values,
         call_receivers,
+        call_argument_values,
         finite_literal_selections,
     )
 }
@@ -1067,6 +1070,7 @@ pub(crate) fn transfer_function_for_with_compiled_options_and_syntax_facts(
     matchers: &CompiledTransferMatchers,
     assignment_values: &[AssignmentValueFact],
     call_receivers: &[CallReceiverFact],
+    call_argument_values: &[CallArgumentValueFact],
     finite_literal_selections: &[FiniteLiteralSelectionFact],
 ) -> TransferOutput {
     let func = FuncId::new(decl.symbol.raw());
@@ -1102,6 +1106,7 @@ pub(crate) fn transfer_function_for_with_compiled_options_and_syntax_facts(
         pending_expression_calls: Vec::new(),
         assignment_values,
         call_receivers,
+        call_argument_values,
         finite_literal_selections,
         in_loop_replay: false,
     };
@@ -1760,6 +1765,10 @@ struct TransferCtx<'a> {
     assignment_values: &'a [AssignmentValueFact],
     /// Tree-sitter receiver-expression facts keyed by semantic call span.
     call_receivers: &'a [CallReceiverFact],
+    /// Tree-sitter call-argument value facts. Inline callback parameter
+    /// bindings live here so rule-declared source delivery never depends on
+    /// parsing rendered callback text or manufacturing a callable symbol.
+    call_argument_values: &'a [CallArgumentValueFact],
     /// Compiler-proven assignments whose dynamic key selects only among
     /// literal values. Sorted by assignment span for logarithmic lookup.
     finite_literal_selections: &'a [FiniteLiteralSelectionFact],
@@ -3751,6 +3760,8 @@ fn walk_call(
         ret_node,
         ctx,
     );
+    let source_callback_args = source_callback_args_for_call(&observed_callee, ctx);
+    apply_inline_source_callback_param_bindings(span, ret_node, &source_callback_args, ctx);
     ctx.out.call_sites.push(CallSiteRef {
         site,
         callee_name: name.to_string(),
@@ -3768,7 +3779,7 @@ fn walk_call(
         call_arg_values: arg_values,
         call_arg_writeback_targets: arg_writeback_targets,
         call_arg_names: arg_names,
-        source_callback_args: source_callback_args_for_call(&observed_callee, ctx),
+        source_callback_args,
         is_assign_rhs: false,
         unresolved_result_passthrough: ctx.options.include_unresolved_call_result_passthrough,
         unresolved_receiver_result_passthrough: (ctx.options.include_unresolved_call_result_passthrough
@@ -4008,6 +4019,62 @@ fn source_callback_args_for_call(
         .filter_map(|index| ctx.options.source_callback_args.get(index))
         .cloned()
         .collect()
+}
+
+/// Bind a rule-declared source callback directly into an inline callback body.
+///
+/// Direct call-argument lambdas are intentionally owned by the enclosing
+/// declaration: the language frontend inlines their body events instead of
+/// manufacturing a second callable. The compiler object records the lambda's
+/// exact parameter bindings on the argument value fact. When a rule declares
+/// that this callback position receives source data, connect the anchored
+/// source call result to those local bindings. Named callback references keep
+/// using Phase 3's resolver-backed cross-function stitch.
+fn apply_inline_source_callback_param_bindings(
+    span: Span,
+    call_ret_node: NodeId,
+    source_callback_args: &[SourceCallbackArgSpec],
+    ctx: &mut TransferCtx<'_>,
+) {
+    let mut bound_names = ahash::AHashSet::default();
+    for shape in source_callback_args {
+        let Some(argument) =
+            call_argument_value_fact(ctx.call_argument_values, span, shape.callback_arg_index)
+        else {
+            continue;
+        };
+        if argument.inline_callback_params.is_empty() {
+            continue;
+        }
+        for &source_param_index in &shape.source_param_indices {
+            let Some(param_name) = argument.inline_callback_params.get(source_param_index) else {
+                continue;
+            };
+            let param_name = param_name.strip_prefix("...").unwrap_or(param_name).trim();
+            if param_name.is_empty() || !bound_names.insert(param_name.to_string()) {
+                continue;
+            }
+            let binding = ctx.write_node(param_name, argument.argument_span);
+            ctx.emit(IdgEdge {
+                from: call_ret_node,
+                to: binding,
+                meta: crate::edge::EdgeMeta {
+                    precision: Precision::Exact,
+                    kind: IdgEdgeKind::IntraAssign,
+                    call_kind: bonsai_callgraph::EdgeKind::Direct,
+                    via_span: span,
+                },
+            });
+            // The callback receives the complete source value at this
+            // parameter position. Preserve that whole-value provenance so a
+            // later exact projection (`input.column`) can inherit from the
+            // binding when no narrower projected writer exists. This is the
+            // same field-sensitive fallback used for ordinary call results;
+            // it never widens one projected field into a sibling.
+            ctx.whole_call_result_writer_ids.insert(binding);
+            ctx.commit_writer(param_name, binding);
+        }
+    }
 }
 
 fn apply_clean_output_overwrite_call(
@@ -4613,6 +4680,7 @@ pub fn transfer_for_many_with_options<'d>(
                 decl,
                 options,
                 &matchers,
+                &[],
                 &[],
                 &[],
                 &[],

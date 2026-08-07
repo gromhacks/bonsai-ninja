@@ -275,7 +275,9 @@ Call-site value shape is likewise compiler-owned. Each adapter lowers exact
 scalar literals, exact named aggregate fields from structurally complete
 spread-free aggregates, complete positional
 sequences, addressable places, and nested expression carriers into
-`CallArgumentValueFact`. Unknown sequence elements remain explicit `None`
+`CallArgumentValueFact`. When the complete argument is an inline callback,
+the same fact retains its Tree-sitter-lowered parameter bindings in source
+order. Unknown sequence elements remain explicit `None`
 slots, so a rule can prove `['sh', '-c', dynamic]` without guessing the
 dynamic value. Match constraints such as `arg_sequence_items_equal` compare
 those typed facts and fail closed when the adapter did not prove the shape;
@@ -556,8 +558,13 @@ interprocedural engine and not an alternate source-to-sink result.
   and `fgets` buffers. These are derived from source rules, not from a
   built-in API list.
 - `source_callback_args: Vec<SourceCallbackArgs>` — rule-declared source
-  callbacks and parameter positions. Callback invocation itself is resolved
-  from AST/callgraph facts rather than callback method-name inventories.
+  callbacks and parameter positions. Named callbacks resolve through exact
+  AST/callgraph identities. Direct call-argument lambdas use the adapter's
+  `CallArgumentValueFact::inline_callback_params` and their already-inlined
+  body events; the delivered parameter retains whole-value provenance so an
+  exact projection such as `input.column` inherits the source without
+  widening to sibling fields. Neither path parses callback text or carries a
+  framework/API-name inventory in the engine.
 - `call_result_passthroughs: Vec<CallResultPassthrough>` — rulepack
   declarations that selected call arguments or the method receiver flow
   to the call result, such as URL decode/unescape helpers. The engine

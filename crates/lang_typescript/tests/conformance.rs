@@ -110,6 +110,45 @@ fn arrow_expression_records_implicit_return() {
 }
 
 #[test]
+fn inline_callback_argument_records_ast_parameter_bindings() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "router.ts",
+            r#"
+const route = procedure.input(schema).query(async ({ input }: Request, context: Context) => {
+  return handle(input.column, context.user);
+});
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("TypeScript declaration index");
+    let callback = index
+        .call_argument_values
+        .iter()
+        .find(|fact| !fact.inline_callback_params.is_empty())
+        .expect("inline callback argument compiler fact");
+
+    assert_eq!(callback.argument_index, 0);
+    assert_eq!(callback.inline_callback_params, ["input", "context"]);
+    assert!(
+        index.call_argument_values.iter().all(|fact| {
+            !fact.inline_callback_params.is_empty()
+                || !fact
+                    .value_flow
+                    .source_names
+                    .iter()
+                    .any(|source| source.contains("=>"))
+        }),
+        "callback identity must come from parsed parameter nodes, not rendered source text"
+    );
+}
+
+#[test]
 fn static_escape_maps_and_character_transforms_are_exact_compiler_facts() {
     use bonsai_lang_api::{CharacterSubstitutionDomain, LanguageAdapter};
 
