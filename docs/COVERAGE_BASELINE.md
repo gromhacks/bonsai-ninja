@@ -14,7 +14,7 @@ will leave unrecognized forms as diagnostic incompleteness.
 > **Reading this alongside [`TAINT_COVERAGE_MATRIX.md`](TAINT_COVERAGE_MATRIX.md)?**
 > The taint matrix shows every applicable cell as `pass` - that's the
 > per-scenario behavioural truth (`TAINT_COVERAGE_MATRIX.md` currently
-> reports 1279 applicable scenario × language cells that run the real
+> reports 1233 applicable scenario × language cells that run the real
 > engine and assert the right answer). This doc is
 > the *static-evidence declaration* - `Partial` here means "recognized
 > forms produce semantic evidence, rare shapes are marked

@@ -25,7 +25,16 @@ The analyzer is one compiler-style pipeline:
 
 ## Current validation
 
-Validated on 2026-08-06 (dated measurements below retain their run date):
+Validated through 2026-08-07 (dated measurements below retain their run date):
+
+- Commit `bdd6125` removes the Solidity frontend, grammar dependency,
+  fixtures, rulepack, package metadata, and documentation after the product
+  decision to keep one application/code-analysis model. The shipped registry
+  and release package now contain exactly the 20 adapters listed in
+  [Language Support](language-support.mdx); no disabled Solidity path or
+  orphaned smart-contract rules remain. The post-removal release build,
+  1,386-case taint matrix, 33-case rulepack conformance suite, adapter metadata
+  checks, and deep rulepack validation are green.
 
 - The `d510043` baseline passed `cargo clippy --workspace --all-targets
   --locked -- -D warnings`; the final ABI-v62 delta passed the same strict
@@ -39,8 +48,8 @@ Validated on 2026-08-06 (dated measurements below retain their run date):
   every target under strict Clippy and reran its affected optimized adapter,
   IDG, security, callback, rulepack, architecture, and CLI suites.
 - Behavioral suites passed for callgraph, resolver, IDG, taint, security, SDK/CLI
-  parity, the 1,076-case per-language CLI matrix, the 121-case end-to-end taint
-  engine suite, conformance architecture invariants, and the exhaustive
+  parity, the 1,029-case per-language CLI matrix, the end-to-end taint engine
+  suites, conformance architecture invariants, and the exhaustive
   rule-example collision validator.
 - The August compiler-guard regression set is pinned at the fact boundary:
   Java constructor locals keep lexical scope, declared receiver types do not
@@ -49,7 +58,7 @@ Validated on 2026-08-06 (dated measurements below retain their run date):
   literal-map membership is scope/mutation checked, exact configured character
   substitutions require complete mappings, and URL rebuild guards prove scheme,
   host allowlist, path, and redirect options from typed IR.
-- The 1,441-case taint matrix now enforces positive and negative contracts for
+- The 1,386-case taint matrix now enforces positive and negative contracts for
   every supported language. Valid-source conformance rejects parser/adapter
   diagnostics, malformed-source conformance requires an explicit incomplete
   parser scope, and the capability matrix fails on every unexplained
@@ -350,6 +359,7 @@ The gates cover distinct failure classes:
 | Hardcoded and corpus-independence audits | Shared language/API guesses and benchmark-specific tuning |
 | Rule validation, collision audit, and taint replay | Invalid YAML, warnings, empty audit coverage, ambiguous ownership, or examples the engine cannot reproduce |
 | Public API, layering, dependency, license, and clone audits | Accidental API drift, dependency cycles, stale dependencies, advisories, unreviewed licensing, and copy-paste architecture |
+| Documentation consistency | Broken local links or headings, navigation/language-count drift, and examples that retain retired CLI flags |
 | Self-security plus JSON/SARIF/HTML and relocated-package smokes | Incomplete self-analysis, broken consumer output contracts, silent rulepack loss, or an archive that only works from the source checkout |
 | Exact Elasticsearch gate under 3 GiB | Cold/warm cache, navigation, inspect, security correctness, latency, or memory-scheduling regressions; release CI fails closed if its corpus or binary is unavailable |
 | Checksums and immutable action pins | Corrupt release archives and mutable CI dependencies |
@@ -392,6 +402,7 @@ cargo test --release --locked -p bonsai_conformance --test architecture_invarian
 cargo test --release --locked -p bonsai_security --test rulepack_conformance
 python3 scripts/sanitizer_credit_audit.py
 python3 scripts/sync_skill.py --check
+python3 scripts/audit-docs.py
 scripts/audit-layering.sh
 scripts/audit-hardcoded.sh --check /tmp/hardcoded-audit
 python3 scripts/audit-corpus-independence.py
