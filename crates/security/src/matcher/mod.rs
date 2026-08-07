@@ -406,8 +406,8 @@ impl<'a> InterTaintView<'a> {
 
     /// True when the engine recorded the call receiver at `span` as
     /// tainted on the current source graph. This covers receiver-state
-    /// APIs such as `tainted.!` and `target.delegatecall("")`, where
-    /// the dangerous operand is not a syntactic argument.
+    /// APIs such as Scala `tainted.!`, where the dangerous operand is not a
+    /// syntactic argument.
     #[must_use]
     pub fn receiver_is_tainted(&self, span: Span) -> bool {
         if self.calls_by_span.get(&span).is_some_and(|calls| {

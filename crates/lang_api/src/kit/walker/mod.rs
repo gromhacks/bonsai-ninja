@@ -167,10 +167,10 @@ fn lower_branch(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<Flow
         let else_node = node
             .child_by_field_name("alternative")
             .or_else(|| node.child_by_field_name("else"))
-            // Solidity's grammar exposes both if arms with the same
-            // `body` field. `child_by_field_name("body")` returns the
-            // first arm only, so recover the second body-like sibling
-            // when no explicit alternative field exists.
+            // Some grammars expose both arms with the same `body` field.
+            // `child_by_field_name("body")` returns the first arm only, so
+            // recover the second body-like sibling when no explicit
+            // alternative field exists.
             .or_else(|| then_node.and_then(|then| next_named_sibling_within(&node, then)));
         let mut then_events = Vec::new();
         if let Some(n) = then_node {

@@ -86,7 +86,7 @@ if (( CHECK_MODE == 1 )); then
     # every row starts with `| lang_<name>`. Drift in the row count
     # likely means an adapter was added or removed.
     rows=$(grep -c '^| lang_' "$doc")
-    expected=21
+    expected=20
     if (( rows != expected )); then
         echo "DRIFT: docs/contributing/adapter-capabilities.mdx has $rows lang_* rows, expected $expected"
         echo ""

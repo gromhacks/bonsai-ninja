@@ -1,7 +1,7 @@
 //! Language-specific syntactic-forms audit — verifies that each
 //! adapter surfaces unusual language constructs (Perl backtick/qx,
 //! Ruby backticks + string interpolation, PHP include/require,
-//! Erlang bit-string concat, Solidity inline assembly) as Call /
+//! Erlang bit-string concatenation) as Call /
 //! Read FlowEvents so the rulepack's name-based rules can match.
 //!
 //! Per `docs/contributing/taint-engine-spec.mdx § Adapter Contract`: per-language
@@ -49,7 +49,6 @@ const LANG_TABLE: &[(&str, Expected)] = &[
     ("ruby", Expected::Pass),
     ("php", Expected::Pass),
     ("erlang", Expected::Pass),
-    ("solidity", Expected::Pass),
     ("elixir", Expected::Pass),
 ];
 

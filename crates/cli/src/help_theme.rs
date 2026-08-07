@@ -23,7 +23,7 @@ use crate::{resolve_theme_early, Cli};
 pub(crate) const CLI_LONG_ABOUT: &str = "\
 bonsai-ninja indexes a source tree and lets you browse symbols, trace
 cross-file execution, inspect source-backed flows, and run rulepack-driven
-security taint analysis across 21 languages.";
+security taint analysis across 20 languages.";
 
 const MAX_HELP_DESCRIPTION_LINES: usize = 8;
 const MAX_SUBCOMMAND_EXAMPLE_COMMANDS: usize = 3;

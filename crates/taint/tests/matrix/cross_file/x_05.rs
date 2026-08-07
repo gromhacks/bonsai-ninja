@@ -295,24 +295,6 @@ fn x_05_scala() {
 }
 
 #[test]
-fn x_05_solidity() {
-    run_positive_cell(
-        "X_05",
-        LangFixture {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            files: &[(
-                "Demo.sol",
-                "contract Demo { function entry(string memory args) public { sink(args); } }\n",
-            )],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
-
-#[test]
 fn x_05_swift() {
     run_positive_cell(
         "X_05",

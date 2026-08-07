@@ -4425,26 +4425,12 @@ fn render_audit(
     headers.push("gaps");
     let mut t = u.table(&headers);
     t.set_content_arrangement(comfy_table::ContentArrangement::Disabled);
-    let ecosystem_specific: Vec<&str> = report
-        .languages
-        .iter()
-        .filter(|l| !l.canonical_sink_families_applicable)
-        .map(|l| l.language.as_str())
-        .collect();
     for lang in &report.languages {
         let mut row: Vec<Cell> = vec![
             Cell::new(u.name(&lang.language)),
             Cell::new(count_cell(u, lang.sources.enabled, 5)),
             Cell::new(count_cell(u, lang.sanitizers.enabled, 5)),
         ];
-        if !lang.canonical_sink_families_applicable {
-            for _ in &report.canonical_sink_families {
-                row.push(Cell::new(u.dim("n/a")));
-            }
-            row.push(Cell::new(u.dim("n/a")));
-            t.add_row(row);
-            continue;
-        }
         let mut gaps: Vec<&str> = Vec::new();
         for fam in &report.canonical_sink_families {
             let entry = lang.sinks.get(fam);
@@ -4475,19 +4461,6 @@ fn render_audit(
         "{}",
         u.dim("audit: counts are enabled-only.  gaps lists sink families with 0 enabled rules.")
     );
-    if !ecosystem_specific.is_empty() {
-        cli_println!(
-            "{}",
-            u.dim(&format!(
-                "n/a = canonical app/web sink-family audit does not apply to ecosystem-specific languages ({})",
-                ecosystem_specific.join(", ")
-            ))
-        );
-        cli_println!(
-            "{}",
-            u.dim("ecosystem-specific languages use the security model declared by rulepack metadata, not app/web taint parity.")
-        );
-    }
     let descriptions = report
         .languages
         .iter()
@@ -4538,7 +4511,7 @@ fn render_audit(
 }
 
 /// Compact column label for the audit matrix. Keep a stable 3-5 char
-/// abbreviation for each long family name so 21-language × 17-family
+/// abbreviation for each long family name so 20-language × 17-family
 /// tables don't force comfy-table into char-wrapping mode. Families
 /// whose natural name is already short (`xss`, `jwt`, `tls`, …) are
 /// returned verbatim.

@@ -55,7 +55,6 @@ const LANGUAGES: &[&str] = &[
     "ruby",
     "rust",
     "scala",
-    "solidity",
     "swift",
     "typescript",
 ];

@@ -1084,21 +1084,3 @@ fn erlang_cross_file_trace() {
     );
     assert_cross_file_trace(&ws, "main", "run", "worker.erl");
 }
-
-#[test]
-fn solidity_unresolved_contract_static_call_is_marked_incomplete() {
-    let ws = ws_with(
-        Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-        &[
-            (
-                "/w/main.sol",
-                "pragma solidity ^0.8.0;\nimport \"./w.sol\";\ncontract M { function main() public { W.worker(); } }",
-            ),
-            (
-                "/w/w.sol",
-                "pragma solidity ^0.8.0;\ncontract W { function worker() public pure {} }",
-            ),
-        ],
-    );
-    assert_unresolved_call_marked_incomplete(&ws, "main", "W.worker");
-}

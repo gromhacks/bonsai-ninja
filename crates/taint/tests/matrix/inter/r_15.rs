@@ -83,21 +83,3 @@ fn r_15_elixir() {
 fn r_15_erlang() {
     run_positive_cell("R_15", LangFixture { lang:"erlang", adapter:Arc::new(bonsai_lang_erlang::ErlangAdapter::new()), files:&[("demo.erl","-module(demo).\n-export([entry/1, helper/2]).\nhelper(P, 0) -> sink(P);\nhelper(P, N) -> helper(P, N-1).\nentry(Args) -> helper(Args, 2).\n")], entry:"entry", seed:&["Args"], sink:"sink" });
 }
-#[test]
-fn r_15_solidity() {
-    run_positive_cell(
-        "R_15",
-        LangFixture {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            files: &[(
-                "Demo.sol",
-                "contract Demo { function entry(string memory args) public { sink(args); } }
-",
-            )],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}

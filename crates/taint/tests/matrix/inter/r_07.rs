@@ -420,17 +420,3 @@ fn r_07_erlang() {
         },
     );
 }
-
-#[test]
-fn r_07_solidity() {
-    run_positive_cell("R_07", LangFixture {
-        lang: "solidity",
-        adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-        files: &[
-            ("Demo.sol", "library Util { function helper(string memory p) internal pure { sink(p); } }\ncontract Demo { function entry(string memory args) public pure { Util.helper(args); } }\n"),
-        ],
-        entry: "entry",
-        seed: &["args"],
-        sink: "sink",
-    });
-}

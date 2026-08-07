@@ -339,15 +339,3 @@ fn ot_12_erlang() {
         sink: "sink",
     }, "Cap");
 }
-
-#[test]
-fn ot_12_solidity() {
-    run_ot_12(LangFixture {
-        lang: "solidity",
-        adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-        files: &[("Demo.sol", "interface ILib { function unknownLibFunc(string memory p) external; }\ncontract Demo { ILib lib; function entry(string memory args) public { lib.unknownLibFunc(args); uint cap = 32; sink(cap); } }\n")],
-        entry: "entry",
-        seed: &["args"],
-        sink: "sink",
-    }, "cap");
-}

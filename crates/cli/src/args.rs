@@ -2550,8 +2550,7 @@ pub(crate) enum SecurityAction {
         #[arg(long)]
         category: Option<String>,
         /// Source tag narrower. Documented vocabulary:
-        /// `block-context`, `browser-input`, `calldata`,
-        /// `caller-identity`, `caller-input`, `caller-value`,
+        /// `browser-input`, `caller-input`,
         /// `cli-input`, `clipboard-input`, `cloud-event`, `cloud-input`,
         /// `config-input`, `db-input`, `db-row`, `deep-link`,
         /// `deprecated-auth`, `env-input`, `event-input`,
@@ -2641,23 +2640,23 @@ pub(crate) enum SecurityAction {
         #[arg(long)]
         severity: Option<String>,
         /// Sink tag narrower. Documented vocabulary:
-        /// `access-control`, `address-squatting`, `atom-exhaustion`,
+        /// `access-control`, `atom-exhaustion`,
         /// `cache-poisoning`, `code-injection`, `command-injection`,
         /// `cookie-misconfig`, `cors`, `cql-injection`,
         /// `cypher-injection`, `dos`, `env-leak`, `ets-match-dos`,
-        /// `external-call`, `file-upload`, `format-string`, `graphql`,
+        /// `file-upload`, `format-string`, `graphql`,
         /// `graphql-injection`, `hash-collision`, `header-injection`,
-        /// `host-header`, `information-exposure`,
+        /// `host-header`,
         /// `insecure-deserialization`, `insecure-temp-file`,
-        /// `integer-overflow`, `intent-redirection`, `jndi-injection`,
+        /// `intent-redirection`, `jndi-injection`,
         /// `jwt`, `ldap-injection`, `lfi`, `log-injection`,
         /// `mass-assignment`, `memory-safety`, `nosql-injection`,
-        /// `oauth`, `open-redirect`, `oracle-manipulation`,
+        /// `oauth`, `open-redirect`,
         /// `path-traversal`, `prototype-pollution`, `queue-injection`,
-        /// `race`, `redos`, `reentrancy`, `signature-replay`,
+        /// `race`, `redos`,
         /// `smtp-injection`, `sql-injection`, `sqli`,
         /// `state-manipulation`, `ssrf`, `ssti`, `timeout-bypass`,
-        /// `timing-attack`, `unchecked-return`, `untrusted-token`,
+        /// `timing-attack`, `untrusted-token`,
         /// `weak-auth`, `weak-crypto`, `weak-randomness`, `weak-tls`,
         /// `web-llm`, `xss`, `xxe`, `zip-slip`.
         #[arg(long)]
@@ -2951,23 +2950,23 @@ pub(crate) enum SecurityAction {
         #[arg(long)]
         severity: Option<String>,
         /// Sink tag narrower. Documented vocabulary:
-        /// `access-control`, `address-squatting`, `atom-exhaustion`,
+        /// `access-control`, `atom-exhaustion`,
         /// `cache-poisoning`, `code-injection`, `command-injection`,
         /// `cookie-misconfig`, `cors`, `cql-injection`,
         /// `cypher-injection`, `dos`, `env-leak`, `ets-match-dos`,
-        /// `external-call`, `file-upload`, `format-string`, `graphql`,
+        /// `file-upload`, `format-string`, `graphql`,
         /// `graphql-injection`, `hash-collision`, `header-injection`,
-        /// `host-header`, `information-exposure`,
+        /// `host-header`,
         /// `insecure-deserialization`, `insecure-temp-file`,
-        /// `integer-overflow`, `intent-redirection`, `jndi-injection`,
+        /// `intent-redirection`, `jndi-injection`,
         /// `jwt`, `ldap-injection`, `lfi`, `log-injection`,
         /// `mass-assignment`, `memory-safety`, `nosql-injection`,
-        /// `oauth`, `open-redirect`, `oracle-manipulation`,
+        /// `oauth`, `open-redirect`,
         /// `path-traversal`, `prototype-pollution`, `queue-injection`,
-        /// `race`, `redos`, `reentrancy`, `signature-replay`,
+        /// `race`, `redos`,
         /// `smtp-injection`, `sql-injection`, `sqli`,
         /// `state-manipulation`, `ssrf`, `ssti`, `timeout-bypass`,
-        /// `timing-attack`, `unchecked-return`, `untrusted-token`,
+        /// `timing-attack`, `untrusted-token`,
         /// `weak-auth`, `weak-crypto`, `weak-randomness`, `weak-tls`,
         /// `web-llm`, `xss`, `xxe`, `zip-slip`.
         #[arg(long)]
@@ -3123,8 +3122,7 @@ pub(crate) enum SecurityAction {
         #[arg(long)]
         trust: Option<String>,
         /// Source tag narrower. Documented vocabulary:
-        /// `block-context`, `browser-input`, `calldata`,
-        /// `caller-identity`, `caller-input`, `caller-value`,
+        /// `browser-input`, `caller-input`,
         /// `cli-input`, `clipboard-input`, `cloud-event`, `cloud-input`,
         /// `config-input`, `db-input`, `db-row`, `deep-link`,
         /// `deprecated-auth`, `env-input`, `event-input`,

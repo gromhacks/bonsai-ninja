@@ -5,7 +5,7 @@
 //! run can show — for every (capability, language) — whether the slot
 //! is reliably emitted on a representative fixture. The matrix is the
 //! source of truth subsequent phases gate on: phase 1 must move
-//! "receiver_types" cells to ✅ for all 21 languages; phase 5 introduces
+//! "receiver_types" cells to ✅ for all 20 languages; phase 5 introduces
 //! a new "literal_rhs" capability; etc.
 //!
 //! The matrix runs as a regular `#[test]` (`capability_matrix_report`)

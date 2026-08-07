@@ -40,7 +40,6 @@ SUPPORTED_LANGS = (
     "ruby",
     "rust",
     "scala",
-    "solidity",
     "swift",
     "typescript",
 )
@@ -64,7 +63,6 @@ LANG_EXTENSIONS: dict[str, tuple[str, ...]] = {
     "ruby": (".rb",),
     "rust": (".rs",),
     "scala": (".scala", ".sc"),
-    "solidity": (".sol",),
     "swift": (".swift",),
     "typescript": (".ts", ".tsx"),
 }
@@ -122,11 +120,6 @@ TARGETS: tuple[RepoTarget, ...] = (
     RepoTarget("ruby", "rails", "https://github.com/rails/rails.git"),
     RepoTarget("rust", "rust", "https://github.com/rust-lang/rust.git"),
     RepoTarget("scala", "spark", "https://github.com/apache/spark.git"),
-    RepoTarget(
-        "solidity",
-        "openzeppelin-contracts",
-        "https://github.com/OpenZeppelin/openzeppelin-contracts.git",
-    ),
     RepoTarget("swift", "swift", "https://github.com/swiftlang/swift.git"),
     RepoTarget("typescript", "vscode", "https://github.com/microsoft/vscode.git"),
 )

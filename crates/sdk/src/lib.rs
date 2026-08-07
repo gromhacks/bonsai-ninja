@@ -230,7 +230,7 @@ impl Default for Bonsai {
 }
 
 impl Bonsai {
-    /// Create a facade configured with the bundled 21-language registry.
+    /// Create a facade configured with the bundled 20-language registry.
     #[must_use]
     pub fn new() -> Self {
         Self {

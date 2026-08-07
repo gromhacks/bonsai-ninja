@@ -66,7 +66,6 @@ fn mid_file_snippets_produce_distinct_token_colors() {
         ("rb", "@db.execute(\"SELECT\", [token])"),
         ("rs", "let x = Command::new(\"sh\").arg(\"-c\").output();"),
         ("scala", "val x = stmt.executeQuery(q)"),
-        ("sol", "require(amount > 0, \"z\");"),
         ("swift", "let s = sqlite3_prepare_v2(db, q, -1, &stmt, nil)"),
         ("ts", "const x: Buffer = execSync('ping ' + cmd);"),
     ];

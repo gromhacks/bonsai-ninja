@@ -90,7 +90,7 @@ CATEGORY_TAGS: dict[str, set[str]] = {
         "char-allowlist",
     },
     "ssti": {"ssti"},
-    "jwt": {"jwt", "untrusted-token", "signature-replay"},
+    "jwt": {"jwt", "untrusted-token"},
     "nosql-injection": {"nosql-injection"},
     "code-injection": {"code-injection", "jndi-injection"},
     "header-injection": {
@@ -113,7 +113,7 @@ CATEGORY_TAGS: dict[str, set[str]] = {
     "rate-limit-missing": {"rate-limit", "rate-limit-missing"},
     "log-injection": {"log-injection"},
     "weak-rng": {"weak-randomness"},
-    "info-disclosure": {"information-disclosure", "information-exposure", "env-leak"},
+    "info-disclosure": {"information-disclosure", "env-leak"},
     "graphql": {"graphql", "graphql-injection"},
     "llm": {"web-llm"},
 }

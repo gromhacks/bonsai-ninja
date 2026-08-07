@@ -5,7 +5,7 @@
 //! site so over-taint can't bridge `sink('safe', tainted)` into
 //! `sink(tainted, 'safe')`.
 //!
-//! All 21 languages. Migrated from `over_taint_matrix.rs::
+//! All 20 languages. Migrated from `over_taint_matrix.rs::
 //! over_taint_all_languages_second_tainted_arg_does_not_taint_first_arg`.
 
 #![allow(unreachable_pub)]
@@ -302,21 +302,6 @@ fn ot_03_erlang() {
         )],
         entry: "entry",
         seed: &["Args"],
-        sink: "sink",
-    });
-}
-
-#[test]
-fn ot_03_solidity() {
-    run_ot_03(LangFixture {
-        lang: "solidity",
-        adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-        files: &[(
-            "Demo.sol",
-            "contract Demo { function entry(string memory args) public { sink(\"safe\", args); } }\n",
-        )],
-        entry: "entry",
-        seed: &["args"],
         sink: "sink",
     });
 }

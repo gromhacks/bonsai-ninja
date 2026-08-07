@@ -27,7 +27,6 @@ bonsai_lang_python = { workspace = true }
 bonsai_lang_ruby = { workspace = true }
 bonsai_lang_rust = { workspace = true }
 bonsai_lang_scala = { workspace = true }
-bonsai_lang_solidity = { workspace = true }
 bonsai_lang_swift = { workspace = true }
 bonsai_lang_typescript = { workspace = true }
 

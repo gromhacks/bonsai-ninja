@@ -1588,7 +1588,6 @@ fn open_fixture(subdir: &str) -> AnalyzerDb {
     registry.register(Arc::new(bonsai_lang_lua::LuaAdapter::new()));
     registry.register(Arc::new(bonsai_lang_elixir::ElixirAdapter::new()));
     registry.register(Arc::new(bonsai_lang_erlang::ErlangAdapter::new()));
-    registry.register(Arc::new(bonsai_lang_solidity::SolidityAdapter::new()));
     registry.register(Arc::new(bonsai_lang_perl::PerlAdapter::new()));
     let db = AnalyzerDb::new(vfs, registry);
     for file in db.vfs().all_files() {
@@ -2266,11 +2265,6 @@ fn interproc_complex_fixture_elixir() {
 #[test]
 fn interproc_complex_fixture_erlang() {
     interproc_complex_produces_propagations("erlang", "erlang/complex");
-}
-
-#[test]
-fn interproc_complex_fixture_solidity() {
-    interproc_complex_produces_propagations("solidity", "solidity/complex");
 }
 
 #[test]

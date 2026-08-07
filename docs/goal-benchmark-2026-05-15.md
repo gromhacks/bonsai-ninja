@@ -882,9 +882,9 @@ Broader examples smoke coverage after the completion metadata and paging fixes:
   `dump-cfg`, `dump-resolve`, `dump-taint`, `security sources`, `security
   sinks`, `security sanitizers`, `security deps`, `security source-analysis`,
   `security taint-analysis`, and `export`.
-- Cross-language micro matrix passed for 22 languages (`c`, `cpp`, `csharp`,
+- Cross-language micro matrix passed for 20 languages (`c`, `cpp`, `csharp`,
   `dart`, `elixir`, `erlang`, `go`, `java`, `javascript`, `kotlin`, `lua`,
-  `objc`, `perl`, `php`, `python`, `ruby`, `rust`, `scala`, `solidity`,
+  `objc`, `perl`, `php`, `python`, `ruby`, `rust`, `scala`,
   `swift`, `typescript`): each ran structural `index`, `calls --format json
   --all`, `dump-callgraph --format json --all`, and
   `security taint-analysis --format json --all`.
@@ -1302,9 +1302,9 @@ freshness and receiver-type fixes:
   and `120` taint engine e2e tests.
 - Supported-language adapter sweep:
   `cargo test -q` across all `bonsai_lang_*` adapter crates passed for the
-  `21` supported languages advertised by the CLI: Python, JavaScript,
+  `20` supported languages advertised by the CLI: Python, JavaScript,
   TypeScript, Java, Kotlin, C#, Swift, Scala, Go, Rust, PHP, Ruby, C, C++,
-  Perl, Dart, Lua, Elixir, Erlang, Objective-C, and Solidity.
+  Perl, Dart, Lua, Elixir, Erlang, and Objective-C.
 - Conformance and architecture invariants:
   `cargo test -q -p bonsai_conformance --test architecture_invariants --test
   flow_event_conformance --test capability_matrix --test async_yield_coverage
@@ -1363,7 +1363,7 @@ Mapping of `docs/goal.md` requirements to current evidence:
 | Keep memory bounded and avoid retaining every full per-entry graph. | Current runs stay below guards: examples under `397 MB`, Redis under `816 MB`, OWASP under `853 MB`; Redis dense export uses compressed complete callgraph mode rather than materializing multi-GB path sets in memory. |
 | Expensive audit/export/prewarm work is explicit, observable, and exact. | Full `export --all` and benchmark harness capture phase summaries including chain mode, truncation counts, and propagation completeness; at benchmark time, default index remained structural. |
 | Caches never determine correctness or hide stale facts. | Cache freshness invariant covers source, dependency metadata, matcher policy, rule/config, and pipeline versions; callgraph/dataflow/IDG/value-flow/taint/flow-id cache versions were bumped for the current semantic changes. |
-| Regression tests prove accuracy, cache behavior, and the cheap structural-only index path. | Compile-time Rust coverage passes through `cargo check --tests` and `cargo test --no-run`; focused runtime regressions pass from a fresh target dir; after cleaning polluted `target/debug`, default-target test harnesses launch normally and `cargo test --workspace --no-fail-fast` passes, including rulepack conformance `28/28`, architecture invariants `45/45`, the 21-language CLI/security matrices, SARIF checks, doc tests, and cache/hot-reload coverage. Current builds test `--structural-only` for the cheap path. |
+| Regression tests prove accuracy, cache behavior, and the cheap structural-only index path. | Compile-time Rust coverage passes through `cargo check --tests` and `cargo test --no-run`; focused runtime regressions pass from a fresh target dir; after cleaning polluted `target/debug`, default-target test harnesses launch normally and `cargo test --workspace --no-fail-fast` passes, including rulepack conformance `28/28`, architecture invariants `45/45`, the 20-language CLI/security matrices, SARIF checks, doc tests, and cache/hot-reload coverage. Current builds test `--structural-only` for the cheap path. |
 | Benchmarks cover `examples/`, Redis, and Java OWASP Benchmark with cold/warm time, RSS, cache, and finding counts. | Current examples, Redis, and OWASP sections above document cold/warm timings, RSS, row/finding counts, cache artifact bytes, and warm behavior, including the 2026-05-17 post-fix runs. |
 | Code remains scoped, deterministic, and professional. | `cargo fmt --all --check`, `git diff --check`, and focused `cargo clippy` pass; changes are confined to analysis semantics, tests, and documentation. |
 

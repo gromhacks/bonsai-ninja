@@ -322,24 +322,6 @@ fn x_12_scala() {
 }
 
 #[test]
-fn x_12_solidity() {
-    run_positive_cell(
-        "X_12",
-        LangFixture {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            files: &[
-                ("Base.sol", "contract Base { function helper(string memory p) public { sink(p); } }\n"),
-                ("Entry.sol", "import './Base.sol';\ncontract Child is Base {}\ncontract Entry { function entry(string memory args) public { Child c; c.helper(args); } }\n"),
-            ],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
-
-#[test]
 fn x_12_swift() {
     run_positive_cell(
         "X_12",

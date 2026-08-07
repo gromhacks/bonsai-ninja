@@ -2428,7 +2428,7 @@ fn facade_browse_dump_export_security_trace_and_inspect_work() {
             .expect("pack audit")
             .languages
             .len(),
-        21
+        20
     );
     assert!(!project
         .security()
@@ -2448,7 +2448,7 @@ fn facade_browse_dump_export_security_trace_and_inspect_work() {
             .expect("rootless pack audit")
             .languages
             .len(),
-        21
+        20
     );
     assert!(!rootless_pack
         .tree(Default::default())

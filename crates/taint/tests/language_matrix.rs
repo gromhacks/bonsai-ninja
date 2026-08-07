@@ -181,13 +181,6 @@ fn matrix() -> Vec<TaintRow> {
             seed_names: ERLANG,
         },
         TaintRow {
-            lang: "solidity",
-            mid: "updateUser",
-            sink: "runAdminCommand",
-            ws_subdir: "solidity/micro",
-            seed_names: COMMON,
-        },
-        TaintRow {
             lang: "perl",
             mid: "update_user",
             sink: "run_admin_command",
@@ -231,7 +224,6 @@ fn open_fixture(subdir: &str) -> AnalyzerDb {
     registry.register(Arc::new(bonsai_lang_lua::LuaAdapter::new()));
     registry.register(Arc::new(bonsai_lang_elixir::ElixirAdapter::new()));
     registry.register(Arc::new(bonsai_lang_erlang::ErlangAdapter::new()));
-    registry.register(Arc::new(bonsai_lang_solidity::SolidityAdapter::new()));
     registry.register(Arc::new(bonsai_lang_perl::PerlAdapter::new()));
     let db = AnalyzerDb::new(vfs, registry);
     for file in db.vfs().all_files() {
@@ -328,10 +320,10 @@ fn dangerous_sink_call_needles(lang: &str) -> &'static [&'static str] {
         "python" => &["os.system"],
         "rust" => &[".arg"],
         "scala" => &[".!"],
-        // Solidity and Swift micro sinks are modeled through stateful
-        // operation setup rather than a tainted direct call argument,
-        // so the generic param-precision check below is not applicable.
-        "solidity" | "swift" => &[],
+        // Swift's micro sink is modeled through stateful operation setup
+        // rather than a tainted direct call argument, so the generic
+        // param-precision check below is not applicable.
+        "swift" => &[],
         _ => &[],
     }
 }

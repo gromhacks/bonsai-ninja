@@ -553,7 +553,7 @@ construct_e2e_tests! {
 //
 // c, cpp, csharp, dart, elixir, erlang, go, java, javascript,
 // kotlin, lua, objc, perl, php, python, ruby, rust, scala,
-// solidity, swift, typescript
+// swift, typescript
 
 /// For every lang, `export` on complex must:
 ///   - emit a taint_graph with `functions` non-empty
@@ -609,7 +609,6 @@ fn semantic_complex_positive_expected(lang: &str) -> bool {
             | "ruby"
             | "rust"
             | "scala"
-            | "solidity"
             | "swift"
             | "typescript"
     )
@@ -790,7 +789,7 @@ macro_rules! complex_e2e_tests {
 
 complex_e2e_tests!(
     c, cpp, csharp, dart, elixir, erlang, go, java, javascript, kotlin, lua, objc, perl, php, python, ruby,
-    rust, scala, solidity, swift, typescript,
+    rust, scala, swift, typescript,
 );
 
 // =============================================================================

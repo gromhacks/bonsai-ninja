@@ -110,11 +110,6 @@ fn r_10_scala() {
 }
 
 #[test]
-fn r_10_solidity() {
-    run_positive_cell("R_10", LangFixture { lang:"solidity", adapter:Arc::new(bonsai_lang_solidity::SolidityAdapter::new()), files:&[("Demo.sol","contract Demo { function cb(string memory p) internal returns (string memory) { return p; } function apply_(function(string memory) internal returns (string memory) f, string memory x) internal returns (string memory) { return f(x); } function entry(string memory args) public { string memory out = apply_(cb, args); sink(out); } }\n")], entry:"entry", seed:&["args"], sink:"sink" });
-}
-
-#[test]
 fn r_10_swift() {
     run_positive_cell("R_10", LangFixture { lang:"swift", adapter:Arc::new(bonsai_lang_swift::SwiftAdapter::new()), files:&[("a.swift","func cb(_ p: String) -> String { return p }\nfunc apply_(_ f: (String) -> String, _ x: String) -> String { return f(x) }\nfunc entry(args: String) { let out = apply_(cb, args); sink(out) }\n")], entry:"entry", seed:&["args"], sink:"sink" });
 }

@@ -18,6 +18,5 @@
 | ruby | Partial | Partial | Unsupported | Partial | Partial | Partial | Partial | Unsupported | Unsupported | Partial | Unsupported | — |
 | rust | Partial | Partial | Partial | Partial | Unsupported | Exact | Unsupported | Unsupported | Partial | Exact | Partial | — |
 | scala | Partial | Partial | Unsupported | Partial | Partial | Partial | Partial | Unsupported | Unsupported | Exact | Partial | — |
-| solidity | Partial | Partial | Unsupported | Partial | Partial | Partial | Partial | Unsupported | Unsupported | Partial | Partial | — |
 | swift | Partial | Partial | Unsupported | Partial | Partial | Partial | Partial | Unsupported | Unsupported | Exact | Partial | — |
 | typescript | Partial | Partial | Unsupported | Partial | Partial | Partial | Partial | Unsupported | Unsupported | Partial | Partial | exports, module.exports |

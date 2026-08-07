@@ -372,8 +372,6 @@ pub struct PackAuditReport {
 #[derive(Clone, Debug, Serialize)]
 pub struct PackAuditLanguage {
     pub language: String,
-    pub security_model: String,
-    pub canonical_sink_families_applicable: bool,
     pub sinks: BTreeMap<String, PackAuditFamilyCount>,
     pub sources: PackAuditCount,
     pub sanitizers: PackAuditCount,
@@ -2598,9 +2596,6 @@ pub fn pack_audit(pack: &Rulepack, lang_filter: Option<&str>) -> PackAuditReport
         .into_iter()
         .map(|language| {
             let metadata = pack.metadata.languages.get(&language);
-            let canonical_sink_families_applicable = metadata
-                .and_then(|metadata| metadata.canonical_sink_families_applicable)
-                .unwrap_or(true);
             let sinks = pack
                 .metadata
                 .canonical_sink_families
@@ -2628,13 +2623,8 @@ pub fn pack_audit(pack: &Rulepack, lang_filter: Option<&str>) -> PackAuditReport
             let (source_enabled, source_disabled) = source_counts.get(&language).copied().unwrap_or((0, 0));
             let (sanitizer_enabled, sanitizer_disabled) =
                 sanitizer_counts.get(&language).copied().unwrap_or((0, 0));
-            let security_model = metadata
-                .and_then(|metadata| metadata.security_model.clone())
-                .unwrap_or_else(|| "app-web-taint".to_string());
             PackAuditLanguage {
                 language,
-                security_model,
-                canonical_sink_families_applicable,
                 sinks,
                 sources: PackAuditCount {
                     enabled: source_enabled,

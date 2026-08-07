@@ -177,21 +177,3 @@ fn i_13_dart() {
         },
     );
 }
-#[test]
-fn i_13_solidity() {
-    run_positive_cell(
-        "I_13",
-        LangFixture {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            files: &[(
-                "Demo.sol",
-                "contract Demo { function entry(string memory args) public { sink(args); } }
-",
-            )],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}

@@ -155,7 +155,6 @@ const MEGA_FLOW_LANGS: &[&str] = &[
     "ruby",
     "rust",
     "scala",
-    "solidity",
     "swift",
     "typescript",
 ];
@@ -180,7 +179,6 @@ fn expected_mega_chain_hops(lang: &str) -> &'static [&'static str] {
             "perform",
             "execute",
         ],
-        "solidity" => &["handle", "orchestrate", "persist"],
         _ => &[],
     }
 }
@@ -195,7 +193,7 @@ fn expected_mega_finding_count_with_inferred_sources(lang: &str) -> usize {
     // (redundant-inferred / xxe over-claim removed); python 5→2 and
     // dart→1 (combiner group_id+sink-site dedup collapsed duplicate
     // entry-chain rows, including local inferred callable-object
-    // evidence); erlang 2→1 and solidity 3→2 once equivalent
+    // evidence); erlang 2→1 once equivalent
     // inferred/member paths are grouped into one real report row.
     // Python is now likewise one grouped row with two member finding ids:
     // the concrete Flask source and the equivalent inferred entry chain.
@@ -220,7 +218,6 @@ fn expected_mega_finding_count_with_inferred_sources(lang: &str) -> usize {
         "ruby" => 1,
         "rust" => 1,
         "scala" => 1,
-        "solidity" => 2,
         "swift" => 1,
         "typescript" => 1,
         other => panic!("missing mega_flow expected finding count for {other}"),
@@ -238,7 +235,7 @@ fn mega_entry_symbol(lang: &str) -> &'static str {
         "c" | "cpp" | "elixir" => "main",
         "csharp" => "Handle",
         "go" => "handleRequest",
-        "java" | "kotlin" | "scala" | "solidity" => "handle",
+        "java" | "kotlin" | "scala" => "handle",
         _ => "handle_request",
     }
 }
@@ -247,7 +244,6 @@ fn mega_target_symbol(lang: &str) -> &'static str {
     match lang {
         "csharp" | "go" => "Execute",
         "objc" => "executeCmd",
-        "solidity" => "persist",
         _ => "execute",
     }
 }
@@ -629,27 +625,6 @@ fn required_mega_construct_markers(lang: &str) -> &'static [&'static str] {
             "foldLeft",
             "case Success",
         ],
-        "solidity" => &[
-            "modifier audit",
-            "as FlowPipeline",
-            "as Store",
-            "contract ",
-            "is ",
-            "event ",
-            "enum Kind",
-            "struct Envelope",
-            "mapping(",
-            "calldata",
-            "memory",
-            "storage",
-            "library",
-            "if (kind",
-            "for (uint256",
-            "unchecked",
-            "try store.persist",
-            "catch",
-            "mapping(bytes => bool)",
-        ],
         "swift" => &[
             "import Foundation",
             "enum Kind",
@@ -725,7 +700,6 @@ fn required_mega_flow_event_kinds(lang: &str) -> &'static [&'static str] {
         "ruby" => &["Assign", "Call", "Continue", "Try", "Yield"],
         "rust" => &["Assign", "Branch", "Call", "Loop"],
         "scala" => &["Assign", "Branch", "Call"],
-        "solidity" => &["Assign", "Branch", "Call", "Loop", "Return", "Try"],
         "swift" => &["Assign", "Branch", "Call", "Loop", "Return"],
         "typescript" => &["Assign", "Await", "Branch", "Call", "Loop", "Return", "Try"],
         _ => &[],
@@ -735,17 +709,7 @@ fn required_mega_flow_event_kinds(lang: &str) -> &'static [&'static str] {
 fn mega_flow_requires_alias_map(lang: &str) -> bool {
     matches!(
         lang,
-        "csharp"
-            | "dart"
-            | "elixir"
-            | "go"
-            | "javascript"
-            | "lua"
-            | "php"
-            | "python"
-            | "rust"
-            | "solidity"
-            | "typescript"
+        "csharp" | "dart" | "elixir" | "go" | "javascript" | "lua" | "php" | "python" | "rust" | "typescript"
     )
 }
 
@@ -3588,7 +3552,6 @@ fn taint_flows_connect_visible_sources_to_sinks() {
     std::fs::create_dir_all(ws.join("go")).expect("go dir");
     std::fs::create_dir_all(ws.join("java")).expect("java dir");
     std::fs::create_dir_all(ws.join("js")).expect("js dir");
-    std::fs::create_dir_all(ws.join("sol")).expect("sol dir");
 
     std::fs::write(
         ws.join("c_shell.c"),
@@ -3742,18 +3705,6 @@ function handler(req, res) {
 "##,
     )
     .expect("js fixture");
-    std::fs::write(
-        ws.join("sol/A.sol"),
-        r#"
-contract A {
-  function f(address t) public {
-    assembly { let ok := call(gas(), t, 0, 0, 0, 0, 0) }
-  }
-}
-"#,
-    )
-    .expect("solidity fixture");
-
     let out = run(&[
         "security",
         ws.to_str().unwrap(),
@@ -3779,7 +3730,6 @@ contract A {
         "java.sqli.statement_executequery",
         "typescript.proto_pollution.recursive_merge",
         "javascript.xss.create_html_document_href_concat",
-        "solidity.eval.inline_assembly_call",
     ] {
         if !rule_is_enabled(expected) {
             continue;
@@ -3825,33 +3775,6 @@ fn pack_tree_uses_actual_yaml_file_names() {
 }
 
 #[test]
-fn pack_audit_marks_solidity_as_ecosystem_specific() {
-    let rules = rules_dir();
-    let out = run(&[
-        "security",
-        &rules,
-        "--rules-dir",
-        &rules,
-        "pack",
-        "--audit",
-        "--lang",
-        "solidity",
-        "--format",
-        "json",
-    ])
-    .unwrap();
-    assert!(out.contains("\"language\": \"solidity\""), "got:\n{out}");
-    assert!(
-        out.contains("\"canonical_sink_families_applicable\": false"),
-        "solidity should be marked outside the canonical app/web audit:\n{out}"
-    );
-    assert!(
-        out.contains("\"security_model\": \"smart-contract\""),
-        "solidity should report the smart-contract security model:\n{out}"
-    );
-}
-
-#[test]
 fn pack_audit_filtered_text_omits_hidden_language_not_applicable_legend() {
     let rules = rules_dir();
     let out = run(&[
@@ -3892,13 +3815,6 @@ fn pack_audit_has_no_unexplained_canonical_family_gaps() {
         .unwrap_or_else(|| panic!("missing languages array:\n{out}"));
     let mut gaps = Vec::new();
     for lang in languages {
-        if lang
-            .get("canonical_sink_families_applicable")
-            .and_then(serde_json::Value::as_bool)
-            == Some(false)
-        {
-            continue;
-        }
         let language = lang
             .get("language")
             .and_then(serde_json::Value::as_str)

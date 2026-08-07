@@ -2,15 +2,15 @@
 //!
 //! These tests are the canonical regression spec for the use-after-free,
 //! use-after-close, use-after-cancel, double-free, double-unlock,
-//! use-after-commit, TOCTOU, and selfdestruct rule classes that ship in
-//! `security-patterns/langs/<lang>/sinks/{memory,race,selfdestruct}.yml`.
+//! use-after-commit and TOCTOU rule classes that ship in
+//! `security-patterns/langs/<lang>/sinks/{memory,race}.yml`.
 //!
 //! ## What these tests verify TODAY
 //!
 //! Today, every lifecycle rule in the pack is documented as an
 //! **audit-pair site**: the rule fires on the lifecycle event itself
 //! (close / cancel / unlock / commit / release / destroy / abort /
-//! unsubscribe / Dispose / selfdestruct / etc.) so a downstream auditor
+//! unsubscribe / Dispose / etc.) so a downstream auditor
 //! can correlate it with later uses of the same value. The full UAF
 //! correlation — "the rule fires only when there is a downstream use of
 //! the same value" — requires Primitive 5 (must-alias / points-to) +
@@ -76,7 +76,7 @@ fn rulepack() -> &'static Rulepack {
 }
 
 /// Build an in-memory workspace registered with the bundled
-/// 21-language adapter set, write a single fixture file, and prime the
+/// 20-language adapter set, write a single fixture file, and prime the
 /// decl/import indexes so subsequent fact queries don't pay the
 /// per-file index-build cost during the matcher's hot loop.
 fn ws_for(file_name: &str, source: &str) -> Workspace {
@@ -90,7 +90,7 @@ fn ws_for(file_name: &str, source: &str) -> Workspace {
 }
 
 /// Single-adapter Python workspace — Python tests don't need the full
-/// 21-language registry to fire, and the lighter registry trims a few
+/// 20-language registry to fire, and the lighter registry trims a few
 /// ms per test. Exposes the same VFS / decl-prime convention.
 fn python_ws(source: &str) -> Workspace {
     let registry = Arc::new(LanguageRegistry::new());
@@ -2066,69 +2066,4 @@ handle(Sup, ChildId) ->
 }
 
 // ===========================================================================
-// Solidity — selfdestruct
 // ===========================================================================
-
-#[test]
-fn solidity_selfdestruct_audit_site() {
-    // selfdestruct fires regardless of state; the contract
-    // post-selfdestruct still executes the rest of the call frame
-    // but state reads diverge across forks. Audit-pair captures
-    // the destruction site.
-    let ws = ws_for(
-        "App.sol",
-        r#"
-pragma solidity ^0.8.0;
-contract App {
-  function destroy(address payable target) public {
-    selfdestruct(target);
-  }
-}
-"#,
-    );
-    let fired = fired_sink_rule_ids(&ws, "solidity");
-    assert_rule_fires(&fired, "solidity.selfdestruct.call", "solidity selfdestruct");
-}
-
-#[test]
-fn solidity_suicide_legacy_audit_site() {
-    let ws = ws_for(
-        "App.sol",
-        r#"
-pragma solidity ^0.4.0;
-contract App {
-  function destroy(address target) public {
-    suicide(target);
-  }
-}
-"#,
-    );
-    let fired = fired_sink_rule_ids(&ws, "solidity");
-    assert_rule_fires(
-        &fired,
-        "solidity.selfdestruct.suicide_legacy",
-        "solidity suicide legacy",
-    );
-}
-
-#[test]
-fn solidity_no_selfdestruct_negative() {
-    // Negative — contract has no selfdestruct/suicide call.
-    let ws = ws_for(
-        "App.sol",
-        r#"
-pragma solidity ^0.8.0;
-contract App {
-  uint256 public x;
-  function set(uint256 v) public { x = v; }
-}
-"#,
-    );
-    let fired = fired_sink_rule_ids(&ws, "solidity");
-    assert_rule_silent(&fired, "solidity.selfdestruct.call", "solidity no selfdestruct");
-    assert_rule_silent(
-        &fired,
-        "solidity.selfdestruct.suicide_legacy",
-        "solidity no suicide",
-    );
-}

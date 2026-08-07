@@ -259,15 +259,3 @@ fn r_02_erlang() {
         sink: "sink",
     });
 }
-
-#[test]
-fn r_02_solidity() {
-    run_positive_cell("R_02", LangFixture {
-        lang: "solidity",
-        adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-        files: &[("Demo.sol", "contract Demo { function entry(string memory args) public { string memory out = helper(args); sink(out); } function helper(string memory p) internal pure returns (string memory) { return p; } }\n")],
-        entry: "entry",
-        seed: &["args"],
-        sink: "sink",
-    });
-}

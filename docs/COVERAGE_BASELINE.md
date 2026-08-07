@@ -115,7 +115,6 @@ public findings.
 | ruby | Partial | Partial | Partial | Unsupported | n/a |
 | rust | Partial | Partial | n/a | Partial | n/a |
 | scala | Partial | Partial | Partial | Partial | n/a |
-| solidity | Partial | Partial | Partial | Partial | n/a |
 | swift | Partial | Partial | Partial | Partial | n/a |
 | typescript | Partial | Partial | Partial | Partial | exports, module.exports |
 
@@ -149,7 +148,6 @@ them is unaffected by these cells.
 | ruby | n/a | n/a | Partial | Partial |
 | rust | Partial | Exact | n/a | Exact |
 | scala | Partial | Partial | Partial | Exact |
-| solidity | n/a | n/a | n/a | n/a |
 | swift | Partial | Partial | Partial | Exact |
 | typescript | Partial | Partial | Partial | n/a |
 
@@ -190,7 +188,6 @@ diagnostic-only.
 | ruby | n/a | Unsupported | n/a |
 | rust | Partial | n/a | Partial |
 | scala | n/a | Unsupported | n/a |
-| solidity | n/a | n/a | n/a |
 | swift | n/a | Unsupported | n/a |
 | typescript | n/a | n/a | n/a |
 
@@ -242,16 +239,13 @@ A plain-English read of where each language stands today:
   and proc-macros aren't expanded).
 - **Scala** - Inheritance + pattern-matching analysis. FFI via Scala-
   native isn't modeled (not a language-level construct).
-- **Solidity** - Contract inheritance + try/catch external-call
-  analysis. Inline `assembly { … }` (Yul) is parsed but not modeled;
-  rules anchored on inline-assembly shapes need manual annotation.
 - **Swift** - Standard class + protocol analysis. FFI via the
   Objective-C bridge or `@_cdecl` isn't modeled at the language
   level.
 
 ## Explicit adapter capability declarations
 
-All 21 adapters explicitly declare the complete
+All 20 adapters explicitly declare the complete
 [`LanguageCapabilities`](../crates/lang_api/src/capabilities.rs) shape.
 Baseline constructors are initialization helpers only; no adapter inherits a
 cross-language syntax policy by omission. Each declaration owns its grammar

@@ -693,32 +693,3 @@ entry(Args) -> {A, _B} = helper(Args), sink(A).
         result.tainted_calls,
     );
 }
-
-// ===========================================================================
-// SOLIDITY
-// ===========================================================================
-
-#[test]
-fn over_taint_solidity_hardcoded_arg_not_tainted() {
-    let adapter: AdapterArc = Arc::new(bonsai_lang_solidity::SolidityAdapter::new());
-    let src = r#"
-contract Demo {
-    function entry(string memory args) public {
-        inner(".category == \"electronics\"");
-    }
-    function inner(string memory filter) internal {
-        sink(filter);
-    }
-}
-"#;
-    let db = build_db(adapter, &[("Demo.sol", src)]);
-    let Some(entry) = func_id_or_none(&db, "entry") else {
-        return;
-    };
-    let result = interprocedural_taint(entry, &seed(&["args"]), &cfg(), &db);
-    assert!(
-        !sink_reached(&result, "sink"),
-        "solidity: hardcoded literal arg must not propagate taint; got {:?}",
-        result.tainted_calls,
-    );
-}

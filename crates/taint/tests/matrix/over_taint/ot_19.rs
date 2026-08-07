@@ -286,15 +286,3 @@ fn ot_19_erlang() {
         sink: "sink",
     });
 }
-
-#[test]
-fn ot_19_solidity() {
-    run_ot_19(LangFixture {
-        lang: "solidity",
-        adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-        files: &[("Demo.sol", "contract Demo { function usersByName(string memory p) internal { sink(p); } function entry(string memory user) public { usersByName(\"admin\"); } }\n")],
-        entry: "entry",
-        seed: &["user"],
-        sink: "sink",
-    });
-}

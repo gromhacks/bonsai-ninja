@@ -28,7 +28,7 @@ linear-space path-language representation.
 
 `[profile.test] debug = 0` is intentional. The repository has hundreds of
 standalone integration-test executables, and each large security/CLI test
-links the complete 21-language analysis graph. Embedding full DWARF made a
+links the complete 20-language analysis graph. Embedding full DWARF made a
 cold `cargo test --workspace --locked` spend tens of minutes linking and
 triggered repeated macOS policy scans without improving test semantics. Do not
 remove this profile setting as routine cleanup. For an intentional debugger

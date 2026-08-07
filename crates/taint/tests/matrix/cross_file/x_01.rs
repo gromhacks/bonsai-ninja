@@ -5,7 +5,7 @@
 //! receive taint via the cross-file resolver.
 //!
 //! Per-language fan-out covers the import idioms each language uses.
-//! n/a cells (e.g. solidity's pragma-only file model) skip via the
+//! n/a cells skip via the
 //! applicability table.
 
 #![allow(unreachable_pub)]
@@ -413,25 +413,4 @@ fn x_01_erlang() {
             sink: "sink",
         },
     );
-}
-
-#[test]
-fn x_01_solidity() {
-    run_positive_cell("X_01", LangFixture {
-        lang: "solidity",
-        adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-        files: &[
-            (
-                "Helper.sol",
-                "library Helper { function helper(string memory p) public { sink(p); } }\n",
-            ),
-            (
-                "Entry.sol",
-                "import './Helper.sol';\ncontract Entry { function entry(string memory args) public { Helper.helper(args); } }\n",
-            ),
-        ],
-        entry: "entry",
-        seed: &["args"],
-        sink: "sink",
-    });
 }

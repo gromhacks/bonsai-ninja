@@ -181,10 +181,6 @@ pub struct PackageTailBindingSemantics {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LanguageRuleMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub security_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub canonical_sink_families_applicable: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_applicable_sink_families: Vec<String>,
     /// Exact names or one-asterisk basename patterns for dependency metadata
@@ -209,12 +205,6 @@ pub struct LanguageRuleMetadata {
 
 impl LanguageRuleMetadata {
     fn merge_overriding(&mut self, incoming: Self) {
-        if incoming.security_model.is_some() {
-            self.security_model = incoming.security_model;
-        }
-        if incoming.canonical_sink_families_applicable.is_some() {
-            self.canonical_sink_families_applicable = incoming.canonical_sink_families_applicable;
-        }
         if !incoming.not_applicable_sink_families.is_empty() {
             self.not_applicable_sink_families = incoming.not_applicable_sink_families;
         }

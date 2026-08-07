@@ -88,7 +88,6 @@ const REF_TEST_HANDLER: GrammarHandler = GrammarHandler {
     sigil_variable_kinds: &["variable_name"],
     global_variable_kinds: &["global_variable"],
     subscript_base_call_refs: true,
-    synthetic_call_ref_names: &[("emit_statement", "emit"), ("revert_statement", "revert")],
     call_name_suffix_tokens: &["!"],
     special_forms: &[
         SyntaxSpecialForm::SplitSelectorCall,

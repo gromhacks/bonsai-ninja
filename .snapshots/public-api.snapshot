@@ -304,10 +304,6 @@ pub struct RustAdapter;
 pub const LANG_ID: LanguageId = LanguageId::new("scala");
 pub struct ScalaAdapter;
 
-=== lang_solidity ===
-pub const LANG_ID: LanguageId = LanguageId::new("solidity");
-pub struct SolidityAdapter;
-
 === lang_swift ===
 pub const LANG_ID: LanguageId = LanguageId::new("swift");
 pub struct SwiftAdapter;

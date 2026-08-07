@@ -113,7 +113,6 @@ const HANDLER: GrammarHandler = GrammarHandler {
     global_variable_kinds: &[],
     subscript_base_call_refs: true,
     non_call_ref_names: &[],
-    synthetic_call_ref_names: &[],
     call_name_suffix_tokens: &[],
     syntax_error_tolerant_call_names: &[],
     callable_reference_kinds: &[],

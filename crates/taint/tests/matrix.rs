@@ -1,7 +1,7 @@
 //! Taint test matrix — canonical "what flows do we model" suite.
 //!
 //! Aggregates 76 scenarios (intra / inter / cross-file / over-taint)
-//! × 21 languages = up to 1596 cells; cells flagged `NotApplicable`
+//! × 20 languages = up to 1520 cells; cells flagged `NotApplicable`
 //! or `AdapterDeferred` in `applicability.rs` are skipped at runtime.
 //! Coverage progress is visible via
 //! `cargo test -p bonsai_taint --test matrix_coverage_report`.

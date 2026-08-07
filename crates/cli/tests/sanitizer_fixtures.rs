@@ -73,8 +73,7 @@ fn fixture_ws(lang: &str) -> String {
 }
 
 /// Languages whose fixture produces at least one default source-to-sink
-/// raw finding. Solidity's fixture is source-independent/pattern-only,
-/// so it is covered separately with `--include-pattern-only` below.
+/// raw finding.
 const LANGS_WITH_DEFAULT_RAW_FINDING: &[&str] = &[
     "c",
     "cpp",
@@ -161,39 +160,6 @@ fn every_sanitizer_fixture_produces_a_raw_finding() {
             "[{lang}] sanitizer_test: no raw (unsanitized / wrong-context) finding — rulepack or adapter may have silently suppressed the unsafe handler"
         );
     }
-}
-
-#[test]
-fn solidity_source_independent_fixture_produces_pattern_only_raw_findings() {
-    let Some(_) = bin_path() else { return };
-    let w = fixture_ws("solidity");
-    let Some((out, _, code)) = run(&[
-        "security",
-        &w,
-        "taint-analysis",
-        "--inferred-sources",
-        "--include-pattern-only",
-        "--format",
-        "json",
-    ]) else {
-        return;
-    };
-    assert_eq!(code, 0, "[solidity] sanitizer_test flows ec={code}");
-    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-    let rows = rows_of(&parsed);
-    let raw_count = rows
-        .iter()
-        .filter(|r| {
-            r.get("status")
-                .and_then(|s| s.as_str())
-                .map(|s| s != "sanitized")
-                .unwrap_or(true)
-        })
-        .count();
-    assert!(
-        raw_count > 0,
-        "[solidity] source-independent sanitizer_test fixture produced no pattern-only raw finding"
-    );
 }
 
 #[test]

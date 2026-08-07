@@ -304,20 +304,3 @@ fn ot_09_erlang() {
         },
     );
 }
-#[test]
-fn ot_09_solidity() {
-    run_negative_cell(
-        "OT_09",
-        LangFixture {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            files: &[(
-                "Demo.sol",
-                "contract Demo { function entry(string memory args) public { sink(\"clean\"); } }\n",
-            )],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}

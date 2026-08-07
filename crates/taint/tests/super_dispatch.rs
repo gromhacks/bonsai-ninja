@@ -187,12 +187,6 @@ fn adapter_receiver_token_capabilities_match_language_syntax() {
             &["this"],
         ),
         (
-            "solidity",
-            Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            &["super"],
-            &["this"],
-        ),
-        (
             "swift",
             Arc::new(bonsai_lang_swift::SwiftAdapter::new()),
             &["super"],

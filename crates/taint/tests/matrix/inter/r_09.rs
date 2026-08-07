@@ -96,11 +96,6 @@ fn r_09_scala() {
 }
 
 #[test]
-fn r_09_solidity() {
-    run_positive_cell("R_09", LangFixture { lang:"solidity", adapter:Arc::new(bonsai_lang_solidity::SolidityAdapter::new()), files:&[("Demo.sol","contract Demo { function cb(string memory p) internal { sink(p); } function apply_(function(string memory) internal f, string memory x) internal { f(x); } function entry(string memory args) public { apply_(cb, args); } }\n")], entry:"entry", seed:&["args"], sink:"sink" });
-}
-
-#[test]
 fn r_09_swift() {
     run_positive_cell("R_09", LangFixture { lang:"swift", adapter:Arc::new(bonsai_lang_swift::SwiftAdapter::new()), files:&[("a.swift","func cb(_ p: String) { sink(p) }\nfunc apply_(_ f: (String) -> Void, _ x: String) { f(x) }\nfunc entry(args: String) { apply_(cb, args) }\n")], entry:"entry", seed:&["args"], sink:"sink" });
 }

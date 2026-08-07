@@ -30,7 +30,6 @@ const LANGS: &[&str] = &[
     "ruby",
     "rust",
     "scala",
-    "solidity",
     "swift",
     "typescript",
 ];
@@ -450,7 +449,7 @@ fn assert_index_stats_eq(label: &str, cli: Value, sdk: Value) {
 fn entry_symbol(lang: &str) -> &'static str {
     match lang {
         "csharp" => "HandleRequest",
-        "dart" | "java" | "javascript" | "kotlin" | "lua" | "scala" | "solidity" | "swift" | "typescript" => {
+        "dart" | "java" | "javascript" | "kotlin" | "lua" | "scala" | "swift" | "typescript" => {
             "handleRequest"
         }
         "go" => "HandleRequest",
@@ -483,7 +482,6 @@ fn slice_site(lang: &str) -> (&'static str, u32, &'static str) {
         "ruby" => ("result", 16, "gateway.rb"),
         "rust" => ("result", 12, "gateway.rs"),
         "scala" => ("result", 17, "Gateway.scala"),
-        "solidity" => ("action", 15, "Gateway.sol"),
         "swift" => ("result", 11, "Gateway.swift"),
         "typescript" => ("result", 18, "gateway.ts"),
         other => panic!("missing slice fixture site for {other}"),
@@ -1906,7 +1904,6 @@ fn bundled_sdk_registry_matches_cli_supported_language_surface() {
             "ruby".to_string(),
             "rust".to_string(),
             "scala".to_string(),
-            "solidity".to_string(),
             "swift".to_string(),
             "typescript".to_string(),
         ])

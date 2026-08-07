@@ -290,26 +290,6 @@ func (h *Handler) Set(cmd string) { h.cmd = cmd }
 }
 
 #[test]
-fn solidity_constructor_state_field_populates() {
-    let src = "
-pragma solidity ^0.8.0;
-contract Handler {
-    address conn;
-    constructor(address _conn) { conn = _conn; }
-}
-";
-    let db = ws(
-        Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-        &[("Handler.sol", src)],
-    );
-    let writes = first_nonempty_field_writes(&db);
-    assert!(
-        writes.iter().any(|w| w.target == "this.conn"),
-        "Solidity constructor `conn = _conn` must populate receiver_field_writes; got {writes:?}"
-    );
-}
-
-#[test]
 fn lua_factory_self_field_populates() {
     let src = "
 local Handler = {}

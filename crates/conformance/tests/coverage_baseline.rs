@@ -5,7 +5,7 @@
 //! per-language *applicability* table (does the language even have
 //! the construct?) so the rendered matrix can show `n/a` rather than
 //! a misleading `Unsupported` for things like "macros in JavaScript"
-//! or "coroutines in Solidity".
+//! or "coroutines in C".
 //!
 //! Two snapshot files:
 //!   - `.snapshots/COVERAGE_BASELINE.snapshot` — the runtime levels alone
@@ -204,16 +204,6 @@ fn applicability_for(language_id: &str) -> Applicability {
         "scala" => A {
             macros: false,
             ffi: false,
-            ..A::all()
-        },
-        "solidity" => A {
-            generics: false,
-            macros: false,
-            async_await: false,
-            coroutines: false,
-            reflection: false,
-            ffi: false,
-            pattern_matching: false,
             ..A::all()
         },
         "swift" => A {

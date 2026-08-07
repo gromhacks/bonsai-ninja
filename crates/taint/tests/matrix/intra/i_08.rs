@@ -83,7 +83,3 @@ fn i_08_elixir() {
 fn i_08_erlang() {
     run_positive_cell("I_08", LangFixture { lang:"erlang", adapter:Arc::new(bonsai_lang_erlang::ErlangAdapter::new()), files:&[("demo.erl","-module(demo).\n-export([entry/1]).\nentry(Args) -> X = case cond_() of true -> \"ok\"; _ -> Args end, sink(X).\ncond_() -> false.\n")], entry:"entry", seed:&["Args"], sink:"sink" });
 }
-#[test]
-fn i_08_solidity() {
-    run_positive_cell("I_08", LangFixture { lang:"solidity", adapter:Arc::new(bonsai_lang_solidity::SolidityAdapter::new()), files:&[("Demo.sol","contract Demo { function cond() internal pure returns (bool) { return false; } function entry(string memory args) public { string memory x; if (cond()) { x = \"ok\"; } else { x = args; } sink(x); } }\n")], entry:"entry", seed:&["args"], sink:"sink" });
-}

@@ -180,7 +180,6 @@ dependencies = [
  "bonsai_lang_ruby",
  "bonsai_lang_rust",
  "bonsai_lang_scala",
- "bonsai_lang_solidity",
  "bonsai_lang_swift",
  "bonsai_lang_typescript",
 ]
@@ -627,18 +626,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bonsai_lang_solidity"
-version = "0.1.0"
-dependencies = [
- "bonsai_common",
- "bonsai_diagnostics",
- "bonsai_lang_api",
- "bonsai_vfs",
- "parking_lot",
- "tree-sitter",
-]
-
-[[package]]
 name = "bonsai_lang_swift"
 version = "0.1.0"
 dependencies = [
@@ -766,7 +753,6 @@ dependencies = [
  "bonsai_lang_ruby",
  "bonsai_lang_rust",
  "bonsai_lang_scala",
- "bonsai_lang_solidity",
  "bonsai_lang_swift",
  "bonsai_lang_typescript",
  "bonsai_resolve",
@@ -816,7 +802,6 @@ dependencies = [
  "bonsai_lang_ruby",
  "bonsai_lang_rust",
  "bonsai_lang_scala",
- "bonsai_lang_solidity",
  "bonsai_lang_swift",
  "bonsai_lang_typescript",
  "bonsai_resolve",
@@ -892,7 +877,6 @@ dependencies = [
  "bonsai_lang_ruby",
  "bonsai_lang_rust",
  "bonsai_lang_scala",
- "bonsai_lang_solidity",
  "bonsai_lang_swift",
  "bonsai_lang_typescript",
  "bonsai_resolve",

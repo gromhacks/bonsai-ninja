@@ -43,7 +43,6 @@ pub(super) fn looks_like_branch_arm_node(kind: &str) -> bool {
             | "declaration_statement"
             | "return_statement"
             | "throw_statement"
-            | "revert_statement"
             | "if_statement"
             | "for_statement"
             | "while_statement"

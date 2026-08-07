@@ -316,15 +316,3 @@ fn ot_01_erlang() {
         sink: "sink",
     }, &["maps:get(other, Obj)"]);
 }
-
-#[test]
-fn ot_01_solidity() {
-    run_ot_01(LangFixture {
-        lang: "solidity",
-        adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-        files: &[("Demo.sol", "contract Demo { struct Box { string value; string other; } function entry(string memory args) public { Box memory obj; obj.value = args; sink(obj.other); } }\n")],
-        entry: "entry",
-        seed: &["args"],
-        sink: "sink",
-    }, &["obj.other"]);
-}

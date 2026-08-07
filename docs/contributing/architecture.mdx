@@ -40,7 +40,7 @@ work in one or two layers at a time, so this doc is organised the same way.
         ┌──────────────┴──────────────┐
         │  Adapter framework          │
         │  bonsai_lang_api            │
-        │  bonsai_lang_*  (21 languages)
+        │  bonsai_lang_*  (20 languages)
         └──────────────▲──────────────┘
         ┌──────────────┴──────────────┐
         │  Foundation                 │
@@ -372,7 +372,7 @@ constructors, module roots, exports, type spellings, exception forms, and
 async/lambda boundaries. Shared analysis must not branch on language id or
 carry a union of source-language tokens.
 
-**`crates/lang_*`** — 21 adapters, one per supported language. Adapters
+**`crates/lang_*`** — 20 adapters, one per supported language. Adapters
 range from a few hundred to a few thousand lines: they declare the
 `GrammarHandler`, run `decl_index_with_handler`, post-process to fill in
 language-specific facts. `call_kinds`, `call_ref_kinds`, pseudo-call
@@ -839,7 +839,7 @@ analysis emits `AnalysisProgress` events; the CLI turns phases into progress
 bars and notes into stderr lines, while SDK consumers receive the same
 scope/cache facts directly.
 
-**`crates/adapters`** registers all 21 language adapters into a
+**`crates/adapters`** registers all 20 language adapters into a
 `LanguageRegistry`. Used by `cli`, `sdk`, and the conformance suite.
 
 ## Tests / supporting crates

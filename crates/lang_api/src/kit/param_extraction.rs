@@ -115,8 +115,8 @@ pub fn extract_param_annotations(
             }
         }
     }
-    // Flat-shape grammars (Solidity, Objective-C) put each parameter as
-    // a direct child of the function. Track the previously-seen
+    // Objective-C's flat declaration shape puts each parameter directly
+    // under the function. Track the previously-seen
     // identifier so ObjC method_parameter siblings inherit their
     // selector piece as a pseudo-annotation.
     let mut cursor = fn_node.walk();
@@ -241,7 +241,7 @@ fn collect_param_annotation_names(
 /// Walks three structurally-distinct shapes:
 ///   1. Receiver-as-field (Go: `func (r *T) m()`).
 ///   2. Parameter container (Python `parameters`, Java `formal_parameters`, ...).
-///   3. Flat siblings of the function node (Solidity, Objective-C selectors).
+///   3. Flat siblings of the function node (Objective-C selectors).
 pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String> {
     let mut param_names = Vec::new();
     // Receivers come first so their slot is index 0.
@@ -363,7 +363,7 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String>
             }
         }
     }
-    // Flat-shape grammars (Solidity, ObjC) emit param nodes as direct
+    // Flat-shape grammars such as Objective-C emit parameter nodes as direct
     // siblings of the function. Run the flat scan even after the
     // container scan succeeded — grammars rarely mix shapes, so usually
     // exactly one path fires. Skip params already counted inside the

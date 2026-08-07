@@ -222,7 +222,7 @@ pub struct Decl {
     /// Populated when the source has an explicit return-type
     /// annotation (Python `-> T`, TypeScript `: T`, Rust `-> T`,
     /// Java/C# return type, Kotlin `: T`, Swift `-> T`, Go return
-    /// type, Scala `: T`, Solidity `returns (T)`). Empty for
+    /// type, Scala `: T`). Empty for
     /// languages without explicit return types or when the
     /// adapter hasn't been updated. The `apply_assign_call_result_types`
     /// pass uses this to propagate the type onto the LHS of
@@ -3135,7 +3135,6 @@ pub enum ImportScope {
 /// | Ruby | `require_relative "pipeline"` | `pipeline` |
 /// | Rust | `use std::io::{self, BufRead};` | `std::io` |
 /// | Scala | `import mega.Storage as Store` | `mega` |
-/// | Solidity | `import {Pipeline as FlowPipeline} from "./Pipeline.sol";` | `./Pipeline.sol` |
 /// | Swift | `import Foundation` | `Foundation` |
 /// | TypeScript | `import { persist as persistEnvelope } from "./storage"` | `./storage` |
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

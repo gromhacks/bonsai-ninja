@@ -5261,7 +5261,7 @@ fn idg_pipeline_hash() -> u64 {
     // container-input span-containment linkage), service.rs
     // return-position source-seeding fallback, and adapter member
     // synthesis (C# expression-bodied-property getters / record members,
-    // Java records, Solidity struct-literal field writes) all change the
+    // Java records and adapter-lowered struct-literal field writes) all change the
     // built IDG without an on-disk layout change.
     let raw = bonsai_common::MATCHER_POLICY_FINGERPRINT;
     let lo = raw as u64;

@@ -213,7 +213,3 @@ fn i_10_elixir() {
 fn i_10_erlang() {
     run_positive_cell("I_10", LangFixture { lang:"erlang", adapter:Arc::new(bonsai_lang_erlang::ErlangAdapter::new()), files:&[("demo.erl","-module(demo).\n-export([entry/1, loop/2]).\nentry(Args) -> Acc = Args, loop(Acc, 3).\nloop(_, 0) -> ok;\nloop(Acc, N) -> sink(Acc), loop(Acc, N-1).\n")], entry:"entry", seed:&["Args"], sink:"sink" });
 }
-#[test]
-fn i_10_solidity() {
-    run_positive_cell("I_10", LangFixture { lang:"solidity", adapter:Arc::new(bonsai_lang_solidity::SolidityAdapter::new()), files:&[("Demo.sol","contract Demo { function entry(string memory args) public { string memory acc = args; for (uint i = 0; i < 3; i++) { sink(acc); } } }\n")], entry:"entry", seed:&["args"], sink:"sink" });
-}

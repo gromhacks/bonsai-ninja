@@ -3581,8 +3581,8 @@ fn walk_call(
         arg_names.push(arg.name.clone());
         // Connect every NAMED carrier the adapter exposed for this
         // arg expression to the CallArg node, not just the
-        // canonical `place`. Some adapters (csharp, scala,
-        // solidity, elixir) only populate `place` for bare
+        // canonical `place`. Some adapters (C#, Scala, Elixir) only
+        // populate `place` for bare
         // identifiers; for compound expressions (`"-c " + tmp`)
         // they fall back to `source_names = ["tmp"]`. Walking both
         // gives the IDG closure parity with the engine's name-based
@@ -3680,8 +3680,8 @@ fn walk_call(
     // flows implicitly into the call (the callee can read from the
     // receiver). Bridge the receiver's identifier-tokens into a
     // synthetic `CallArg(site, 0)` slot if no explicit args
-    // already exist there, so solidity-style `t.delegatecall("")`
-    // captures the flow from `t` into the call. Method calls only —
+    // already exist there, so a method call whose receiver carries data
+    // captures the receiver flow. Method calls only —
     // free functions don't carry implicit receiver flow.
     let mut receiver_arg_node = None;
     let mut receiver_storage_base = None;

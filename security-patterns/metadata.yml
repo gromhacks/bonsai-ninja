@@ -69,7 +69,6 @@ sanitizer_credits:
   nosql-parameter: [nosql-injection]
   signed-token-verify: [code-injection, insecure-deserialization]
   signature-verify: [code-injection, insecure-deserialization, untrusted-token]
-  signature-sanitizer: [signature-replay, untrusted-token]
   html-encode: [xss]
   html-sanitize: [xss]
   js-encode: [xss]
@@ -90,16 +89,15 @@ sanitizer_credits:
   auth-sanitizer: [weak-auth, access-control]
   password-verify: [weak-auth]
   deser-secure: [insecure-deserialization]
-  jwt-verify: [jwt, untrusted-token, signature-replay]
+  jwt-verify: [jwt, untrusted-token]
   constant-time: [timing-attack]
   constant-time-compare: [timing-attack]
   bounds-check: [memory-safety]
   crypto-bounds: [memory-safety, weak-crypto]
   crypto-mode: [weak-crypto]
   kdf: [weak-crypto]
-  numeric-coerce: [integer-overflow]
+  numeric-coerce: []
   regex-escape: [redos]
-  controlled-exposure: [information-exposure]
   lock-acquire: [race]
   cookie-secure: [cookie-misconfig]
   # Inventory-only until the pack defines a rate-limit-missing sink family.
@@ -122,8 +120,6 @@ sink_tag_semantics:
   memory-safety:
     allow_file_package_evidence: true
     skip_call_package_gate: true
-  information-exposure:
-    suppress_inferred_sources: true
   log-injection:
     suppress_local_source_flow_classes: [environment-input]
   xxe:
@@ -504,9 +500,3 @@ languages:
   perl:
     package_matching:
       package_separators: ["::", "->", "/"]
-
-  solidity:
-    security_model: smart-contract
-    canonical_sink_families_applicable: false
-    package_matching:
-      package_separators: [".", "/"]

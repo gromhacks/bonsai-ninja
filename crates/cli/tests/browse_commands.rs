@@ -2361,7 +2361,7 @@ fn top_level_help_contains_examples_and_theme_note() {
         "top-level help missing theme listing: {out}"
     );
     assert!(
-        out.contains("21\nlanguages") || out.contains("21 languages"),
+        out.contains("20\nlanguages") || out.contains("20 languages"),
         "top-level help missing supported-language line: {out}"
     );
 }
@@ -4393,15 +4393,6 @@ fn lang_expectations() -> Vec<LangExpect> {
             import_mark: Some("UserService"),
             string_mark: Some("notify-admin"),
             class_mark: None,
-        },
-        LangExpect {
-            lang: "solidity",
-            entry: "handleRequest",
-            ref_sym: Some("verifyToken"),
-            sink: "runAdminCommand",
-            import_mark: Some("UserService"),
-            string_mark: None,
-            class_mark: Some("Gateway"),
         },
     ]
 }

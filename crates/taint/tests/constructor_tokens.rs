@@ -69,7 +69,6 @@ fn constructor_method_vocabulary_is_adapter_owned_without_legacy_fallback() {
         ("ruby", Arc::new(bonsai_lang_ruby::RubyAdapter::new())),
         ("rust", Arc::new(bonsai_lang_rust::RustAdapter::new())),
         ("scala", Arc::new(bonsai_lang_scala::ScalaAdapter::new())),
-        ("solidity", Arc::new(bonsai_lang_solidity::SolidityAdapter::new())),
         ("swift", Arc::new(bonsai_lang_swift::SwiftAdapter::new())),
         (
             "typescript",

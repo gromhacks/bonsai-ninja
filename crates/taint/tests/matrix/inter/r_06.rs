@@ -93,7 +93,3 @@ fn r_06_rust() {
         sink: "sink",
     });
 }
-#[test]
-fn r_06_solidity() {
-    run_positive_cell("R_06", LangFixture { lang:"solidity", adapter:Arc::new(bonsai_lang_solidity::SolidityAdapter::new()), files:&[("Demo.sol","library Box { function helper(string memory p) internal pure { sink(p); } }\ncontract Demo { function entry(string memory args) public pure { Box.helper(args); } }\n")], entry:"entry", seed:&["args"], sink:"sink" });
-}
