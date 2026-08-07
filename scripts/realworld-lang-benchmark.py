@@ -170,7 +170,7 @@ def run_command(
     cmd: list[str],
     *,
     cwd: Path,
-    timeout: int,
+    timeout: int | None,
     env: dict[str, str] | None = None,
     stdout_path: Path | None = None,
     stderr_path: Path | None = None,
@@ -497,7 +497,7 @@ def run_target(
     tmp_root: Path,
     out_dir: Path,
     clone_timeout: int,
-    command_timeout: int,
+    command_timeout: int | None,
     profile: str | None,
     paged_output: bool,
     keep_workspaces: bool,
@@ -612,7 +612,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json-out", default=None, help="summary JSON path")
     parser.add_argument("--clone-timeout", type=int, default=900)
-    parser.add_argument("--command-timeout", type=int, default=900)
+    parser.add_argument(
+        "--command-timeout",
+        type=int,
+        default=None,
+        help="optional per-analysis-command timeout in seconds; uncapped by default",
+    )
     parser.add_argument(
         "--profile",
         default="production",

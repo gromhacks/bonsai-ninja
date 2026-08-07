@@ -44,6 +44,36 @@ while IFS= read -r occurrence; do
     fi
 done < <(rg -n --no-heading 'pip[[:space:]]+install' .github/workflows --glob '*.yml' --glob '*.yaml' || true)
 
+release_workflow=.github/workflows/release.yml
+required_release_commands=(
+    'python3 scripts/audit-docs.py'
+    'python3 scripts/pack_audit.py --duplicates --fail-on-family-file-mismatch'
+    'python3 scripts/fp_audit.py'
+    'python3 scripts/category_audit.py'
+    'scripts/audit-loop.sh --quick'
+)
+for command in "${required_release_commands[@]}"; do
+    if ! rg -Fq -- "$command" "$release_workflow"; then
+        printf 'release workflow omits required gate: %s\n' "$command" >&2
+        violations=$((violations + 1))
+    fi
+done
+
+if rg -q 'timeout-minutes:' "$release_workflow"; then
+    printf 'release workflow may not time-cap exact semantic gates: %s\n' "$release_workflow" >&2
+    violations=$((violations + 1))
+fi
+
+if rg -q 'export .*--all' "$release_workflow"; then
+    printf 'release workflow passes unsupported --all to export: %s\n' "$release_workflow" >&2
+    violations=$((violations + 1))
+fi
+
+if rg -q '(index|diagnostics) .*--format' "$release_workflow"; then
+    printf 'release workflow passes unsupported --format to a text-only command: %s\n' "$release_workflow" >&2
+    violations=$((violations + 1))
+fi
+
 if (( violations > 0 )); then
     printf 'GitHub Actions pinning audit failed: %d mutable reference(s).\n' "$violations" >&2
     exit 1

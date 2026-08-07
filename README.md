@@ -180,6 +180,14 @@ completed in 22.63 seconds. The integration gate protects cold planning, warm
 production taint, navigation, inspect, and security inventories without
 terminating, skipping, or capping semantic work.
 
+The 2026-08-07 final warm-generation repeat passed all five scale tests in
+234.09 seconds. Exact broad `inspect execute --taint-flow` completed in 29.53 seconds
+for 198,025 unique pageable paths after reusing declaration targets already
+selected by the compiler pass and avoiding redundant relevance proofs for
+entries that own exact target nodes. Fresh-cache production taint completed in
+34.28 seconds, warm production taint in 27.74 seconds, and immediate semantic
+reuse in 2.48 seconds under the same 3 GiB schedule and unchanged SLOs.
+
 ## Human-First And LLM-First
 
 Most code tooling and most LLM coding workflows still force a model to

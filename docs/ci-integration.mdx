@@ -113,6 +113,15 @@ taint 25.90 seconds. Source, sink, sanitizer, and dependency inventories took
 remained near 1 GiB RSS, released its bodies before IDG replay, and the IDG
 worker remained below the 3 GiB scheduling budget.
 
+A 2026-08-07 final warm-generation repeat passed all five tests in 234.09
+seconds without changing those limits: immediate semantic reuse took 2.48
+seconds, default inspect 10.02 seconds, broad raw-taint inspect 29.53 seconds,
+fresh-cache production taint 34.28 seconds, and warm production taint 27.74
+seconds. The broad inspect result retained all 12,233 entry closures and
+198,025 unique pageable paths; compiler-owned declaration targets and direct
+target ownership now avoid redundant header/relevance lookups without changing
+the IDG fixed point.
+
 The integration test deliberately does not write the multi-gigabyte native
 Elasticsearch artifact on every CI runner. Changes to native export, compiler
 summary closure, phase release, JSON streaming, or export caching must also run

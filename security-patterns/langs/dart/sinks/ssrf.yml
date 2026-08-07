@@ -1010,7 +1010,9 @@
       regex: ^Uri\.parse$
   description: "Disabled audit-only - Uri.parse(tainted) by itself does not perform a network or filesystem call. Enable when triaging URL-construction sites; the dangerous sinks are the http/HttpClient/File rules that consume the parsed Uri."
 - id: dart.ssrf.uri_https_constructor
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: dart
   tag: ssrf
   severity: medium
@@ -1035,9 +1037,11 @@
 
       '
     expect_no_match: true
-  description: "TODO(only-when-packaged): Uri lives in dart:core which is auto-imported - Uri.https(tainted host or path) - host parameter is attacker-controlled, enabling SSRF when later fetched."
+  description: "Disabled audit-only - Uri.https constructs a URI but does not perform a network request. Network clients that consume the URI are the security sinks."
 - id: dart.ssrf.uri_http_constructor
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: dart
   tag: ssrf
   severity: medium
@@ -1062,4 +1066,4 @@
 
       '
     expect_no_match: true
-  description: "Uri.http(tainted host or path) - host parameter is attacker-controlled, enabling SSRF when later fetched."
+  description: "Disabled audit-only - Uri.http constructs a URI but does not perform a network request. Network clients that consume the URI are the security sinks."
