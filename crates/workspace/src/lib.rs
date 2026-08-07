@@ -5401,7 +5401,13 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // input dependencies, Java constructor locals preserve lexical identity,
     // and qualified Go composite receivers resolve by their declared type.
     // Rebuild graphs whose call or transfer edges used the earlier facts.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 76;
+    // v77 (2026-08-06): a rule-declared source callback can bind directly to
+    // adapter-lowered parameters of an inline call-argument lambda. Named
+    // callbacks retain resolver-backed cross-function stitching.
+    // v78 (2026-08-06): inline callback source bindings retain whole-value
+    // provenance so exact field projections inherit the delivered source
+    // without widening projected fields into siblings.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 78;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 

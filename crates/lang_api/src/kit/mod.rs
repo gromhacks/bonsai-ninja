@@ -4754,21 +4754,30 @@ pub fn extract_call_argument_value_facts(
                                 value, file, src, handler,
                             ),
                             direct_call_callee_span(value, file, src, handler),
+                            if handler.is_lambda(value.kind()) {
+                                extract_param_names(&value, src)
+                            } else {
+                                Vec::new()
+                            },
                         )
                     })
-                    .max_by_key(|(flow, _)| {
+                    .max_by_key(|(flow, _, callback_params)| {
                         (
                             flow.aggregate_fields.len() + flow.tuple_items.len() + flow.spreads.len(),
                             usize::from(!flow.is_empty()),
+                            callback_params.len(),
                         )
                     })
             });
-        if let Some((value_flow, direct_call_span)) = selected.filter(|(flow, _)| !flow.is_empty()) {
+        if let Some((value_flow, direct_call_span, inline_callback_params)) =
+            selected.filter(|(flow, _, callback_params)| !flow.is_empty() || !callback_params.is_empty())
+        {
             facts.push(crate::CallArgumentValueFact {
                 call_span,
                 argument_index,
                 argument_span,
                 direct_call_span,
+                inline_callback_params,
                 value_flow,
                 static_value: None,
                 exact_static_aggregate_fields: Vec::new(),
@@ -4896,6 +4905,11 @@ pub fn populate_call_argument_static_values(
                     parsed_call_target(&value_node, src).map(|target| span_of(file, &target.node))
                 } else {
                     None
+                },
+                inline_callback_params: if handler.is_lambda(value_node.kind()) {
+                    extract_param_names(&value_node, src)
+                } else {
+                    Vec::new()
                 },
                 value_flow: Default::default(),
                 static_value,

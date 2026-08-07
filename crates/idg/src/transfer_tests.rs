@@ -101,6 +101,145 @@ fn empty_param_name_skipped() {
 }
 
 #[test]
+fn configured_source_call_binds_inline_callback_parameter_from_compiler_fact() {
+    let mut decl = empty_decl(1, "module");
+    let source_span = span(20, 48);
+    let callback_span = span(49, 90);
+    let sink_span = span(70, 74);
+    decl.flow_events = vec![
+        FlowEvent::Call {
+            span: source_span,
+            name: "t.procedure.input(schema).query".to_string(),
+            receiver: Some("t.procedure.input(schema)".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: vec![CallArg {
+                span: callback_span,
+                passing_mode: Default::default(),
+                name: None,
+                value_text: "async ({ input }) => sink(input)".to_string(),
+                place: None,
+                source_names: vec!["input".to_string()],
+            }],
+        },
+        FlowEvent::Assign {
+            span: callback_span,
+            target: "input".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["input".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: sink_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                span: span(75, 80),
+                passing_mode: Default::default(),
+                name: None,
+                value_text: "\"prefix\" + input.column".to_string(),
+                place: None,
+                source_names: vec!["input".to_string(), "input.column".to_string()],
+            }],
+        },
+    ];
+    let callback_facts = [CallArgumentValueFact {
+        call_span: source_span,
+        argument_index: 0,
+        argument_span: callback_span,
+        direct_call_span: None,
+        inline_callback_params: vec!["input".to_string()],
+        value_flow: ExpressionFlow::default(),
+        static_value: None,
+        exact_static_aggregate_fields: Vec::new(),
+        exact_static_sequence_values: None,
+    }];
+    let options = TransferOptions {
+        source_callback_args: vec![SourceCallbackArgSpec {
+            callee: r"regex:(^|\.)procedure\.input\(.+\)\.query$".to_string(),
+            callback_arg_index: 0,
+            source_param_indices: vec![0],
+        }],
+        ..TransferOptions::default()
+    };
+
+    let out = transfer_function_for_with_options_and_compiler_facts(
+        &decl,
+        &options,
+        &[],
+        &[],
+        &callback_facts,
+        &[],
+    );
+    let source_ret = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::CallRet { site }) if site.0 == source_span
+            )
+            .then_some(NodeId(u32::try_from(index).expect("node id")))
+        })
+        .expect("source call result");
+    let callback_binding = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::Write { span, .. }) if *span == callback_span
+            )
+            .then_some(NodeId(u32::try_from(index).expect("node id")))
+        })
+        .expect("inline callback binding");
+    let sink_arg = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::CallArg { site, idx: 0 }) if site.0 == sink_span
+            )
+            .then_some(NodeId(u32::try_from(index).expect("node id")))
+        })
+        .expect("sink argument");
+
+    assert!(out
+        .edges
+        .iter()
+        .any(|edge| edge.from == source_ret && edge.to == callback_binding));
+    assert!(out
+        .edges
+        .iter()
+        .any(|edge| edge.from == callback_binding && edge.to == sink_arg));
+
+    let without_rule = transfer_function_for_with_options_and_compiler_facts(
+        &decl,
+        &TransferOptions::default(),
+        &[],
+        &[],
+        &callback_facts,
+        &[],
+    );
+    assert!(without_rule.edges.iter().all(|edge| {
+        !(rendered_place_name(&without_rule, edge.from).starts_with("CallRet(")
+            && rendered_place_name(&without_rule, edge.to) == "input")
+    }));
+}
+
+#[test]
 fn assign_simple_emits_read_to_write_edge() {
     let mut decl = empty_decl(1, "f");
     decl.flow_events = vec![FlowEvent::Assign {
@@ -1695,6 +1834,7 @@ fn finite_literal_selection_keeps_lookup_call_but_cleans_result_write() {
         &TransferOptions::default(),
         &assignment_values,
         &[],
+        &[],
         &selections,
     );
     let result_write = out
@@ -1764,6 +1904,7 @@ fn finite_literal_selection_used_inline_does_not_taint_the_sink_argument() {
     let out = transfer_function_for_with_options_and_compiler_facts(
         &decl,
         &TransferOptions::default(),
+        &[],
         &[],
         &[],
         &selections,

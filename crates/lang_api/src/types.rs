@@ -2647,6 +2647,13 @@ pub struct CallArgumentValueFact {
     /// not populate this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_call_span: Option<Span>,
+    /// Adapter-lowered parameter bindings when the complete argument is an
+    /// inline callback/lambda expression. Indices use the same flattened,
+    /// source-ordered binding convention as [`Decl::params`]. API/provider
+    /// identity is deliberately absent: rulepack transfer semantics decide
+    /// whether a particular callback position receives source data.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inline_callback_params: Vec<String>,
     pub value_flow: ExpressionFlow,
     /// Exact scalar value decoded by the owning language frontend.
     #[serde(default, skip_serializing_if = "Option::is_none")]

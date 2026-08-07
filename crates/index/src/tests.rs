@@ -252,6 +252,7 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
             argument_index: 0,
             argument_span: arg_span,
             direct_call_span: Some(call_span),
+            inline_callback_params: Vec::new(),
             value_flow: bonsai_lang_api::ExpressionFlow {
                 call_sites: vec![call_span],
                 ..Default::default()

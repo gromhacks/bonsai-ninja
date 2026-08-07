@@ -240,7 +240,11 @@ exact, serializable summaries to `DeclIndex`:
 - `StringCompositionFact` for concatenations, interpolations, accessor calls,
   and language-level literal fallbacks used to reconstruct a value;
 - exact static aggregate/scalar fields on `CallArgumentValueFact` for
-  constructor or call configuration.
+  constructor or call configuration;
+- `CallArgumentValueFact::inline_callback_params` for a complete inline
+  callback argument, derived from the callback's parsed parameter/pattern
+  nodes. The fact records syntax only; rule data decides whether a callback
+  position receives untrusted input.
 
 Provider-dependent facts record the canonical imported factory/operation call
 but do not classify it. `CharacterConstraintDomain::ProviderBound` and

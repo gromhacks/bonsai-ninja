@@ -30,6 +30,10 @@ use std::sync::Arc;
 /// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
 /// or the object validation contract changes in a way that can alter compiler
 /// facts.
+// v62: call-argument facts retain adapter-lowered inline callback parameter
+// bindings. Configured source-callback delivery can therefore enter an
+// inlined callback body without parsing rendered lambda text or inventing a
+// synthetic callable declaration.
 // v61: Java compilation units without a package declaration use the unnamed
 // package rather than a filename-derived namespace; Perl, Ruby, and Rust
 // structured control facts track their current Tree-sitter grammar nodes.
@@ -123,7 +127,7 @@ use std::sync::Arc;
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 61;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 62;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;

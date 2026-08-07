@@ -27,14 +27,17 @@ The analyzer is one compiler-style pipeline:
 
 Validated on 2026-08-06 (dated measurements below retain their run date):
 
-- `cargo clippy --workspace --all-targets --locked -- -D warnings` passed;
-  this strict gate compiled the complete workspace and every test target.
-- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-  --document-private-items --locked` passed.
+- The `d510043` baseline passed `cargo clippy --workspace --all-targets
+  --locked -- -D warnings`; the final ABI-v62 delta passed the same strict
+  all-target Clippy policy for every changed crate and its dependencies.
+- The baseline passed full-workspace rustdoc with warnings denied; the final
+  delta passed release rustdoc with private items for every changed crate.
 - `cargo fmt --all -- --check` and `git diff --check` passed.
 - The final `cargo test --workspace --locked --no-fail-fast` pass completed
-  across all crates, integration binaries, adapter suites, and doc tests after
-  the architecture, lifecycle, packaging, and release-gate changes.
+  across all crates, integration binaries, adapter suites, and doc tests at
+  the `d510043` release-gate baseline. The final ABI-v62 delta then compiled
+  every target under strict Clippy and reran its affected optimized adapter,
+  IDG, security, callback, rulepack, architecture, and CLI suites.
 - Behavioral suites passed for callgraph, resolver, IDG, taint, security, SDK/CLI
   parity, the 1,076-case per-language CLI matrix, the 121-case end-to-end taint
   engine suite, conformance architecture invariants, and the exhaustive
@@ -59,6 +62,13 @@ Validated on 2026-08-06 (dated measurements below retain their run date):
   getter receiver state across constructor/inheritance hops. The IDG suite
   also pins parameter-less receiver-root mapping and finite composition of a
   resolved receiver place plus selector demand.
+- Inline source callbacks are now pinned at the compiler-fact boundary. An
+  adapter records parsed callback parameter bindings on the exact call
+  argument; rule data selects the callback and delivered parameter positions;
+  the IDG binds that source into the already-inlined body. Positive JavaScript
+  and destructured TypeScript cases, a no-source negative, and the complete
+  vulnerable/fixed CVEBench pair set pass without provider names in shared
+  Rust.
 - `security sanitizers` inventories only credit-bearing sanitizer matches.
   Rulepack-compatible passthrough transfers and generic non-crediting
   validation markers remain available to taint propagation but cannot be
@@ -143,18 +153,19 @@ seconds with 35,110,912 bytes maximum RSS.
 ## Elasticsearch scale result
 
 The current release pipeline is measured against the sibling 30,055-source
-Elasticsearch checkout. The final 2026-08-06 ABI-v61 exact large-workspace
-integration gate passed 5/5 in 213.51 seconds under a 3 GiB scheduling budget.
-It starts fresh
+Elasticsearch checkout. The final 2026-08-06 ABI-v62 exact large-workspace
+integration gate passed 5/5 in 1,760.06 seconds under a 3 GiB scheduling
+budget, including the required one-time rebuild from the incompatible ABI-v61
+compiler-object generation. It starts fresh
 processes and covers fresh-cache taint planning, warm semantic reuse, nine
 navigation commands, targeted inspect with taint evidence, security inventory,
 and production taint. Its enforced ceilings are 15 seconds for warm semantic
 reuse and 30 seconds for each measured query/analysis command.
 
-The semantic generation validation/open phase completed in 5.23 seconds and
-the immediate fresh-process warm reuse completed in 2.35 seconds. Default
-inspect completed in 10.87 seconds. The broad exact
-`inspect execute --taint-flow` regression query completed in 28.70 seconds and
+The ABI-v62 generation rebuild completed in 1,541.88 seconds and the immediate
+fresh-process warm reuse completed in 2.32 seconds. Default inspect completed
+in 10.33 seconds. The broad exact
+`inspect execute --taint-flow` regression query completed in 29.58 seconds and
 reported 3,895 declaration hits, 26,047 other syntax hits, 198,718 unique raw
 taint flows, and 12,233/12,233 scoped-IDG entry closures. A separate
 ABI-v61 RSS-profiled run used 3,420,733,440 bytes maximum RSS, a
@@ -166,13 +177,14 @@ CPU availability, 3 GiB permits up to ten workers, 2 GiB up to two, and 1 GiB
 one worker. Concurrency changes only scheduling, never entries, targets,
 closure, or output.
 
-The same current generation was also built once from an empty semantic cache.
-That explicit, opt-in `index --semantic` compiler prewarm completed in
-1,727.39 seconds (28m47s). The compiler-object worker remained near 1.0 GiB
+The ABI-v62 run was a real cache migration: changing serialized callback facts
+invalidated every ABI-v61 compiler object rather than silently reusing stale
+data. The explicit `index --semantic` compiler worker remained near 0.9 GiB
 RSS, exited before IDG replay began, and the IDG worker remained below the
 3 GiB scheduling budget. Normal commands do
 not force that whole-workspace prewarm: fresh-cache production taint completed
-in 28.84 seconds, warm production taint in 26.26 seconds, and exact syntax
+in 30.22 seconds against its 45-second cold SLO, warm production taint in
+25.90 seconds, and exact syntax
 commands hydrate only the product they request. The long explicit prewarm is
 recorded honestly because it remains a bulk cache-publication operation, not
 an interactive-command latency claim.
@@ -201,9 +213,9 @@ callee-name matching cannot manufacture field flow. Regression tests pin
 scalar-to-receiver mapping, sibling-field isolation, clean output-argument
 overwrites, Java record accessors, and C# expression-bodied properties.
 
-The final gate measured source inventory at 3.39 seconds, the exhaustive
-high-severity sink inventory at 21.34 seconds, credit-bearing sanitizer
-inventory at 16.97 seconds, and dependency inventory at 8.65 seconds. These
+The final gate measured source inventory at 3.85 seconds, the exhaustive
+high-severity sink inventory at 22.63 seconds, credit-bearing sanitizer
+inventory at 18.32 seconds, and dependency inventory at 10.42 seconds. These
 are syntax/compiler and rulepack facts, not Elasticsearch-specific name lists.
 
 Production security in the integration gate reports
@@ -283,15 +295,17 @@ external implementations cannot be presented as resolved compiler facts.
 
 ## External benchmark snapshot
 
-The final 2026-08-05 ABI-v61 CVEBench-SAST artifact used isolated copies of
+The final 2026-08-06 ABI-v62 CVEBench-SAST artifact used isolated copies of
 every vulnerable and fixed repository, disabled analyzer caches between cases,
-and requested uncapped SARIF. All 460 scans exited successfully in 208.4
-seconds with no incomplete analysis: per-scan latency was 0.456 seconds mean,
-0.571 seconds p95, and 0.705 seconds maximum. Its verified report records
-229/230 primary detections, 100% sanitizer recognition, 0 duplicate findings,
-92.71% precision, 100% precision excluding off-chain findings, 100% fix
-validation, zero decoy trips, zero false positives per kLOC, 100% cross-file
-and hard-case recall, and a 4.9565 mean score.
+and requested uncapped SARIF. All 460 scans exited successfully in 226.69
+seconds with no incomplete analysis: vulnerable-scan latency was 0.496 seconds
+mean, 0.621 seconds p95, and 0.745 seconds maximum. Its verified report records
+229/230 primary detections, 99.13% file localization, 98.70% line localization,
+100% sanitizer recognition, 0 duplicate findings, 92.71% precision, 100%
+precision excluding off-chain findings, 100% fix validation, zero decoy trips,
+zero false positives per kLOC, and a 4.9565 mean score. The ABI-v62 run restores
+both TypeScript inline-callback regressions to full 5.0 source/sink/flow matches
+while every fixed snapshot remains clean.
 
 The sole empty vulnerable scan is the documented `XSSFWorkbook` case: the
 benchmark labels normal spreadsheet construction as an XXE sink even though
@@ -301,17 +315,9 @@ add a false sink to make that invalid case pass. The TypeScript
 (entity-expansion denial of service, CWE-776); the rule does not falsely claim
 that this library resolves external `SYSTEM` entities.
 
-The artifact records 11 decoy trips, all copies of one shared Flask
-`/raw` route. That route passes attacker-controlled JSON to SQL whenever
-`APP_ENV=dev-internal`; a production deployment file currently selects a
-different environment, but the source route remains registered and reachable
-under a supported runtime configuration. Suppressing it would make compiler
-flow depend on one deployment snapshot and hide a real configuration-dependent
-attack path, so the engine reports it. This is an intentional soundness choice,
-not a benchmark-specific exception. The benchmark also scores Python
-`os.path.join` as the planted path-traversal sink even when Bonsai reports the
-downstream `FileResponse` emission sink; that location mismatch does not change
-the detected source-to-filesystem flow.
+The benchmark scores Python `os.path.join` as the planted path-traversal sink
+even when Bonsai reports the downstream `FileResponse` emission sink; that
+location mismatch does not change the detected source-to-filesystem flow.
 
 Benchmark metrics are evidence about the checked corpus, not a substitute for
 the 21-language adapter/rule conformance gates. Dataset corrections must be

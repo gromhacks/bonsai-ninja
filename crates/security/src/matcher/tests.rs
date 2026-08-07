@@ -1905,6 +1905,7 @@ fn prior_call_static_arguments_use_language_decoded_values() {
         argument_index: index,
         argument_span: Span::new(FileId::new(0), 11 + index as u64, 12 + index as u64),
         direct_call_span: None,
+        inline_callback_params: Vec::new(),
         value_flow: Default::default(),
         static_value: value,
         exact_static_aggregate_fields: Vec::new(),

@@ -70,8 +70,10 @@ Adapter obligations:
 - `args[i].value_text` is retained for rendering only. `name` preserves an
   adapter-decoded keyword name, while `place`, `source_names`,
   `passing_mode`, and the file's `CallArgumentValueFact` table carry semantic
-  value shape. Shared analysis must never recover argument semantics by
-  tokenizing `value_text` or slicing the source with `Span`.
+  value shape. Inline callback parameter bindings are stored on that compiler
+  fact from parsed parameter/pattern nodes. Shared analysis must never recover
+  argument or callback semantics by tokenizing `value_text` or slicing the
+  source with `Span`.
 - `args[i].passing_mode` is emitted by the active adapter. `WriteBack` means
   the callee may update the caller-owned place and enables the IDG's outbound
   parameter stitch. The shared kit and taint engine do not recognize
