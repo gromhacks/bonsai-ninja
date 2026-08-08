@@ -939,6 +939,10 @@ fn path_and_slice_text_summaries_are_polished() {
         slice_out.contains("status") && slice_out.contains("incomplete"),
         "slice summary should render a human status label:\n{slice_out}"
     );
+    assert!(
+        !slice_out.contains("run `bonsai-ninja index --semantic`"),
+        "slice must compute its selected value-flow projection on demand instead of prescribing an artifact that semantic indexing intentionally does not build:\n{slice_out}"
+    );
     for raw in ["complete no", "max steps"] {
         assert!(
             !slice_out.contains(raw),
@@ -2308,6 +2312,28 @@ fn inspect_from_to_work_standalone_without_query() {
     assert!(
         stderr.contains("query") || stderr.contains("filter"),
         "error message should mention query/filter requirement, got: {stderr}"
+    );
+}
+
+#[test]
+fn inspect_from_to_resolves_qualified_same_named_methods() {
+    let root = tempdir_for_test("inspect-qualified-endpoints");
+    std::fs::write(
+        root.join("app.py"),
+        "class Target:\n    def run(self):\n        return 1\n\nclass Source:\n    def run(self):\n        return Target().run()\n",
+    )
+    .expect("write app.py");
+
+    let Some(out) = run_inspect_graph(&root, &["--from", "Source.run", "--to", "Target.run"]) else {
+        return;
+    };
+    assert!(
+        out.contains("Source.run") && out.contains("Target.run"),
+        "qualified same-named endpoints must resolve through compiler declaration identities:\n{out}"
+    );
+    assert!(
+        out.contains("FLOW 1"),
+        "the exact qualified endpoint corridor must render its connected flow:\n{out}"
     );
 }
 
@@ -7057,9 +7083,14 @@ fn dump_resolve_in_file_uses_semantic_context() {
         .get("file")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    assert!(
-        file.ends_with("a.rs"),
-        "semantic file context should keep a.rs helper, got {file}:\n{out}"
+    assert_eq!(
+        file, "a.rs",
+        "resolver locations must use the same workspace-relative path accepted by --in-file:\n{out}"
+    );
+    assert_eq!(
+        parsed.get("in_file").and_then(|v| v.as_str()),
+        Some("a.rs"),
+        "applied file context must be rendered workspace-relative:\n{out}"
     );
     assert_eq!(
         parsed.get("analysis_complete").and_then(|v| v.as_bool()),

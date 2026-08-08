@@ -173,6 +173,13 @@ pub struct Decl {
     /// does not interpret these.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_annotations: Vec<Vec<String>>,
+    /// Direct call expressions used as parameter defaults, parallel-indexed
+    /// with `params` (Python `payload = fastapi.Body(...)` ->
+    /// `["fastapi.Body"]`). This is a source-syntax fact only: adapters must
+    /// not interpret framework/API names, and consumers decide what a
+    /// particular default call means through rulepack constraints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub param_default_calls: Vec<Vec<String>>,
     /// Adapter-derived local/parameter/field receiver type bindings
     /// valid inside this declaration. This is syntax metadata from
     /// parsed declarations, used by matchers to resolve
@@ -3420,6 +3427,7 @@ mod compiler_attribution_tests {
             has_implicit_returns: false,
             params: Vec::new(),
             param_annotations: Vec::new(),
+            param_default_calls: Vec::new(),
             type_aliases: Vec::new(),
             bases: Vec::new(),
             receiver_param_index: None,

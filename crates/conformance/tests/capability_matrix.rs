@@ -21,7 +21,7 @@ fn fixture_for(lang: &str) -> (&'static str, &'static str, &'static [Capability]
     match lang {
         "python" => (
             "app.py",
-            "from typing import List\nfrom fastapi import Query\n\nclass Pipeline(Base):\n    def __init__(self, conn: str):\n        self.conn = conn\n\n    def run(self, items: List[str]):\n        try:\n            for item in items:\n                if item:\n                    self.handle(item)\n        except Exception as e:\n            return e\n\n    def handle(self, x: str = Query(...)):\n        y = self.transform(x)\n        return y\n",
+            "from typing import Annotated, List\nfrom fastapi import Query\n\nclass Pipeline(Base):\n    def __init__(self, conn: str):\n        self.conn = conn\n\n    def run(self, items: List[str]):\n        try:\n            for item in items:\n                if item:\n                    self.handle(item)\n        except Exception as e:\n            return e\n\n    def handle(self, x: Annotated[str, Query()] = Query(...)):\n        y = self.transform(x)\n        return y\n",
             &[Capability::ImplicitReceiverNames, Capability::ImplicitReturns],
         ),
         "javascript" => (

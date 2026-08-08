@@ -1257,6 +1257,7 @@
     kind: param
     target:
       annotation: Body
+      default_call: Body
   match_examples:
   - name: fastapi body marker
     code: |
@@ -1265,7 +1266,7 @@
       def handler(payload: dict = Body(...)):
           return payload
     expect_match_text: [payload]
-  description: "FastAPI `Body(...)` parameter binder - request-body envelope. Per the python adapter's binder-marker support, the annotation `Body` is recorded only when the parameter's default-value is a `Body(...)` call, so this rule no longer over-fires on unrelated `Body` constructors (G1, R7)."
+  description: "FastAPI `Body(...)` parameter binder - request-body envelope. The rule owns both `Annotated[..., Body()]` metadata and the generic direct parameter-default-call fact, so the framework API name remains in the rulepack and unrelated constructors stay quiet (G1, R7)."
 
 - id: python.fastapi.query_param_marker
   enabled: true
@@ -1281,6 +1282,7 @@
     kind: param
     target:
       annotation: Query
+      default_call: Query
   match_examples:
   - name: fastapi query marker
     code: |
@@ -1289,7 +1291,7 @@
       def handler(q: str = Query(...)):
           return q
     expect_match_text: [q]
-  description: "FastAPI `Query(...)` parameter binder - URL query value. Annotation-based match via the python adapter's binder-marker support; only fires when the parameter's default-value is a `Query(...)` call (G1, R7)."
+  description: "FastAPI `Query(...)` parameter binder - URL query value. The rule owns both annotation-metadata and direct-default-call syntax selectors while the adapter remains API-neutral (G1, R7)."
 
 - id: python.tornado.websocket_on_message_param
   enabled: true

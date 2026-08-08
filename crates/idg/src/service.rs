@@ -5566,6 +5566,16 @@ impl IdgQueryService {
                 }
             }
 
+            // The relevance relation is only an optional pruning proof. Once
+            // one projected compiler place lacks the symbolic inverse needed
+            // to make that proof complete, `contains_node`/`contains_fact`
+            // deliberately admit every forward state. Finishing the backward
+            // fixed point would therefore be dead work and cannot change the
+            // exact forward closure or its result.
+            if !worklist.relevance.pruning_complete {
+                break;
+            }
+
             if let Some(key) = worklist.pending_facts.pop() {
                 let key = key as u64;
                 let base = (key >> 32) as u32;

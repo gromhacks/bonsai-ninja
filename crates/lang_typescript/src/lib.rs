@@ -991,9 +991,11 @@ fn ts_cast_type_name(cast: Node<'_>, src: &[u8]) -> Option<String> {
 ///
 /// Tree-sitter exposes this as a normal constructor parameter carrying
 /// an `accessibility_modifier` token rather than an assignment event. Emit
-/// the same `diag -> DiagService` and `this.diag` field-write facts that a
-/// handwritten assignment would have produced, but only for the syntactic
-/// parameter-property forms (`public` / `private` / `protected` / `readonly`).
+/// the same `this.diag -> DiagService` type and `this.diag` field-write facts
+/// that a handwritten assignment would have produced, but only for the
+/// syntactic parameter-property forms (`public` / `private` / `protected` /
+/// `readonly`). The ordinary parameter type (`diag -> DiagService`) is already
+/// lowered by `collect_param_type_aliases`.
 fn collect_typescript_parameter_properties(
     tree: &Tree,
     file: FileId,
@@ -1033,13 +1035,18 @@ fn collect_typescript_parameter_properties(
             if name.is_empty() || name == type_name {
                 continue;
             }
+            // A parameter property is a TypeScript syntax-level declaration
+            // of the receiver field. Record that exact receiver projection so
+            // shared class-field propagation does not need to invent a
+            // synthetic assignment event to prove the type.
+            let receiver_field = format!("this.{name}");
             let alias = TypeAliasBinding {
-                name: name.clone(),
+                name: receiver_field.clone(),
                 type_name,
             };
             let field_write = FieldWrite {
                 span: span_of(file, &param),
-                target: format!("this.{name}"),
+                target: receiver_field,
                 source_param_indices: vec![current_index],
             };
             let entry = (alias, field_write);

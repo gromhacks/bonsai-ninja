@@ -4,8 +4,8 @@
 //! the global [`crate::ui::Ui`] palette so it matches every other
 //! command's chrome. Compact mode prints a step list of marks
 //! (one line per finding/sink/source); the default view shows the
-//! primary file source with marks beside the relevant lines, then
-//! inlines cross-file caller / callee bodies when available.
+//! primary file source with marks beside relevant lines. Cross-file caller /
+//! callee bodies appear only when the caller requests a semantic overlay.
 
 use anyhow::Result;
 use bonsai_sdk::{FlowEntryExit, InlinedDecl, LineMark, MarkKind, ReadFileFilters, ReadFileOut, Severity};

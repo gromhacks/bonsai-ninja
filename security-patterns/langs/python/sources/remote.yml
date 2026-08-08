@@ -398,6 +398,7 @@
     kind: param
     target:
       annotation: Depends
+      default_call: Depends
   match_examples:
   - name: fastapi depends param
     code: |
@@ -408,7 +409,7 @@
       def handler(token: str = Depends(get_token)):
           return token
     expect_match_text: [token]
-  description: "FastAPI `Depends(...)` parameter binder - value is the dependency factory's return. Annotation-based match per python adapter's binder-marker support; only fires when the parameter's default-value is a `Depends(...)` call (G1)."
+  description: "FastAPI `Depends(...)` parameter binder - value is the dependency factory's return. The rule owns both annotation-metadata and direct-default-call syntax selectors while the adapter remains API-neutral (G1)."
 - id: python.flask.request_args
   enabled: false
   disabled_reason:

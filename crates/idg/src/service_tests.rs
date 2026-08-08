@@ -604,6 +604,7 @@ fn empty_decl(symbol: u32, file: u32, name: &str) -> Decl {
         has_implicit_returns: false,
         params: Vec::new(),
         param_annotations: Vec::new(),
+        param_default_calls: Vec::new(),
         type_aliases: Vec::new(),
         bases: Vec::new(),
         receiver_param_index: None,
@@ -1419,6 +1420,11 @@ fn target_relevance_keeps_scalar_seeds_for_unmodeled_projected_places() {
     assert!(
         relevance.admits_any(&[WsNodeId(param.0)]),
         "a projected place without an exact symbolic fact must not let the backward pruning proof reject a scalar receiver seed"
+    );
+    assert_eq!(
+        relevance.nodes.len(),
+        1,
+        "once relevance becomes non-pruning, completing the backward worklist cannot affect the exact forward closure"
     );
 }
 

@@ -2077,8 +2077,9 @@ pub(crate) enum Cmd {
         kind: Vec<String>,
         /// Fuzzy filter: only keep flows that pass through something
         /// matching this substring anywhere in the chain (any hop) or
-        /// the hit text. `--from request` catches `handle_request`
-        /// even as an intermediate hop.
+        /// the hit text. Qualified owner names disambiguate same-named
+        /// methods (`Source.run`); `--from request` catches
+        /// `handle_request` even as an intermediate hop.
         #[arg(long)]
         from: Option<String>,
         /// Narrow `--from` matching to a single browse-fact kind —
@@ -2088,10 +2089,10 @@ pub(crate) enum Cmd {
         #[arg(long = "from-kind", value_enum, requires = "from")]
         from_kind: Option<FactKindFilter>,
         /// Fuzzy filter: only keep flows that reach something matching
-        /// this substring anywhere in the chain or the hit text.
-        /// `--to os.system` keeps the `os.system` call-hit even though
-        /// the chain itself ends at `run_admin_command` (the enclosing
-        /// function).
+        /// this substring anywhere in the chain or the hit text. Qualified
+        /// owner names disambiguate same-named methods. `--to os.system`
+        /// keeps the `os.system` call-hit even though the chain itself ends at
+        /// `run_admin_command` (the enclosing function).
         #[arg(long)]
         to: Option<String>,
         /// Narrow `--to` matching to a single browse-fact kind —
@@ -2461,9 +2462,9 @@ pub(crate) enum Cmd {
         /// Filter to flows the needle participates in (sink side).
         #[arg(long)]
         to: Option<String>,
-        /// Optional explicit cap on inlined caller / callee bodies.
-        /// Omitted (or 0) includes every connected body; output pagination
-        /// remains independent.
+        /// Request the cross-file caller/callee overlay and optionally cap its
+        /// inlined bodies. `0` is uncapped; omission keeps the default view
+        /// file-local unless another semantic overlay flag is present.
         #[arg(long)]
         max_inlined_bodies: Option<usize>,
         /// Drop the inlined-body section; emit a step-list of marks.

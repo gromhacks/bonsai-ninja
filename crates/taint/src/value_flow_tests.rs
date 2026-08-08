@@ -71,6 +71,7 @@ fn decl(params: &[&str], flow_events: Vec<FlowEvent>) -> Decl {
         has_implicit_returns: false,
         params: params.iter().map(|param| (*param).to_string()).collect(),
         param_annotations: Vec::new(),
+        param_default_calls: Vec::new(),
         type_aliases: Vec::new(),
         bases: Vec::new(),
         receiver_param_index: None,

@@ -388,6 +388,12 @@ fn normalize_erlang_access_events(
                 for arg in args {
                     if let Some(source) = erlang_fun_ref_source(&arg.value_text) {
                         arg.value_text.clone_from(&source);
+                        // `fun name/arity` is Erlang's exact callable-value
+                        // syntax. Lower the grammar-proven target as a place
+                        // so shared callgraph construction can distinguish it
+                        // from a compound expression that merely mentions a
+                        // function name.
+                        arg.place = Some(source.clone());
                         push_unique_string(&mut arg.source_names, source);
                         continue;
                     }

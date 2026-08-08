@@ -995,6 +995,155 @@ struct OccurrenceScan<'a> {
     partial_workspace: bool,
 }
 
+struct OccurrenceFact {
+    kind: String,
+    text: String,
+    span: bonsai_common::Span,
+    containing: Option<(bonsai_common::FuncId, String)>,
+    assignment_source_call: bool,
+}
+
+struct OccurrenceFileScan<'query, 'workspace> {
+    ws: &'workspace Workspace,
+    chain_cache: &'query ChainCache<'workspace>,
+    occurrence_matcher: &'query Matcher,
+    kind_selection: &'query InspectKindSelection,
+    filter_only_occurrence_kind: Option<bonsai_sdk::FactKindFilter>,
+    syntax_fast_path: bool,
+    large_syntax_scan: bool,
+}
+
+fn scan_occurrence_file(
+    file: bonsai_common::FileId,
+    options: &OccurrenceFileScan<'_, '_>,
+) -> Vec<OccurrenceFact> {
+    let OccurrenceFileScan {
+        ws,
+        chain_cache,
+        occurrence_matcher,
+        kind_selection,
+        filter_only_occurrence_kind,
+        syntax_fast_path,
+        large_syntax_scan,
+    } = options;
+    // Occurrence facts are file-local Tree-sitter IR. Stream the exact
+    // compiler object instead of retaining a whole-workspace body index.
+    let Some(streamed_index) = ws.exact_decl_index_shared(file) else {
+        return Vec::new();
+    };
+    let idx = streamed_index.as_ref();
+    let decls_in_file: Vec<&bonsai_lang_api::Decl> = idx.defs.iter().collect();
+    let mut facts = Vec::new();
+    let mut unused_rendered_hits = Vec::new();
+    let mut collect_fact = |kind: &str,
+                            text: String,
+                            span: bonsai_common::Span,
+                            containing: Option<(bonsai_common::FuncId, String)>,
+                            assignment_source_call: bool,
+                            _out: &mut Vec<HitOut>| {
+        facts.push(OccurrenceFact {
+            kind: kind.to_string(),
+            text,
+            span,
+            containing,
+            assignment_source_call,
+        });
+    };
+
+    // Calls + Assigns + Args live in flow_events.
+    for decl in &decls_in_file {
+        if !matches!(
+            decl.kind,
+            DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+        ) {
+            continue;
+        }
+        walk_flow_hits(
+            &decl.flow_events,
+            bonsai_common::FuncId::new(decl.symbol.raw()),
+            &decl.name,
+            FlowHitWalkContext {
+                workspace: Some(ws),
+                matcher: occurrence_matcher,
+                endpoint_kind_filter: *filter_only_occurrence_kind,
+                kinds: &kind_selection.requested,
+            },
+            &mut unused_rendered_hits,
+            &mut collect_fact,
+        );
+    }
+
+    if kind_selection.wants("string") {
+        for string in &idx.strings {
+            if occurrence_matcher.is_match(&string.text) {
+                facts.push(OccurrenceFact {
+                    kind: "string".to_string(),
+                    text: string.text.clone(),
+                    span: string.span,
+                    containing: chain_cache.enclosing_func(file, &decls_in_file, string.span),
+                    assignment_source_call: false,
+                });
+            }
+        }
+    }
+
+    // Function-body call refs duplicate the flow-event facts above. Retain
+    // module-level calls plus explicitly requested decorator/reference facts.
+    let scan_refs = kind_selection.wants("decorator")
+        || kind_selection.wants("ref")
+        || (kind_selection.wants("call") && (!*syntax_fast_path || !*large_syntax_scan));
+    if scan_refs {
+        for reference in &idx.refs {
+            let kind = match reference.kind {
+                RefKind::Decorator => "decorator",
+                RefKind::Call => {
+                    let enclosing = chain_cache.enclosing_func(file, &decls_in_file, reference.span);
+                    if enclosing.is_some() {
+                        continue;
+                    }
+                    "call"
+                }
+                _ => "ref",
+            };
+            if kind_selection.wants(kind) && occurrence_matcher.is_match(&reference.name) {
+                facts.push(OccurrenceFact {
+                    kind: kind.to_string(),
+                    text: reference.name.clone(),
+                    span: reference.span,
+                    containing: chain_cache.enclosing_func(file, &decls_in_file, reference.span),
+                    assignment_source_call: false,
+                });
+            }
+        }
+    }
+
+    if kind_selection.wants("import") {
+        // This runs inside a memory-scheduled file worker. Decode the
+        // independently addressable compiler import header directly; do not
+        // initialize or retain a lazy workspace-wide import cache here.
+        for import in ws.db().imports_for_uncached(file) {
+            let alias_match = import
+                .alias
+                .as_deref()
+                .is_some_and(|alias| occurrence_matcher.is_match(alias));
+            let original_match = import
+                .original_name
+                .as_deref()
+                .is_some_and(|original| occurrence_matcher.is_match(original));
+            if occurrence_matcher.is_match(&import.module) || alias_match || original_match {
+                facts.push(OccurrenceFact {
+                    kind: "import".to_string(),
+                    text: import_hit_text(&import),
+                    span: import.span,
+                    containing: None,
+                    assignment_source_call: false,
+                });
+            }
+        }
+    }
+    facts
+}
+
 fn scan_occurrence_facts(
     ws: &Workspace,
     chain_cache: &ChainCache<'_>,
@@ -1026,105 +1175,57 @@ fn scan_occurrence_facts(
             "scanning files"
         };
         let hit_bar = progress::progress_bar(hit_phase, files_in_path_order.len() as u64);
-        for file in files_in_path_order.iter().copied() {
-            hit_bar.inc(1);
-            // Occurrence facts are file-local Tree-sitter IR. Stream the
-            // exact compiler object in every mode instead of retaining a
-            // whole-workspace body index for semantic inspections.
-            let Some(streamed_index) = ws.exact_decl_index_shared(file) else {
-                continue;
-            };
-            let idx = streamed_index.as_ref();
-            // Preload decls in this file for enclosing-function lookup.
-            let decls_in_file: Vec<&bonsai_lang_api::Decl> = idx.defs.iter().collect();
-
-            // Calls + Assigns + Args live in flow_events.
-            for d in &decls_in_file {
-                if !matches!(
-                    d.kind,
-                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-                ) {
-                    continue;
-                }
-                walk_flow_hits(
-                    &d.flow_events,
-                    bonsai_common::FuncId::new(d.symbol.raw()),
-                    &d.name,
-                    FlowHitWalkContext {
-                        workspace: Some(ws),
-                        matcher: occurrence_matcher,
-                        endpoint_kind_filter: filter_only_occurrence_kind,
-                        kinds: &kind_selection.requested,
-                    },
+        // Exact bodies remap against the immutable syntax header. Initialize
+        // that workspace-wide cache on the coordinator before any file-local
+        // Rayon work, then schedule the complete file set in source-weighted
+        // batches. Memory changes concurrency only; result application stays
+        // in path order for byte-stable output and cache-independent dedup.
+        let _ = ws.compiler_header_index();
+        let source_bytes = files_in_path_order
+            .iter()
+            .map(|file| {
+                ws.vfs().snapshot(*file).map_or(0, |snapshot| {
+                    u64::try_from(snapshot.text.len()).unwrap_or(u64::MAX)
+                })
+            })
+            .collect::<Vec<_>>();
+        let batches = bonsai_common::syntax_weighted_batches(&source_bytes, rayon::current_num_threads());
+        bonsai_diagnostics::debug_log!(
+            "compiler-cache",
+            "inspect occurrence schedule: files={} batches={} max_batch={}",
+            files_in_path_order.len(),
+            batches.len(),
+            batches.iter().map(|batch| batch.len()).max().unwrap_or(0)
+        );
+        let file_scan = OccurrenceFileScan {
+            ws,
+            chain_cache,
+            occurrence_matcher,
+            kind_selection,
+            filter_only_occurrence_kind,
+            syntax_fast_path,
+            large_syntax_scan,
+        };
+        for batch in batches {
+            use rayon::prelude::*;
+            let batch_facts = files_in_path_order[batch]
+                .par_iter()
+                .copied()
+                .map(|file| {
+                    let facts = scan_occurrence_file(file, &file_scan);
+                    hit_bar.inc(1);
+                    facts
+                })
+                .collect::<Vec<_>>();
+            for fact in batch_facts.into_iter().flatten() {
+                push_hit(
+                    &fact.kind,
+                    fact.text,
+                    fact.span,
+                    fact.containing,
+                    fact.assignment_source_call,
                     hits,
-                    push_hit,
                 );
-            }
-
-            // Strings.
-            if kind_selection.wants("string") {
-                for s in &idx.strings {
-                    if occurrence_matcher.is_match(&s.text) {
-                        let enclosing = chain_cache.enclosing_func(file, &decls_in_file, s.span);
-                        push_hit("string", s.text.clone(), s.span, enclosing, false, hits);
-                    }
-                }
-            }
-
-            // Refs (covers decorators via RefKind::Decorator, plus residual
-            // module-level call refs). On large syntax-fast inspections,
-            // call facts from function bodies already came from flow_events
-            // above; avoid an O(refs × enclosing lookup) pass just to
-            // rediscover the same calls.
-            let scan_refs = kind_selection.wants("decorator")
-                || kind_selection.wants("ref")
-                || (kind_selection.wants("call") && (!syntax_fast_path || !large_syntax_scan));
-            if scan_refs {
-                for r in &idx.refs {
-                    let kind_tag = match r.kind {
-                        RefKind::Decorator => "decorator",
-                        RefKind::Call => {
-                            // Skip call-refs that correspond to a call already
-                            // surfaced by the flow-event walker above. Module-
-                            // level calls (JS `const x = require(...)` at file
-                            // top, Python top-level script statements, etc.)
-                            // have NO enclosing function — they're not in any
-                            // decl's flow_events — so we must emit them here or
-                            // they become invisible to inspect.
-                            let enclosing = chain_cache.enclosing_func(file, &decls_in_file, r.span);
-                            if enclosing.is_some() {
-                                continue;
-                            }
-                            "call"
-                        }
-                        _ => "ref",
-                    };
-                    if !kind_selection.wants(kind_tag) {
-                        continue;
-                    }
-                    if occurrence_matcher.is_match(&r.name) {
-                        let enclosing = chain_cache.enclosing_func(file, &decls_in_file, r.span);
-                        push_hit(kind_tag, r.name.clone(), r.span, enclosing, false, hits);
-                    }
-                }
-            }
-
-            // Imports (fallback to generic scan when the adapter didn't provide any).
-            if kind_selection.wants("import") {
-                let imports_vec = ws.db().imports_for(file);
-                for imp in &imports_vec {
-                    let alias_match = imp
-                        .alias
-                        .as_deref()
-                        .is_some_and(|alias| occurrence_matcher.is_match(alias));
-                    let original_match = imp
-                        .original_name
-                        .as_deref()
-                        .is_some_and(|original| occurrence_matcher.is_match(original));
-                    if occurrence_matcher.is_match(&imp.module) || alias_match || original_match {
-                        push_hit("import", import_hit_text(imp), imp.span, None, false, hits);
-                    }
-                }
             }
         }
         hit_bar.finish_and_clear();
@@ -2180,11 +2281,29 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         Some(std::sync::Arc::new(bonsai_callgraph::ResolvedCallGraph::default()))
     } else if explicit_endpoint_graph_flow && endpoint_workspace.is_none() {
         let endpoint_funcs = endpoint_funcs.clone().or_else(|| {
+            // A complete workspace can resolve every qualified/fuzzy endpoint
+            // from compiler declaration identities. `lookup_function` is a
+            // single-result convenience and returns `None` for overloaded or
+            // same-named methods, which made otherwise exact filter-only
+            // queries such as `Source.run -> Target.run` silently empty.
+            // Preserve every matching FuncId and let the exact corridor prove
+            // which pair is connected.
+            let resolve = |query: &str| {
+                let matcher = Matcher::build(Some(query), is_regex).ok()?;
+                Some(bonsai_sdk::matching_func_ids(ws, &matcher))
+            };
             filters
                 .from
-                .and_then(|from| ws.lookup_function(from))
-                .zip(filters.to.and_then(|to| ws.lookup_function(to)))
-                .map(|(from, to)| (vec![from], vec![to]))
+                .and_then(resolve)
+                .zip(filters.to.and_then(resolve))
+                // `--from` / `--to` deliberately match every compiler fact,
+                // not only callable declarations. A parameter, argument,
+                // reference, or external call therefore has no workspace
+                // FuncId. In that case the declaration corridor is not a
+                // valid accelerator; retain the canonical graph/token filter
+                // path. Empty endpoint sets would otherwise manufacture an
+                // empty graph and hide exact syntax-connected flows.
+                .filter(|(from, to)| !from.is_empty() && !to.is_empty())
         });
         endpoint_funcs.map(|(from, to)| {
             let corridor =

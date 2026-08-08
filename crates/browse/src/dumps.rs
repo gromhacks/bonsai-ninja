@@ -24,6 +24,9 @@ pub struct HirDump {
     pub params: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub param_annotations: Vec<Vec<String>>,
+    /// Direct parameter-default calls as exact adapter-emitted syntax facts.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub param_default_calls: Vec<Vec<String>>,
     /// Adapter-emitted receiver/type bindings consumed by resolver and
     /// callgraph narrowing. Including these in the HIR dump makes a bad edge
     /// diagnosable from compiler facts instead of requiring ad-hoc logging.
@@ -55,6 +58,7 @@ impl HirDump {
             kind: format!("{:?}", decl.kind).to_lowercase(),
             params: decl.params.clone(),
             param_annotations: decl.param_annotations.clone(),
+            param_default_calls: decl.param_default_calls.clone(),
             type_aliases: decl.type_aliases.clone(),
             return_type: decl.return_type.clone(),
             span: decl.span,
@@ -440,6 +444,7 @@ mod tests {
             has_implicit_returns: false,
             params: Vec::new(),
             param_annotations: Vec::new(),
+            param_default_calls: Vec::new(),
             type_aliases: Vec::new(),
             bases: Vec::new(),
             receiver_param_index: None,

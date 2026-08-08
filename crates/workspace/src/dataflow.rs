@@ -19,7 +19,7 @@ use crate::cache_fingerprint::{
 use crate::factstore_cleanup::{forward_port_unwritten_entries, map_factstore_io};
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{workspace_bonsai_dir, FileId, FuncId, SymbolId, MATCHER_POLICY_FINGERPRINT};
-use bonsai_db::AnalyzerDb;
+use bonsai_db::{AnalyzerDb, COMPILER_OBJECT_CACHE_VERSION};
 use bonsai_lang_api::DeclKind;
 use bonsai_taint::{
     taint_facts_and_graph_for_entry, taint_facts_and_graph_for_entry_with_caches, EntryTaintGraph,
@@ -36,6 +36,8 @@ use std::{
 /// Monotonic bump. Increment every time the on-disk format changes
 /// (shape of `KindedTokens`, serialisation layout, propagation
 /// semantics) so old sidecars are rejected on open.
+// v37 (2026-08-07): snapshot and factstore freshness bind to the compiler
+// frontend ABI so adapter IR changes cannot reuse derived flow graphs.
 // v36 (2026-08-03): compiler-object v50 and the structural qualified-place
 // contract change exact assignment/call carriers; reject v35 derived graphs.
 // v35 (2026-07-30): invalidate derived facts after compiler-object v13
@@ -51,7 +53,7 @@ use std::{
 // method-receiver-base source exemption + container-input span
 // containment, service.rs return-position source-seeding fallback) and
 // adapter member synthesis alter propagated taint facts.
-pub const DATAFLOW_CACHE_VERSION: u32 = 36;
+pub const DATAFLOW_CACHE_VERSION: u32 = 37;
 
 type DataFlowMemoryEntry = (FuncId, Arc<KindedTokens>, Arc<EntryTaintGraph>, AHashSet<FileId>);
 
@@ -96,6 +98,8 @@ pub struct SnapshotEntry {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SerializableSnapshot {
     pub version: u32,
+    #[serde(default)]
+    pub compiler_frontend_abi: u32,
     /// Matcher policy fingerprint. Security rule matching is applied
     /// after graph load, but the cached graph is consumed together
     /// with matcher classifications; stale matcher policy must force
@@ -133,6 +137,7 @@ fn dataflow_pipeline_hash_for_content(content_fingerprint: u64, sidecar_path: &P
     (raw as u64)
         ^ ((raw >> 64) as u64)
         ^ u64::from(DATAFLOW_CACHE_VERSION)
+        ^ crate::compiler_frontend_cache_fingerprint(COMPILER_OBJECT_CACHE_VERSION)
         ^ content_fingerprint
         ^ dependency_metadata_fingerprint_for_sidecar(sidecar_path)
 }
@@ -756,6 +761,7 @@ impl DataFlowCache {
         });
         SerializableSnapshot {
             version: DATAFLOW_CACHE_VERSION,
+            compiler_frontend_abi: COMPILER_OBJECT_CACHE_VERSION,
             matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT,
             dependency_metadata_fingerprint: 0,
             files: snapshot_files,
@@ -780,6 +786,9 @@ impl DataFlowCache {
     /// follow up with [`Self::prewarm_all`] to backfill the rest.
     pub fn load_snapshot(&self, snap: SerializableSnapshot, db: &AnalyzerDb) -> usize {
         if snap.version != DATAFLOW_CACHE_VERSION {
+            return 0;
+        }
+        if snap.compiler_frontend_abi != COMPILER_OBJECT_CACHE_VERSION {
             return 0;
         }
         if snap.matcher_policy_fingerprint != MATCHER_POLICY_FINGERPRINT {

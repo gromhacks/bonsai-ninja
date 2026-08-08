@@ -246,6 +246,7 @@ profiles:
       - proto/gen/
       - migrations/
       - docs/
+      - docs_src/
       - doc/
       - scripts/
       - deploy/

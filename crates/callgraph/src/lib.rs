@@ -2681,7 +2681,7 @@ fn add_callback_arg_edges(
     };
     let mut seen = AHashSet::new();
     for arg in args {
-        let targets = resolver.resolve(&arg.value_text, arg.span);
+        let targets = resolver.resolve(arg);
         let [to] = targets.as_slice() else {
             if targets.len() > 1 {
                 unresolved_workspace_sites.push(UnresolvedWorkspaceCallSite {
@@ -3390,7 +3390,7 @@ struct CallableArgResolutionContext<'a> {
 }
 
 impl CallableArgResolutionContext<'_> {
-    fn resolve(&mut self, raw: &str, arg_span: Span) -> Vec<FuncId> {
+    fn resolve(&mut self, arg: &CallArg) -> Vec<FuncId> {
         let Self {
             global,
             alias_targets,
@@ -3406,9 +3406,11 @@ impl CallableArgResolutionContext<'_> {
             method_candidate_cache,
             callable_target_cache,
         } = self;
-        if !call_arg_can_be_callable_reference(raw, *quoted_callable_literals) {
+        if !call_arg_can_be_callable_reference(arg, *quoted_callable_literals) {
             return Vec::new();
         }
+        let raw = arg.value_text.as_str();
+        let arg_span = arg.span;
         let variants = bonsai_lang_api::callable_reference_variants(
             raw,
             *callable_reference_syntax,
@@ -3491,8 +3493,8 @@ impl CallableArgResolutionContext<'_> {
     }
 }
 
-fn call_arg_can_be_callable_reference(raw: &str, quoted_callable_literals: bool) -> bool {
-    let trimmed = raw.trim();
+fn call_arg_can_be_callable_reference(arg: &CallArg, quoted_callable_literals: bool) -> bool {
+    let trimmed = arg.value_text.trim();
     if trimmed.is_empty() {
         return false;
     }
@@ -3504,6 +3506,17 @@ fn call_arg_can_be_callable_reference(raw: &str, quoted_callable_literals: bool)
     }
     if trimmed.starts_with("method(") {
         return true;
+    }
+    // `CallArg::place` is the adapter's AST proof that the argument is one
+    // exact storable reference. A compound expression has no exact place but
+    // still carries its constituent `source_names`; looking up its rendered
+    // text as a symbol can fabricate callback edges (for example Python
+    // `self.prefix + path` resolving to an unrelated method named `path`).
+    // Synthetic assignment-call arguments predate `CallArg` and carry neither
+    // fact, so keep accepting their simple spellings until that producer is
+    // migrated to the full compiler argument IR.
+    if arg.place.is_none() && !arg.source_names.is_empty() {
+        return false;
     }
     !(trimmed.contains('(') || trimmed.contains(')'))
 }
@@ -3785,7 +3798,7 @@ fn collect_local_callable_binding_uses(
                     insert_local_callable_binding_use(out, receiver, capabilities);
                 }
                 for arg in args {
-                    if call_arg_can_be_callable_reference(&arg.value_text, false) {
+                    if call_arg_can_be_callable_reference(arg, false) {
                         insert_local_callable_binding_use(out, &arg.value_text, capabilities);
                     }
                     for source_name in &arg.source_names {

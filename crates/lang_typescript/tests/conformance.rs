@@ -514,6 +514,62 @@ class Controller {
 }
 
 #[test]
+fn ordinary_constructor_parameter_does_not_type_receiver_field() {
+    use bonsai_lang_api::{FlowEvent, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "controller.ts",
+            r#"
+class Service {
+  run(cmd: string): string { return cmd; }
+}
+class Controller {
+  constructor(svc: Service) {}
+  go(body: string): string {
+    return this.svc.run(String(body));
+  }
+}
+"#,
+        )],
+    );
+    for file in ws.db().vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+    }
+    let global = ws.db().global_index();
+    let go = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "go")
+        .expect("go declaration");
+
+    assert!(
+        !go.type_aliases.iter().any(|alias| alias.name == "this.svc"),
+        "ordinary parameters must not declare receiver fields: {:?}",
+        go.type_aliases
+    );
+    assert!(
+        go.flow_events.iter().any(|event| {
+            matches!(
+                event,
+                FlowEvent::Call {
+                    name,
+                    receiver,
+                    receiver_types,
+                    ..
+                } if name == "this.svc.run"
+                    && receiver.as_deref() == Some("this.svc")
+                    && receiver_types.is_empty()
+            )
+        }),
+        "unproven receiver fields must remain untyped: {:?}",
+        go.flow_events
+    );
+}
+
+#[test]
 fn arrow_iife_body_contributes_to_module_flow() {
     use bonsai_lang_api::{FlowEvent, LanguageAdapter};
 

@@ -6,7 +6,7 @@
 //! stage's intermediate state — the trace exposes the algorithm, not
 //! just its final output.
 
-use crate::common::{file_path_matches_filter, format_span};
+use crate::common::{file_path_matches_filter, format_span, workspace_relative_path};
 use bonsai_callgraph::{collect_callable_targets, short_callee};
 use bonsai_common::FileId;
 use bonsai_hash::fnv1a_names_low32;
@@ -118,8 +118,12 @@ where
                 .is_ok_and(|p| file_path_matches_filter(ws, &p.display().to_string(), needle))
         })
     });
-    let applied_file_display: Option<String> =
-        resolved_file_id.and_then(|file_id| ws.vfs().path(file_id).ok().map(|p| p.display().to_string()));
+    let applied_file_display: Option<String> = resolved_file_id.and_then(|file_id| {
+        ws.vfs()
+            .path(file_id)
+            .ok()
+            .map(|path| workspace_relative_path(ws, &path.display().to_string()))
+    });
     if let (Some(needle), None) = (f.in_file, resolved_file_id) {
         return ResolveOutcome::FileContextNotFound {
             needle: needle.to_string(),
@@ -203,6 +207,7 @@ where
             continue;
         };
         let (candidate_file, candidate_line, candidate_column) = format_span(&decl.name_span, ws);
+        let candidate_file = workspace_relative_path(ws, &candidate_file);
         candidates.push(ResolveCandidate {
             candidate_id: compute_candidate_id(
                 query,

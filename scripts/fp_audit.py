@@ -4,12 +4,12 @@
 FP risk signals (highest first):
 
   1. Bare verb name (`callee.name`) with no `packages:` / `imports:` /
-     `frameworks:` constraint AND no argument-boundary constraint.
+     `frameworks:` constraint and no typed matcher constraint.
      Example: `name: query` with nothing else fires on every method
      called `query` in the workspace.
 
   2. Generic receiver-attribute pair (`callee.attribute: [db, query]`,
-     `[client, query]`, `[user, save]`) without an argument-boundary
+     `[client, query]`, `[user, save]`) without a package or typed matcher
      constraint.
      ORM facades and helper objects routinely use these names.
 
@@ -133,19 +133,17 @@ def has_constraint_kind(rule: dict, kinds: tuple[str, ...]) -> bool:
 
 
 def generic_name_risk(
-    name: object, has_package: bool, has_arg_constraint: bool
+    name: object, has_package: bool, has_typed_constraint: bool
 ) -> tuple[int, list[str]]:
     if not isinstance(name, str) or name.lower() not in GENERIC_VERBS:
         return 0, []
-    if not has_package and not has_arg_constraint:
+    if not has_package and not has_typed_constraint:
         return 5, [f"bare generic verb name `{name}` with no scoping"]
-    if not has_arg_constraint:
-        return 2, [f"bare generic verb name `{name}` (has package, no arg)"]
     return 0, []
 
 
 def generic_receiver_risk(
-    attribute: object, has_arg_constraint: bool
+    attribute: object, has_package: bool, has_typed_constraint: bool
 ) -> tuple[int, list[str]]:
     if (
         not isinstance(attribute, list)
@@ -154,7 +152,11 @@ def generic_receiver_risk(
     ):
         return 0, []
     receiver, method = attribute
-    if receiver.lower() not in GENERIC_RECEIVERS or has_arg_constraint:
+    if (
+        receiver.lower() not in GENERIC_RECEIVERS
+        or has_package
+        or has_typed_constraint
+    ):
         return 0, []
     return 3, [
         f"generic receiver `{receiver}.{method}` with no argument-boundary constraint"
@@ -214,6 +216,11 @@ def score_rule(rule: dict, family: str, _kind: str) -> tuple[int, list[str]]:
             "receiver_name_in",
         ),
     )
+    constraints = rule.get("constraints") or []
+    has_typed_constraint = bool(
+        isinstance(constraints, list)
+        and any(isinstance(constraint, dict) and constraint for constraint in constraints)
+    )
 
     match = rule.get("match") or {}
     callee = match.get("callee") if isinstance(match, dict) else None
@@ -223,8 +230,8 @@ def score_rule(rule: dict, family: str, _kind: str) -> tuple[int, list[str]]:
     name = callee.get("name")
     attr = callee.get("attribute")
     for component_score, component_reasons in (
-        generic_name_risk(name, has_pkg, has_arg_constraint),
-        generic_receiver_risk(attr, has_arg_constraint),
+        generic_name_risk(name, has_pkg, has_typed_constraint),
+        generic_receiver_risk(attr, has_pkg, has_typed_constraint),
         expected_shape_risk(family, name, attr, has_arg_constraint),
     ):
         score += component_score
@@ -292,8 +299,12 @@ def risk_totals(
 def render_findings(
     findings: list[tuple[int, str, str, str, list[str]]], top: int
 ) -> None:
-    by_lang, by_family = risk_totals(findings)
     print(f"Total scored rules: {len(findings)}")
+    if not findings:
+        print("No heuristic FP-risk candidates.")
+        return
+
+    by_lang, by_family = risk_totals(findings)
     print(f"Top {top} FP-prone rules:")
     for score, rule_id, kind, path, reasons in findings[:top]:
         print(f"  [{score:>2}] {rule_id}  ({kind})")

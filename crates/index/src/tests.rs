@@ -19,6 +19,7 @@ fn decl(file: FileId, local_symbol: u32, name: &str) -> Decl {
         has_implicit_returns: false,
         params: Vec::new(),
         param_annotations: Vec::new(),
+        param_default_calls: Vec::new(),
         type_aliases: Vec::new(),
         bases: Vec::new(),
         receiver_param_index: None,
@@ -80,6 +81,7 @@ fn insert_merges_duplicate_declaration_facts() {
     duplicate.has_implicit_returns = true;
     duplicate.params = vec!["value".to_string()];
     duplicate.param_annotations = vec![vec!["RequestParam".to_string()]];
+    duplicate.param_default_calls = vec![vec!["Body".to_string()]];
     duplicate.type_aliases.push(bonsai_lang_api::TypeAliasBinding {
         name: "value".to_string(),
         type_name: "Payload".to_string(),
@@ -111,6 +113,7 @@ fn insert_merges_duplicate_declaration_facts() {
     assert!(decl.has_implicit_returns);
     assert_eq!(decl.params, vec!["value".to_string()]);
     assert_eq!(decl.param_annotations, vec![vec!["RequestParam".to_string()]]);
+    assert_eq!(decl.param_default_calls, vec![vec!["Body".to_string()]]);
     assert_eq!(decl.type_aliases.len(), 1);
     assert_eq!(decl.bases, vec!["Base".to_string()]);
     assert_eq!(decl.receiver_param_index, Some(0));

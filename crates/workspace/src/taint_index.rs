@@ -28,7 +28,7 @@ use crate::taint_index_disk::{
 };
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{workspace_bonsai_dir, FuncId, MATCHER_POLICY_FINGERPRINT};
-use bonsai_db::AnalyzerDb;
+use bonsai_db::{AnalyzerDb, COMPILER_OBJECT_CACHE_VERSION};
 use bonsai_factstore::{FactStoreReader, FactStoreWriter};
 use bonsai_taint::EntryTaintGraph;
 use fs2::FileExt;
@@ -41,6 +41,8 @@ use std::sync::Arc;
 /// On-disk snapshot version for the workspace-wide taint graph.
 /// Disk format is the streaming factstore; bumping this invalidates
 /// every cached sidecar so consumers get a fresh build on next open.
+// v18 (2026-08-07): taint-graph freshness binds to the compiler frontend ABI
+// and callgraph ABI, so adapter callback facts cannot reuse an older graph.
 // v17 (2026-08-03): target relevance now records whether the adapter-lowered
 // field inverse is complete. Partial inverses are non-pruning, so older
 // cached negative source graphs are not semantically reusable.
@@ -61,7 +63,7 @@ use std::sync::Arc;
 // RHS call spans for assignment-derived terminal calls.
 // v9 (2026-05-27): taint graph derives from the IDG, whose construction
 // and seeding changed enough that old graphs are no longer equivalent.
-pub const TAINT_GRAPH_CACHE_VERSION: u32 = 17;
+pub const TAINT_GRAPH_CACHE_VERSION: u32 = 18;
 
 /// Caller-defined table id stamped into the factstore header. 4 is
 /// the next slot after dataflow (2), value-flow (1), flow-ids (3).
@@ -108,19 +110,27 @@ fn taint_graph_pipeline_hash(db: &AnalyzerDb, config_fingerprint: u64, sidecar_p
     let content =
         workspace_content_fingerprint(db) ^ dependency_metadata_fingerprint_for_sidecar(sidecar_path);
     let semantic_version = u64::from(TAINT_GRAPH_CACHE_VERSION);
+    let compiler_semantics = crate::compiler_frontend_cache_fingerprint(COMPILER_OBJECT_CACHE_VERSION)
+        ^ u64::from(crate::callgraph_sidecar::CALLGRAPH_CACHE_VERSION).wrapping_mul(0x9E37_79B1_85EB_CA87);
     // Mix in the caller's config fingerprint so a `--rules-dir` swap
     // produces a different pipeline hash and the new file invalidates
     // the old. `0` is the sentinel "no fingerprint set" value the
     // backward-compatible API used; treat it as opting out of the
     // config-bound check.
     if config_fingerprint == 0 {
-        policy_lo ^ policy_hi ^ content ^ semantic_version ^ crate::idg_stitching_semantic_fingerprint()
+        policy_lo
+            ^ policy_hi
+            ^ content
+            ^ semantic_version
+            ^ compiler_semantics
+            ^ crate::idg_stitching_semantic_fingerprint()
     } else {
         policy_lo
             ^ policy_hi
             ^ content
             ^ config_fingerprint
             ^ semantic_version
+            ^ compiler_semantics
             ^ crate::idg_stitching_semantic_fingerprint()
     }
 }

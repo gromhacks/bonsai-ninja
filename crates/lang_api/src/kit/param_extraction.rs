@@ -19,8 +19,10 @@
 //!
 //! Annotation extraction covers the Java/Kotlin/C# pattern of
 //! `formal_parameter > modifiers > marker_annotation / annotation`.
-//! FastAPI binder annotations and other Python decorator shapes are
-//! handled in the `lang_python` adapter's post-processing.
+//! Language-specific parameter forms are handled in the owning adapter's
+//! post-processing and lowered as API-neutral facts. For example, Python
+//! records a direct parameter-default call without interpreting its callee as
+//! a framework binder.
 
 use tree_sitter::Node;
 
@@ -60,6 +62,26 @@ pub fn extract_param_annotations(
         for child in param.named_children(&mut cursor) {
             if matches!(child.kind(), "modifiers" | "annotation_list" | "attribute_list") {
                 annotation_search_roots.push(child);
+            } else if matches!(
+                child.kind(),
+                "marker_annotation" | "annotation" | "attribute" | "decorator"
+            ) {
+                // TypeScript and several C-family grammars place parameter
+                // decorators directly beside the name/type rather than in a
+                // wrapper. Keep those exact syntax nodes while still
+                // excluding unrelated default-value expressions.
+                annotation_search_roots.push(child);
+            }
+        }
+        // Typed parameters may carry annotation metadata directly inside the
+        // grammar's `type` field (for example Python
+        // `Annotated[Payload, Body()]`). Search that field rather than the
+        // whole parameter so a default expression such as `q = Query(...)`
+        // is not duplicated into `param_annotations`; direct default calls
+        // have their own parallel compiler fact.
+        if annotation_search_roots.is_empty() {
+            if let Some(type_node) = param.child_by_field_name("type") {
+                annotation_search_roots.push(type_node);
             }
         }
         // Fall back to scanning the param itself when no wrapper exists.
@@ -227,6 +249,11 @@ fn collect_param_annotation_names(
                     collected_names.push(bare_callee);
                 }
             }
+            // The call itself is the annotation metadata. Its receiver path
+            // and arguments are ordinary expressions, not additional
+            // annotations (`Annotated[T, framework.Metadata(...)]` must emit
+            // `Metadata`, not `framework` or nested argument call names).
+            continue;
         }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {

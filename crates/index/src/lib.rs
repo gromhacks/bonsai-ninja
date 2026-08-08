@@ -1323,6 +1323,11 @@ fn merge_duplicate_decl(into: &mut Decl, mut duplicate: Decl) {
         duplicate.param_annotations,
         params_match,
     );
+    merge_param_annotations(
+        &mut into.param_default_calls,
+        duplicate.param_default_calls,
+        params_match,
+    );
 
     extend_unique(&mut into.type_aliases, duplicate.type_aliases);
     extend_unique_strings(&mut into.bases, duplicate.bases);

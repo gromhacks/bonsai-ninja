@@ -170,6 +170,38 @@ fn coderef_assignment_emits_clean_callable_alias() {
 }
 
 #[test]
+fn coderef_call_argument_emits_exact_callable_place() {
+    let mut events = vec![FlowEvent::Call {
+        span: Span::new(FileId::new(0), 0, 18),
+        name: "invoke".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            passing_mode: Default::default(),
+            span: Span::new(FileId::new(0), 7, 15),
+            name: None,
+            value_text: "\\&helper".to_string(),
+            place: None,
+            source_names: vec!["helper".to_string()],
+        }],
+    }];
+
+    rewrite_perl_call_arg_texts(&mut events, "");
+
+    assert!(matches!(
+        events.as_slice(),
+        [FlowEvent::Call { name, args, .. }]
+            if name == "invoke"
+                && args.first().is_some_and(|arg| {
+                    arg.value_text == "helper"
+                        && arg.place.as_deref() == Some("helper")
+                        && arg.source_names == ["helper"]
+                })
+    ));
+}
+
+#[test]
 fn direct_array_argv_binding_infers_perl_param() {
     let src = "my @items = @_;";
     let (span, assignment_values) = assignment_fixture(src);
