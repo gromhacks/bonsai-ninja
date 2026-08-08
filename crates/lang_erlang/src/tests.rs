@@ -78,6 +78,38 @@ fn fun_ref_assignment_emits_clean_callable_alias() {
     ));
 }
 
+#[test]
+fn fun_ref_call_argument_emits_exact_callable_place() {
+    let mut events = vec![FlowEvent::Call {
+        span: bonsai_common::Span::new(FileId::new(0), 0, 20),
+        name: "invoke".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
+            span: bonsai_common::Span::new(FileId::new(0), 7, 19),
+            name: None,
+            value_text: "fun helper/1".to_string(),
+            place: None,
+            source_names: vec!["helper".to_string()],
+        }],
+    }];
+
+    normalize_erlang_access_events(&mut events, "", &AssignmentValueIndex::default());
+
+    assert!(matches!(
+        events.as_slice(),
+        [FlowEvent::Call { name, args, .. }]
+            if name == "invoke"
+                && args.first().is_some_and(|arg| {
+                    arg.value_text == "helper"
+                        && arg.place.as_deref() == Some("helper")
+                        && arg.source_names == ["helper"]
+                })
+    ));
+}
+
 fn call_event(name: &str) -> FlowEvent {
     FlowEvent::Call {
         span: bonsai_common::Span::new(FileId::new(0), 0, 1),
@@ -151,6 +183,7 @@ fn list_cons_param_pattern_emits_entry_bindings() {
         has_implicit_returns: false,
         params: vec!["_Arg0".to_string()],
         param_annotations: Vec::new(),
+        param_default_calls: Vec::new(),
         type_aliases: Vec::new(),
         bases: Vec::new(),
         receiver_param_index: None,

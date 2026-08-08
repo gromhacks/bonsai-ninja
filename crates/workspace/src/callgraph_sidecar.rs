@@ -11,7 +11,7 @@ use bonsai_callgraph::{
     CallEdge, CallGraphLocalBinding, CallGraphNode, ResolvedCallGraph, UnresolvedWorkspaceCallSite,
 };
 use bonsai_common::{wire, workspace_bonsai_dir, FileId, FuncId, MATCHER_POLICY_FINGERPRINT};
-use bonsai_db::AnalyzerDb;
+use bonsai_db::{AnalyzerDb, COMPILER_OBJECT_CACHE_VERSION};
 use bonsai_factstore::{FactStoreReader, FactStoreWriter};
 use bonsai_hash::fnv1a_bytes64;
 use bonsai_idg::workspace_adapter::CallGraphRelation;
@@ -22,6 +22,12 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+// v30 (2026-08-07): metadata binds the callgraph to the exact compiler
+// frontend ABI. Adapter-lowered call/callable facts can no longer change while
+// an older graph remains reusable under the same source snapshot.
+// v29 (2026-08-07): callback resolution requires an adapter-proven exact
+// argument place (or explicit callable syntax); compound data expressions no
+// longer resolve through same-spelled workspace declarations.
 // v28 (2026-08-03): local callable and alias candidates consume typed adapter
 // facts plus canonical structural compiler names; rebuild graphs that used the
 // former shared quoted-callable/separator interpretation.
@@ -70,7 +76,7 @@ use std::sync::Arc;
 // v13 (2026-07-18): metadata and graph payloads are independent factstore
 // entries, so freshness checks do not recursively decode millions of edges.
 // v12 (2026-07-16): MessagePack replaced the retired binary codec.
-pub const CALLGRAPH_CACHE_VERSION: u32 = 28;
+pub const CALLGRAPH_CACHE_VERSION: u32 = 30;
 
 const CALLGRAPH_TABLE_ID: u32 = 102;
 const METADATA_KEY: u64 = 0;
@@ -83,6 +89,7 @@ const FIXED_ENTRY_COUNT: usize = 2;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CallgraphMetadata {
     version: u32,
+    compiler_frontend_abi: u32,
     matcher_policy_fingerprint: u128,
     /// Sorted `(workspace path, content hash)` pairs for every indexed file.
     files: Vec<(String, u64)>,
@@ -1100,6 +1107,7 @@ pub(crate) fn save_callgraph_sidecar(
     drop(node_files);
     let metadata = CallgraphMetadata {
         version: CALLGRAPH_CACHE_VERSION,
+        compiler_frontend_abi: COMPILER_OBJECT_CACHE_VERSION,
         matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT,
         files: current_source_fingerprints(db),
         dependency_metadata_fingerprint: dependency_metadata_fingerprint_for_sidecar(path),
@@ -1543,6 +1551,15 @@ fn validate_metadata(path: &Path, metadata: &CallgraphMetadata) -> std::io::Resu
             ),
         ));
     }
+    if metadata.compiler_frontend_abi != COMPILER_OBJECT_CACHE_VERSION {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "callgraph sidecar compiler frontend ABI mismatch: file={} expected={}",
+                metadata.compiler_frontend_abi, COMPILER_OBJECT_CACHE_VERSION
+            ),
+        ));
+    }
     if metadata.matcher_policy_fingerprint != MATCHER_POLICY_FINGERPRINT {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -1583,6 +1600,7 @@ fn metadata_pipeline_hash(metadata: &CallgraphMetadata) -> u64 {
     hasher.absorb(b"bonsai-callgraph-sidecar-v20");
     hasher.absorb_separator();
     hasher.absorb(&metadata.version.to_le_bytes());
+    hasher.absorb(&metadata.compiler_frontend_abi.to_le_bytes());
     hasher.absorb(&metadata.matcher_policy_fingerprint.to_le_bytes());
     hasher.absorb(&metadata.dependency_metadata_fingerprint.to_le_bytes());
     // Bind the header to the recorded producer so metadata tampering cannot
@@ -1758,6 +1776,7 @@ mod tests {
         let path = cache_dir.join(format!("callgraph.v{CALLGRAPH_CACHE_VERSION}.factstore"));
         let metadata = CallgraphMetadata {
             version: CALLGRAPH_CACHE_VERSION,
+            compiler_frontend_abi: COMPILER_OBJECT_CACHE_VERSION,
             matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT,
             files: Vec::new(),
             dependency_metadata_fingerprint: dependency_metadata_fingerprint_for_sidecar(&path),
@@ -1768,6 +1787,28 @@ mod tests {
 
         validate_metadata(&path, &metadata)
             .expect("an unrelated producer build must not invalidate exact compiler inputs");
+    }
+
+    #[test]
+    fn compiler_frontend_abi_is_semantic_freshness() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root
+            .path()
+            .join(format!("callgraph.v{CALLGRAPH_CACHE_VERSION}.factstore"));
+        let metadata = CallgraphMetadata {
+            version: CALLGRAPH_CACHE_VERSION,
+            compiler_frontend_abi: COMPILER_OBJECT_CACHE_VERSION.wrapping_sub(1),
+            matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT,
+            files: Vec::new(),
+            dependency_metadata_fingerprint: dependency_metadata_fingerprint_for_sidecar(&path),
+            build_fingerprint: crate::build_fingerprint_hash(),
+            partition_files: Vec::new(),
+            name_bucket_keys: Vec::new(),
+        };
+
+        let error = validate_metadata(&path, &metadata)
+            .expect_err("adapter IR from an older frontend ABI must invalidate the callgraph");
+        assert!(error.to_string().contains("compiler frontend ABI mismatch"));
     }
 
     #[test]

@@ -23,7 +23,7 @@ use crate::flow_ids_disk::{decode as decode_flow_id_entry, encode as encode_flow
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::ResolvedCallGraph;
 use bonsai_common::{workspace_bonsai_dir, FuncId, MATCHER_POLICY_FINGERPRINT};
-use bonsai_db::AnalyzerDb;
+use bonsai_db::{AnalyzerDb, COMPILER_OBJECT_CACHE_VERSION};
 use bonsai_factstore::{FactStoreReader, FactStoreWriter};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::DeclKind;
@@ -38,6 +38,8 @@ const FLOW_IDS_TABLE_ID: u32 = 3;
 
 /// On-disk format version. Bump when the encoding changes so old
 /// sidecars are rejected on open.
+// v12 (2026-08-07): bind flow-id freshness to the compiler frontend ABI so
+// adapter call/identity changes cannot reuse paths derived from older IR.
 // v11 (2026-08-03): regenerate structural flow ids after compiler-object v50
 // canonicalized file-derived identities and callable-reference facts.
 // v10 (2026-07-31): structural flow ids hash exact compiler declaration
@@ -48,7 +50,7 @@ const FLOW_IDS_TABLE_ID: u32 = 3;
 // v7 (2026-07-16): MessagePack replaces the retired binary codec.
 // v6 (2026-05-27): downstream of IDG/adapter semantic changes,
 // enumerated chains can differ, so reject older sidecars.
-pub const FLOW_IDS_CACHE_VERSION: u32 = 11;
+pub const FLOW_IDS_CACHE_VERSION: u32 = 12;
 
 /// Pipeline-hash field in the factstore header. Folds the matcher
 /// policy fingerprint into 64 bits and mixes in the current workspace
@@ -63,6 +65,7 @@ fn flow_ids_pipeline_hash_for_content(content_fingerprint: u64, sidecar_path: &P
     (raw as u64)
         ^ ((raw >> 64) as u64)
         ^ u64::from(FLOW_IDS_CACHE_VERSION)
+        ^ crate::compiler_frontend_cache_fingerprint(COMPILER_OBJECT_CACHE_VERSION)
         ^ content_fingerprint
         ^ dependency_metadata_fingerprint_for_sidecar(sidecar_path)
 }

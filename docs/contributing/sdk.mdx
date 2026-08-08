@@ -260,8 +260,8 @@ warmed IDG cross-call edges when the query open hydrated an IDG sidecar;
 planner decision. When a target pattern matches an indexed call site but no
 callable declaration, `PathRow.terminal_call` identifies the exact terminal
 call and location while the function path stops at the enclosing callable.
-`slices` reuses the workspace value-flow/IDG graph when a semantic sidecar is
-loaded, merges adapter-emitted syntax-flow detail, and reports `backends` so
+`slices` projects the selected callable's workspace value-flow/IDG graph on
+demand, reuses a compatible cached entry when present, merges adapter-emitted syntax-flow detail, and reports `backends` so
 SDK callers can distinguish `value-flow` evidence from `flow-events`.
 Parameter boundaries, unavailable semantic graphs, ambiguity, or caps are
 incomplete instead of guessed.
@@ -394,6 +394,10 @@ Projects opened through filtered/literal/path-scoped query APIs are exact for
 that scoped command, but they are not complete workspace indexes; their
 security analyses keep taint graph reuse in memory and intentionally skip the
 shared taint graph sidecar and manifest refresh.
+Path-scoped opens retain the selected source's stable full-workspace `FileId`
+when a compiler-object generation names that path. The selected payload still
+must match adapter, path, content hash, and SHA-256 digest; a miss recompiles
+that file through its Tree-sitter adapter without admitting stale facts.
 `cache.stats()?.validation` reports manifest freshness, semantic/dataflow/
 taint/export readiness, per-sidecar freshness, and stale reasons. The
 validation path checks binary sidecar payloads as well as manifest

@@ -253,7 +253,10 @@ class and verify each box.
       `../elasticsearch` or `BONSAI_ELASTICSEARCH_ROOT`. The gate waits for
       completed exact work and checks warm index, navigation, inspect,
       inventory, and production taint latency under the default 3 GiB
-      scheduling budget; it never times out or truncates analysis.
+      scheduling budget; it never times out or truncates analysis. Keep its
+      shared scenario lock: measured commands must not compete with one another
+      inside Rust's parallel test harness. The lock does not serialize analyzer
+      workers.
 - [ ] **Rooted query scheduling charges committed memory, not mapped cache
       history.** The external-memory IDG's clean file-backed pages are
       reclaimable. Keep the named non-reclaimable reserve and per-closure
@@ -286,6 +289,11 @@ class and verify each box.
       wall time under the same budget. The 2026-08-07 final warm-generation
       repeat completed fresh-cache taint in 34.28 s, warm taint in 27.74 s, and
       broad raw-taint inspect in 29.53 s with all 12,233 entry closures retained.
+      The current ABI-v64 migration gate completed its one-time generation in
+      1,672.82 s, immediate reuse in 2.34 s, fresh-cache taint in 29.89 s,
+      warm taint in 28.46 s, broad raw-taint inspect in 27.11 s, and scoped
+      `read-file` in 1.31 s. Every navigation and inventory SLO passed under
+      the 3 GiB scheduling budget.
 - [ ] **Large native export gate passes when relevant.** Export the complete
       sibling Elasticsearch checkout under a recorded scheduling budget,
       validate with `jq --stream`, and record bytes, wall time, physical

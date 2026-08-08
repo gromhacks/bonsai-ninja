@@ -262,7 +262,13 @@ bonsai-ninja inspect ./src --query os.system --kind call
 bonsai-ninja inspect ./src --query os.system --taint-flow
 bonsai-ninja inspect ./src --query os.system --graph-flow
 bonsai-ninja inspect ./src --from handle_request --to os.system --view grouped
+bonsai-ninja inspect ./src --from Source.run --to Target.run
 ```
+
+A standalone `--from`/`--to` pair resolves every matching compiler callable
+identity and builds the exact source-to-target corridor. Use `Owner.member` to
+disambiguate same-named methods; connectivity, not a single-result name lookup,
+selects the surviving pair.
 
 | Flag | Default | Description |
 |---|---:|---|
@@ -271,9 +277,9 @@ bonsai-ninja inspect ./src --from handle_request --to os.system --view grouped
 | `--query <QUERY>` | None | Preferred query flag. |
 | `--regex` | false | Treat query as regex. |
 | `--kind <KIND>` | All | Restrict to `decl`, `call`, `import`, `var`, `string`, `arg`, `ref`, or `decorator`. Repeatable. |
-| `--from <TEXT>` | None | Keep flows passing through this text. |
+| `--from <TEXT>` | None | Keep flows passing through this text. Qualified `Owner.member` identities are accepted. |
 | `--from-kind <KIND>` | None | Narrow `--from` to `decl`, `call`, `read`, `write`, `arg`, `string`, `import`, or `class`. Requires `--from`. |
-| `--to <TEXT>` | None | Keep flows reaching this text. |
+| `--to <TEXT>` | None | Keep flows reaching this text. Qualified `Owner.member` identities are accepted. |
 | `--to-kind <KIND>` | None | Narrow `--to` to a browse-fact kind. Requires `--to`. |
 | `--file <TEXT>` | None | Hit workspace-relative file path filter. Explicit absolute paths are also accepted. |
 | `--in-fn <TEXT>` | None | Enclosing-function filter for non-decl hits. |
@@ -619,7 +625,7 @@ bonsai-ninja read-file ./src auth/verify_token.py --lines 1:80 --from request.ar
 | Command | Purpose | Key flags |
 |---|---|---|
 | `tree` | Fast structural workspace tree with no compiler or security work. | `--max-depth`, `--file`, `--exclude-file`, `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
-| `read-file` | Source view for one file with inline marks and cross-file caller/callee bodies. | `--symbol`, `--lines`, `--from`, `--to`, `--max-inlined-bodies`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--output-path`, `--rules-dir` |
+| `read-file` | Lightweight file-local source/declaration view; findings and cross-file caller/callee bodies are explicit overlays. | `--symbol`, `--lines`, `--from`, `--to`, `--max-inlined-bodies`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--output-path`, `--rules-dir` |
 
 JSON includes top-level `analysis_complete` and
 `analysis_incomplete_reasons`. Structural `tree` marks depth and child limits
@@ -632,6 +638,9 @@ uncapped by default; `--max-inlined-bodies <N>` is the explicit body cap and
 `0` is uncapped. `--all` only disables output pagination; it does not enable
 semantic work or change the body scope. Set `BONSAI_INCLUDE_MINIFIED=1` only
 when `read-file` path/symbol resolution should include `.min.*` assets.
+After semantic indexing, the default path reuses the selected file's exact
+content-addressed compiler body by its stable full-workspace `FileId`; it does
+not construct a resolved callgraph merely to render local source.
 
 ## Debug Dumps
 

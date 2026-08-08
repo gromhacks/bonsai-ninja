@@ -791,6 +791,7 @@ pub fn synthesize_record_members(index: &mut crate::DeclIndex, tree: &Tree, src:
                 has_implicit_returns: false,
                 params: comp_names.clone(),
                 param_annotations: Vec::new(),
+                param_default_calls: Vec::new(),
                 type_aliases: Vec::new(),
                 bases: Vec::new(),
                 receiver_param_index: None,
@@ -832,6 +833,7 @@ pub fn synthesize_record_members(index: &mut crate::DeclIndex, tree: &Tree, src:
                 has_implicit_returns: false,
                 params: Vec::new(),
                 param_annotations: Vec::new(),
+                param_default_calls: Vec::new(),
                 type_aliases: Vec::new(),
                 bases: Vec::new(),
                 receiver_param_index: None,
@@ -5035,6 +5037,7 @@ fn lower_lambda_declarations(lowering: &CallableLowering<'_>, defs: &mut Vec<cra
             has_implicit_returns: lowering.handler.tail_expression_returns || body_implicit_returns,
             params,
             param_annotations: Vec::new(),
+            param_default_calls: Vec::new(),
             type_aliases: Vec::new(),
             bases: Vec::new(),
             receiver_param_index: None,
@@ -5155,6 +5158,7 @@ fn lower_class_declarations(
             has_implicit_returns: false,
             params: Vec::new(),
             param_annotations: Vec::new(),
+            param_default_calls: Vec::new(),
             type_aliases: Vec::new(),
             bases: Vec::new(),
             receiver_param_index: None,
@@ -5257,6 +5261,7 @@ fn lower_module_declaration(lowering: &CallableLowering<'_>, defs: &mut Vec<crat
         has_implicit_returns: false,
         params: Vec::new(),
         param_annotations: Vec::new(),
+        param_default_calls: Vec::new(),
         type_aliases: Vec::new(),
         bases: Vec::new(),
         receiver_param_index: None,
@@ -5542,6 +5547,7 @@ pub fn decl_index_with_handler(
             has_implicit_returns: !returns_void && (handler.tail_expression_returns || body_implicit_returns),
             params,
             param_annotations,
+            param_default_calls: Vec::new(),
             type_aliases: Vec::new(),
             bases: Vec::new(),
             receiver_param_index,
@@ -8392,11 +8398,38 @@ pub fn apply_class_field_type_aliases(idx: &mut crate::DeclIndex) {
         ) {
             continue;
         }
+        // An adapter-proven annotation on an exact receiver field is already
+        // the strongest available type fact. Propagate it even when the RHS
+        // has no parameter carriers (for example `self.client: Client =
+        // Client()`).
+        for alias in &decl.type_aliases {
+            if !type_alias_names_receiver_field(decl, &alias.name) {
+                continue;
+            }
+            let key = (alias.name.clone(), alias.type_name.clone());
+            if seen.entry(parent_sym).or_default().insert(key.clone()) {
+                by_class
+                    .entry(parent_sym)
+                    .or_default()
+                    .push(crate::TypeAliasBinding {
+                        name: key.0,
+                        type_name: key.1,
+                    });
+            }
+        }
         for field_write in &decl.receiver_field_writes {
             for &param_idx in &field_write.source_param_indices {
                 let Some(param_name) = decl.params.get(param_idx) else {
                     continue;
                 };
+                // FieldWrite source indices are taint carriers, not type
+                // assignments. Constructor arguments can taint a constructed
+                // object, but their declared types do not become the type of
+                // that object (`self.router = Router(provider=self)`). Only a
+                // direct parameter-to-field assignment proves this alias.
+                if !receiver_field_write_directly_uses_parameter(&decl.flow_events, field_write, param_name) {
+                    continue;
+                }
                 let Some(alias) = decl.type_aliases.iter().find(|a| a.name == *param_name) else {
                     continue;
                 };
@@ -8433,6 +8466,73 @@ pub fn apply_class_field_type_aliases(idx: &mut crate::DeclIndex) {
             }
         }
     }
+}
+
+fn type_alias_names_receiver_field(decl: &crate::Decl, alias_name: &str) -> bool {
+    let explicit_receiver = decl
+        .receiver_param_index
+        .and_then(|index| decl.params.get(index))
+        .into_iter();
+    explicit_receiver
+        .chain(decl.implicit_receiver_names.iter())
+        .any(|receiver| {
+            alias_name.strip_prefix(receiver).is_some_and(|suffix| {
+                suffix.starts_with('.')
+                    || suffix.starts_with("::")
+                    || suffix.starts_with("->")
+                    || suffix.starts_with('[')
+            })
+        })
+}
+
+fn receiver_field_write_directly_uses_parameter(
+    events: &[crate::FlowEvent],
+    field_write: &crate::FieldWrite,
+    parameter: &str,
+) -> bool {
+    events.iter().any(|event| match event {
+        crate::FlowEvent::Assign {
+            span,
+            target,
+            source_name,
+            source_call,
+            ..
+        } => {
+            *span == field_write.span
+                && target == &field_write.target
+                && source_call.is_none()
+                && source_name.as_deref().is_some_and(|source| {
+                    let source = source.trim();
+                    source == parameter
+                        || bonsai_common::trim_leading_name_punctuation(source)
+                            == bonsai_common::trim_leading_name_punctuation(parameter)
+                })
+        }
+        crate::FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            receiver_field_write_directly_uses_parameter(then_events, field_write, parameter)
+                || receiver_field_write_directly_uses_parameter(else_events, field_write, parameter)
+        }
+        crate::FlowEvent::Loop { body, .. }
+        | crate::FlowEvent::Defer { body, .. }
+        | crate::FlowEvent::Using { body, .. } => {
+            receiver_field_write_directly_uses_parameter(body, field_write, parameter)
+        }
+        crate::FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            receiver_field_write_directly_uses_parameter(body, field_write, parameter)
+                || receiver_field_write_directly_uses_parameter(catch_events, field_write, parameter)
+                || receiver_field_write_directly_uses_parameter(finally_events, field_write, parameter)
+        }
+        _ => false,
+    })
 }
 
 /// Heuristically classify the RHS shape of every

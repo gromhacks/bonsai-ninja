@@ -49,8 +49,8 @@ fn idg_pipeline_hash_tracks_dependency_metadata() {
 
 #[test]
 fn idg_pipeline_hash_tracks_compiler_frontend_abi() {
-    let current = compiler_frontend_idg_fingerprint(COMPILER_OBJECT_CACHE_VERSION);
-    let next = compiler_frontend_idg_fingerprint(
+    let current = compiler_frontend_cache_fingerprint(COMPILER_OBJECT_CACHE_VERSION);
+    let next = compiler_frontend_cache_fingerprint(
         COMPILER_OBJECT_CACHE_VERSION
             .checked_add(1)
             .expect("compiler object ABI version overflow"),

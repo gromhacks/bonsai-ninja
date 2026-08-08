@@ -48,7 +48,8 @@ in `COVERAGE_BASELINE.md`.
 | `bases` | Cross-class virtual dispatch narrows when the receiver type is known. | Parent/interface rules and inherited dispatch may not match. |
 | `receiver_field_writes` | G3 cross-method field-taint inheritance: `def m1(x): self.f = x` → `def m2(): use(self.f)` propagates taint. | Field-aliased flows aren't crossed; intra-method propagation still works. |
 | `has_implicit_returns` | Return summaries can use terminal-tail evidence only for real expression-return body forms. | Terminal assignments are never treated as returns; expression-bodied helpers may need explicit `Return` events. |
-| `param_annotations` | Synthetic-source inference: `@route("/api")` on a Flask handler treats the params as remote sources without an explicit YAML rule. | Inferred sources need explicit rules instead. |
+| `param_annotations` | Rulepack parameter matching for grammar-declared annotations/decorators. | Annotation-based source/sanitizer rules cannot match. |
+| `param_default_calls` | Rulepack parameter matching for a direct default call, such as Python `value = Body(...)`, without teaching the adapter framework names. | Default-call binder rules cannot match. |
 | `export_aliases` | CommonJS resolver credits `module.exports = X` to the module's public surface. | `require()` consumers don't see the assignments. |
 | `super_dispatch` | `super.foo()` resolves precisely to the parent class's `foo`. | The edge remains unresolved/incomplete unless another semantic fact proves it; public analysis never widens to name-only dispatch. |
 
@@ -63,28 +64,28 @@ language-name, or span-containment workarounds.
 adapter doesn't populate it (backlog candidate). `n/a` = language has
 no equivalent construct.
 
-| Adapter | Visibility | type_aliases | receiver_types | bases | receiver_field_writes | param_annotations | export_aliases | super_dispatch |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| lang_c | ✓ | ✓ | ✓ | n/a | n/a | n/a | n/a | n/a |
-| lang_cpp | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | n/a | partial |
-| lang_csharp | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
-| lang_dart | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
-| lang_elixir | ✓ | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
-| lang_erlang | ✓ | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
-| lang_go | ✓ | ✓ | ✓ | ✓ | ✓ | — | n/a | n/a |
-| lang_java | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
-| lang_javascript | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ | ✓ |
-| lang_kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
-| lang_lua | ✓ | n/a | n/a | n/a | ✓ | n/a | n/a | n/a |
-| lang_objc | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | partial |
-| lang_perl | ✓ | n/a | n/a | ✓ | ✓ | n/a | n/a | — |
-| lang_php | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
-| lang_python | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
-| lang_ruby | ✓ | ✓ | ✓ | ✓ | ✓ | partial | n/a | ✓ |
-| lang_rust | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
-| lang_scala | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | partial |
-| lang_swift | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | partial |
-| lang_typescript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Adapter | Visibility | type_aliases | receiver_types | bases | receiver_field_writes | param_annotations | param_default_calls | export_aliases | super_dispatch |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| lang_c | ✓ | ✓ | ✓ | n/a | n/a | n/a | n/a | n/a | n/a |
+| lang_cpp | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | n/a | n/a | partial |
+| lang_csharp | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | n/a | ✓ |
+| lang_dart | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | n/a | ✓ |
+| lang_elixir | ✓ | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| lang_erlang | ✓ | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| lang_go | ✓ | ✓ | ✓ | ✓ | ✓ | — | n/a | n/a | n/a |
+| lang_java | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | n/a | ✓ |
+| lang_javascript | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | n/a | ✓ | ✓ |
+| lang_kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | n/a | ✓ |
+| lang_lua | ✓ | n/a | n/a | n/a | ✓ | n/a | n/a | n/a | n/a |
+| lang_objc | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | n/a | partial |
+| lang_perl | ✓ | n/a | n/a | ✓ | ✓ | n/a | n/a | n/a | — |
+| lang_php | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | n/a | ✓ |
+| lang_python | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
+| lang_ruby | ✓ | ✓ | ✓ | ✓ | ✓ | partial | n/a | n/a | ✓ |
+| lang_rust | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | n/a | ✓ |
+| lang_scala | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | n/a | partial |
+| lang_swift | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | n/a | partial |
+| lang_typescript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ | ✓ |
 
 ## What the cells mean for users
 
@@ -105,10 +106,12 @@ gaps affect it:
   `self.field = x` and is later read by another method on the same
   object won't be tracked. Cross-method same-class flows degrade —
   intra-method flows still work.
-- **`param_annotations = —`:** synthetic per-route entry-point
-  sources (Flask `@route`, FastAPI handlers, Spring `@RequestBody`)
-  are only inferred for languages where this is populated. Other
-  languages need explicit source rules in YAML.
+- **`param_annotations = —`:** rules keyed to parameter annotations such as
+  Spring `@RequestBody` cannot match until the adapter emits that grammar
+  fact.
+- **`param_default_calls = —`:** rules keyed to a parameter's direct default
+  call cannot match. Python emits this fact generically for binder-style
+  syntax; framework names remain in YAML.
 
 ## Backlog candidates
 

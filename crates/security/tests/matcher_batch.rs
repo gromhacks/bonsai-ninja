@@ -600,6 +600,38 @@ class App {
 }
 
 #[test]
+fn parameter_default_call_rule_matches_adapter_syntax_fact() {
+    let ws = python_ws(
+        r#"
+import fastapi as api
+from typing import Annotated
+
+def handler(payload: dict = api.Body(...), annotated: Annotated[str, api.Body()] = "", ordinary: str = "Body"):
+    return payload
+"#,
+    );
+    let mut rule = base_rule("python.test.fastapi_body", RuleKind::Source, MatchKind::Param);
+    rule.language = "python".to_string();
+    rule.packages = vec!["fastapi".to_string()];
+    rule.match_spec.target = Some(RuleTarget {
+        annotation: Some("Body".to_string()),
+        default_call: Some("Body".to_string()),
+        ..Default::default()
+    });
+
+    let hits = match_rule_against_facts(&ws, &rule);
+    let matched = hits
+        .iter()
+        .map(|hit| hit.match_text.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        matched,
+        BTreeSet::from(["annotated", "payload"]),
+        "annotation metadata and direct defaults should be alternative rule-owned parameter shapes: {hits:?}"
+    );
+}
+
+#[test]
 fn param_rule_decl_kind_and_visibility_filters_exclude_non_entry_shapes() {
     let ws = java_ws(
         r#"

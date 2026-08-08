@@ -59,7 +59,8 @@ than matching the API name in Rust.
 
 Examples that follow this rule:
 
-- Python FastAPI binder annotation merging — `lang_python`.
+- Python direct parameter-default call extraction — `lang_python`; the fact
+  is API-neutral and FastAPI binder names remain in YAML rules.
 - Python `getattr(obj, "literal")` reflection rewriting —
   `lang_python::rewrite_python_constant_reflection`.
 - Python `__all__` literal parsing for future wildcard-import narrowing;

@@ -190,11 +190,14 @@ an unchanged content-addressed object; generation refresh copies its validated
 compressed payload directly and recompiles only misses.
 
 Every derived semantic sidecar includes the compiler-object frontend ABI in
-its pipeline identity. A lowering or compiler-object schema change therefore
-invalidates the callgraph/IDG products built from older facts even when the
-workspace source and dependency bytes have not changed. Root-only validators
-reconstruct the same ABI-bound identity as a fully opened workspace; a cheap
-validation path must never accept a graph the compiler path would reject.
+its pipeline identity. The callgraph records and validates that ABI explicitly;
+IDG, dataflow, value-flow, flow-ID, and taint-graph factstores mix it into
+their pipeline hashes, and serializable compatibility snapshots carry the
+same field. A lowering or compiler-object schema change therefore invalidates
+products built from older facts even when the workspace source and dependency
+bytes have not changed. Root-only validators reconstruct the same ABI-bound
+identity as a fully opened workspace; a cheap validation path must never
+accept a graph the compiler path would reject.
 
 The selected adapter also owns per-path grammar variants. Parser pools and
 tree-cache entries include that exact grammar identity (for example
@@ -299,14 +302,20 @@ Commands request the lowest compiler product that can answer their contract:
 - File/name/kind predicates run during the IR walk before result-row
   allocation. JSON pagination estimates serialized fields only and never reads
   text-only source-line previews.
-- `read-file` opens a one-file scoped workspace by default. Explicit flow,
-  rulepack, or cross-file-body options select workspace semantics.
-- `inspect` matches compact headers, streams exact occurrence bodies per
-  candidate file, and hydrates exact bodies only for selected rendered chains.
-  Raw taint rows carry a worker-precomputed conservative presentation cost;
-  pagination reuses it without serializing or rescanning the complete result
-  set. Only the requested raw-taint page is formatted and cached. Stable
-  page/cursor navigation still covers every row.
+- `read-file` opens a one-file scoped workspace by default, preserves the
+  file's full-workspace ordinal, and decodes its validated compiler object
+  when present. Explicit flow, rulepack, or cross-file-body options select
+  workspace semantics; the default path never constructs a callgraph.
+- `inspect` matches compact headers, then streams exact occurrence bodies in
+  source-size-weighted file batches. The coordinator initializes the immutable
+  linker header before file workers start; workers decode only independently
+  addressable compiler bodies/import headers, and their facts are applied in
+  canonical path order. Memory changes batch width only. Exact bodies are
+  hydrated again only for selected rendered chains. Raw taint rows carry a
+  worker-precomputed conservative presentation cost; pagination reuses it
+  without serializing or rescanning the complete result set. Only the
+  requested raw-taint page is formatted and cached. Stable page/cursor
+  navigation still covers every row.
 - Security and export retain compact linkage beside the sparse IDG and stream
   exact compiler bodies through the byte-weighted cache.
 - Every IDG query reuses `IdgQueryService::global_linkage_index()`. Calling
@@ -356,7 +365,9 @@ The kit is split across several files:
   grammars that lump both arms together.
 - `kit/bindings.rs` — pattern and foreach lowering from tree-sitter fields.
 - `kit/identifiers.rs` — identifier-shape predicates.
-- `kit/param_extraction.rs` — parameter names + annotations.
+- `kit/param_extraction.rs` — language-neutral parameter names + grammar
+  annotations; adapter-specific default-call forms remain in the owning
+  adapter and lower to API-neutral compiler facts.
 - `kit/pseudo_call.rs` — the adapter callback dispatch for non-call CST nodes.
   Concrete JSX, channel-send, delete, echo, subshell, eval, and operator
   grammar vocabulary remains in the owning `lang_*` crate.
@@ -449,9 +460,12 @@ Targeted queries may compile a sparse backward relevance relation before the
 forward closure. That relation is only a pruning proof and records whether its
 symbolic inversion is complete. If a requested projection has no invertible
 persisted fact, the proof is incomplete and therefore admits unproven nodes
-and facts instead of removing them. The exact forward IDG fixed point remains
-the semantic authority. This fail-open optimization contract preserves paths
-through scalar call boundaries without inventing sibling-field propagation.
+and facts instead of removing them. Because one failed inverse makes the
+relation globally non-pruning, construction stops at that first proof failure
+instead of walking nodes whose membership cannot be used. The exact forward
+IDG fixed point remains the semantic authority. This fail-open optimization
+contract preserves paths through scalar call boundaries without inventing
+sibling-field propagation.
 
 Closure reached sets use sorted external runs, while pending LIFO frontiers
 store all spilled chunks in one append-only temporary file and truncate
@@ -578,11 +592,11 @@ external API.
 `slice` is the backwards-slice counterpart for "what influences this
 symbol?" It identifies exact adapter-emitted symbol sites first and infers the
 line when one site survives; ambiguous sites require explicit `--line` and
-optionally `--file`. It consumes the shared value-flow/IDG graph when a
-semantic sidecar has been hydrated, then merges adapter-emitted
+optionally `--file`. It projects the selected callable's shared value-flow/IDG
+graph on demand (reusing a compatible cached entry when present), then merges adapter-emitted
 `FlowEvent` facts for local syntax detail: assignments, call arguments,
 returns, structured branches/loops, and lifecycle/use-site events. It does
-not parse raw source or invent missing edges; unavailable semantic graphs,
+not parse raw source, require an all-entry compatibility prewarm, or invent missing edges; unavailable semantic graphs,
 parameter boundaries, and unresolved caller boundaries are reported through
 `analysis_incomplete_reasons`, and rows expose their `backends` so users
 can see whether evidence came from `value-flow`, `flow-events`, or both.

@@ -244,6 +244,10 @@ fn compact_decl_storage(decl: &mut Decl) {
         compact_strings(annotations);
     }
     decl.param_annotations.shrink_to_fit();
+    for calls in &mut decl.param_default_calls {
+        compact_strings(calls);
+    }
+    decl.param_default_calls.shrink_to_fit();
     for alias in &mut decl.type_aliases {
         alias.name.shrink_to_fit();
         alias.type_name.shrink_to_fit();

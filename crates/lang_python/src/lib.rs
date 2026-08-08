@@ -233,15 +233,14 @@ impl LanguageAdapter for PythonAdapter {
         // the only visibility filter. Precise wildcard-import narrowing
         // (consult `__all__` only on the `from module import *` path)
         // belongs in the resolver as a separate exported-names fact.
-        // Per-decl `type_aliases`: walk the tree and record
-        // `param: Type` annotations plus FastAPI-style binder
-        // markers (`param: T = Body(...)` / `Depends(...)` /
-        // `Query(...)` / `Header(...)` / `Cookie(...)` /
-        // `Form(...)` / `File(...)` / `Path(...)`). The matcher
-        // consults `Decl.type_aliases` when resolving
-        // `attribute: [Type, method]` rules, so this lets
-        // `[UploadFile, filename]` and similar receiver-typed sink
-        // and source rules fire on Python code per
+        // Per-decl compiler facts: walk the tree and record `param: Type`
+        // annotations plus the exact direct call used as a parameter default
+        // (`param: T = module.factory(...)`). The adapter deliberately does
+        // not interpret framework/API names: rules decide what a default call
+        // means through `target.default_call`. The matcher consults
+        // `Decl.type_aliases` when resolving `attribute: [Type, method]`
+        // rules, so typed receivers such as `[UploadFile, filename]` still
+        // resolve per
         // docs/contributing/design-patterns.mdx::Semantic Resolution Always.
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
@@ -256,7 +255,7 @@ impl LanguageAdapter for PythonAdapter {
             // then propagates onto LHS type_aliases.
             bonsai_lang_api::populate_decl_return_types(&mut idx, &tree, src, &HANDLER);
             let aliases_by_span = collect_python_method_type_aliases(&tree, file, src);
-            let param_binders_by_span = collect_python_param_binder_annotations(&tree, file, src);
+            let param_default_calls_by_span = collect_python_param_default_calls(&tree, file, src);
             for decl in &mut idx.defs {
                 if let Some(aliases) = aliases_by_span
                     .iter()
@@ -264,11 +263,11 @@ impl LanguageAdapter for PythonAdapter {
                 {
                     decl.type_aliases = aliases.clone();
                 }
-                if let Some(binders) = param_binders_by_span
+                if let Some(default_calls) = param_default_calls_by_span
                     .iter()
-                    .find_map(|(span, binders)| (*span == decl.span).then_some(binders))
+                    .find_map(|(span, calls)| (*span == decl.span).then_some(calls))
                 {
-                    merge_python_param_binder_annotations(decl, binders);
+                    merge_python_param_default_calls(decl, default_calls);
                 }
             }
             // Per-class `bases`: `class C(Base, Mixin):` →
@@ -2399,20 +2398,9 @@ fn python_exact_place(node: Node<'_>, src: &[u8]) -> Option<String> {
     }
 }
 
-/// FastAPI / Starlette parameter-binder markers. When a parameter's
-/// default-value is a call to one of these names, the binder
-/// determines the runtime type more reliably than the declared
-/// annotation. `param: str = Body(...)` semantically receives an
-/// envelope from the request body even though the annotation says
-/// `str`.
-const FASTAPI_BINDER_MARKERS: &[&str] = &[
-    "Body", "Depends", "Query", "Header", "Cookie", "Form", "File", "Path",
-];
-
 /// Walk every function/method/lambda body once and record the
-/// parameter type-alias bindings emitted by typed parameters or
-/// FastAPI-style binder default calls. Returns `(decl_span,
-/// aliases)` pairs so `extract_declarations` can attach them to
+/// parameter type-alias bindings emitted by typed parameters. Returns
+/// `(decl_span, aliases)` pairs so `extract_declarations` can attach them to
 /// the right `Decl`.
 fn collect_python_method_type_aliases(
     tree: &Tree,
@@ -2425,6 +2413,9 @@ fn collect_python_method_type_aliases(
         if let Some(params) = fn_node.child_by_field_name("parameters") {
             collect_python_parameter_aliases(params, src, &mut aliases);
         }
+        if let Some(body) = fn_node.child_by_field_name("body") {
+            collect_python_annotated_assignment_aliases(body, src, &mut aliases);
+        }
         dedup_python_type_aliases(&mut aliases);
         if !aliases.is_empty() {
             out.push((span_of(file, &fn_node), aliases));
@@ -2433,40 +2424,74 @@ fn collect_python_method_type_aliases(
     out
 }
 
-fn collect_python_param_binder_annotations(
+/// Collect exact local / receiver-field annotations from one function body.
+/// Nested callables and classes own separate declaration scopes and are
+/// indexed independently, so this walk deliberately does not descend into
+/// them.
+fn collect_python_annotated_assignment_aliases(node: Node<'_>, src: &[u8], out: &mut Vec<TypeAliasBinding>) {
+    if node.kind() == "assignment" {
+        if let (Some(left), Some(type_node)) =
+            (node.child_by_field_name("left"), node.child_by_field_name("type"))
+        {
+            if let (Some(place), Some(type_name)) = (
+                python_exact_place(left, src),
+                canonical_python_type_from_node(type_node, src),
+            ) {
+                push_python_type_alias(out, &place, &type_name);
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "function_definition" | "lambda" | "class_definition"
+        ) {
+            continue;
+        }
+        collect_python_annotated_assignment_aliases(child, src, out);
+    }
+}
+
+/// Collect direct parameter-default calls without assigning them any
+/// framework semantics. For example, both `x = Body(...)` and
+/// `x = project.Body(...)` become syntax facts owned by the matching
+/// parameter; rulepack `default_call` constraints decide whether either fact
+/// represents a source, sanitizer, or other security boundary.
+fn collect_python_param_default_calls(
     tree: &Tree,
     file: FileId,
     src: &[u8],
 ) -> Vec<(Span, Vec<(String, String)>)> {
     let mut out = Vec::new();
     for fn_node in collect_kinds(tree, &["function_definition", "lambda"]) {
-        let mut binders = Vec::new();
+        let mut calls = Vec::new();
         if let Some(params) = fn_node.child_by_field_name("parameters") {
-            collect_python_parameter_binder_annotations(params, src, &mut binders);
+            collect_python_parameter_default_calls(params, src, &mut calls);
         }
-        dedup_python_param_binders(&mut binders);
-        if !binders.is_empty() {
-            out.push((span_of(file, &fn_node), binders));
+        dedup_python_param_default_calls(&mut calls);
+        if !calls.is_empty() {
+            out.push((span_of(file, &fn_node), calls));
         }
     }
     out
 }
 
-fn collect_python_parameter_binder_annotations(node: Node<'_>, src: &[u8], out: &mut Vec<(String, String)>) {
+fn collect_python_parameter_default_calls(node: Node<'_>, src: &[u8], out: &mut Vec<(String, String)>) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
             "typed_default_parameter" | "default_parameter" => {
-                if let Some(binding) = python_param_binder_annotation(child, src) {
+                if let Some(binding) = python_param_default_call(child, src) {
                     out.push(binding);
                 }
             }
-            _ => collect_python_parameter_binder_annotations(child, src, out),
+            _ => collect_python_parameter_default_calls(child, src, out),
         }
     }
 }
 
-fn python_param_binder_annotation(node: Node<'_>, src: &[u8]) -> Option<(String, String)> {
+fn python_param_default_call(node: Node<'_>, src: &[u8]) -> Option<(String, String)> {
     let name_node = node
         .child_by_field_name("name")
         .or_else(|| first_named_child_of_kind(node, &["identifier"]))?;
@@ -2475,39 +2500,43 @@ fn python_param_binder_annotation(node: Node<'_>, src: &[u8]) -> Option<(String,
         return None;
     }
     let value_node = node.child_by_field_name("value")?;
-    let binder = python_binder_call_marker(value_node, src)?;
-    Some((name, binder))
+    if value_node.kind() != "call" {
+        return None;
+    }
+    let function = value_node.child_by_field_name("function")?;
+    let callee = python_exact_place(function, src)?;
+    Some((name, callee))
 }
 
-fn dedup_python_param_binders(binders: &mut Vec<(String, String)>) {
+fn dedup_python_param_default_calls(calls: &mut Vec<(String, String)>) {
     let mut deduped = Vec::new();
-    for (name, binder) in binders.drain(..) {
+    for (name, callee) in calls.drain(..) {
         if !deduped
             .iter()
-            .any(|(existing_name, existing_binder)| existing_name == &name && existing_binder == &binder)
+            .any(|(existing_name, existing_callee)| existing_name == &name && existing_callee == &callee)
         {
-            deduped.push((name, binder));
+            deduped.push((name, callee));
         }
     }
-    *binders = deduped;
+    *calls = deduped;
 }
 
-fn merge_python_param_binder_annotations(decl: &mut bonsai_lang_api::Decl, binders: &[(String, String)]) {
-    if decl.params.is_empty() || binders.is_empty() {
+fn merge_python_param_default_calls(decl: &mut bonsai_lang_api::Decl, calls: &[(String, String)]) {
+    if decl.params.is_empty() || calls.is_empty() {
         return;
     }
-    if decl.param_annotations.len() < decl.params.len() {
-        decl.param_annotations.resize_with(decl.params.len(), Vec::new);
+    if decl.param_default_calls.len() < decl.params.len() {
+        decl.param_default_calls.resize_with(decl.params.len(), Vec::new);
     }
-    for (name, binder) in binders {
+    for (name, callee) in calls {
         let Some(idx) = decl.params.iter().position(|param| param == name) else {
             continue;
         };
-        let anns = &mut decl.param_annotations[idx];
-        if !anns.iter().any(|existing| existing == binder) {
-            anns.push(binder.clone());
-            anns.sort();
-            anns.dedup();
+        let defaults = &mut decl.param_default_calls[idx];
+        if !defaults.iter().any(|existing| existing == callee) {
+            defaults.push(callee.clone());
+            defaults.sort();
+            defaults.dedup();
         }
     }
 }
@@ -4484,9 +4513,6 @@ fn collect_python_parameter_aliases(node: Node<'_>, src: &[u8], out: &mut Vec<Ty
             "typed_parameter" | "typed_default_parameter" => {
                 python_typed_parameter_alias(child, src, out);
             }
-            "default_parameter" => {
-                python_default_parameter_alias(child, src, out);
-            }
             // Recurse for nested parameter lists (lambda's `parameters`
             // node sometimes nests under `lambda_parameters`).
             _ => collect_python_parameter_aliases(child, src, out),
@@ -4502,56 +4528,14 @@ fn python_typed_parameter_alias(node: Node<'_>, src: &[u8], out: &mut Vec<TypeAl
     if name.is_empty() {
         return;
     }
-    // Default value can name a FastAPI binder which overrides the
-    // declared annotation as the resolved-receiver type.
-    if let Some(value_node) = node.child_by_field_name("value") {
-        if let Some(binder) = python_binder_call_marker(value_node, src) {
-            push_python_type_alias(out, &name, &binder);
-            return;
-        }
-    }
     // Type annotation: `name: T` — `type` field, which is a `type` node
     // wrapping a `genericised_type` / `identifier` / etc.
     let type_node = node.child_by_field_name("type");
     if let Some(t) = type_node {
-        if let Some(canonical) = canonical_python_type_name(node_text(&t, src)) {
+        if let Some(canonical) = canonical_python_type_from_node(t, src) {
             push_python_type_alias(out, &name, &canonical);
         }
     }
-}
-
-fn python_default_parameter_alias(node: Node<'_>, src: &[u8], out: &mut Vec<TypeAliasBinding>) {
-    // `name = Body(...)` (no annotation); FastAPI binder still
-    // surfaces a meaningful receiver type.
-    let Some(name_node) = node.child_by_field_name("name") else {
-        return;
-    };
-    let name = node_text(&name_node, src).trim().to_string();
-    if name.is_empty() {
-        return;
-    }
-    if let Some(value_node) = node.child_by_field_name("value") {
-        if let Some(binder) = python_binder_call_marker(value_node, src) {
-            push_python_type_alias(out, &name, &binder);
-        }
-    }
-}
-
-/// When `value` is a call expression whose callee is one of the
-/// FastAPI / Starlette parameter-binder names (`Body`, `Depends`,
-/// `Query`, …), return the binder's name so the matcher can route
-/// the parameter through `attribute: [Body, …]` rules.
-fn python_binder_call_marker(value: Node<'_>, src: &[u8]) -> Option<String> {
-    if value.kind() != "call" {
-        return None;
-    }
-    let function = value.child_by_field_name("function")?;
-    let text = node_text(&function, src);
-    let bare = text.rsplit('.').next().unwrap_or(text).trim();
-    if FASTAPI_BINDER_MARKERS.contains(&bare) {
-        return Some(bare.to_string());
-    }
-    None
 }
 
 fn first_named_child_of_kind<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
@@ -4566,11 +4550,46 @@ fn first_named_child_of_kind<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<
     None
 }
 
-/// Strip generics / unions / subscripts down to the leftmost
-/// receiver-shaped identifier. `List[str]` → `List`,
-/// `Optional[Request]` → `Optional`, `dict[str, int]` → `dict`.
-/// The matcher resolves through the canonical-shape table for
-/// generic shapes when relevant.
+/// Lower a Python type-annotation AST to the runtime receiver type used for
+/// dispatch. Container generics keep their outer type (`list[str]` → `list`),
+/// while typing-only wrappers expose their first payload (`Annotated[T, …]`
+/// and `Optional[T]` → `T`). Union syntax chooses the first non-`None` arm.
+fn canonical_python_type_from_node(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "type" | "parenthesized_expression" | "parenthesized_list_splat" => {
+            let mut cursor = node.walk();
+            let canonical = node
+                .named_children(&mut cursor)
+                .find_map(|child| canonical_python_type_from_node(child, src));
+            canonical
+        }
+        "generic_type" => {
+            let base = node.named_child(0)?;
+            let base_name = canonical_python_type_name(node_text(&base, src))?;
+            if matches!(
+                base_name.as_str(),
+                "Annotated" | "Optional" | "ClassVar" | "Final" | "Required" | "NotRequired"
+            ) {
+                let parameters = node.named_child(1)?;
+                let mut cursor = parameters.walk();
+                return parameters
+                    .named_children(&mut cursor)
+                    .find_map(|child| canonical_python_type_from_node(child, src));
+            }
+            Some(base_name)
+        }
+        "union_type" | "binary_operator" => {
+            let mut cursor = node.walk();
+            let canonical = node.named_children(&mut cursor).find_map(|child| {
+                let candidate = canonical_python_type_from_node(child, src)?;
+                (!matches!(candidate.as_str(), "None" | "NoneType")).then_some(candidate)
+            });
+            canonical
+        }
+        _ => canonical_python_type_name(node_text(&node, src)),
+    }
+}
+
 fn canonical_python_type_name(raw: &str) -> Option<String> {
     let trimmed = raw.trim().split('|').next().unwrap_or(raw).trim();
     let head = trimmed.split('[').next().unwrap_or(trimmed).trim();

@@ -176,7 +176,7 @@ where
     let transfer = bonsai_idg::TransferOptions::compiler_semantics(complete_field_place_languages)
         .semantic_fingerprint();
     let pipeline_hash = idg_pipeline_hash()
-        ^ compiler_frontend_idg_fingerprint(COMPILER_OBJECT_CACHE_VERSION)
+        ^ compiler_frontend_cache_fingerprint(COMPILER_OBJECT_CACHE_VERSION)
         ^ content
         ^ transfer
         ^ u64::from(callgraph_sidecar::CALLGRAPH_CACHE_VERSION).wrapping_mul(0x9E37_79B1_85EB_CA87)
@@ -3761,8 +3761,9 @@ impl Workspace {
         Ok(ws)
     }
 
-    /// Open one supported source file under `root`, parse it, and
-    /// index only its local syntax facts.
+    /// Open one supported source file under `root` and index only its local
+    /// syntax facts. A fresh content-addressed compiler object is reused by
+    /// stable full-workspace `FileId`; a miss falls back to Tree-sitter.
     ///
     /// This is the fast path for file-centric navigation commands.
     /// It deliberately does not ingest the whole workspace or load
@@ -3809,10 +3810,17 @@ impl Workspace {
         ws.inner.db.set_scoped_workspace_root(canonical_root.clone());
         on_event(WorkspaceOpenEvent::IngestStarted);
         let source = read_supported_source_file_at_path(&canonical_root, &ws.inner.registry, path)?;
-        let id = ws
+        let stable_file = ws
             .inner
-            .vfs
-            .write(source.path.clone(), Arc::<str>::from(source.text));
+            .db
+            .load_compiler_object_store_for_selected_path(&canonical_root, &source.path)
+            .ok()
+            .flatten();
+        let text = Arc::<str>::from(source.text);
+        let id = match stable_file {
+            Some(file) => ws.inner.vfs.write_with_id(file, source.path, text),
+            None => ws.inner.vfs.write(source.path, text),
+        };
         *ws.inner.reparse_counter.lock() += 1;
         on_event(WorkspaceOpenEvent::IngestFinished { files: 1 });
         on_event(WorkspaceOpenEvent::ParseStarted { files: 1 });
@@ -5444,7 +5452,7 @@ fn idg_workspace_pipeline_hash(db: &AnalyzerDb, root: Option<&Path>) -> u64 {
         // ABI bump can change declaration, call, assignment, or FlowEvent
         // facts even when every source byte and the on-disk IDG layout stay
         // unchanged, so an older graph must never survive that bump.
-        ^ compiler_frontend_idg_fingerprint(COMPILER_OBJECT_CACHE_VERSION)
+        ^ compiler_frontend_cache_fingerprint(COMPILER_OBJECT_CACHE_VERSION)
         ^ crate::cache_fingerprint::workspace_content_fingerprint(db)
         ^ default_workspace_idg_transfer_options(db).semantic_fingerprint()
         ^ u64::from(callgraph_sidecar::CALLGRAPH_CACHE_VERSION).wrapping_mul(0x9E37_79B1_85EB_CA87);
@@ -5454,7 +5462,7 @@ fn idg_workspace_pipeline_hash(db: &AnalyzerDb, root: Option<&Path>) -> u64 {
     pipeline_hash
 }
 
-fn compiler_frontend_idg_fingerprint(version: u32) -> u64 {
+fn compiler_frontend_cache_fingerprint(version: u32) -> u64 {
     u64::from(version).wrapping_mul(0xD6E8_FEB8_6659_FD93)
 }
 

@@ -165,14 +165,17 @@ fn single_file_local_id_maps_to_its_persisted_header_partition() {
 
     let complete = Workspace::index(root.path(), python_registry()).expect("complete workspace");
     complete
+        .save_compiler_object_sidecar(root.path())
+        .expect("persist compiler objects");
+    complete
         .save_compiler_linkage_sidecar(root.path())
         .expect("persist linkage sidecar");
     let scoped = Workspace::open_query_matching_path(root.path(), python_registry(), Path::new("beta.py"))
         .expect("single-file query");
     assert_eq!(
         scoped.vfs().all_files(),
-        vec![FileId::new(0)],
-        "a navigation-only open stays dense and does not walk sibling metadata"
+        vec![FileId::new(1)],
+        "a warmed file-local query must preserve the full workspace ordinal so it can decode the exact compiler object"
     );
 
     let headers = scoped.compiler_header_index_for_files(&scoped.vfs().all_files());

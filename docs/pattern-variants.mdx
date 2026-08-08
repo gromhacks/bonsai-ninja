@@ -89,7 +89,7 @@ class overrides:
   description: "Tornado WebSocketHandler.on_message - peer-controlled message payload."
 ```
 
-### Decorated function parameter (FastAPI)
+### Parameter default-call binder (FastAPI)
 
 ```yaml
 - id: python.fastapi.body_param
@@ -101,7 +101,7 @@ class overrides:
   match:
     kind: param
     target:
-      annotation: Body
+      default_call: Body
   match_examples:
     - name: fastapi body param
       code: |

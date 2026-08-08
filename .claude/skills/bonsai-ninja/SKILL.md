@@ -222,6 +222,14 @@ analysis, never a raw-text fallback.
 `read-file --all` disables output paging only. It does not enable security or
 whole-workspace graph work; request overlays explicitly, and use
 `--max-inlined-bodies 0` only when every connected body is intentional.
+Without `--rules-dir`, `--from`, `--to`, or `--max-inlined-bodies`, it is a
+file-local compiler-object view and does not build a callgraph or IDG.
+
+For standalone structural endpoint queries, use qualified `Owner.member`
+spellings when methods share a short name. `inspect --from Source.run --to
+Target.run` resolves the compiler identities as sets and keeps only the exact
+connected corridor. `dump-resolve --in-file` accepts and reports
+workspace-relative paths.
 
 ## Debug A Code-Intelligence Disagreement
 

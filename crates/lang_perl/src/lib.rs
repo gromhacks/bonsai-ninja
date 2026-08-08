@@ -1905,6 +1905,17 @@ fn rewrite_perl_call_arg_texts(events: &mut [FlowEvent], source: &str) {
         match event {
             FlowEvent::Call { args, .. } => {
                 for arg in &mut *args {
+                    if let Some(source_name) = perl_coderef_rhs_source(&arg.value_text) {
+                        // `\&name` is a grammar-recognized exact Perl
+                        // coderef, not a compound expression containing a
+                        // callable-looking token. Preserve that proof in the
+                        // language-neutral CallArg place fact.
+                        arg.value_text.clone_from(&source_name);
+                        arg.place = Some(source_name.clone());
+                        arg.source_names.clear();
+                        arg.source_names.push(source_name);
+                        continue;
+                    }
                     let start = usize::try_from(arg.span.start).unwrap_or(usize::MAX);
                     let end = usize::try_from(arg.span.end).unwrap_or(usize::MAX);
                     if start == usize::MAX || end > source.len() || start > end {

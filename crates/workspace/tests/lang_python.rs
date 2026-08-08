@@ -133,7 +133,7 @@ fn param_names_captured() {
 }
 
 #[test]
-fn fastapi_param_annotations_are_parallel_to_names() {
+fn parameter_annotations_and_default_calls_are_parallel_to_names() {
     let w = make(
         "from typing import Annotated\n\
          from fastapi import Body, Query\n\
@@ -144,7 +144,15 @@ fn fastapi_param_annotations_are_parallel_to_names() {
     let annotations = param_annotations_of(&w, "handle");
     assert_eq!(annotations.len(), 2);
     assert!(annotations[0].contains(&"Body".to_string()), "{annotations:?}");
-    assert!(annotations[1].contains(&"Query".to_string()), "{annotations:?}");
+    assert!(annotations[1].is_empty(), "{annotations:?}");
+
+    let default_calls = param_default_calls_of(&w, "handle");
+    assert_eq!(default_calls.len(), 2);
+    assert!(default_calls[0].is_empty(), "{default_calls:?}");
+    assert!(
+        default_calls[1].contains(&"Query".to_string()),
+        "{default_calls:?}"
+    );
 }
 
 #[test]

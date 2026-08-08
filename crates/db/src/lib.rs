@@ -511,7 +511,8 @@ impl AnalyzerDb {
     }
 
     fn build_decl_index_uncached(&self, file: FileId) -> Option<DeclIndex> {
-        self.build_decl_index_with_diagnostics(file, &self.inner.diagnostics)
+        self.compiler_decl_index_from_store(file)
+            .or_else(|| self.build_decl_index_with_diagnostics(file, &self.inner.diagnostics))
     }
 
     fn build_decl_index_with_diagnostics(

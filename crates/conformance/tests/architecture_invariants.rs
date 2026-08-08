@@ -1381,6 +1381,40 @@ fn cli_read_file_uses_sdk_rulepack_attachment() {
 }
 
 #[test]
+fn plain_read_file_reuses_one_exact_compiler_body_without_semantic_graphs() {
+    let root = repo_root();
+    let sdk_read = read(&root.join("crates/sdk/src/read_file.rs"));
+    let body = function_body(&sdk_read, "read_file_with_taint_options");
+    let overlay_gate = body
+        .find("if semantic_overlays_requested")
+        .expect("read-file semantic overlay gate");
+    let callgraph = body
+        .find("cached_resolved_call_graph()")
+        .expect("explicit read-file callgraph overlay");
+    assert!(
+        body.contains("rulepack.is_some()")
+            && body.contains("filters.max_inlined_bodies.is_some()")
+            && callgraph > overlay_gate,
+        "plain read-file must not build a resolved callgraph; only explicit semantic overlays may enter that path"
+    );
+
+    let workspace = read(&root.join("crates/workspace/src/lib.rs"));
+    let scoped_open = function_body(&workspace, "open_query_matching_path_with_options_and_events");
+    assert!(
+        scoped_open.contains("load_compiler_object_store_for_selected_path")
+            && scoped_open.contains("write_with_id"),
+        "path-scoped queries must preserve the selected file's full-workspace FileId and reuse its compiler object"
+    );
+
+    let architecture = read(&root.join("docs/contributing/architecture.mdx"));
+    assert!(
+        architecture.contains("default path never constructs a callgraph")
+            && architecture.contains("full-workspace ordinal"),
+        "read-file compiler-object and lightweight-overlay contracts must stay documented"
+    );
+}
+
+#[test]
 fn cli_tree_is_filesystem_only() {
     let root = repo_root();
     let path = root.join("crates/cli/src/commands/tree.rs");
@@ -3239,6 +3273,7 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
     );
     let command = function_body(&inspect, "cmd_inspect");
     let occurrence_scan = function_body(&inspect, "scan_occurrence_facts");
+    let occurrence_file_scan = function_body(&inspect, "scan_occurrence_file");
     let decl_scan = function_body(&inspect, "collect_decl_hits");
     let render_flow = function_body(&inspect, "render_flow_with_cached_call_spans");
     let render_function = function_body(&inspect, "render_function_source");
@@ -3259,9 +3294,15 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
         command.contains("let global = ws.compiler_header_index()")
             && decl_scan.contains("ws.compiler_header_index()")
             && !decl_scan.contains("global_index()")
-            && occurrence_scan.contains("ws.exact_decl_index_shared(file)")
+            && occurrence_scan.contains("let _ = ws.compiler_header_index()")
+            && occurrence_scan.contains("syntax_weighted_batches")
+            && occurrence_scan.contains(".par_iter()")
+            && occurrence_scan.contains("scan_occurrence_file(file, &file_scan)")
+            && occurrence_file_scan.contains("ws.exact_decl_index_shared(file)")
             && !occurrence_scan.contains("resident_global")
             && !occurrence_scan.contains("global_index()")
+            && !occurrence_file_scan.contains("resident_global")
+            && !occurrence_file_scan.contains("global_index()")
             && render_flow.contains("ws.exact_decl(symbol)")
             && !render_flow.contains("global_index()")
             && render_function.contains("ws.exact_decl_index_shared(file)")
@@ -5403,6 +5444,41 @@ fn structured_security_guards_are_rulepack_driven() {
         rules.contains("pub struct ConfiguredArgumentFactoryGuardSemantics")
             && xxe_pack.contains("configured_argument_factory_guard:"),
         "configured argument factory roles must be declared in the rule schema and rulepack"
+    );
+}
+
+#[test]
+fn python_parameter_default_calls_are_api_neutral_compiler_facts() {
+    let root = repo_root();
+    let adapter_source = read(&root.join("crates/lang_python/src/lib.rs"));
+    let adapter = production_source(&adapter_source);
+    for forbidden in [
+        "FASTAPI_BINDER_MARKERS",
+        "python_binder_call_marker",
+        "merge_python_param_binder_annotations",
+    ] {
+        assert!(
+            !adapter.contains(forbidden),
+            "Python lowering must not interpret framework parameter binders through `{forbidden}`"
+        );
+    }
+    assert!(
+        adapter.contains("collect_python_param_default_calls") && adapter.contains("param_default_calls"),
+        "Python must lower direct parameter-default calls as generic compiler facts"
+    );
+
+    let rule_schema = read(&root.join("crates/security/src/rule.rs"));
+    let python_sources = format!(
+        "{}\n{}",
+        read(&root.join("security-patterns/langs/python/sources/web_extra.yml")),
+        read(&root.join("security-patterns/langs/python/sources/remote.yml"))
+    );
+    assert!(
+        rule_schema.contains("pub default_call: Option<String>")
+            && python_sources.contains("default_call: Body")
+            && python_sources.contains("default_call: Query")
+            && python_sources.contains("default_call: Depends"),
+        "framework binder identities must be declared by rulepack default_call selectors"
     );
 }
 

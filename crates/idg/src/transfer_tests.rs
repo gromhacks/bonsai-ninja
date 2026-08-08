@@ -22,6 +22,7 @@ fn empty_decl(sym: u32, name: &str) -> Decl {
         has_implicit_returns: false,
         params: Vec::new(),
         param_annotations: Vec::new(),
+        param_default_calls: Vec::new(),
         type_aliases: Vec::new(),
         bases: Vec::new(),
         receiver_param_index: None,

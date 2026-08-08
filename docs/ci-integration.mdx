@@ -60,7 +60,11 @@ cold `index --semantic` to finish, then measures a second fresh-process warm
 reuse plus navigation, inspect, security inventory, and production taint
 commands. Every assertion is evaluated after the command exits and
 `analysis_complete` is checked, so an SLO failure cannot interrupt, skip, or
-truncate semantic work.
+truncate semantic work. The five top-level benchmark scenarios take a shared
+test lock: Rust's parallel test harness must not make a command's SLO depend on
+another benchmark command running at the same time. This serializes scenarios,
+not analyzer workers, and does not change the memory budget, semantic scope, or
+SLO.
 
 The inspect gate also protects phase residency and target planning: broad
 `inspect --taint-flow` must finish syntax discovery and release exact bodies
@@ -121,6 +125,45 @@ seconds. The broad inspect result retained all 12,233 entry closures and
 198,025 unique pageable paths; compiler-owned declaration targets and direct
 target ownership now avoid redundant header/relevance lookups without changing
 the IDG fixed point.
+
+The 2026-08-07 ABI-v64 migration pass passed all five tests in 1,883.15
+seconds. Its required one-time exact generation took 1,672.82 seconds and
+immediate reuse took 2.34 seconds. Default inspect took 7.38 seconds, broad
+raw-taint inspect 27.11 seconds, fresh-cache production taint 29.89 seconds,
+and warm production taint 28.46 seconds. The scoped `read-file` probe took
+1.31 seconds. All navigation and security-inventory SLOs passed; compiler
+lowering stayed near 0.9 GiB RSS under the 3 GiB scheduling budget. ABI-v64
+also binds every callgraph and compatibility flow artifact to the compiler
+frontend ABI, preventing stale adapter IR from surviving an upgrade. This is
+the current cache-compatibility reference.
+
+The prior 2026-08-07 ABI-v63 migration pass also passed all five tests. Its required
+one-time exact generation took 1,720.68 seconds and immediate reuse took 2.34
+seconds. Default inspect took 10.35 seconds, broad raw-taint inspect 29.69
+seconds, fresh-cache production taint 34.30 seconds, and warm production taint
+29.85 seconds. The scoped `read-file` navigation probe took 1.62 seconds. The
+compiler worker remained near 1 GiB RSS and the IDG worker stayed within the 3
+GiB scheduling budget. The earlier migration runs remain useful historical
+comparisons.
+
+After the final shared parameter-fact refinement, a complete warm-generation
+repeat passed 5/5 in 220.51 seconds with the same limits. Immediate semantic
+validation/reuse took 5.11/2.34 seconds, default inspect 10.02 seconds, broad
+raw-taint inspect 28.53 seconds, fresh-cache production taint 30.44 seconds,
+warm production taint 27.47 seconds, and scoped `read-file` 1.33 seconds. This
+remains the pre-query-scheduler comparison; the migration timing above remains
+the cache-compatibility reference.
+
+The final 2026-08-07 release-candidate repeat passed 5/5 in 217.85 seconds
+under the same 3 GiB schedule. Exact occurrence hydration now uses
+source-size-weighted file batches and canonical-order fact application;
+Elasticsearch syntax hydration fell from about 5.2 seconds to 2.0 seconds
+without changing compiler facts or pagination. Immediate semantic validation
+and reuse took 5.15/2.41 seconds, default inspect 7.05 seconds, broad exact
+raw-taint inspect 25.71 seconds, fresh-cache production taint 31.59 seconds,
+warm production taint 27.00 seconds, and scoped `read-file` 1.54 seconds.
+Source, sink, sanitizer, and dependency inventories took 3.84, 23.01, 17.51,
+and 10.09 seconds. This remains the pre-ABI-v64 warm-generation comparison.
 
 The integration test deliberately does not write the multi-gigabyte native
 Elasticsearch artifact on every CI runner. Changes to native export, compiler

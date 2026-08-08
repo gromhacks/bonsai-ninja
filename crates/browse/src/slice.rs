@@ -287,38 +287,33 @@ fn slice_decl(ws: &Workspace, decl: &Decl, file_path: &str, filters: &SliceFilte
         &decl.name,
         file_path,
     );
-    let computation = match semantic_slice_from_value_flow(
-        ws,
-        decl,
-        filters.symbol,
-        filters.line,
-        filters.max_steps,
-    ) {
-        SemanticSliceResult::Computed(semantic) => {
-            let mut computation = semantic;
-            merge_slice_computations(&mut computation, local_computation, filters.max_steps, &decl.name);
-            computation
-        }
-        SemanticSliceResult::Unavailable => {
-            let mut computation = local_computation;
-            push_unique_string(
-                &mut computation.analysis_incomplete_reasons,
-                "semantic value-flow graph was not available; run `bonsai-ninja index --semantic` to hydrate reusable semantic sidecars",
-            );
-            computation
-        }
-        SemanticSliceResult::NoTargetNode => {
-            let mut computation = local_computation;
-            push_unique_string(
-                &mut computation.analysis_incomplete_reasons,
-                &format!(
-                    "semantic value-flow graph has no target node for `{}` at or before line {}",
-                    filters.symbol, filters.line
-                ),
-            );
-            computation
-        }
-    };
+    let computation =
+        match semantic_slice_from_value_flow(ws, decl, filters.symbol, filters.line, filters.max_steps) {
+            SemanticSliceResult::Computed(semantic) => {
+                let mut computation = semantic;
+                merge_slice_computations(&mut computation, local_computation, filters.max_steps, &decl.name);
+                computation
+            }
+            SemanticSliceResult::Unavailable => {
+                let mut computation = local_computation;
+                push_unique_string(
+                    &mut computation.analysis_incomplete_reasons,
+                    "semantic value-flow projection produced no nodes for this callable",
+                );
+                computation
+            }
+            SemanticSliceResult::NoTargetNode => {
+                let mut computation = local_computation;
+                push_unique_string(
+                    &mut computation.analysis_incomplete_reasons,
+                    &format!(
+                        "semantic value-flow graph has no target node for `{}` at or before line {}",
+                        filters.symbol, filters.line
+                    ),
+                );
+                computation
+            }
+        };
     let slice_id = compute_slice_id(
         file_path,
         &decl.name,
@@ -844,14 +839,14 @@ fn semantic_slice_from_value_flow(
     target_line: u32,
     max_steps: usize,
 ) -> SemanticSliceResult {
-    let has_semantic_cache = !ws.value_flow().is_empty() || ws.db().idg_service().is_some();
-    if !has_semantic_cache {
-        return SemanticSliceResult::Unavailable;
-    }
+    // Value-flow is an exact on-demand projection of the canonical IDG. It
+    // does not require the legacy all-entry compatibility sidecar, and
+    // `index --semantic` intentionally does not build that quadratic-scale
+    // artifact. Compute only the selected callable when no reusable entry is
+    // available.
     let func = FuncId::new(decl.symbol.raw());
-    let graph = ws
-        .value_flow()
-        .graph_for_with_caches(func, ws.db(), ws.inter_taint_caches());
+    let value_flow = ws.value_flow();
+    let graph = value_flow.graph_for_with_caches(func, ws.db(), ws.inter_taint_caches());
     if graph.nodes.is_empty() {
         return SemanticSliceResult::Unavailable;
     }

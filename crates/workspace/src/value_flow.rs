@@ -17,7 +17,7 @@ use crate::value_flow_disk::{
 };
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{workspace_bonsai_dir, FuncId, MATCHER_POLICY_FINGERPRINT};
-use bonsai_db::AnalyzerDb;
+use bonsai_db::{AnalyzerDb, COMPILER_OBJECT_CACHE_VERSION};
 use bonsai_factstore::{FactStoreReader, FactStoreWriter};
 use bonsai_lang_api::DeclKind;
 use bonsai_taint::{value_flow_for_function_with_caches, InterTaintCaches, InterTaintConfig};
@@ -32,6 +32,8 @@ use std::sync::Arc;
 /// sidecars are rejected. The workspace-interned factstore format is
 /// produced by [`bonsai_factstore`], whose header and pipeline hash reject
 /// incompatible payloads before decoding.
+// v14 (2026-08-07): snapshot and factstore freshness bind to the compiler
+// frontend ABI so adapter IR changes cannot reuse derived value-flow graphs.
 // v13 (2026-08-03): rebuild exact value flows after compiler-object v50 and
 // the qualified-place/callable identity contract changed.
 // v12 (2026-07-30): invalidate derived graphs after compiler-object v13
@@ -40,7 +42,7 @@ use std::sync::Arc;
 // v9 (2026-07-16): remove the retired saturation field.
 // v8 (2026-05-27): the value-flow graph derives from the IDG, whose
 // construction and seeding changed enough to reject older sidecars.
-pub const VALUE_FLOW_CACHE_VERSION: u32 = 13;
+pub const VALUE_FLOW_CACHE_VERSION: u32 = 14;
 
 /// Caller-defined table id stamped into the factstore header. Lets
 /// the reader detect "this is the value-flow store" vs other
@@ -62,6 +64,7 @@ fn value_flow_pipeline_hash_for_content(content_fingerprint: u64, sidecar_path: 
     let hi = (raw >> 64) as u64;
     lo ^ hi
         ^ u64::from(VALUE_FLOW_CACHE_VERSION)
+        ^ crate::compiler_frontend_cache_fingerprint(COMPILER_OBJECT_CACHE_VERSION)
         ^ content_fingerprint
         ^ dependency_metadata_fingerprint_for_sidecar(sidecar_path)
 }
@@ -794,6 +797,7 @@ impl ValueFlowCache {
         }
         SerializableValueFlowSnapshot {
             version: VALUE_FLOW_CACHE_VERSION,
+            compiler_frontend_abi: COMPILER_OBJECT_CACHE_VERSION,
             matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT,
             entries,
         }
@@ -805,6 +809,9 @@ impl ValueFlowCache {
     /// survived; mismatched fingerprints invalidate everything.
     pub fn load_snapshot(&self, snap: SerializableValueFlowSnapshot) -> usize {
         if snap.version != VALUE_FLOW_CACHE_VERSION {
+            return 0;
+        }
+        if snap.compiler_frontend_abi != COMPILER_OBJECT_CACHE_VERSION {
             return 0;
         }
         if snap.matcher_policy_fingerprint != MATCHER_POLICY_FINGERPRINT {
@@ -866,6 +873,8 @@ fn compute_returning_seed_names(graph: &ValueFlowGraph, func: FuncId) -> AHashSe
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SerializableValueFlowSnapshot {
     pub version: u32,
+    #[serde(default)]
+    pub compiler_frontend_abi: u32,
     pub matcher_policy_fingerprint: u128,
     pub entries: Vec<SerializableValueFlowEntry>,
 }

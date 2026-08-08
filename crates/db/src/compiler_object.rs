@@ -30,6 +30,12 @@ use std::sync::Arc;
 /// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
 /// or the object validation contract changes in a way that can alter compiler
 /// facts.
+// v64: Erlang `fun name/arity` and Perl `\&name` call arguments retain an
+// adapter-proven exact callable place. Cached v63 objects can omit callback
+// edges after the callgraph correctly rejects compound data expressions.
+// v63: Python annotated assignment fields and typing-wrapper payloads retain
+// their AST-derived receiver types. Cached v62 objects can mis-type a
+// constructed field from one of its constructor arguments.
 // v62: call-argument facts retain adapter-lowered inline callback parameter
 // bindings. Configured source-callback delivery can therefore enter an
 // inlined callback body without parsing rendered lambda text or inventing a
@@ -127,7 +133,7 @@ use std::sync::Arc;
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 62;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 64;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;
@@ -738,6 +744,46 @@ impl CompilerObjectStore {
 }
 
 impl AnalyzerDb {
+    /// Attach the immutable compiler-object generation for one file-local
+    /// query and return that file's stable full-workspace identity.
+    ///
+    /// The generation metadata is integrity-checked here. The selected
+    /// object's path, language, content hash, and SHA-256 digest are checked
+    /// again when its payload is consumed, so an edited file safely falls
+    /// back to Tree-sitter while retaining its stable ordinal.
+    pub fn load_compiler_object_store_for_selected_path(
+        &self,
+        workspace_root: &Path,
+        selected_path: &Path,
+    ) -> std::io::Result<Option<FileId>> {
+        let store = CompilerObjectStore::open_reusable(workspace_root)?;
+        if store.reader.len() != compiler_object_entry_count(store.metadata.files.len()) {
+            return Err(invalid_data("compiler-object entry count mismatch"));
+        }
+        let canonical_root = workspace_root
+            .canonicalize()
+            .unwrap_or_else(|_| workspace_root.to_path_buf());
+        let relative = selected_path
+            .strip_prefix(&canonical_root)
+            .or_else(|_| selected_path.strip_prefix(workspace_root))
+            .unwrap_or(selected_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let file = store
+            .metadata
+            .files
+            .iter()
+            .find(|metadata| metadata.path == relative)
+            .map(|metadata| FileId::new(metadata.file));
+        if file.is_some() {
+            *self.inner.compiler_object_store.write() = Some(Arc::new(store));
+            self.inner
+                .compiler_object_store_requires_repair
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+        Ok(file)
+    }
+
     /// Attach a complete immutable compiler-object generation to a scoped
     /// query after the caller has validated the full source fingerprint set.
     ///
@@ -793,6 +839,34 @@ impl AnalyzerDb {
         let object = loaded.unwrap_or_else(|| self.compile_fresh_file_object(descriptor));
         self.publish_compiler_diagnostics(&object);
         Some(object)
+    }
+
+    /// Load only a persisted declaration body when the selected source has an
+    /// exact content-addressed object. `None` is a normal cache miss; callers
+    /// then invoke the adapter directly without compiling unrelated import
+    /// projections merely to satisfy a file-local view.
+    pub(crate) fn compiler_decl_index_from_store(&self, file: FileId) -> Option<DeclIndex> {
+        let descriptor = source_descriptor(self, file)?;
+        let store = self.inner.compiler_object_store.read().as_ref().cloned()?;
+        match store.load(&descriptor) {
+            Ok(Some(object)) => {
+                self.publish_compiler_diagnostics(&object);
+                object.declarations
+            }
+            Ok(None) => None,
+            Err(error) => {
+                self.inner
+                    .compiler_object_store_requires_repair
+                    .store(true, std::sync::atomic::Ordering::Release);
+                bonsai_diagnostics::debug_log!(
+                    "compiler-object",
+                    "compiler declaration body miss for {}: {}",
+                    descriptor.path,
+                    error
+                );
+                None
+            }
+        }
     }
 
     /// Return whether this exact source snapshot has already completed the

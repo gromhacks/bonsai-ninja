@@ -170,6 +170,19 @@ fn sidecar_rejects_changed_workspace_content() {
 }
 
 #[test]
+fn snapshot_rejects_compiler_frontend_abi_mismatch() {
+    let cache = ValueFlowCache::new();
+    let mut snapshot = cache.snapshot();
+    snapshot.compiler_frontend_abi = snapshot.compiler_frontend_abi.wrapping_sub(1);
+
+    assert_eq!(
+        ValueFlowCache::new().load_snapshot(snapshot),
+        0,
+        "compiler frontend ABI mismatch must reject derived value-flow entries"
+    );
+}
+
+#[test]
 fn prewarm_to_disk_preserves_resident_entries() {
     let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
     let db = build_db_with(

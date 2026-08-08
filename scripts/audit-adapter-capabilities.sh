@@ -27,12 +27,13 @@ esac
 # - bases: decl.bases assignment
 # - rfw: receiver_field_writes population
 # - panns: param_annotations population
+# - pdefaults: param_default_calls population
 # - exports: module_export_aliases (LanguageCapabilities field)
 # - super: super_dispatch handling
 
 generate_table() {
-    printf '%-20s %-3s %-7s %-5s %-3s %-5s %s\n' \
-        "Adapter" "vis" "aliases" "bases" "rfw" "panns" "exports"
+    printf '%-20s %-3s %-7s %-5s %-3s %-5s %-9s %s\n' \
+        "Adapter" "vis" "aliases" "bases" "rfw" "panns" "pdefaults" "exports"
     for adapter in "$ROOT_DIR"/crates/lang_*; do
         name="$(basename "$adapter")"
         [[ "$name" == "lang_api" ]] && continue
@@ -55,11 +56,15 @@ generate_table() {
         # `extract_param_annotations` (called from
         # `decl_index_with_handler`) for every adapter. Counting the
         # literal field name here only catches adapters that do
-        # *additional* annotation post-processing (Python's binder
-        # merge, Ruby's attr_*). The kit covers Java/Kotlin/C#
+        # *additional* annotation post-processing (Ruby's attr_*).
+        # The kit covers Java/Kotlin/C#/Python
         # natively, verified by
         # `crates/taint/tests/param_annotations_smoke.rs`.
         panns=$(grep -cE 'param_annotations|extract_param_annotations|param_decoration_kinds' "$src" 2>/dev/null)
+        # Direct parameter-default calls are a separate API-neutral compiler
+        # fact. Python currently owns the grammar shape; framework binder names
+        # remain in rule YAML and therefore do not affect this count.
+        pdefaults=$(grep -cE 'collect_[[:alnum:]_]*param_default_calls|merge_[[:alnum:]_]*param_default_calls|\.param_default_calls' "$src" 2>/dev/null)
         # Visibility population: count every concrete `Visibility::Variant`
         # assignment, plus the `visibility_by_span` cache key. Adapters
         # legitimately use `Module` (Erlang `-export`, Go uppercase rule,
@@ -68,8 +73,8 @@ generate_table() {
         # populates the field.
         visi=$(grep -cE 'visibility_by_span|Visibility::(Private|Public|Module|Crate|Protected|Internal)' "$src" 2>/dev/null)
         exports=$(grep -cE 'module_export_aliases' "$src" 2>/dev/null)
-        printf '%-20s %-3d %-7d %-5d %-3d %-5d %d\n' \
-            "$name" "$visi" "$aliases" "$bases" "$rfw" "$panns" "$exports"
+        printf '%-20s %-3d %-7d %-5d %-3d %-5d %-9d %d\n' \
+            "$name" "$visi" "$aliases" "$bases" "$rfw" "$panns" "$pdefaults" "$exports"
     done
 }
 

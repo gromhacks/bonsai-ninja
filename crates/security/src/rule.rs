@@ -223,6 +223,13 @@ pub struct RuleTarget {
     /// `Decl.param_annotations` parallel-indexed with `params`. T204.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotation: Option<String>,
+    /// Match a parameter by the direct call used as its default value
+    /// (Python `payload = fastapi.Body(...)`). Only meaningful with
+    /// `kind: param`; reads the adapter-emitted
+    /// `Decl.param_default_calls` syntax fact. API/framework names belong in
+    /// this rule field, never in language adapters or shared analysis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_call: Option<String>,
     /// Restrict a rule match to declarations whose enclosing class
     /// equals or extends one of the given names. Lets rules like
     /// `WebSocketHandler.on_message(self, message)` and
@@ -301,6 +308,7 @@ impl RuleTarget {
             && self.attribute.is_none()
             && self.regex.is_none()
             && self.annotation.is_none()
+            && self.default_call.is_none()
             && self.base_name_in.is_empty()
             && self.base_name_not_in.is_empty()
             && self.in_class.is_empty()

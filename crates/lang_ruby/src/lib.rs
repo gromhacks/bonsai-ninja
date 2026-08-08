@@ -385,6 +385,7 @@ impl LanguageAdapter for RubyAdapter {
                 has_implicit_returns: true,
                 params: erb_implicit_inputs,
                 param_annotations,
+                param_default_calls: Vec::new(),
                 type_aliases: Vec::new(),
                 bases: Vec::new(),
                 receiver_param_index: None,

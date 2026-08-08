@@ -74,6 +74,7 @@ fn decl_with(
         has_implicit_returns: false,
         params: Vec::new(),
         param_annotations: Vec::new(),
+        param_default_calls: Vec::new(),
         type_aliases: Vec::new(),
         bases: Vec::new(),
         receiver_param_index: None,
@@ -3366,6 +3367,47 @@ fn callback_argument_resolves_when_outer_callee_is_unresolved() {
         cg.callees_of(entry)
             .any(|edge| edge.to == callback && edge.kind == EdgeKind::Indirect),
         "a compiler-resolved callback argument must survive an unresolved outer API call"
+    );
+}
+
+#[test]
+fn compound_argument_is_not_resolved_as_a_same_named_callback() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            decl(
+                file,
+                0,
+                "add_api_route",
+                vec![FlowEvent::Call {
+                    span: Span::new(file, 20, 80),
+                    name: "route_class".to_string(),
+                    receiver: None,
+                    receiver_types: Vec::new(),
+                    call_kind: CallKind::Function,
+                    args: vec![CallArg {
+                        passing_mode: Default::default(),
+                        span: Span::new(file, 32, 50),
+                        name: None,
+                        value_text: "self.prefix + path".to_string(),
+                        place: None,
+                        source_names: vec!["self.prefix".to_string(), "path".to_string()],
+                    }],
+                }],
+            ),
+            decl(file, 1, "path", Vec::new()),
+        ],
+    );
+
+    let cg = build_graph(&global, |_| Some("python"));
+    let caller = FuncId::new(global.find_by_name("add_api_route")[0].raw());
+    let unrelated_path = FuncId::new(global.find_by_name("path")[0].raw());
+    assert!(
+        cg.callees_of(caller).all(|edge| edge.to != unrelated_path),
+        "AST-proven compound data must not be reinterpreted as a callable reference"
     );
 }
 

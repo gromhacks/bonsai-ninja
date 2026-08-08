@@ -41,7 +41,7 @@ Required for every rule:
   `missing`.
 - `match.callee` (call/new) or `match.target` (read/write/return/param)
   - at least one structural selector such as `name`, `attribute`, `regex`,
-    `annotation`, or `call_kind_in`.
+    `annotation`, `default_call`, or `call_kind_in`.
 - `description` - at least 15 chars, explains the API and risk.
 - `match_examples` - at least one entry whose `code` triggers the rule.
 
@@ -108,6 +108,7 @@ Recent capability promotions unblock several rule families:
 | `regex`         | `^.*\\.body$`       | For variable receivers with a fixed verb.                               |
 | `base_name_in`  | `[args, variables]` | Optional base/receiver identifier filter for receiver-agnostic regexes. |
 | `annotation`    | `RequestParam`      | Walks `Decl.param_annotations`.                                         |
+| `default_call`  | `Body`              | Param-only: matches the direct default call from `Decl.param_default_calls`. |
 | `decl_kind_in`  | `[method]`          | Param-rule filter over adapter-emitted `Decl.kind`.                     |
 | `visibility_in` | `[public]`          | Param-rule filter over adapter-emitted `Decl.visibility`.               |
 
@@ -118,6 +119,13 @@ recover class membership from source-span containment.
 Param-rule qualifiers `decl_kind_in` and `visibility_in` are also
 adapter facts; they should be used when a source applies only to public
 entrypoints and not to same-named internal/helper parameters.
+`default_call` is the rule-owned bridge for source-language forms such as
+Python `payload: dict = fastapi.Body(...)`: the adapter records the direct
+callee without knowing FastAPI, while the rule assigns the API its security
+meaning. When a parameter target declares both `annotation` and
+`default_call`, they are alternative source-syntax selectors; this lets one
+rule cover `Annotated[..., Body()]` and `value = Body(...)` without duplicating
+the security identity.
 
 ## Constraints
 

@@ -2564,6 +2564,13 @@ fn text_anchor_groups_for_target(target: &RuleTarget, match_kind: MatchKind) -> 
             groups.push(out);
         }
     }
+    if let Some(default_call) = target.default_call.as_deref() {
+        let mut out = Vec::new();
+        push_text_anchor(&mut out, bonsai_common::short_qualified_tail(default_call));
+        if !out.is_empty() {
+            groups.push(out);
+        }
+    }
     if let Some(regex) = target.regex.as_deref() {
         let mut out = Vec::new();
         for token in regex_required_hir_anchor_tokens(regex) {
@@ -3675,6 +3682,11 @@ fn scan_params_batch(
             // T204: per-param annotations are parallel-indexed with
             // `params`. Empty if the adapter doesn't surface them.
             let param_anns: &[String] = decl.param_annotations.get(idx).map(Vec::as_slice).unwrap_or(&[]);
+            let param_default_calls: &[String] = decl
+                .param_default_calls
+                .get(idx)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
             for prepared in rules {
                 // Enclosing-class / enclosing-method gates run
                 // before the shape match so we never even consider
@@ -3686,12 +3698,21 @@ fn scan_params_batch(
                     continue;
                 }
                 let want_annotation = target.and_then(|t| t.annotation.as_deref());
-                let matched = if let Some(want) = want_annotation {
-                    // Annotation-mode rule: the param matches if any of
-                    // its surfaced annotations equals the rule's
-                    // requested name (case-insensitive prefix-tolerant
-                    // — `RequestParam` matches `@RequestParam`).
-                    param_anns.iter().any(|a| annotation_name_matches(a, want))
+                let want_default_call = target.and_then(|t| t.default_call.as_deref());
+                let matched = if want_annotation.is_some() || want_default_call.is_some() {
+                    // Parameter syntax selectors are alternatives. This lets
+                    // one rule own both a decorator/annotation form and an
+                    // equivalent direct default-call binder without teaching
+                    // the adapter that either spelling is a framework API.
+                    want_annotation
+                        .is_some_and(|want| param_anns.iter().any(|a| annotation_name_matches(a, want)))
+                        || want_default_call.is_some_and(|want| {
+                            param_default_calls.iter().any(|callee| {
+                                callee == want
+                                    || bonsai_common::short_qualified_tail(callee)
+                                        == bonsai_common::short_qualified_tail(want)
+                            })
+                        })
                 } else if target.is_some_and(param_target_is_context_only) {
                     true
                 } else {
@@ -3848,7 +3869,11 @@ fn decl_target_context_allows(
 }
 
 fn param_target_is_context_only(target: &RuleTarget) -> bool {
-    target.name.is_none() && target.attribute.is_none() && target.regex.is_none()
+    target.name.is_none()
+        && target.attribute.is_none()
+        && target.regex.is_none()
+        && target.annotation.is_none()
+        && target.default_call.is_none()
 }
 
 fn semantic_type_names_match(actual: &str, expected: &str) -> bool {
@@ -7272,6 +7297,7 @@ fn callee_matches_with_receiver_types(
 /// analysis helpers never grow their own API-name comparisons.
 pub(crate) fn rule_target_matches_call(callee: &str, receiver_types: &[String], target: &RuleTarget) -> bool {
     if target.annotation.is_some()
+        || target.default_call.is_some()
         || !target.in_class.is_empty()
         || !target.in_method.is_empty()
         || !target.in_method_prefix.is_empty()

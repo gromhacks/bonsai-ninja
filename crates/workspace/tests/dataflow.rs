@@ -696,6 +696,29 @@ fn snapshot_rejects_version_mismatch() {
 }
 
 #[test]
+fn snapshot_rejects_compiler_frontend_abi_mismatch() {
+    let ws = ws_with(
+        &[(
+            "/w/m.py",
+            "def handle(req):\n    sink(req)\ndef sink(y):\n    pass\n",
+        )],
+        python_adapter(),
+    );
+    let mut snap = ws.dataflow().snapshot(ws.db());
+    snap.compiler_frontend_abi = snap.compiler_frontend_abi.wrapping_sub(1);
+
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(python_adapter());
+    let ws2 = Workspace::new(registry);
+    let surviving = ws2.dataflow().load_snapshot(snap, ws2.db());
+
+    assert_eq!(
+        surviving, 0,
+        "compiler frontend ABI mismatch must drop every derived flow entry"
+    );
+}
+
+#[test]
 fn snapshot_rejects_changed_file_contents() {
     let ws = ws_with(
         &[(

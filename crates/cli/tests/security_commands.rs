@@ -3122,6 +3122,7 @@ def handle():
         "benches/bench_cmd.py",
         "CMakeFiles/generated_cmd.py",
         "docs/example_cmd.py",
+        "docs_src/tutorial_cmd.py",
         "support/release.py",
     ] {
         let path = ws.join(relative);
@@ -3172,6 +3173,7 @@ def handle():
         "benches/",
         "CMakeFiles/",
         "docs/",
+        "docs_src/",
         "support/",
     ] {
         assert!(

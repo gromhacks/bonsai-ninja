@@ -1,12 +1,9 @@
 //! `read-file` — single-file connected-content view (SDK aggregator).
 //!
-//! Reads a workspace file and overlays the analysis facts that
-//! touch its lines: which decls cover each line, which calls /
-//! cross-file edges live there, which `S:` finding the line
-//! participates in, the flow's entry/exit, and the cross-file
-//! callers/callees of the file (with body slices when within
-//! budget). Lives in `bonsai_sdk` because it aggregates across
-//! browse + security + callgraph data.
+//! Reads a workspace file and its file-local declaration facts. Expensive
+//! security and cross-file callgraph overlays are opt-in through the matching
+//! filters. Lives in `bonsai_sdk` because the explicit overlay path aggregates
+//! browse, security, and callgraph data.
 
 use bonsai_browse::Locator;
 use bonsai_common::{normalize_path_for_filter, workspace_relative_filter_path, FuncId, SymbolId};
@@ -318,77 +315,86 @@ fn read_file_with_taint_options(
     flow_ids.dedup();
     marks.sort_by_key(|m| m.line);
 
-    // Cross-file callers / callees for this file's decls.
-    let resolved = ws.cached_resolved_call_graph();
-    let global = ws.compiler_linkage_index();
-    let file_funcs: Vec<FuncId> = global
-        .decls_in(file_id)
-        .iter()
-        .map(|d| FuncId::new(d.symbol.raw()))
-        .collect();
-    drop(global);
     let mut callers_in: Vec<InlinedDecl> = Vec::new();
     let mut callees_out: Vec<InlinedDecl> = Vec::new();
-    for func in &file_funcs {
-        for caller_edge in resolved
-            .callers_of(*func)
-            .filter(|edge| edge.precision.is_semantic())
-        {
-            let caller_loc = func_to_locator(caller_edge.from, ws);
-            if caller_loc.file == raw_path {
-                continue;
-            }
-            callers_in.push(InlinedDecl {
-                locator: caller_loc,
-                source: String::new(),
-                flow_id: None,
-                edge_id: None,
-                bridges_to: None,
-                callers_in: Vec::new(),
-                callees_out: Vec::new(),
-            });
-        }
-        for callee_edge in resolved
-            .callees_of(*func)
-            .filter(|edge| edge.precision.is_semantic())
-        {
-            let callee_loc = func_to_locator(callee_edge.to, ws);
-            if callee_loc.file == raw_path {
-                continue;
-            }
-            callees_out.push(InlinedDecl {
-                locator: callee_loc,
-                source: String::new(),
-                flow_id: None,
-                edge_id: None,
-                bridges_to: None,
-                callers_in: Vec::new(),
-                callees_out: Vec::new(),
-            });
-        }
-    }
-    dedupe_inlined_decls(&mut callers_in);
-    dedupe_inlined_decls(&mut callees_out);
-
-    let max_bodies = effective_max_inlined_bodies(filters.max_inlined_bodies);
-    let raw_callers = callers_in.len();
-    let raw_callees = callees_out.len();
-    callers_in.truncate(max_bodies);
-    callees_out.truncate(max_bodies);
-
-    // Body inlining: read the snapshot for the cross-file decl and
-    // slice its body span. Best-effort; on failure we leave source
-    // empty and the renderer falls back to header-only.
+    let mut raw_callers = 0usize;
+    let mut raw_callees = 0usize;
+    let mut max_bodies = usize::MAX;
     let mut bodies_dropped = 0usize;
-    for decl in callers_in.iter_mut().chain(callees_out.iter_mut()) {
-        if decl.locator.file == "external" {
-            bodies_dropped += 1;
-            continue;
+    let semantic_overlays_requested = rulepack.is_some()
+        || filters.from.is_some()
+        || filters.to.is_some()
+        || filters.max_inlined_bodies.is_some();
+    if semantic_overlays_requested {
+        // Cross-file callers / callees are an explicit semantic overlay. The
+        // default file view must not construct a resolved workspace callgraph.
+        let resolved = ws.cached_resolved_call_graph();
+        let global = ws.compiler_linkage_index();
+        let file_funcs: Vec<FuncId> = global
+            .decls_in(file_id)
+            .iter()
+            .map(|d| FuncId::new(d.symbol.raw()))
+            .collect();
+        drop(global);
+        for func in &file_funcs {
+            for caller_edge in resolved
+                .callers_of(*func)
+                .filter(|edge| edge.precision.is_semantic())
+            {
+                let caller_loc = func_to_locator(caller_edge.from, ws);
+                if caller_loc.file == raw_path {
+                    continue;
+                }
+                callers_in.push(InlinedDecl {
+                    locator: caller_loc,
+                    source: String::new(),
+                    flow_id: None,
+                    edge_id: None,
+                    bridges_to: None,
+                    callers_in: Vec::new(),
+                    callees_out: Vec::new(),
+                });
+            }
+            for callee_edge in resolved
+                .callees_of(*func)
+                .filter(|edge| edge.precision.is_semantic())
+            {
+                let callee_loc = func_to_locator(callee_edge.to, ws);
+                if callee_loc.file == raw_path {
+                    continue;
+                }
+                callees_out.push(InlinedDecl {
+                    locator: callee_loc,
+                    source: String::new(),
+                    flow_id: None,
+                    edge_id: None,
+                    bridges_to: None,
+                    callers_in: Vec::new(),
+                    callees_out: Vec::new(),
+                });
+            }
         }
-        if let Some(text) = read_decl_body(&decl.locator, ws) {
-            decl.source = text;
-        } else {
-            bodies_dropped += 1;
+        dedupe_inlined_decls(&mut callers_in);
+        dedupe_inlined_decls(&mut callees_out);
+
+        max_bodies = effective_max_inlined_bodies(filters.max_inlined_bodies);
+        raw_callers = callers_in.len();
+        raw_callees = callees_out.len();
+        callers_in.truncate(max_bodies);
+        callees_out.truncate(max_bodies);
+
+        // Body inlining is best-effort; on failure the renderer falls back to
+        // a header-only related declaration.
+        for decl in callers_in.iter_mut().chain(callees_out.iter_mut()) {
+            if decl.locator.file == "external" {
+                bodies_dropped += 1;
+                continue;
+            }
+            if let Some(text) = read_decl_body(&decl.locator, ws) {
+                decl.source = text;
+            } else {
+                bodies_dropped += 1;
+            }
         }
     }
 

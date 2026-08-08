@@ -90,6 +90,40 @@ fn decl_type_alias(db: &AnalyzerDb, fn_name: &str, var: &str) -> Option<String> 
     panic!("missing declaration `{fn_name}`")
 }
 
+fn decl_param_default_calls(db: &AnalyzerDb, fn_name: &str, param: &str) -> Vec<String> {
+    let global = db.global_index();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if decl.name == fn_name {
+                let idx = decl
+                    .params
+                    .iter()
+                    .position(|candidate| candidate == param)
+                    .unwrap_or_else(|| panic!("missing parameter `{param}` on `{fn_name}`"));
+                return decl.param_default_calls.get(idx).cloned().unwrap_or_default();
+            }
+        }
+    }
+    panic!("missing declaration `{fn_name}`")
+}
+
+fn decl_param_annotations(db: &AnalyzerDb, fn_name: &str, param: &str) -> Vec<String> {
+    let global = db.global_index();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if decl.name == fn_name {
+                let idx = decl
+                    .params
+                    .iter()
+                    .position(|candidate| candidate == param)
+                    .unwrap_or_else(|| panic!("missing parameter `{param}` on `{fn_name}`"));
+                return decl.param_annotations.get(idx).cloned().unwrap_or_default();
+            }
+        }
+    }
+    panic!("missing declaration `{fn_name}`")
+}
+
 #[test]
 fn local_constructor_assignment_infers_receiver_type() {
     // A workspace declaration, not identifier casing, proves that the call
@@ -147,5 +181,81 @@ def handler():
         decl_type_alias(&db, "handler", "s"),
         None,
         "lowercase `socket.socket()` tail must not be treated as a constructor"
+    );
+}
+
+#[test]
+fn annotated_receiver_field_type_propagates_without_constructor_arg_types() {
+    let db = python_db(
+        r#"
+from typing import Annotated
+
+class Router:
+    def add_api_route(self, path):
+        return path
+
+class App:
+    def __init__(self: "App", provider: Annotated[object, "metadata"]):
+        self.router: Router = Router(provider)
+
+    def register_route(self, path):
+        return self.router.add_api_route(path)
+"#,
+    );
+
+    assert_eq!(
+        decl_type_alias(&db, "register_route", "self.router").as_deref(),
+        Some("Router"),
+        "the annotated field type, not a constructor argument type, must drive sibling receiver dispatch"
+    );
+}
+
+#[test]
+fn annotated_parameter_exposes_payload_type_for_receiver_dispatch() {
+    let db = python_db(
+        r#"
+from typing import Annotated
+
+class Request:
+    def json(self):
+        return {}
+
+def handle(request: Annotated[Request, "framework metadata"]):
+    return request.json()
+"#,
+    );
+
+    assert_eq!(
+        decl_type_alias(&db, "handle", "request").as_deref(),
+        Some("Request")
+    );
+}
+
+#[test]
+fn parameter_default_call_is_generic_syntax_not_a_framework_type_guess() {
+    let db = python_db(
+        r#"
+import framework as fw
+from typing import Annotated
+
+def handle(payload: Annotated[str, fw.Metadata()] = fw.Body(...), plain: str = "value"):
+    return payload
+"#,
+    );
+
+    assert_eq!(
+        decl_param_default_calls(&db, "handle", "payload"),
+        vec!["fw.Body".to_string()]
+    );
+    assert_eq!(
+        decl_param_annotations(&db, "handle", "payload"),
+        vec!["Metadata".to_string()],
+        "Annotated metadata and a direct default call must remain distinct syntax facts"
+    );
+    assert!(decl_param_default_calls(&db, "handle", "plain").is_empty());
+    assert_eq!(
+        decl_type_alias(&db, "handle", "payload").as_deref(),
+        Some("str"),
+        "a default-call name must not override the declared runtime type"
     );
 }

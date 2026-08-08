@@ -25,7 +25,35 @@ The analyzer is one compiler-style pipeline:
 
 ## Current validation
 
-Validated through 2026-08-07 (dated measurements below retain their run date):
+Validated through 2026-08-08 (dated measurements below retain their run date):
+
+- The ABI-v64 release candidate passed `cargo check --release --workspace
+  --all-targets --locked`, strict release all-target Clippy with warnings
+  denied, and full release rustdoc with private items and warnings denied.
+  `cargo test --release --workspace --all-targets` then executed the complete
+  local workspace matrix with zero failures. That run includes the 1,029-case
+  per-language CLI matrix, CLI/SDK parity, adapter and rulepack conformance,
+  end-to-end taint suites, paging/completeness contracts, output formats, and
+  the five-scenario Elasticsearch SLO gate. The standalone adapter `FlowEvent`
+  audit also passed after compiling its locked debug harness from a cold cache.
+- The release-binary command matrix passed 1,279 command/switch cases across
+  all 20 languages. Rulepack validation replayed 9,965 enabled examples from
+  7,053 rules with zero misses, errors, or warnings. Self-security completed
+  with no incomplete reasons or production-threshold findings; SARIF 2.1.0,
+  HTML, JSON, and NetworkX output smokes parsed successfully.
+- A FastAPI `15410ee4bfd1` real-repository trial pinned and fixed four compiler
+  contracts: compound expressions no longer become same-named callback
+  references, Python receiver fields retain exact annotated types, a direct
+  parameter-default call is a typed `param_default_calls` fact rather than a
+  framework guess, and plain `read-file` opens one exact compiler object
+  without constructing the workspace callgraph. `FastAPI.add_api_route` now
+  resolves to `APIRouter.add_api_route` as one receiver-type-narrowed hop; the
+  false callback edge is absent. The full 1,140-file production security scan
+  completed in 1.40 seconds with zero findings and no `docs_src` leakage.
+  Qualified `FastAPI.add_api_route` to `APIRouter.add_api_route` endpoint
+  inspection now resolves every compiler identity and renders the exact
+  connected corridor; resolver diagnostics report the same workspace-relative
+  path spelling accepted by `--in-file`.
 
 - Commit `bdd6125` removes the Solidity frontend, grammar dependency,
   fixtures, rulepack, package metadata, and documentation after the product
@@ -36,11 +64,10 @@ Validated through 2026-08-07 (dated measurements below retain their run date):
   1,386-case taint matrix, 33-case rulepack conformance suite, adapter metadata
   checks, and deep rulepack validation are green.
 
-- The `d510043` baseline passed `cargo clippy --workspace --all-targets
-  --locked -- -D warnings`; the final ABI-v62 delta passed the same strict
-  all-target Clippy policy for every changed crate and its dependencies.
-- The baseline passed full-workspace rustdoc with warnings denied; the final
-  delta passed release rustdoc with private items for every changed crate.
+- The `d510043` baseline and the current ABI-v64 candidate passed `cargo
+  clippy --workspace --all-targets --locked -- -D warnings`.
+- The baseline and current candidate passed full-workspace release rustdoc
+  with private items and warnings denied.
 - `cargo fmt --all -- --check` and `git diff --check` passed.
 - The final `cargo test --workspace --locked --no-fail-fast` pass completed
   across all crates, integration binaries, adapter suites, and doc tests at
@@ -132,10 +159,12 @@ The current deep rulepack gate is clean:
 | Errors | 0 |
 | Warnings | 0 |
 
-On this macOS validation host, `syspolicyd` can delay the launch of newly
-linked Cargo test executables. That host-level launch latency is not analyzer
-runtime. Release-profile affected-crate suites are the final-change gate on
-this host; CI still runs the complete workspace command.
+On this macOS validation host, `syspolicyd` can delay the first launch of a
+newly linked debug Cargo test executable by several minutes even when the test
+itself runs in milliseconds. That host-level launch latency is not analyzer
+runtime. The release-profile workspace/all-target suite avoids relying on that
+distinction: it executed to completion locally, and CI repeats the complete
+workspace command independently.
 
 ## Self-analysis
 
@@ -172,7 +201,59 @@ seconds with 35,110,912 bytes maximum RSS.
 ## Elasticsearch scale result
 
 The current release pipeline is measured against the sibling 30,055-source
-Elasticsearch checkout. The final 2026-08-06 ABI-v62 exact large-workspace
+Elasticsearch checkout. The 2026-08-07 ABI-v64 exact large-workspace gate
+passed 5/5 in 1,883.15 seconds under a 3 GiB scheduling budget. Its required
+one-time compiler-object/IDG generation took 1,672.82 seconds after the ABI
+change; immediate fresh-process reuse took 2.34 seconds. Fresh-cache
+production taint completed in 29.89 seconds, default inspect in 7.38 seconds,
+broad exact raw-taint inspect in 27.11 seconds, and warm production taint in
+28.46 seconds. Navigation timings included tree 0.03 seconds, search 4.30
+seconds, definitions 14.72 seconds, imports 6.74 seconds, classes 7.46
+seconds, entrypoints 23.00 seconds, calls 3.25 seconds, arguments 3.29
+seconds, and a scoped `read-file` in 1.31 seconds. Source, sink, sanitizer,
+and dependency inventories took 4.34, 21.05, 15.65, and 9.95 seconds. Every
+enforced SLO passed. The compiler worker remained near 0.9 GiB RSS while
+rebuilding all exact objects and stayed within the 3 GiB scheduler budget.
+ABI-v64 binds callgraph and compatibility flow sidecars to the compiler
+frontend ABI, so adapter-fact changes cannot silently reuse an older derived
+graph. This is the current cache-migration and release reference.
+
+The prior 2026-08-07 ABI-v63 exact large-workspace gate
+passed 5/5 in 1,945.09 seconds under a 3 GiB scheduling budget. Its required
+one-time compiler-object/IDG generation took 1,720.68 seconds after the ABI
+change; immediate fresh-process reuse took 2.34 seconds. Fresh-cache
+production taint completed in 34.30 seconds, default inspect in 10.35 seconds,
+broad exact raw-taint inspect in 29.69 seconds, and warm production taint in
+29.85 seconds. Every enforced SLO passed. Navigation timings included search
+4.07 seconds, definitions 13.03 seconds, imports 6.92 seconds, classes 7.21
+seconds, entrypoints 24.04 seconds, calls 3.46 seconds, arguments 3.38 seconds,
+and a scoped `read-file` in 1.62 seconds. Source, sink, sanitizer, and
+dependency inventories took 4.15, 21.91, 17.34, and 10.68 seconds. The
+compiler worker remained near 1 GiB RSS and the IDG phase remained within the
+3 GiB scheduler budget.
+
+The final ABI-v63 warm-generation repeat, after the shared parameter-fact
+refinement, passed 5/5 in 220.51 seconds with the same limits. Semantic
+generation validation/reuse took 5.11/2.34 seconds, default inspect 10.02
+seconds, broad exact raw-taint inspect 28.53 seconds, fresh-cache production
+taint 30.44 seconds, warm production taint 27.47 seconds, and scoped
+`read-file` 1.33 seconds. The five benchmark scenarios share a test lock so
+Rust's parallel harness cannot make one measured SLO depend on another
+scenario; analyzer workers, exact scope, memory scheduling, and SLOs are
+unchanged.
+
+The final ABI-v63 2026-08-07 release-candidate repeat passed 5/5 in 217.85 seconds
+under the same limits. Inspect's file-local compiler-object pass now uses the
+shared source-size-weighted scheduler and applies owned facts in canonical path
+order; measured Elasticsearch syntax hydration fell from about 5.2 seconds to
+2.0 seconds without changing semantic work. Semantic generation
+validation/reuse took 5.15/2.41 seconds, default inspect 7.05 seconds, broad
+exact raw-taint inspect 25.71 seconds, fresh-cache production taint 31.59
+seconds, warm production taint 27.00 seconds, and scoped `read-file` 1.54
+seconds. Navigation and all four security inventories remained within their
+30-second SLOs. This remains the pre-ABI-v64 warm-generation comparison.
+
+The prior final 2026-08-06 ABI-v62 exact large-workspace
 integration gate passed 5/5 in 1,760.06 seconds under a 3 GiB scheduling
 budget, including the required one-time rebuild from the incompatible ABI-v61
 compiler-object generation. It starts fresh

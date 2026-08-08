@@ -2418,6 +2418,9 @@ fn rule_match_target_key(rule: &Rule) -> String {
     if let Some(annotation) = &target.annotation {
         return format!("annotation:{annotation}");
     }
+    if let Some(default_call) = &target.default_call {
+        return format!("default-call:{default_call}");
+    }
     "<empty>".to_string()
 }
 

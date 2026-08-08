@@ -432,3 +432,9 @@ pub fn param_annotations_of(ws: &Workspace, fn_name: &str) -> Vec<Vec<String>> {
         .map(|d| d.param_annotations.clone())
         .unwrap_or_default()
 }
+
+pub fn param_default_calls_of(ws: &Workspace, fn_name: &str) -> Vec<Vec<String>> {
+    decl(ws, fn_name)
+        .map(|d| d.param_default_calls.clone())
+        .unwrap_or_default()
+}

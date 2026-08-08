@@ -1,11 +1,6 @@
-# PHP DOMXPath is a built-in class (no `use` import) and the matcher's
-# package context gate requires a `packages:` signal. The instance-form
-# `$xpath->query($expr)` cannot be matched safely without an
-# adapter-emitted import, and the literal static form
-# `DOMXPath::query(...)` is unusual. Disabled until either:
-#   - the matcher learns to recognise PHP built-in classes without
-#     an import-time package signal, or
-#   - rule constraints allow per-receiver-type narrowing.
+# PHP DOMXPath is a built-in class with no `use` import. The adapter-proven
+# receiver type narrows `$xpath->query($expr)` to DOMXPath, so a same-named
+# application method cannot satisfy this rule and no package guess is needed.
 - id: php.xpath.domxpath_query
   enabled: true
   language: php
