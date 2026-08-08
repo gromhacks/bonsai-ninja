@@ -518,5 +518,18 @@ fn id_prefix(id: &str) -> Result<&str> {
     if rest.is_empty() {
         anyhow::bail!("stable id `{id}` is missing its hash body");
     }
+    let expected_hex_len = match prefix {
+        "F" | "G" | "S" => 16,
+        "T" | "E" | "N" | "R" => 8,
+        _ => return Ok(prefix),
+    };
+    let is_lower_hex = rest
+        .bytes()
+        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
+    if rest.len() != expected_hex_len || !is_lower_hex {
+        anyhow::bail!(
+            "invalid stable id `{id}`; expected `{prefix}:` followed by exactly {expected_hex_len} lowercase hexadecimal characters"
+        );
+    }
     Ok(prefix)
 }

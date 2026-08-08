@@ -27,6 +27,24 @@ The analyzer is one compiler-style pipeline:
 
 Validated through 2026-08-08 (dated measurements below retain their run date):
 
+- A direct release-binary audit exercised every documented root, browse,
+  navigation, inspect, trace, slice, stable-ID, debug-dump, cache, export, and
+  security command without a wrapper script. It also covered structural,
+  semantic, watch, text, JSON, SARIF, HTML, GraphML, Cypher, NetworkX,
+  baseline, summary, explain, pagination, and invalid-input behavior. The
+  resulting contract fixes are pinned by tests: semantic index runs always
+  return a cache summary; security text carries its `S:`/`F:`/`G:` identities;
+  baseline JSON carries an aggregate diff; filtered totals remain truthful;
+  invalid stable IDs and out-of-range pages fail closed; `--page next` reuses
+  a validated eager page; selective cache clearing leaves a fresh manifest;
+  and token estimates describe the same complete result on every page.
+- The current candidate passed `cargo test --release -p bonsai_cli
+  --all-targets -- --skip elasticsearch_` and the optimized SDK, security,
+  taint, IDG, and conformance package matrix with zero failures. It also
+  passed strict all-target release Clippy, private-item release rustdoc with
+  warnings denied, formatting, diff hygiene, and direct deep rulepack replay
+  of all 9,965 enabled examples from 7,053 rules with zero errors or warnings.
+
 - The ABI-v64 release candidate passed `cargo check --release --workspace
   --all-targets --locked`, strict release all-target Clippy with warnings
   denied, and full release rustdoc with private items and warnings denied.
@@ -201,7 +219,21 @@ seconds with 35,110,912 bytes maximum RSS.
 ## Elasticsearch scale result
 
 The current release pipeline is measured against the sibling 30,055-source
-Elasticsearch checkout. The 2026-08-07 ABI-v64 exact large-workspace gate
+Elasticsearch checkout. The 2026-08-08 ABI-v64 exact warm-generation gate
+passed 5/5 in 231.33 seconds under a 3 GiB scheduling budget. Semantic
+generation readiness completed in 12.36 seconds and immediate fresh-process
+reuse in 2.37 seconds. Fresh-cache production taint completed in 29.77
+seconds, warm production taint in 28.34 seconds, default inspect in 7.09
+seconds, and exact raw-taint inspect in 26.91 seconds. Navigation timings were
+tree 0.03 seconds, search 4.10 seconds, definitions 15.31 seconds, imports
+7.64 seconds, classes 8.40 seconds, entrypoints 24.26 seconds, calls 3.43
+seconds, arguments 3.46 seconds, and scoped `read-file` 1.78 seconds. Source,
+sink, sanitizer, and dependency inventories completed in 3.46, 24.54, 18.16,
+and 9.83 seconds. Every enforced SLO passed; the gate completed exact work and
+did not cap files, graph depth, closure, or results. This is the current
+interactive-scale release reference.
+
+The 2026-08-07 ABI-v64 exact cache-migration gate
 passed 5/5 in 1,883.15 seconds under a 3 GiB scheduling budget. Its required
 one-time compiler-object/IDG generation took 1,672.82 seconds after the ABI
 change; immediate fresh-process reuse took 2.34 seconds. Fresh-cache

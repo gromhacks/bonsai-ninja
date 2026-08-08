@@ -1730,6 +1730,9 @@ fn finish_inspect(
             );
         }
     }
+    if render.structural_drilldown {
+        retain_structural_drilldown_targets(&mut report);
+    }
 
     if graph_flows_enabled && filters.from.is_some() && filters.to.is_some() {
         report.hits.retain(|hit| !hit.flows.is_empty());
@@ -3875,6 +3878,31 @@ fn apply_flow_id_filter(report: &mut InspectReport, target_flow_id: &str) {
     rebuild_report_summary(report);
 }
 
+/// `show F:` / `show G:` may need to reconstruct an id without its original
+/// query breadcrumb. That lookup intentionally starts from every declaration,
+/// then narrows by stable id. Every declaration along a chain can therefore
+/// carry the same reconstructed flow even though the id denotes one chain.
+/// Keep the declaration at the chain tail—the structural target—and avoid
+/// rendering the identical source body once per intermediate function.
+///
+/// Same-name overloads remain separate: they are genuine ambiguous targets,
+/// not duplicate views of different positions in one chain.
+fn retain_structural_drilldown_targets(report: &mut InspectReport) {
+    if report.decl_hits.len() <= 1 {
+        return;
+    }
+    let fallback = report.decl_hits.first().cloned();
+    report.decl_hits.retain(|hit| {
+        hit.flows
+            .iter()
+            .any(|flow| flow.chain.last().is_some_and(|tail| tail == &hit.symbol))
+    });
+    if report.decl_hits.is_empty() {
+        report.decl_hits.extend(fallback);
+    }
+    rebuild_report_summary(report);
+}
+
 /// Drop every flow from a report that's not a member of the given
 /// group, then drop any `InspectOut` / `HitOut` that has no
 /// remaining flows. Mirror of [`apply_flow_id_filter`], one level
@@ -4708,7 +4736,8 @@ fn render_inspect_report_text(
     let requested_start_offset: usize = match &paging_cfg.page {
         paging::PageArg::First => page_starts.first().copied().unwrap_or(0),
         paging::PageArg::Number(n) => {
-            let idx = (*n as usize).saturating_sub(1).min(total_pages.saturating_sub(1));
+            paging::validate_page_number(*n, total_pages as u64, "inspect")?;
+            let idx = (*n as usize).saturating_sub(1);
             page_starts.get(idx).copied().unwrap_or(0)
         }
         // Cursors are minted from the ACTUAL unit the previous render

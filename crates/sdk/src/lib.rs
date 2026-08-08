@@ -2124,6 +2124,7 @@ impl WorkspaceCache {
     }
 
     pub fn clear_dataflow(&self) -> std::io::Result<()> {
+        let refresh_manifest = self.manifest_path().exists();
         let sidecars = [
             bonsai_workspace::dataflow::DataFlowCache::sidecar_path(&self.root),
             bonsai_workspace::dataflow::DataFlowCache::factstore_sidecar_path(&self.root),
@@ -2132,6 +2133,13 @@ impl WorkspaceCache {
             if sidecar.exists() {
                 fs::remove_file(sidecar)?;
             }
+        }
+        // A selective clear changes cache coverage but intentionally leaves
+        // the other compiler artifacts in place. Keep the aggregate manifest
+        // consistent with that new state so the next `cache stats` reports a
+        // missing optional dataflow artifact, not a corrupt/stale cache.
+        if refresh_manifest {
+            self.write_manifest().map_err(std::io::Error::other)?;
         }
         Ok(())
     }

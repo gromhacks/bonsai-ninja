@@ -294,7 +294,7 @@ pub(crate) fn cmd_defs(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} definitions)", out.len())));
+                    cli_println!("{}", u.dim(&format!("({} definitions)", info.total_rows)));
                     render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja defs <workspace>");
@@ -386,7 +386,7 @@ pub(crate) fn cmd_entrypoints(
                         ]);
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} entry points)", out.len())));
+                    cli_println!("{}", u.dim(&format!("({} entry points)", info.total_rows)));
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja entrypoints <workspace>");
                     Ok(())
@@ -920,7 +920,7 @@ pub(crate) fn cmd_calls(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} call sites)", out.len())));
+                    cli_println!("{}", u.dim(&format!("({} call sites)", info.total_rows)));
                     render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja calls <workspace>");
@@ -1261,7 +1261,7 @@ pub(crate) fn cmd_imports(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} imports)", out.len())));
+                    cli_println!("{}", u.dim(&format!("({} imports)", info.total_rows)));
                     render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja imports <workspace>");
@@ -1382,7 +1382,7 @@ pub(crate) fn cmd_vars(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} writes)", out.len())));
+                    cli_println!("{}", u.dim(&format!("({} writes)", info.total_rows)));
                     render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja vars <workspace>");
@@ -1499,7 +1499,7 @@ pub(crate) fn cmd_strings(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} strings)", out.len())));
+                    cli_println!("{}", u.dim(&format!("({} strings)", info.total_rows)));
                     render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja strings <workspace>");
@@ -1577,7 +1577,7 @@ pub(crate) fn cmd_comments(
                         t.add_row(cells);
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} comments)", out.len())));
+                    cli_println!("{}", u.dim(&format!("({} comments)", info.total_rows)));
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja comments <workspace>");
                     Ok(())
@@ -1712,7 +1712,7 @@ pub(crate) fn cmd_args(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} arguments)", out.len())));
+                    cli_println!("{}", u.dim(&format!("({} arguments)", info.total_rows)));
                     render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja args <workspace>");
@@ -1848,7 +1848,7 @@ pub(crate) fn cmd_operations(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} operations)", out.len())));
+                    cli_println!("{}", u.dim(&format!("({} operations)", info.total_rows)));
                     render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja operations <workspace>");
@@ -1981,7 +1981,7 @@ pub(crate) fn cmd_classes(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} types)", out.len())));
+                    cli_println!("{}", u.dim(&format!("({} types)", info.total_rows)));
                     render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja classes <workspace>");
@@ -2071,7 +2071,7 @@ pub(crate) fn cmd_refs(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} references)", out.len())));
+                    cli_println!("{}", u.dim(&format!("({} references)", info.total_rows)));
                     render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja refs <workspace> <symbol>");
@@ -2185,7 +2185,7 @@ pub(crate) fn cmd_search(
                         b.finish_and_clear();
                     }
                     cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({} matches)", hits.len())));
+                    cli_println!("{}", u.dim(&format!("({} matches)", info.total_rows)));
                     render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja search <workspace> <query>");

@@ -410,7 +410,7 @@ fn cache_rebuild(workspace: Option<std::path::PathBuf>, warm_export: bool) -> Re
     // involved.
     print_kv("rebuilding", &workspace_root.display().to_string());
     let spin = progress::ScopedSpinner::new("warming structural compiler sidecars");
-    super::diagnostics::run_semantic_workers(&workspace_root)?;
+    let _ = super::diagnostics::run_semantic_workers(&workspace_root)?;
     spin.finish();
 
     if warm_export {

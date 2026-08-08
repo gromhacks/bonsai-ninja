@@ -422,6 +422,9 @@ where
         }
     };
     let total_pages = pages.len() as u64;
+    if let PageArg::Number(requested) = &cfg.page {
+        validate_page_number(*requested, total_pages, command)?;
+    }
     let clamped_idx = target_idx.min(total_pages.saturating_sub(1));
     let (start_offset, row_count) = pages[clamped_idx as usize];
     let slice: Vec<T> = rows
@@ -462,6 +465,20 @@ where
             total_tokens_uncapped,
         },
     ))
+}
+
+/// Reject an explicit numeric page that does not exist. Cursors already fail
+/// closed when they do not belong to the current result set; silently
+/// clamping `--page 99` to the last page made numeric paging the odd one out
+/// and could make automation believe it had reviewed a page it never saw.
+pub(crate) fn validate_page_number(requested: u64, total_pages: u64, command: &str) -> anyhow::Result<()> {
+    if requested > total_pages.max(1) {
+        anyhow::bail!(
+            "page {requested} is out of range for {command}; available pages: 1..={}",
+            total_pages.max(1)
+        );
+    }
+    Ok(())
 }
 
 /// Resolve an opaque page cursor against the exact offsets admitted by a

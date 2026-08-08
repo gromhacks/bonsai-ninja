@@ -829,16 +829,50 @@ fn every_command_json_wraps_when_context_is_set() {
 }
 
 #[test]
-fn every_command_page_2_resolves() {
-    // Tiny context so every command actually splits into pages.
+fn every_command_page_2_resolves_or_reports_out_of_range() {
+    // Tiny context splits commands that have enough rows. Empty/single-row
+    // commands must reject page 2 explicitly instead of silently replaying
+    // page 1.
+    let Some(bin) = bin_path() else {
+        return;
+    };
     let ws = ws();
     let ws_str = ws.to_str().unwrap();
     for (cmd, extra) in ALL_PAGED_COMMANDS {
-        let mut args: Vec<&str> = vec![cmd, ws_str, "--context", "128", "--page", "2"];
-        args.extend_from_slice(extra);
-        // Non-zero exit is the assertion — `--page 2` should
-        // always clamp to the last page and render, never fail.
-        let Some(_) = run(&args) else { return };
+        let mut first_args: Vec<&str> = vec![cmd, ws_str, "--format", "json", "--context", "128"];
+        first_args.extend_from_slice(extra);
+        let Some(first) = run(&first_args) else { return };
+        let value: serde_json::Value = serde_json::from_str(&first)
+            .unwrap_or_else(|error| panic!("{cmd}: invalid JSON: {error}\n{first}"));
+        let total_pages = value["page"]["total_pages"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{cmd}: missing page.total_pages: {value:?}"));
+
+        let mut second_args: Vec<&str> =
+            vec![cmd, ws_str, "--format", "json", "--context", "128", "--page", "2"];
+        second_args.extend_from_slice(extra);
+        second_args.extend(["--no-color", "--no-progress"]);
+        let out = Command::new(&bin)
+            .args(&second_args)
+            .current_dir(repo_root())
+            .env("COLUMNS", "200")
+            .env_remove("BONSAI_CONTEXT")
+            .output()
+            .expect("run page 2");
+        if total_pages >= 2 {
+            assert!(
+                out.status.success(),
+                "{cmd}: valid page 2 failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        } else {
+            let error = String::from_utf8_lossy(&out.stderr);
+            assert!(!out.status.success(), "{cmd}: nonexistent page 2 must fail");
+            assert!(
+                error.contains("page 2 is out of range"),
+                "{cmd}: page 2 failure should be explicit: {error}"
+            );
+        }
     }
 }
 

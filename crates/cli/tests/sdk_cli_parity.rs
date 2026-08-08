@@ -615,7 +615,7 @@ fn taint_analysis_paged_cli_json_is_a_window_over_sdk_results() {
         let mut cli = run_cli(&security_cli_args(
             "examples/python/micro",
             "taint-analysis",
-            &["--context", "4k", "--page", page],
+            &["--context", "512", "--page", page],
         ));
         normalize_json_files(&mut cli);
         for row in wrapped_rows(cli) {
@@ -996,7 +996,7 @@ fn source_analysis_paged_cli_json_is_a_window_over_sdk_results() {
         let cli = run_cli(&security_cli_args(
             "examples/python/micro",
             "source-analysis",
-            &["--context", "4k", "--page", page],
+            &["--context", "512", "--page", page],
         ));
         let wrapped = Value::Array(wrapped_rows(cli));
         for row in cli_source_sigs(wrapped) {
