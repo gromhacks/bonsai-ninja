@@ -83,6 +83,10 @@ struct TaintAnalysisRenderReport {
     /// attachment. JSON `--all` needs this because it serializes full
     /// finding rows; text output can rebuild flow bodies lazily.
     bulk_flow_evidence: bool,
+    /// Render-only baseline summary. A baseline shapes output and must never
+    /// enter the reusable semantic analysis payload.
+    #[serde(skip)]
+    baseline: Option<BaselineDiff>,
 }
 
 /// One finding in the cached render report. Flow render structs are
@@ -177,6 +181,7 @@ impl From<TaintAnalysisRenderReportCache> for TaintAnalysisRenderReport {
             analysis_incomplete_reasons: report.analysis_incomplete_reasons,
             runtime_disabled_rules: report.runtime_disabled_rules,
             bulk_flow_evidence: report.bulk_flow_evidence,
+            baseline: None,
         }
     }
 }
@@ -1232,7 +1237,7 @@ fn cmd_flows(
 
     let render_report = build_taint_render_report(
         report,
-        /* include_findings = */ !summary_only,
+        /* include_findings = */ !summary_only || baseline_ids.is_some(),
         bulk_flow_evidence_attached,
     );
     let render_progress = ScopedProgress::new(if summary_only {
@@ -1284,12 +1289,13 @@ fn emit_taint_render_report(
     if secondary.is_active() {
         owned = Some(filter_taint_render_report(report));
     }
-    let baseline_diff = baseline_ids.map(|ids| {
+    if let Some(ids) = baseline_ids {
         let target = owned.get_or_insert_with(|| report.clone());
-        apply_baseline(target, ids)
-    });
+        let diff = apply_baseline(target, ids);
+        target.baseline = Some(diff);
+    }
     let report: &TaintAnalysisRenderReport = owned.as_ref().unwrap_or(report);
-    let emit_result = emit_taint_render_report_inner(
+    emit_taint_render_report_inner(
         workspace,
         render_workspace,
         pack,
@@ -1299,11 +1305,7 @@ fn emit_taint_render_report(
         format,
         filters_hash,
         cache_payload,
-    );
-    if let Some(diff) = &baseline_diff {
-        print_baseline_summary(diff, format);
-    }
-    emit_result
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1320,12 +1322,19 @@ fn emit_taint_render_report_inner(
 ) -> Result<()> {
     match format {
         SecurityFormat::Json if summary_only => {
-            cli_println!("{}", serde_json::to_string_pretty(&report.summary)?);
+            let mut summary = serde_json::to_value(&report.summary)?;
+            if let (Some(diff), Some(fields)) = (report.baseline.as_ref(), summary.as_object_mut()) {
+                fields.insert("baseline".to_string(), serde_json::to_value(diff)?);
+            }
+            cli_println!("{}", serde_json::to_string_pretty(&summary)?);
             save_taint_payload_if_requested(workspace, filters_hash, Vec::new(), None);
         }
         SecurityFormat::Text if summary_only => {
             let text = page_cache::capture(|| {
                 render_taint_summary_text(&report.summary);
+                if let Some(diff) = report.baseline.as_ref() {
+                    render_baseline_summary_text(diff);
+                }
                 Ok(())
             })?;
             save_taint_payload_if_requested(workspace, filters_hash, Vec::new(), None);
@@ -1562,7 +1571,7 @@ fn render_taint_json_page(
     analysis_incomplete_reasons.extend(paged_json_incomplete_reasons("security/taint-analysis", info));
     analysis_incomplete_reasons.sort();
     analysis_incomplete_reasons.dedup();
-    let wrapped = serde_json::json!({
+    let mut wrapped = serde_json::json!({
         "analysis_complete": report.analysis_complete && analysis_incomplete_reasons.is_empty(),
         "analysis_incomplete_reasons": analysis_incomplete_reasons,
         "runtime_disabled_rules": report.runtime_disabled_rules,
@@ -1570,6 +1579,9 @@ fn render_taint_json_page(
         "rows": rows,
         "page": page_info_to_json(info),
     });
+    if let (Some(diff), Some(fields)) = (report.baseline.as_ref(), wrapped.as_object_mut()) {
+        fields.insert("baseline".to_string(), serde_json::to_value(diff)?);
+    }
     cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
     Ok(())
 }
@@ -1625,8 +1637,13 @@ fn build_taint_text_pages(
                 .map(|unit| paging::bytes_to_tokens(unit.text.len() as u64))
                 .sum(),
         };
-        let text =
-            page_cache::capture(|| render_taint_analysis_text_units(report, &units[start..end], &info))?;
+        let text = page_cache::capture(|| {
+            render_taint_analysis_text_units(report, &units[start..end], &info)?;
+            if let Some(diff) = report.baseline.as_ref() {
+                render_baseline_summary_text(diff);
+            }
+            Ok(())
+        })?;
         pages.push(page_cache::CachedPage {
             number: page_number,
             cursor,
@@ -1842,6 +1859,9 @@ fn resolve_taint_text_page(
     filters_hash: u64,
 ) -> Result<u64> {
     let total_pages = bounds.len().max(1) as u64;
+    if let paging::PageArg::Number(requested) = &paging_cfg.page {
+        paging::validate_page_number(*requested, total_pages, "security/taint-analysis")?;
+    }
     let target = match &paging_cfg.page {
         paging::PageArg::First => 1,
         paging::PageArg::Number(n) => *n,
@@ -2015,6 +2035,7 @@ fn build_taint_render_report(
             analysis_incomplete_reasons: report.analysis_incomplete_reasons,
             runtime_disabled_rules: report.runtime_disabled_rules,
             bulk_flow_evidence: false,
+            baseline: None,
         };
     }
     let findings = report
@@ -2036,6 +2057,7 @@ fn build_taint_render_report(
         analysis_incomplete_reasons: report.analysis_incomplete_reasons,
         runtime_disabled_rules: report.runtime_disabled_rules,
         bulk_flow_evidence,
+        baseline: None,
     }
 }
 
@@ -2229,18 +2251,9 @@ fn emit_taint_explain(
     Ok(())
 }
 
-/// Surface the `--baseline` diff counts. In JSON mode the per-finding
-/// `baseline_status` carries the machine-readable signal, so the summary
-/// goes to stderr to keep stdout a clean findings document; in text mode
-/// it joins the rendered report on stdout.
-fn print_baseline_summary(diff: &BaselineDiff, format: SecurityFormat) {
-    if matches!(format, SecurityFormat::Json) {
-        eprintln!(
-            "baseline diff — {} new · {} fixed · {} unchanged",
-            diff.new, diff.fixed, diff.unchanged
-        );
-        return;
-    }
+/// Append the text baseline summary inside the cached page payload so an
+/// identical warm replay preserves the exact same user-visible report.
+fn render_baseline_summary_text(diff: &BaselineDiff) {
     let u = ui();
     cli_println!();
     cli_println!(
@@ -2366,6 +2379,7 @@ fn filter_taint_render_report(report: &TaintAnalysisRenderReport) -> TaintAnalys
         analysis_incomplete_reasons: report.analysis_incomplete_reasons.clone(),
         runtime_disabled_rules: report.runtime_disabled_rules.clone(),
         bulk_flow_evidence: report.bulk_flow_evidence,
+        baseline: None,
     }
 }
 
@@ -3296,6 +3310,18 @@ fn render_finding_security_header(u: &Ui, idx: usize, combined: &CombinedFinding
         }
     };
     cli_println!("  {}", status_label);
+    if let Some(flow_id) = f.representative_flow_id.as_deref() {
+        let group_id = f.group_id.as_deref().unwrap_or("-");
+        cli_println!(
+            "  {} {}  ·  {} {}",
+            u.dim("flow:"),
+            u.dim(flow_id),
+            u.dim("group:"),
+            u.dim(group_id),
+        );
+    } else if let Some(group_id) = f.group_id.as_deref() {
+        cli_println!("  {} {}", u.dim("group:"), u.dim(group_id));
+    }
     if sink_count > 1 {
         cli_println!("  {}      {}", u.dim("sinks:"), u.dim(&sink_count.to_string()));
     }

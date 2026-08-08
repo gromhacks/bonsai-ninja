@@ -136,10 +136,10 @@ fn paginate_walks_pages_losslessly() {
 fn paginate_page_number_and_cursor_resolve_to_same_slice() {
     let rows: Vec<String> = (0..30).map(|i| format!("row-{i}")).collect();
     let per_row_bytes = |r: &String| r.len() as u64;
-    let cfg_num = PagingConfig::new(Some(40), PageArg::Number(3), None, false, FormatClass::Text);
+    let cfg_num = PagingConfig::new(Some(10), PageArg::Number(3), None, false, FormatClass::Text);
     let (slice_num, info_num) = paginate(&rows, &cfg_num, "t", 7, per_row_bytes).unwrap();
     let cfg_cursor = PagingConfig::new(
-        Some(40),
+        Some(10),
         PageArg::Cursor(info_num.cursor.clone()),
         None,
         false,
@@ -287,6 +287,22 @@ fn paginate_fits_single_oversized_row() {
     let (slice, info) = paginate(&rows, &cfg, "t", 0, cost_bytes_ascii).unwrap();
     assert_eq!(slice.len(), 1);
     assert!(info.tokens_used > info.budget.unwrap_or(0));
+}
+
+#[test]
+fn paginate_rejects_explicit_page_past_the_result_set() {
+    let rows: Vec<&str> = vec!["a", "b", "c"];
+    let cfg = PagingConfig::new(
+        Some(10_000),
+        PageArg::Number(99),
+        Some(2),
+        false,
+        FormatClass::Text,
+    );
+    let error = paginate(&rows, &cfg, "defs", 0, cost_bytes_ascii).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("page 99 is out of range"), "{message}");
+    assert!(message.contains("1..=2"), "{message}");
 }
 
 #[test]

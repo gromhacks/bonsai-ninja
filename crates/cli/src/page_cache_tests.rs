@@ -1,7 +1,8 @@
 use super::{
     cache_is_fresh, content_tree_fingerprint, dependency_metadata_fingerprint, eager_window,
-    read_json_cache_file, remember_structural_id_hints, rulepack_dir_skipped, serialize_json_bounded,
-    structural_id_hint, workspace_fingerprint, PageCacheFile, MAX_PAYLOAD_BYTES, RENDER_CACHE_VERSION,
+    page_after_cursor, read_json_cache_file, remember_structural_id_hints, rulepack_dir_skipped,
+    serialize_json_bounded, structural_id_hint, workspace_fingerprint, CachedPage, PageCacheFile,
+    MAX_PAYLOAD_BYTES, RENDER_CACHE_VERSION,
 };
 use std::path::PathBuf;
 
@@ -22,6 +23,22 @@ fn eager_window_keeps_page_cache_opportunistic() {
         window.into_iter().collect::<Vec<_>>(),
         vec![1, 2, 3, 4, 10, 11, 12, 13]
     );
+}
+
+#[test]
+fn next_page_replay_resolves_from_the_current_cached_cursor() {
+    let pages = (1..=3)
+        .map(|number| CachedPage {
+            number,
+            cursor: format!("P:{number:08x}"),
+            text: format!("page {number}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        page_after_cursor(&pages, "P:00000001").map(|page| page.number),
+        Some(2)
+    );
+    assert!(page_after_cursor(&pages, "P:00000003").is_none());
 }
 
 #[test]

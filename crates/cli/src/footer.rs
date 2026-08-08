@@ -229,24 +229,15 @@ pub(crate) fn render_paging_footer(info: &paging::PageInfo, cmd_line_hint: &str)
         } else {
             0
         };
-        // The "full uncapped" hint scales from the paginator's per-
-        // row cost sum. When that sum underreports the truth, scale
-        // it by the ratio of actual-rendered-tokens to
-        // paginator-estimated-tokens-on-this-page so the uncapped
-        // projection stays in the same order of magnitude as the
-        // page the reader is holding. When the estimate matches
-        // reality the ratio is ~1.0 and the number is unchanged.
-        let estimated_page_tokens = info.tokens_used.max(1);
-        let scale = actual_tokens as f64 / estimated_page_tokens as f64;
-        let projected_uncapped = (info.total_tokens_uncapped as f64 * scale).round() as u64;
-        let uncapped_hint = if projected_uncapped > actual_tokens {
-            format!(
-                "  ·  full uncapped: ~{} tokens",
-                format_count(projected_uncapped as usize)
-            )
-        } else {
-            String::new()
-        };
+        // The full-result estimate belongs to the complete canonical row
+        // set, so it must not change while the user walks pages. Scaling it
+        // by one page's actual/estimated ratio made pages containing short
+        // rows advertise a different full-result size from pages containing
+        // wrapped rows. The paginator's complete-row estimate is deliberately
+        // conservative and, importantly, stable across every resume form.
+        let uncapped_hint = uncapped_hint_tokens(info, actual_tokens)
+            .map(|tokens| format!("  ·  full uncapped: ~{} tokens", format_count(tokens as usize)))
+            .unwrap_or_default();
         cli_println!(
             "{}",
             u.dim(&format!(
@@ -312,6 +303,10 @@ pub(crate) fn render_paging_footer(info: &paging::PageInfo, cmd_line_hint: &str)
     }
 }
 
+fn uncapped_hint_tokens(info: &paging::PageInfo, actual_tokens: u64) -> Option<u64> {
+    (info.total_tokens_uncapped > actual_tokens).then_some(info.total_tokens_uncapped)
+}
+
 fn paging_total_label(cmd_line_hint: &str, total: u64) -> &'static str {
     let singular = total == 1;
     let pluralize = |one: &'static str, many: &'static str| if singular { one } else { many };
@@ -367,5 +362,31 @@ fn paging_total_label(cmd_line_hint: &str, total: u64) -> &'static str {
         pluralize("AST line", "AST lines")
     } else {
         pluralize("row", "rows")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uncapped_hint_tokens;
+    use crate::paging::PageInfo;
+
+    #[test]
+    fn uncapped_estimate_is_stable_across_pages_with_different_render_costs() {
+        let info = PageInfo {
+            page_number: 1,
+            total_pages: 2,
+            page_size: 5,
+            shown_rows: 5,
+            total_rows: 10,
+            budget: Some(1_024),
+            tokens_used: 900,
+            cursor: "P:00000000".to_string(),
+            next_cursor: Some("P:00000001".to_string()),
+            is_last: false,
+            start_offset: 0,
+            total_tokens_uncapped: 8_192,
+        };
+        assert_eq!(uncapped_hint_tokens(&info, 300), Some(8_192));
+        assert_eq!(uncapped_hint_tokens(&info, 700), Some(8_192));
     }
 }

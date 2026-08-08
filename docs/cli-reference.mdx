@@ -53,7 +53,14 @@ subcommand help.
 
 ## index
 
-`index` parses a workspace, builds the syntax/construct index, and prints workspace stats as JSON. It does not eagerly warm whole-workspace semantic sidecars unless an explicit prewarm flag is passed.
+`index` parses a workspace, builds the syntax/construct index, and prints a
+JSON cache summary. Default/structural mode reports file, compiler-object, and
+parse-reuse counts. `--semantic` reports the same workspace file count plus
+whether the complete semantic generation was reused or rebuilt, manifest
+freshness, semantic readiness, total cache bytes, and every ready sidecar. A
+warm semantic run still prints this summary; successful commands never return
+silent output. Whole-workspace semantic sidecars are not warmed unless an
+explicit prewarm flag is passed.
 
 ```bash
 bonsai-ninja index ./src
@@ -229,7 +236,7 @@ redo work.
 | `--all` | false | Emit every finding. |
 | `--summary` | false | Emit only aggregate finding counts. Text shows compact tables; JSON emits the summary object without paged rows. |
 | `--format <FORMAT>` | text | `text`, `json`, or `sarif`. SARIF is supported for `taint-analysis` findings. |
-| `--baseline <PREV_JSON>` | None | Compare against a previous `taint-analysis --format json --all` file and classify findings as `new`, `unchanged`, or `fixed`. |
+| `--baseline <PREV_JSON>` | None | Compare against a previous `taint-analysis --format json --all` file and classify findings as `new`, `unchanged`, or `fixed`. Text appends the three counts; JSON adds `baseline_status` to each current row and a top-level `baseline` object with counts plus any fixed finding IDs. |
 | `--explain` | false | Explain why a `--source` / `--sink` pair does or does not connect instead of rendering findings. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
@@ -307,6 +314,10 @@ flows/groups and security taint-path flows/groups: `show F:...` and
 `show G:...` try the structural inspect owner first, then fall back to
 `security taint-analysis --flow F:...` / `--group G:...` when the id
 belongs to a security finding.
+Stable IDs are validated before any workspace or rulepack work: `F:`, `G:`,
+and `S:` use exactly 16 lowercase hexadecimal characters; `T:`, `E:`, `N:`,
+and `R:` use exactly 8. Malformed IDs fail immediately with the required
+shape.
 
 ```bash
 bonsai-ninja show ./src F:0123456789abcdef
@@ -547,6 +558,9 @@ overwrite full-workspace `taint_graph.v*.<mode>.<config>.factstore` files in tha
 `cache stats --format json` includes the same validation report the
 SDK exposes: `manifest_status`, semantic/dataflow/taint/export readiness,
 per-sidecar freshness, and stale reasons.
+Selective `cache clear --dataflow-only` republishes the manifest immediately,
+so the removed optional projection is reported as `missing` while unrelated
+semantic sidecars remain fresh; it is never misreported as a stale workspace.
 
 ## Browse Commands
 

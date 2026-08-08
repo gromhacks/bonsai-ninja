@@ -1778,6 +1778,21 @@ def handle():
     assert_eq!(group_rows.len(), 1);
     assert_eq!(group_rows[0]["group_id"].as_str(), Some(group_id.as_str()));
 
+    let text = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--flow",
+        &flow_id,
+    ])
+    .unwrap();
+    assert!(
+        text.contains(&flow_id) && text.contains(&group_id),
+        "human-readable findings must print their S:/F:/G: drilldown ids together:\n{text}"
+    );
+
     let shown = run(&[
         "show",
         ws.to_str().unwrap(),
@@ -3894,6 +3909,16 @@ def handle():
         diffed.contains("\"baseline_status\": \"unchanged\""),
         "unchanged finding must be tagged against an identical baseline:\n{diffed}"
     );
+    let diffed_json: serde_json::Value = serde_json::from_str(&diffed).expect("baseline diff JSON");
+    assert_eq!(diffed_json["baseline"]["new"], 0);
+    assert_eq!(diffed_json["baseline"]["fixed"], 0);
+    assert_eq!(diffed_json["baseline"]["unchanged"], 1);
+    let warm_diffed = run(&with_baseline).expect("warm baseline diff replay");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&warm_diffed).expect("warm baseline JSON"),
+        diffed_json,
+        "cached baseline replay must preserve the complete JSON contract"
+    );
 
     // Empty baseline → the finding must classify as `new`.
     let empty_path = ws.join("empty.json");
@@ -3906,6 +3931,11 @@ def handle():
         vs_empty_out.contains("\"baseline_status\": \"new\""),
         "finding absent from baseline must be tagged new:\n{vs_empty_out}"
     );
+    let vs_empty_json: serde_json::Value =
+        serde_json::from_str(&vs_empty_out).expect("new baseline diff JSON");
+    assert_eq!(vs_empty_json["baseline"]["new"], 1);
+    assert_eq!(vs_empty_json["baseline"]["fixed"], 0);
+    assert_eq!(vs_empty_json["baseline"]["unchanged"], 0);
 }
 
 #[test]

@@ -826,7 +826,18 @@ fn index_semantic_flag_writes_shared_semantic_sidecars() {
     let Some(out) = run(&["index", tmp.to_str().unwrap(), "--semantic"]) else {
         return;
     };
-    assert!(out.contains("files"), "index summary missing: {out}");
+    let semantic: serde_json::Value = serde_json::from_str(&out).expect("semantic index summary JSON");
+    assert_eq!(semantic["mode"], "semantic", "{out}");
+    assert_eq!(semantic["files"], 1, "{out}");
+    assert_eq!(semantic["semantic_cache"], "rebuilt", "{out}");
+    assert_eq!(semantic["semantic_ready"], true, "{out}");
+    assert_eq!(semantic["manifest_status"], "fresh", "{out}");
+    let Some(warm_out) = run(&["index", tmp.to_str().unwrap(), "--semantic"]) else {
+        return;
+    };
+    let warm: serde_json::Value = serde_json::from_str(&warm_out).expect("warm semantic index summary JSON");
+    assert_eq!(warm["semantic_cache"], "hit", "{warm_out}");
+    assert_eq!(warm["semantic_ready"], true, "{warm_out}");
     let Some(stats_out) = run(&["cache", "stats", tmp.to_str().unwrap(), "--format", "json"]) else {
         return;
     };
@@ -5026,12 +5037,13 @@ fn cache_clear_removes_existing_dir() {
 #[test]
 fn cache_clear_dataflow_only_removes_factstore_sidecar() {
     let tmp = tempdir_for_test("bonsai_cache_clear_factstore");
-    let stats = bonsai_sdk::WorkspaceCache::new(&tmp)
-        .stats()
-        .expect("cache stats");
+    std::fs::write(tmp.join("main.py"), "def main():\n    return 1\n").expect("write source");
+    let cache = bonsai_sdk::WorkspaceCache::new(&tmp);
+    let stats = cache.stats().expect("cache stats");
     let factstore = stats.dataflow_factstore_sidecar;
     std::fs::create_dir_all(factstore.parent().expect("factstore parent")).expect("mkdir cache");
     std::fs::write(&factstore, b"factstore bytes").expect("write factstore");
+    cache.write_manifest().expect("write cache manifest");
 
     let Some(out) = run(&["cache", "clear", tmp.to_str().unwrap(), "--dataflow-only"]) else {
         return;
@@ -5043,6 +5055,18 @@ fn cache_clear_dataflow_only_removes_factstore_sidecar() {
     assert!(
         !factstore.exists(),
         "cache clear --dataflow-only must remove the factstore sidecar"
+    );
+    let stats = cache.stats().expect("cache stats after selective clear");
+    let validation = stats
+        .validation
+        .sidecars
+        .iter()
+        .find(|sidecar| sidecar.name == "dataflow_factstore")
+        .expect("dataflow validation row");
+    assert_eq!(
+        validation.status,
+        bonsai_sdk::CacheFreshnessStatus::Missing,
+        "selective clear must update the manifest instead of leaving a stale sidecar claim: {validation:#?}"
     );
 }
 
@@ -5195,6 +5219,28 @@ fn strings_contains_flag_runs() {
     assert!(
         out.contains("token") || out.contains("string") || out.contains("literal"),
         "--contains broke strings:\n{out}"
+    );
+}
+
+#[test]
+fn secondary_filter_updates_browse_totals() {
+    let ws = ws_path();
+    let Some(out) = run(&[
+        "defs",
+        ws.to_str().unwrap(),
+        "--contains",
+        "verify_token",
+        "--all",
+    ]) else {
+        return;
+    };
+    assert!(
+        out.contains("verify_token"),
+        "filtered definition missing:\n{out}"
+    );
+    assert!(
+        out.contains("(1 definitions)"),
+        "browse totals must describe the post-filter rows, not the hidden pre-filter set:\n{out}"
     );
 }
 
@@ -5848,6 +5894,52 @@ fn show_flow_id_reopens_inspect_drilldown() {
     assert!(
         !out.contains("OCCURRENCE HITS") && !out.contains("match points:"),
         "show F: is a structural-chain drilldown; it must not attach arbitrary syntax hits:\n{out}"
+    );
+}
+
+#[test]
+fn show_rejects_malformed_stable_id_before_opening_analysis_backends() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let out = Command::new(bin)
+        .args(["show", ws_path().to_str().unwrap(), "F:nothex", "--no-color"])
+        .output()
+        .expect("run malformed show id");
+    assert!(!out.status.success(), "malformed stable id must fail");
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        error.contains("exactly 16 lowercase hexadecimal characters"),
+        "malformed stable id should produce one direct validation error: {error}"
+    );
+    assert!(
+        !error.contains("security taint flow") && !error.contains("SDK structural chains"),
+        "malformed stable id must not probe expensive downstream namespaces: {error}"
+    );
+}
+
+#[test]
+fn show_flow_id_without_a_query_renders_one_structural_target_block() {
+    let ws = tempdir_for_test("bonsai_show_flow_without_hint");
+    write_tiny_python_workspace(&ws);
+    let Some(full) = run_inspect_graph(&ws, &["--query", "sink"]) else {
+        return;
+    };
+    let ids = extract_flow_ids(&full);
+    let Some(target) = ids.first() else {
+        panic!("fixture should emit at least one F: id:\n{full}");
+    };
+    // Cache cleanup removes the saved query breadcrumb. The next process must
+    // reconstruct the stable id directly without rendering the same chain
+    // once per declaration along it.
+    let _ = run(&["cache", "clear", ws.to_str().unwrap()]);
+    let Some(out) = run(&["show", ws.to_str().unwrap(), target, "--compact"]) else {
+        return;
+    };
+    assert_eq!(
+        out.matches(&format!("FLOW 1 {target}")).count(),
+        1,
+        "one structural flow id must render one target block, not once per chain function:\n{out}"
     );
 }
 

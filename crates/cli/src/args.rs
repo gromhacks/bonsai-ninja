@@ -273,8 +273,9 @@ pub(crate) enum Cmd {
     #[command(
         display_order = 10,
         long_about = themed_subcommand_long_about("Ingest every supported source file under <WORKSPACE> and print \
-                      a summary (file count, decls, refs, module count) as \
-                      JSON.\n\
+                      a JSON summary of the compiler-object cache and workspace \
+                      file count. Semantic mode additionally reports cache \
+                      readiness, freshness, and the sidecars it made reusable.\n\
                       \n\
                       By default this is syntax/construct index-up-front behavior: \
                       bonsai parses source, builds declaration/import indexes, \

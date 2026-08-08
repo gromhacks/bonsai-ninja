@@ -36,10 +36,10 @@ thread_local! {
 
 const EAGER_PAGE_LIMIT: u64 = 4;
 // Page boundaries and semantic command planning are part of the cached
-// rendering contract. Version 11 invalidates pages produced by the former
-// retrieval-scoped cold dump-taint path, which could omit cross-file
-// propagations before a callgraph sidecar existed.
-const RENDER_CACHE_VERSION: u32 = 11;
+// rendering contract. Version 12 invalidates payloads produced before
+// explicit out-of-range pages failed closed and before the full-result token
+// estimate became stable across every page.
+const RENDER_CACHE_VERSION: u32 = 12;
 
 /// Stable structural ids are hashes of rendered chains, so the id alone
 /// cannot be inverted into the target declaration that made the query
@@ -200,7 +200,7 @@ pub(crate) fn replay_if_hit(workspace: &Path) -> anyhow::Result<bool> {
         stage.finish();
         return Ok(false);
     }
-    let Some(page) = requested_page(&cache.pages) else {
+    let Some(page) = requested_page(&cache) else {
         stage.finish();
         return Ok(false);
     };
@@ -541,8 +541,13 @@ where
     Ok(())
 }
 
-fn requested_page(pages: &[CachedPage]) -> Option<&CachedPage> {
-    requested_page_arg().and_then(|arg| page_for_arg(pages, &arg))
+fn requested_page(cache: &PageCacheFile) -> Option<&CachedPage> {
+    let arg = requested_page_arg()?;
+    if arg.eq_ignore_ascii_case("next") {
+        let current = paging::last_cursor(&cache.command, cache.filters_hash)?;
+        return page_after_cursor(&cache.pages, &current);
+    }
+    page_for_arg(&cache.pages, &arg)
 }
 
 fn requested_page_arg() -> Option<String> {
@@ -566,6 +571,11 @@ fn page_for_arg<'a>(pages: &'a [CachedPage], raw: &str) -> Option<&'a CachedPage
         return pages.iter().find(|p| p.cursor == raw);
     }
     None
+}
+
+fn page_after_cursor<'a>(pages: &'a [CachedPage], cursor: &str) -> Option<&'a CachedPage> {
+    let current = pages.iter().position(|page| page.cursor == cursor)?;
+    pages.get(current + 1)
 }
 
 fn parse_page_number(raw: &str) -> Option<u64> {

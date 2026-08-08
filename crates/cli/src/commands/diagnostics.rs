@@ -37,7 +37,37 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
         if let Some(phase) = options.semantic_worker {
             return run_semantic_worker(root, phase);
         }
-        run_semantic_workers(root)?;
+        let result = run_semantic_workers(root)?;
+        let cache = bonsai_for_cli().cache(root);
+        let manifest = cache.read_manifest()?.ok_or_else(|| {
+            anyhow::anyhow!("semantic prewarm completed without publishing a cache manifest")
+        })?;
+        let ready_sidecars = result
+            .stats
+            .validation
+            .sidecars
+            .iter()
+            .filter(|sidecar| {
+                matches!(
+                    sidecar.status,
+                    bonsai_sdk::CacheFreshnessStatus::Fresh | bonsai_sdk::CacheFreshnessStatus::NotApplicable
+                )
+            })
+            .map(|sidecar| (sidecar.name.clone(), sidecar.bytes))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        cli_println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "mode": "semantic",
+                "files": manifest.workspace_sources.files,
+                "semantic_cache": if result.rebuilt { "rebuilt" } else { "hit" },
+                "semantic_ready": result.stats.validation.semantic_ready,
+                "manifest_status": result.stats.validation.manifest_status.as_str(),
+                "cache_bytes": result.stats.total_bytes,
+                "ready_sidecars": ready_sidecars,
+            }))?
+        );
+        flush_stdout()?;
         return Ok(());
     }
     // A one-shot structural index must leave reusable compiler artifacts.
@@ -117,13 +147,19 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
 /// A worker exit is the portable hard reclamation boundary: every phase still
 /// sees the complete AST-derived compiler input and emits the same sidecars,
 /// while their peak resident sets cannot become additive.
-pub(super) fn run_semantic_workers(root: &std::path::Path) -> Result<()> {
+pub(super) struct SemanticWarmResult {
+    stats: bonsai_sdk::CacheStats,
+    rebuilt: bool,
+}
+
+pub(super) fn run_semantic_workers(root: &std::path::Path) -> Result<SemanticWarmResult> {
     let executable = std::env::current_exe()?;
     // Maintenance is intentionally separate from semantic planning. A fully
     // fresh manifest can coexist with crash staging files or sidecars from an
     // older schema; reclaim those under writer locks without opening or
     // decoding any compiler graph.
     bonsai_for_cli().cache(root).maintain_persisted_sidecars()?;
+    let mut rebuilt = false;
     loop {
         // Cache validation hashes the complete source snapshot and may inspect
         // large factstore metadata. A fresh process is a hard reclamation
@@ -131,18 +167,20 @@ pub(super) fn run_semantic_workers(root: &std::path::Path) -> Result<()> {
         // graph workers.
         let stats = semantic_cache_stats(&executable, root)?;
         if semantic_generation_is_current(&stats.validation) {
-            return Ok(());
+            return Ok(SemanticWarmResult { stats, rebuilt });
         }
-        for phase in semantic_phase_plan(&stats.validation) {
+        let phases = semantic_phase_plan(&stats.validation);
+        rebuilt |= !phases.is_empty();
+        for phase in phases {
             run_semantic_phase_process(&executable, root, phase)?;
         }
         // Each worker publishes atomically. This final validation proves every
         // artifact describes the same current snapshot. An edit between
         // workers reruns the exact compiler pipeline until it reaches a
         // quiescent generation; there is no semantic retry cap.
-        let validation = semantic_cache_stats(&executable, root)?.validation;
-        if semantic_generation_is_current(&validation) {
-            return Ok(());
+        let stats = semantic_cache_stats(&executable, root)?;
+        if semantic_generation_is_current(&stats.validation) {
+            return Ok(SemanticWarmResult { stats, rebuilt });
         }
         let retry = progress::ScopedSpinner::new(
             "workspace changed between semantic workers; rebuilding one coherent generation",
@@ -343,14 +381,7 @@ fn run_semantic_worker(root: &std::path::Path, phase: SemanticWorkerPhase) -> Re
         SemanticWorkerPhase::Retrieval => project.cache().warm_retrieval_sidecar(),
         SemanticWorkerPhase::Callgraph => project.cache().warm_callgraph_sidecar(),
         SemanticWorkerPhase::Linkage => project.cache().warm_compiler_linkage_sidecar(),
-        SemanticWorkerPhase::Idg => {
-            project.cache().warm_idg_sidecar_and_manifest()?;
-            let stage = progress::ScopedSpinner::new("collecting index stats");
-            let stats = project.stats();
-            stage.finish();
-            cli_println!("{}", serde_json::to_string_pretty(&stats)?);
-            flush_stdout()
-        }
+        SemanticWorkerPhase::Idg => project.cache().warm_idg_sidecar_and_manifest(),
         SemanticWorkerPhase::Manifest => unreachable!("manifest phase returned before workspace open"),
     }
 }

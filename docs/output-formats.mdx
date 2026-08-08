@@ -27,6 +27,12 @@ and the current rows or JSON lines. Use `--page next` or the printed
 `--context uncapped` only when you intentionally want an exhaustive
 artifact.
 
+Paging is deterministic and fail-closed. A numeric page beyond the reported
+last page is an error rather than an alias for the last page. `next` and
+printed cursors reuse the validated page cache when available, and the
+footer's uncapped token estimate describes the complete result consistently
+on every page, not only the rows currently rendered.
+
 These are presentation controls, not analysis budgets. The semantic IDG
 closure runs to a fixed point before authoritative taint/security facts are
 emitted. When a preview enumerator or page is limited, metadata says that more
@@ -95,10 +101,21 @@ needs aggregate triage counts. Summary mode emits the summary object
 directly, including severity, status, precision, tag, language, source
 rule, and sink rule counts, without paged finding rows.
 
+Every security finding text block prints its stable `S:` finding ID plus its
+representative `F:` flow ID and `G:` group ID before the evidence body. Native
+JSON is always an envelope so a proven-clean result can be distinguished from
+an incomplete scan. With `--baseline`, the envelope also contains the aggregate
+`baseline` diff while each current row carries `baseline_status`.
+
 ```json
-[
-  {
+{
+  "analysis_complete": true,
+  "analysis_incomplete_reasons": [],
+  "summary": { "total_findings": 1 },
+  "rows": [{
     "finding_id": "S:979a7231afe45297",
+    "representative_flow_id": "F:0123456789abcdef",
+    "group_id": "G:701fc172b976025d",
     "source": { "rule_id": "python.flask.request_args_get", "line": 29 },
     "sink": { "rule_id": "python.cmdi.os_system", "line": 29 },
     "chain_display": ["handle_request", "run_pipeline", "orchestrate", "execute"],
@@ -106,8 +123,9 @@ rule, and sink rule counts, without paged finding rows.
       { "caller": "handle_request", "callee": "run_pipeline", "tainted_args": [{ "index": 0, "value_text": "envelope" }] },
       { "caller": "execute", "callee": "os.system", "tainted_args": [{ "index": 0, "value_text": "cmd" }] }
     ]
-  }
-]
+  }],
+  "page": { "number": 1, "is_last": true, "total_rows": 1 }
+}
 ```
 
 ## SARIF
