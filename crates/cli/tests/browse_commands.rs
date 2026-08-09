@@ -975,6 +975,25 @@ fn trace_from_entry_produces_flow() {
     );
 }
 
+#[test]
+fn trace_resolves_owner_qualified_method() {
+    let root = tempdir_for_test("trace-qualified-method");
+    std::fs::write(
+        root.join("app.py"),
+        "class Alpha:\n    def run(self):\n        target()\n\nclass Beta:\n    def run(self):\n        decoy()\n\ndef target():\n    pass\n\ndef decoy():\n    pass\n",
+    )
+    .expect("write app.py");
+
+    let Some(out) = run(&["trace", root.to_str().unwrap(), "Alpha.run"]) else {
+        return;
+    };
+    assert!(out.contains("target"), "qualified trace missed Alpha.run: {out}");
+    assert!(
+        !out.contains("decoy"),
+        "qualified trace leaked through same-named Beta.run: {out}"
+    );
+}
+
 /// Default `trace` output is the themed text view (not JSON). Pin
 /// the structural markers so we'd notice if it regressed back to a
 /// flat dump or a plain-text wall.
@@ -2346,6 +2365,66 @@ fn inspect_from_to_resolves_qualified_same_named_methods() {
         out.contains("FLOW 1"),
         "the exact qualified endpoint corridor must render its connected flow:\n{out}"
     );
+}
+
+#[test]
+fn inspect_from_to_excludes_sibling_branches_outside_exact_corridor() {
+    let root = tempdir_for_test("inspect-qualified-corridor");
+    std::fs::write(
+        root.join("app.py"),
+        "class Target:\n    def run(self):\n        return 1\n\nclass Decoy:\n    def run(self):\n        return 2\n\nclass Source:\n    def run(self):\n        Target().run()\n        Decoy().run()\n",
+    )
+    .expect("write app.py");
+
+    let Some(out) = run_inspect_graph(
+        &root,
+        &[
+            "--from",
+            "Source.run",
+            "--to",
+            "Target.run",
+            "--format",
+            "json",
+            "--all",
+        ],
+    ) else {
+        return;
+    };
+    let report: serde_json::Value = serde_json::from_str(&out).expect("inspect JSON");
+    let flows = ["decl_hits", "hits"]
+        .into_iter()
+        .flat_map(|section| {
+            report[section]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|hit| hit["flows"].as_array().into_iter().flatten())
+        })
+        .collect::<Vec<_>>();
+    assert!(!flows.is_empty(), "exact corridor emitted no flows: {out}");
+    for flow in flows {
+        let functions = flow["functions"].as_array().expect("flow functions");
+        let has_owner = |function: &serde_json::Value, wanted: &str| {
+            function["owners"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|owner| owner["name"].as_str() == Some(wanted))
+        };
+        assert!(
+            functions
+                .first()
+                .is_some_and(|function| has_owner(function, "Source"))
+                && functions
+                    .last()
+                    .is_some_and(|function| has_owner(function, "Target")),
+            "flow escaped the exact Source.run -> Target.run corridor: {flow}"
+        );
+        assert!(
+            functions.iter().all(|function| !has_owner(function, "Decoy")),
+            "sibling Decoy.run branch leaked into exact corridor: {flow}"
+        );
+    }
 }
 
 #[test]

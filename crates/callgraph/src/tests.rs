@@ -794,6 +794,47 @@ fn resolved_path_enumeration_ignores_nonsemantic_edges() {
 }
 
 #[test]
+fn resolved_graph_between_keeps_all_target_paths_and_drops_sibling_branches() {
+    let file = FileId::new(1);
+    let source = FuncId::new(1);
+    let left = FuncId::new(2);
+    let right = FuncId::new(3);
+    let target = FuncId::new(4);
+    let decoy = FuncId::new(5);
+    let mut graph = CallGraph::new();
+    for (from, to, offset) in [
+        (source, left, 10),
+        (left, target, 20),
+        (source, right, 30),
+        (right, target, 40),
+        (source, decoy, 50),
+    ] {
+        graph.add_edge(CallEdge {
+            from,
+            to,
+            span: Span::new(file, offset, offset + 1),
+            kind: EdgeKind::Direct,
+            precision: Precision::Exact,
+            provenance: EdgeProvenance::direct_symbol(),
+        });
+    }
+
+    let corridor = ResolvedCallGraph::from_call_graph(graph).between(&[source], &[target], None);
+    let edges = corridor
+        .inner()
+        .edges
+        .iter()
+        .map(|edge| (edge.from, edge.to))
+        .collect::<AHashSet<_>>();
+    assert_eq!(edges.len(), 4);
+    assert!(edges.contains(&(source, left)));
+    assert!(edges.contains(&(left, target)));
+    assert!(edges.contains(&(source, right)));
+    assert!(edges.contains(&(right, target)));
+    assert!(!edges.iter().any(|(from, to)| *from == decoy || *to == decoy));
+}
+
+#[test]
 fn resolved_path_enumeration_exact_path_cap_is_not_truncated() {
     let file = FileId::new(1);
     let entry = FuncId::new(1);

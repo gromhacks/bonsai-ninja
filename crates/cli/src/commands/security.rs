@@ -4060,7 +4060,7 @@ fn render_dep_block(u: &Ui, idx: usize, r: &DependencyRow, pack: &Rulepack) {
 
     let shown: Vec<&String> = r.evidence_files.iter().take(5).collect();
     for file in &shown {
-        cli_println!("    {}", u.path(&short_file(file)));
+        cli_println!("    {}", u.path(file));
     }
     if r.evidence_files.len() > shown.len() {
         cli_println!(
@@ -4093,7 +4093,7 @@ fn dep_block_cost_bytes(r: &DependencyRow, pack: &Rulepack) -> u64 {
         .evidence_files
         .iter()
         .take(5)
-        .map(|file| short_file(file).len() + 8)
+        .map(|file| file.len() + 8)
         .sum::<usize>()
         + if r.evidence_files.len() > 5 { 32 } else { 0 };
     let mut seen_desc: ahash::AHashSet<&str> = ahash::AHashSet::new();

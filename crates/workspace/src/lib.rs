@@ -4707,7 +4707,12 @@ impl Workspace {
                     map.line_col(node.name_span.start).line == wanted
                 })
             });
-            file_matches && line_matches
+            let qualified_matches = lookup.qualified.is_none_or(|wanted| {
+                node.qualified_name
+                    .as_deref()
+                    .is_some_and(|candidate| qualified_name_suffix_matches(candidate, wanted))
+            });
+            file_matches && line_matches && qualified_matches
         });
         nodes.sort_by(|left, right| {
             let left_path = self
@@ -4780,7 +4785,12 @@ impl Workspace {
         let line_matches = spec
             .line
             .is_none_or(|wanted| self.decl_name_line(decl).is_some_and(|line| line == wanted));
-        file_matches && line_matches
+        let qualified_matches = spec.qualified.is_none_or(|wanted| {
+            decl.qualified_name
+                .as_deref()
+                .is_some_and(|candidate| qualified_name_suffix_matches(candidate, wanted))
+        });
+        file_matches && line_matches && qualified_matches
     }
 
     fn decl_name_line(&self, decl: &Decl) -> Option<u32> {
@@ -4893,8 +4903,9 @@ impl Workspace {
         ))
     }
 
-    /// Source -> sink trace. The cross-module trace is computed from
-    /// `source`, then truncated at the first step that reaches `sink`.
+    /// Source -> sink trace. Declared endpoints are interpreted over the
+    /// exact compiler-resolved graph corridor; external call sinks use the
+    /// source-reachable trace and stop at the exact call step.
     pub fn trace_source_to_sink(&self, source: &str, sink: &str) -> Result<TraceResult, WorkspaceError> {
         self.trace_source_to_sink_with_options(source, sink, CrossModuleOptions::default())
     }
@@ -4906,19 +4917,63 @@ impl Workspace {
         opts: CrossModuleOptions,
     ) -> Result<TraceResult, WorkspaceError> {
         let src = self.resolve_function_symbol(source)?;
-        // The sink may legitimately be an external / framework call (like
-        // `os.system`, `exec`, `Runtime.getRuntime().exec`) that isn't a
-        // declared function in the workspace. Only pre-compute a
-        // `FuncId` for it when it IS a declared function; otherwise we'll
-        // still truncate the trace by matching step messages below.
-        let call_graph = self.resolved_call_graph_reachable_from(&[FuncId::new(src.raw())]);
-        let header_files = call_graph
+        // A declared sink gives the compiler an exact target identity. Build
+        // only the uncapped source-to-target graph corridor before symbolic
+        // interpretation; tracing the entire downstream program and trimming
+        // the rendered vector afterward is both asymptotically wrong and can
+        // spend minutes on sibling branches. External/framework calls remain
+        // supported by the exact call-step fallback below.
+        let sink_symbol = match self.resolve_function_symbol(sink) {
+            Ok(symbol) => Some(symbol),
+            Err(WorkspaceError::SymbolNotFound(_)) => None,
+            Err(error) => return Err(error),
+        };
+        let source_func = FuncId::new(src.raw());
+        let sink_func = sink_symbol.map(|symbol| FuncId::new(symbol.raw()));
+        let call_graph = if let Some(target) = sink_func {
+            let persisted = self
+                .persisted_resolved_call_graph_between(&[source_func], &[target])
+                .and_then(|result| match result {
+                    Ok(graph) => Some(Arc::new(graph)),
+                    Err(error) => {
+                        bonsai_diagnostics::debug_log!(
+                            "compiler-cache",
+                            "trace source-target callgraph partitions rejected: {}",
+                            error
+                        );
+                        None
+                    }
+                });
+            persisted.unwrap_or_else(|| {
+                let compiled = self.source_reachable_query_call_graph(&[source_func], &[target], None);
+                Arc::new(compiled.graph.between(&[source_func], &[target], None))
+            })
+        } else {
+            self.resolved_call_graph_reachable_from(&[source_func])
+        };
+        let mut header_files = call_graph
             .nodes()
             .iter()
             .map(|node| node.file)
             .collect::<Vec<_>>();
+        for symbol in std::iter::once(src).chain(sink_symbol) {
+            if let Some(file) = self.compiler_header_index().declaring_file(symbol) {
+                header_files.push(file);
+            }
+        }
+        header_files.sort_unstable_by_key(|file| file.raw());
+        header_files.dedup();
         let headers = self.compiler_header_index_for_files(&header_files);
-        let raw = CrossModuleTracer::new(self, Arc::clone(&headers), call_graph.as_ref(), opts).trace(src);
+        let mut raw =
+            CrossModuleTracer::new(self, Arc::clone(&headers), call_graph.as_ref(), opts).trace(src);
+        let declared_sink_hit = sink_func.and_then(|target| {
+            raw.steps.iter().position(|step| {
+                step.func == target && step.kind == bonsai_abstract_interp::StepKind::EnterFunction
+            })
+        });
+        if let Some(hit) = declared_sink_hit {
+            raw.steps.truncate(hit.saturating_add(1));
+        }
         let mut result = self.finalize_trace(
             raw,
             TraceQuery {
@@ -4935,9 +4990,17 @@ impl Workspace {
             opts,
             headers,
         );
-        if let Some(hit) = result.steps.iter().position(|s| s.function == sink) {
-            bonsai_trace::truncate_after_step(&mut result, hit);
-        } else if !result.steps.iter().any(|s| s.function == sink) {
+        if sink_func.is_some() {
+            if declared_sink_hit.is_none() {
+                result.diagnostics.push(bonsai_trace::TraceDiagnostic {
+                    severity: "warning".into(),
+                    message: format!("sink {sink} not reached from {source}"),
+                    span: None,
+                    note: None,
+                    code: Some("sink-not-reached".into()),
+                });
+            }
+        } else {
             // External/framework sinks are not workspace declarations, so
             // match the finalized concrete call step. Keep this exact:
             // substring scans can stop at unrelated calls such as
@@ -5118,14 +5181,30 @@ struct SymbolLookupSpec<'a> {
     file: Option<&'a str>,
     line: Option<u32>,
     name: &'a str,
+    qualified: Option<&'a str>,
+}
+
+fn qualified_symbol_lookup(spec: &str) -> SymbolLookupSpec<'_> {
+    let tail = bonsai_common::short_qualified_tail(spec);
+    SymbolLookupSpec {
+        name: tail,
+        qualified: (tail != spec).then_some(spec),
+        ..Default::default()
+    }
+}
+
+fn qualified_name_suffix_matches(candidate: &str, wanted: &str) -> bool {
+    let candidate = bonsai_common::normalize_qualified_name(candidate);
+    let wanted = bonsai_common::normalize_qualified_name(wanted);
+    candidate == wanted
+        || candidate
+            .strip_suffix(&wanted)
+            .is_some_and(bonsai_common::ends_at_qualified_name_boundary)
 }
 
 fn split_symbol_lookup_spec(spec: &str) -> SymbolLookupSpec<'_> {
     let Some(name_idx) = spec.rfind(':') else {
-        return SymbolLookupSpec {
-            name: spec,
-            ..Default::default()
-        };
+        return qualified_symbol_lookup(spec);
     };
     let (head, name) = (&spec[..name_idx], &spec[name_idx + 1..]);
     if name.is_empty() || head.is_empty() || name.contains(['/', '\\']) {
@@ -5142,6 +5221,7 @@ fn split_symbol_lookup_spec(spec: &str) -> SymbolLookupSpec<'_> {
                     file: Some(path),
                     line: Some(line),
                     name,
+                    qualified: None,
                 };
             }
         }
@@ -5151,12 +5231,10 @@ fn split_symbol_lookup_spec(spec: &str) -> SymbolLookupSpec<'_> {
             file: Some(head),
             line: None,
             name,
+            qualified: None,
         };
     }
-    SymbolLookupSpec {
-        name: spec,
-        ..Default::default()
-    }
+    qualified_symbol_lookup(spec)
 }
 
 fn file_matches_qualifier(decl_file: &Path, qualifier: &str) -> bool {
@@ -6106,6 +6184,28 @@ mod symbol_lookup_spec_tests {
         let spec = split_symbol_lookup_spec("My.Module:run");
         assert_eq!(spec.file, None);
         assert_eq!(spec.line, None);
-        assert_eq!(spec.name, "My.Module:run");
+        assert_eq!(spec.name, "run");
+        assert_eq!(spec.qualified, Some("My.Module:run"));
+    }
+
+    #[test]
+    fn owner_qualified_name_uses_short_tail_for_candidate_lookup() {
+        let spec = split_symbol_lookup_spec("Flask.__call__");
+        assert_eq!(spec.file, None);
+        assert_eq!(spec.line, None);
+        assert_eq!(spec.name, "__call__");
+        assert_eq!(spec.qualified, Some("Flask.__call__"));
+    }
+
+    #[test]
+    fn qualified_suffix_matching_respects_identifier_boundaries() {
+        assert!(qualified_name_suffix_matches(
+            "src.flask.app.Flask.__call__",
+            "Flask.__call__"
+        ));
+        assert!(!qualified_name_suffix_matches(
+            "src.flask.app.OtherFlask.__call__",
+            "Flask.__call__"
+        ));
     }
 }

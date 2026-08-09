@@ -539,6 +539,44 @@ struct DeclHitPass<'a> {
     taint_flow: bool,
     graph_flows_enabled: bool,
     full_source_for_large_bodies: bool,
+    endpoint_corridor: Option<&'a ExactEndpointCorridor>,
+}
+
+struct ExactEndpointCorridor {
+    sources: ahash::AHashSet<bonsai_common::FuncId>,
+    targets: ahash::AHashSet<bonsai_common::FuncId>,
+}
+
+impl ExactEndpointCorridor {
+    fn new(sources: &[bonsai_common::FuncId], targets: &[bonsai_common::FuncId]) -> Option<Self> {
+        (!sources.is_empty() && !targets.is_empty()).then(|| Self {
+            sources: sources.iter().copied().collect(),
+            targets: targets.iter().copied().collect(),
+        })
+    }
+
+    fn project_path(
+        &self,
+        path: &[bonsai_common::FuncId],
+        required: Option<bonsai_common::FuncId>,
+    ) -> Option<Vec<bonsai_common::FuncId>> {
+        for (source_idx, func) in path.iter().enumerate() {
+            if !self.sources.contains(func) {
+                continue;
+            }
+            let Some(target_offset) = path[source_idx..]
+                .iter()
+                .position(|candidate| self.targets.contains(candidate))
+            else {
+                continue;
+            };
+            let corridor = &path[source_idx..=source_idx + target_offset];
+            if required.is_none_or(|func| corridor.contains(&func)) {
+                return Some(corridor.to_vec());
+            }
+        }
+        None
+    }
 }
 
 struct InspectKindSelection {
@@ -683,6 +721,16 @@ fn collect_decl_hits(
             );
             extended_chains.extend(paths.into_iter().map(|path| (path, chain.precision)));
         }
+        if let Some(corridor) = options.endpoint_corridor {
+            extended_chains = extended_chains
+                .into_iter()
+                .filter_map(|(path, precision)| {
+                    corridor
+                        .project_path(&path, Some(target_func))
+                        .map(|path| (path, precision))
+                })
+                .collect();
+        }
         if options.filters.from.is_some() || options.filters.to.is_some() {
             extended_chains.retain(|(path, _)| {
                 let mut chain_names: Vec<String> =
@@ -799,6 +847,7 @@ struct OccurrenceHitPass<'a> {
     occurrence_scan_skipped_for_id_lookup: bool,
     partial_workspace: bool,
     large_syntax_scan: bool,
+    endpoint_corridor: Option<&'a ExactEndpointCorridor>,
 }
 
 struct OccurrenceChainResolution {
@@ -1252,6 +1301,7 @@ fn collect_occurrence_hits<'workspace>(
         occurrence_scan_skipped_for_id_lookup,
         partial_workspace,
         large_syntax_scan,
+        endpoint_corridor,
     } = options;
     // ----- 2. Non-decl hits: calls, assignments, strings, imports, args, decorators, refs.
     let mut hits: Vec<HitOut> = Vec::new();
@@ -1442,6 +1492,16 @@ fn collect_occurrence_hits<'workspace>(
                     .iter()
                     .map(|chain| (chain.funcs.clone(), chain.precision)),
             );
+        }
+        if let Some(corridor) = endpoint_corridor {
+            extended_chains_r = extended_chains_r
+                .into_iter()
+                .filter_map(|(path, precision)| {
+                    corridor
+                        .project_path(&path, containing_id)
+                        .map(|path| (path, precision))
+                })
+                .collect();
         }
         if filters.from.is_some() || filters.to.is_some() {
             // Filter enumerated paths, not the raw upstream chains:
@@ -2205,7 +2265,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         target_inspect_funcs.as_ref().map_or(0, Vec::len),
         target_inspect_workspace.is_some()
     );
-    let endpoint_funcs = if explicit_endpoint_graph_flow && partial_workspace {
+    let mut endpoint_funcs = if explicit_endpoint_graph_flow && partial_workspace {
         let candidate_files = initial_ws.vfs().all_files();
         let resolve = |query: &str| {
             if !is_regex {
@@ -2275,6 +2335,14 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     } else {
         initial_ws
     };
+    if explicit_endpoint_graph_flow && endpoint_funcs.is_none() {
+        let resolve = |query: &str| {
+            let matcher = Matcher::build(Some(query), is_regex).ok()?;
+            let funcs = bonsai_sdk::matching_func_ids(ws, &matcher);
+            (!funcs.is_empty()).then_some(funcs)
+        };
+        endpoint_funcs = filters.from.and_then(resolve).zip(filters.to.and_then(resolve));
+    }
     // A missing/stale partitioned callgraph is an acceleration miss, not a
     // reason to hydrate the complete resident graph. Compile the exact
     // uncapped source-reachable worklist and seed only this invocation's
@@ -2341,6 +2409,9 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     let query_graph = endpoint_fallback_graph
         .clone()
         .or_else(|| target_fallback_graph.clone());
+    let endpoint_corridor = endpoint_funcs
+        .as_ref()
+        .and_then(|(from, to)| ExactEndpointCorridor::new(from, to));
     if endpoint_workspace.is_some() || endpoint_fallback_graph.is_some() {
         // The compiler corridor already resolved both qualified endpoints to
         // exact FuncIds. Inspect's presentation matcher operates on short
@@ -2540,6 +2611,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             taint_flow,
             graph_flows_enabled,
             full_source_for_large_bodies,
+            endpoint_corridor: endpoint_corridor.as_ref(),
         },
         &mut taint_candidates,
     );
@@ -2560,6 +2632,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             occurrence_scan_skipped_for_id_lookup,
             partial_workspace,
             large_syntax_scan,
+            endpoint_corridor: endpoint_corridor.as_ref(),
         },
         &mut taint_candidates,
     );

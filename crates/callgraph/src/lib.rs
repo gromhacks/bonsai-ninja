@@ -1184,6 +1184,81 @@ impl ResolvedCallGraph {
         }
     }
 
+    /// Project this resolved graph to every edge lying on a directed path
+    /// from `starts` to `targets`.
+    ///
+    /// This is an exact graph projection, not path enumeration: reverse
+    /// reachability proves which nodes can reach a target, then forward
+    /// reachability admits only those nodes from the source set. Work is
+    /// linear in the selected graph and has no depth, path, or result cap.
+    #[must_use]
+    pub fn between(&self, starts: &[FuncId], targets: &[FuncId], max_precision: Option<Precision>) -> Self {
+        if starts.is_empty() || targets.is_empty() {
+            return Self::default();
+        }
+
+        let edge_allowed = |edge: &CallEdge| max_precision.is_none_or(|max| edge.precision <= max);
+        let mut can_reach_target = AHashSet::new();
+        let mut reverse = Vec::new();
+        for &target in targets {
+            if can_reach_target.insert(target) {
+                reverse.push(target);
+            }
+        }
+        while let Some(func) = reverse.pop() {
+            for edge in self.callers_of(func).filter(|edge| edge_allowed(edge)) {
+                if can_reach_target.insert(edge.from) {
+                    reverse.push(edge.from);
+                }
+            }
+        }
+
+        let mut included = AHashSet::new();
+        let mut forward = Vec::new();
+        for &start in starts {
+            if can_reach_target.contains(&start) && included.insert(start) {
+                forward.push(start);
+            }
+        }
+        while let Some(func) = forward.pop() {
+            for edge in self
+                .callees_of(func)
+                .filter(|edge| edge_allowed(edge) && can_reach_target.contains(&edge.to))
+            {
+                if included.insert(edge.to) {
+                    forward.push(edge.to);
+                }
+            }
+        }
+
+        let nodes = self
+            .nodes
+            .iter()
+            .filter(|node| included.contains(&node.func))
+            .cloned()
+            .collect();
+        let edges = self
+            .cg
+            .edges
+            .iter()
+            .filter(|edge| edge_allowed(edge) && included.contains(&edge.from) && included.contains(&edge.to))
+            .cloned()
+            .collect();
+        let local_bindings = self
+            .local_bindings
+            .iter()
+            .filter(|binding| included.contains(&binding.caller) && included.contains(&binding.target))
+            .cloned()
+            .collect();
+        let unresolved_workspace_sites = self
+            .unresolved_workspace_sites
+            .iter()
+            .filter(|site| included.contains(&site.caller))
+            .copied()
+            .collect();
+        Self::from_persisted_parts(nodes, edges, local_bindings, unresolved_workspace_sites)
+    }
+
     /// Build the workspace's resolved call graph from every decl's
     /// flow events. Single-pass: O(total flow events × candidates per call).
     ///

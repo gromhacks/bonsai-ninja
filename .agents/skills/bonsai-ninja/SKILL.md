@@ -228,7 +228,12 @@ file-local compiler-object view and does not build a callgraph or IDG.
 For standalone structural endpoint queries, use qualified `Owner.member`
 spellings when methods share a short name. `inspect --from Source.run --to
 Target.run` resolves the compiler identities as sets and keeps only the exact
-connected corridor. `dump-resolve --in-file` accepts and reports
+connected corridor. `trace <workspace> Owner.member` uses the same
+adapter-emitted qualified identity; use `path:name` or `path:line:name` when
+file/line disambiguation is needed. A declared `trace --from/--to` pair is
+projected to its complete graph corridor before symbolic interpretation; use
+that shape instead of a broad entry trace when the question already names a
+target. `dump-resolve --in-file` accepts and reports
 workspace-relative paths.
 
 ## Debug A Code-Intelligence Disagreement
@@ -286,6 +291,10 @@ Inventory the model when a finding or gap needs explanation:
 ./target/release/bonsai-ninja security <workspace> deps \
   --severity high --context 8k --no-color --no-progress
 ```
+
+Dependency evidence paths are complete and workspace-relative. Preserve the
+whole path when citing or filtering them; do not shorten nested monorepo paths
+to their final components.
 
 `security sanitizers` lists only matched rules that can make a
 credit-bearing sanitizer claim. Rulepack declarations that preserve taint or
