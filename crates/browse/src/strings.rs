@@ -1,6 +1,8 @@
 //! `bonsai-ninja strings` data layer.
 
-use crate::common::{file_path_matches_filter, format_span, make_name_filter, textual_relevance_key};
+use crate::common::{
+    file_path_matches_filter, format_span, make_name_filter, textual_relevance_key, workspace_file_id,
+};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 
@@ -129,14 +131,7 @@ fn cached_span_map(
 /// alongside table rows without re-implementing the logic.
 #[must_use]
 pub fn enclosing_fn_for_file_line(ws: &Workspace, file_path: &str, line: u32) -> Option<String> {
-    // Look up the file by path string. Linear scan is fine — we
-    // only call this once per browse-row's enclosing-fn check.
-    let file = ws.vfs().all_files().into_iter().find(|f| {
-        ws.vfs()
-            .path(*f)
-            .map(|p| p.display().to_string())
-            .is_ok_and(|p| p == file_path)
-    })?;
+    let file = workspace_file_id(ws, file_path)?;
     let index = ws.db().decl_index_uncached(file)?;
     enclosing_fn_for_index_line(ws, file, &index, line)
 }

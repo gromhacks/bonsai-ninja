@@ -1126,15 +1126,7 @@ pub(crate) fn page_info_to_json(info: &paging::PageInfo) -> serde_json::Value {
 /// Read a single 1-indexed line from a workspace file path, trimming
 /// trailing whitespace. Returns empty on any I/O or lookup failure.
 pub(crate) fn read_line(ws: &Workspace, file_path: &str, line: u32) -> String {
-    let path = std::path::Path::new(file_path);
-    let file_id = ws.vfs().lookup(path).or_else(|| {
-        ws.vfs().all_files().into_iter().find(|file| {
-            ws.vfs()
-                .path(*file)
-                .is_ok_and(|candidate| candidate.as_path() == path)
-        })
-    });
-    let Some(file_id) = file_id else {
+    let Some(file_id) = bonsai_sdk::workspace_file_id(ws, file_path) else {
         return String::new();
     };
     let Ok(snapshot) = ws.vfs().snapshot(file_id) else {

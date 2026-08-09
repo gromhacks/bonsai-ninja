@@ -22,6 +22,9 @@ The analyzer is one compiler-style pipeline:
   BFS name search, call-depth ceiling, iteration limit, or result cap.
 - Paging and diagnostic path previews can be bounded, but they report
   truncation and never change the semantic result.
+- Native JSON schema v7 emits portable workspace-relative code locations with
+  a single top-level `workspace_root`; the export cache version is coupled to
+  that wire contract.
 
 ## Current validation
 
@@ -89,6 +92,30 @@ Validated through 2026-08-08 (dated measurements below retain their run date):
   0.10 seconds at 20.2 MB maximum RSS; its default paged form reports all six
   pages instead of hiding the remaining output.
 
+- A Tokio `ecd621dd2c1a5205a84f579225e1454b62af211c` production-repository
+  trial exercised 790 Rust compiler objects (787 first-party and three
+  generated) with zero parser diagnostics. The exact route from
+  `tokio.runtime.runtime.spawn` through `spawn_named` to
+  `tokio.runtime.scheduler.spawn` is now resolved from Rust syntax facts:
+  qualified struct-field receiver types, enum-owned methods, rooted/scoped
+  imports, conditional item-macro declarations, and scoped calls. No executor
+  or Tokio API name appears in adapter/shared production logic. A fresh
+  ABI-v68 semantic generation completed in 5.85 seconds at about 189 MB RSS;
+  immediate reuse completed in 0.11 seconds at about 13.9 MB. Exact
+  call-site resolution and source-to-target tracing completed in 0.22/0.24
+  seconds, graph-flow inspection in 3.28 seconds, and production taint in
+  0.57 seconds with complete scope. Native schema-v7 export streamed 8,462
+  exact call edges in 1.15 seconds at about 169 MB RSS. A qualified endpoint
+  `inspect` flow can be reopened by its stable `F:` id, and every returned
+  location is a complete, copyable workspace-relative path. The same trial
+  exposed and pinned qualified endpoint-provenance replay, tuple/named field
+  receiver typing, and path-rendering regressions before release.
+  The unfiltered export honestly remained incomplete for 11 dynamic call
+  sites, 9,713 receiver-type gaps, and 10,248 unresolved call sites where Rust
+  source syntax does not expose enough receiver/type evidence. Those counters
+  are neither parser diagnostics nor semantic caps; the exact targeted route,
+  diagnostic scope, and production security scope were complete.
+
 - Commit `bdd6125` removes the Solidity frontend, grammar dependency,
   fixtures, rulepack, package metadata, and documentation after the product
   decision to keep one application/code-analysis model. The shipped registry
@@ -98,7 +125,7 @@ Validated through 2026-08-08 (dated measurements below retain their run date):
   1,386-case taint matrix, 33-case rulepack conformance suite, adapter metadata
   checks, and deep rulepack validation are green.
 
-- The `d510043` baseline and the current ABI-v64 candidate passed `cargo
+- The `d510043` baseline and the current ABI-v68 candidate passed `cargo
   clippy --workspace --all-targets --locked -- -D warnings`.
 - The baseline and current candidate passed full-workspace release rustdoc
   with private items and warnings denied.
@@ -166,7 +193,7 @@ Validated through 2026-08-08 (dated measurements below retain their run date):
   executed from a relocated temporary working directory so security-rule
   discovery is proven against the packaged layout rather than the source tree.
 - The release workflow's native CLI smoke was executed command-for-command on
-  the current binary. `index` and `diagnostics` remain intentional text-only
+  the current binary. `index` and `diagnostics` remain intentional JSON-only
   commands, while inspect/trace/export JSON, SARIF, and HTML outputs are parsed
   as their declared formats. Repository policy now rejects unsupported
   `--format`/`--all` combinations in that workflow, semantic gate timeouts, or
@@ -235,19 +262,37 @@ seconds with 35,110,912 bytes maximum RSS.
 ## Elasticsearch scale result
 
 The current release pipeline is measured against the sibling 30,055-source
-Elasticsearch checkout. The 2026-08-08 ABI-v64 exact warm-generation gate
-passed 5/5 in 231.33 seconds under a 3 GiB scheduling budget. Semantic
-generation readiness completed in 12.36 seconds and immediate fresh-process
-reuse in 2.37 seconds. Fresh-cache production taint completed in 29.77
-seconds, warm production taint in 28.34 seconds, default inspect in 7.09
-seconds, and exact raw-taint inspect in 26.91 seconds. Navigation timings were
-tree 0.03 seconds, search 4.10 seconds, definitions 15.31 seconds, imports
-7.64 seconds, classes 8.40 seconds, entrypoints 24.26 seconds, calls 3.43
-seconds, arguments 3.46 seconds, and scoped `read-file` 1.78 seconds. Source,
-sink, sanitizer, and dependency inventories completed in 3.46, 24.54, 18.16,
-and 9.83 seconds. Every enforced SLO passed; the gate completed exact work and
-did not cap files, graph depth, closure, or results. This is the current
-interactive-scale release reference.
+Elasticsearch checkout. The 2026-08-08 ABI-v68 exact cache-migration gate
+passed 5/5 in 1,822.56 seconds under a 3 GiB scheduling budget. Its required
+one-time compiler-object/IDG generation completed in 1,619.68 seconds and
+immediate fresh-process reuse in 2.35 seconds. Fresh-cache production taint
+completed in 29.51 seconds, warm production taint in 25.42 seconds, default
+inspect in 6.76 seconds, and exact raw-taint inspect in 24.20 seconds.
+Navigation timings were tree 0.03 seconds, search 3.90 seconds, definitions
+13.22 seconds, imports 6.77 seconds, classes 7.40 seconds, entrypoints 25.28
+seconds, calls 3.36 seconds, arguments 3.52 seconds, and scoped `read-file`
+1.71 seconds. Source, sink, sanitizer, and dependency inventories completed in
+3.55, 21.25, 15.94, and 8.63 seconds. The compiler worker remained near 1.04
+GiB RSS and exited before the IDG worker peaked near 2.67 GiB. Every enforced
+SLO passed; the gate completed exact work and did not cap files, graph depth,
+closure, or results. This is the current cache-migration and release reference.
+
+The final 2026-08-09 ABI-v68 warm release-candidate repeat passed 5/5 in
+219.44 seconds. Semantic readiness and immediate reuse completed in
+5.29/2.38 seconds, fresh-cache and warm production taint in 30.16/29.23
+seconds, and default/exact broad raw-taint inspect in 7.12/25.81 seconds.
+Navigation remained within SLO: tree 0.02 seconds, search 4.09, definitions
+12.65, imports 6.80, classes 7.29, entrypoints 25.93, calls 3.44, arguments
+3.42, and scoped `read-file` 1.28. Source, sink, sanitizer, and dependency
+inventories completed in 3.94, 22.95, 17.07, and 10.49 seconds. All five tests
+completed exact work without semantic caps or skipped files.
+
+The previous 2026-08-08 ABI-v64 exact warm-generation gate passed 5/5 in
+231.33 seconds under the same schedule. Semantic generation readiness
+completed in 12.36 seconds and immediate reuse in 2.37 seconds. Fresh-cache
+and warm production taint completed in 29.77/28.34 seconds, while default and
+exact raw-taint inspect completed in 7.09/26.91 seconds. It remains the
+pre-ABI-v68 warm comparison.
 
 The 2026-08-07 ABI-v64 exact cache-migration gate
 passed 5/5 in 1,883.15 seconds under a 3 GiB scheduling budget. Its required
@@ -264,7 +309,7 @@ enforced SLO passed. The compiler worker remained near 0.9 GiB RSS while
 rebuilding all exact objects and stayed within the 3 GiB scheduler budget.
 ABI-v64 binds callgraph and compatibility flow sidecars to the compiler
 frontend ABI, so adapter-fact changes cannot silently reuse an older derived
-graph. This is the current cache-migration and release reference.
+graph. This is the prior ABI-v64 cache-migration reference.
 
 The prior 2026-08-07 ABI-v63 exact large-workspace gate
 passed 5/5 in 1,945.09 seconds under a 3 GiB scheduling budget. Its required
@@ -448,8 +493,10 @@ and reports that omission. `--all` retains the complete propagation language
 in canonical `compiled_idg` form; `--full-propagations` materializes the much
 larger per-entry row product only when a downstream consumer explicitly needs
 it. Unfiltered workspace incompleteness remains an evidence boundary rather
-than resource saturation: dynamic calls, receiver-type gaps, and unresolved
-external implementations cannot be presented as resolved compiler facts.
+than resource saturation: ambiguous workspace candidates, dynamic calls, and
+receiver-type gaps cannot be presented as resolved compiler facts. A call for
+which the compiler finds no workspace candidate is an explicit external or
+unknown boundary, not a claim that workspace resolution was truncated.
 
 ## External benchmark snapshot
 

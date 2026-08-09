@@ -332,8 +332,8 @@ fn diagnostics_exits_clean_with_no_errors() {
     assert!(
         parsed["adapter_capabilities"]
             .as_array()
-            .is_some_and(|rows| rows.iter().any(|row| row["language"].as_str() == Some("python"))),
-        "diagnostics report must include adapter capabilities; got:\n{out}"
+            .is_some_and(|rows| { rows.len() == 1 && rows[0]["language"].as_str() == Some("python") }),
+        "diagnostics must include only workspace adapter capabilities; got:\n{out}"
     );
 }
 

@@ -618,3 +618,35 @@ fn frontend_only_remap_does_not_invent_cross_file_receiver_ancestry() {
     assert_eq!(receiver_types(&frontend), ["Child"]);
     assert_eq!(receiver_types(&semantic), ["Child", "Base"]);
 }
+
+#[test]
+fn receiver_ancestry_preserves_qualified_direct_type_identity() {
+    let body_file = FileId::new(44);
+    let mut body = decl(body_file, 0, "run");
+    body.flow_events.push(FlowEvent::Call {
+        span: Span::new(body_file, 10, 20),
+        name: "self.inner.spawn".to_string(),
+        receiver: Some("self.inner".to_string()),
+        receiver_types: vec!["scheduler.Handle".to_string()],
+        call_kind: bonsai_lang_api::CallKind::Method,
+        args: Vec::new(),
+    });
+    let local = DeclIndex {
+        file: body_file,
+        defs: vec![body],
+        ..DeclIndex::default()
+    };
+    let mut global = GlobalIndex::new();
+    global.insert_header_preprocessed(local.clone());
+    global.finalize_semantic_facts();
+
+    let semantic = global.remap_file_to_existing_symbols(local);
+    let FlowEvent::Call { receiver_types, .. } = &semantic.defs[0].flow_events[0] else {
+        panic!("expected call")
+    };
+    assert_eq!(
+        receiver_types,
+        &["scheduler.Handle"],
+        "ancestry enrichment may add actual bases but must not weaken a qualified direct type to its bare tail"
+    );
+}

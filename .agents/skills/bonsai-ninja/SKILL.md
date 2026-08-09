@@ -44,6 +44,12 @@ For scripts and structured inspection, normally add:
 --format json --no-color --no-progress
 ```
 
+JSON-only compiler reports (`index`, `diagnostics`, `dump-hir`, and
+`dump-cfg`) already emit JSON and intentionally have no `--format` switch;
+use only `--no-color --no-progress` with those commands. `diagnostics` reports
+capabilities only for adapters present in the workspace, so its payload stays
+proportional to the repository being inspected.
+
 Use `--output-path <file>` for large artifacts instead of shell redirection
 when the command supports it.
 Use `--html-output <file>` only when a human-readable standalone report is
@@ -233,8 +239,12 @@ adapter-emitted qualified identity; use `path:name` or `path:line:name` when
 file/line disambiguation is needed. A declared `trace --from/--to` pair is
 projected to its complete graph corridor before symbolic interpretation; use
 that shape instead of a broad entry trace when the question already names a
-target. `dump-resolve --in-file` accepts and reports
-workspace-relative paths.
+target. `dump-resolve --in-file` accepts and reports workspace-relative
+paths. Pass the exact adapter-lowered call spelling (for example
+`self.inner.spawn`) to join that syntax site to the canonical callgraph; add
+`--line` only when repeated spellings resolve differently. Compiler-qualified
+identities printed by `defs` can be passed directly to `dump-hir` and
+`dump-cfg`.
 
 ## Debug A Code-Intelligence Disagreement
 

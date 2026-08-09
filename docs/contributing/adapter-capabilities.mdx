@@ -147,8 +147,9 @@ registered adapter and writes generated docs/data to
 `build/capability-matrix.md` and `build/capability-matrix.json`. Those
 generated files are the machine-readable view; the table above is the
 review-oriented summary. `bonsai-ninja diagnostics <workspace>` and
-`Project::diagnostics_report()` expose the same registered adapter
-capability declarations that the engine consults. The test fails on every
+`Project::diagnostics_report()` expose the declarations for adapters present
+in the selected workspace; the generated matrix remains the complete registry
+view. The test fails on every
 applicable `Missing` cell; a language that genuinely lacks the construct must
 declare the fixture cell not applicable with a language-semantic rationale.
 This prevents a generated red cell from surviving a green CI run.

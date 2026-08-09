@@ -22,8 +22,34 @@ if [[ "${1:-}" == "--check" ]]; then
     MODE="check"
     shift
 fi
-OUT_DIR="${1:-/tmp/hardcoded-audit}"
-rm -rf "$OUT_DIR"
+if (( $# > 1 )); then
+    echo "usage: scripts/audit-hardcoded.sh [--check] [OUT_DIR]" >&2
+    exit 2
+fi
+
+OUT_DIR="$(python3 - "${1:-/tmp/hardcoded-audit}" <<'PY'
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+PY
+)"
+case "$OUT_DIR" in
+    "$ROOT_DIR"|"$ROOT_DIR"/*)
+        echo "refusing audit output inside the repository: $OUT_DIR" >&2
+        exit 2
+        ;;
+esac
+
+MARKER="$OUT_DIR/.bonsai-hardcoded-audit"
+if [[ -e "$OUT_DIR" && ! -f "$MARKER" ]]; then
+    echo "refusing to replace an unmarked directory: $OUT_DIR" >&2
+    exit 2
+fi
+mkdir -p "$OUT_DIR"
+: > "$MARKER"
+rm -rf "$OUT_DIR/stripped"
+rm -f "$OUT_DIR/violations.tsv"
 mkdir -p "$OUT_DIR/stripped"
 REPORT="$OUT_DIR/violations.tsv"
 : > "$REPORT"

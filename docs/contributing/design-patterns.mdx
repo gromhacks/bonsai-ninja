@@ -223,13 +223,15 @@ When the language has typed catch arms, the engine narrows by type:
 (`Exception`, `Throwable`, `Error`, `System.Exception`, `Object`) — those
 catch anything by spec and seed conservatively.
 
-## 10. Async / spawn isolation
+## 10. Async body visibility
 
-Detached futures don't poison the caller's continuation. When an adapter
-identifies a spawn body (Rust `tokio::spawn`, `std::thread::spawn`, etc.),
-the body events are wrapped in `FlowEvent::Defer` so the engine treats
-them as scope-local. The caller's post-spawn state continues from the
-pre-spawn state without absorbing whatever happened inside the body.
+Async bodies remain visible to flow analysis from their Tree-sitter syntax,
+independent of the executor or library that later polls them. The Rust adapter
+walks `async_block` and `.await` grammar nodes without classifying scheduler
+API names. Runtime-specific detachment is not inferred from a callee spelling;
+it requires a declared semantic summary before it may change continuation
+state. `FlowEvent::Defer` remains the shared representation only when the
+frontend can prove a deferred scope from language syntax.
 
 ## 11. Reflection and dynamic dispatch rewrites
 
@@ -251,8 +253,8 @@ The dividing line: language-specific shapes go in adapters; cross-language
 analysis goes in the engine.
 
 If a fact is reasoning about *what the source did syntactically* — `throw
-new IOException(...)` exposes the type; `tokio::spawn` opens a detached
-scope; `module_function :foo` exposes the surface — that's an adapter
+new IOException(...)` exposes the type; a Rust `async_block` exposes a future
+body; `module_function :foo` exposes the surface — that's an adapter
 post-process.
 
 If a fact is reasoning about *what the engine should do given the

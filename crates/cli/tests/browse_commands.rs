@@ -1069,6 +1069,14 @@ fn trace_source_to_sink_json_rebuilds_summary_after_sink_slice() {
     };
     let v: serde_json::Value = serde_json::from_str(&out).expect("trace JSON parses");
     let steps = v["steps"].as_array().expect("steps array");
+    assert!(
+        steps.iter().all(|step| {
+            !step["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("Call outside selected corridor"))
+        }),
+        "source-to-target trace must omit calls excluded by the exact corridor:\n{out}"
+    );
     let step_ids: std::collections::HashSet<u64> =
         steps.iter().filter_map(|step| step["id"].as_u64()).collect();
     assert_eq!(
@@ -1398,6 +1406,10 @@ fn html_output_is_standalone_themed_and_escapes_source() {
     assert!(html.starts_with("<!doctype html>"));
     assert!(html.contains("bonsai-ninja") && html.contains("Moss theme"));
     assert!(html.contains("&lt;unsafe&gt;&amp;value"));
+    assert!(
+        !html.contains(&workspace.display().to_string()),
+        "HTML code locations must be portable and workspace-relative"
+    );
     assert!(html.ends_with("</body></html>\n"));
 
     let _ = std::fs::remove_dir_all(workspace);
@@ -3775,6 +3787,14 @@ fn dump_callgraph_counts_semantic_workspace_edges_only() {
     };
     let rows: serde_json::Value = serde_json::from_str(&out).expect("dump-callgraph JSON");
     let rows = rows.as_array().expect("dump-callgraph rows");
+    assert!(
+        rows.iter().all(|row| {
+            row["file"]
+                .as_str()
+                .is_some_and(|file| !std::path::Path::new(file).is_absolute())
+        }),
+        "dump-callgraph locations must be copyable workspace-relative paths: {out}"
+    );
     let row = |name: &str| {
         rows.iter()
             .find(|row| row["function"].as_str() == Some(name))
@@ -5977,6 +5997,62 @@ fn show_flow_id_reopens_inspect_drilldown() {
 }
 
 #[test]
+fn show_flow_id_restores_endpoint_scoped_inspect_provenance() {
+    let ws = tempdir_for_test("bonsai_show_endpoint_flow");
+    write_tiny_python_workspace(&ws);
+    let Some(full) = run_inspect_graph(&ws, &["--from", "app.handle", "--to", "app.sink"]) else {
+        return;
+    };
+    let ids = extract_flow_ids(&full);
+    let Some(target) = ids.first() else {
+        panic!("endpoint-scoped inspect should emit at least one F: id:\n{full}");
+    };
+    let Some(out) = run(&[
+        "show",
+        ws.to_str().unwrap(),
+        target,
+        "--compact",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let report: serde_json::Value = serde_json::from_str(out.trim()).expect("show JSON");
+    assert!(
+        json_tree_contains_id_field(&report, "flow_id", "F:"),
+        "show must restore the exact from/to query that emitted the id:\n{out}"
+    );
+    assert!(
+        out.contains(target),
+        "show must return the requested endpoint-scoped flow id:\n{out}"
+    );
+}
+
+#[test]
+fn inspect_flow_locations_are_complete_workspace_relative_paths() {
+    let ws = tempdir_for_test("bonsai_inspect_relative_flow_paths");
+    let nested = ws.join("package/src/runtime/scheduler");
+    std::fs::create_dir_all(&nested).expect("create nested fixture");
+    std::fs::write(
+        nested.join("mod.py"),
+        "def sink(value):\n    return value\n\ndef handle(value):\n    return sink(value)\n",
+    )
+    .expect("write nested fixture");
+
+    let Some(out) = run_inspect_graph(&ws, &["--from", "handle", "--to", "sink", "--all"]) else {
+        return;
+    };
+    assert!(
+        out.contains("[module] package/src/runtime/scheduler/mod.py"),
+        "flow bodies must print a copyable workspace-relative path, not a last-three-components abbreviation:\n{out}"
+    );
+    assert!(
+        !out.contains(&ws.display().to_string()),
+        "flow output must not leak the temporary absolute workspace path:\n{out}"
+    );
+}
+
+#[test]
 fn show_rejects_malformed_stable_id_before_opening_analysis_backends() {
     let Some(bin) = bin_path() else {
         return;
@@ -7275,6 +7351,97 @@ fn dump_resolve_in_file_uses_semantic_context() {
             .is_some_and(Vec::is_empty),
         "complete resolve should not carry incomplete reasons:\n{out}"
     );
+}
+
+#[test]
+fn dump_resolve_exact_receiver_call_uses_adapter_type_evidence_on_a_cold_workspace() {
+    let root = tempdir_for_test("dump-resolve-exact-receiver");
+    std::fs::write(
+        root.join("runtime.rs"),
+        r#"pub struct Scheduler;
+impl Scheduler {
+    pub fn spawn(&self) {}
+}
+
+pub struct Handle {
+    inner: Scheduler,
+}
+impl Handle {
+    pub fn spawn(&self) {}
+    pub fn route(&self) {
+        self.inner.spawn();
+    }
+}
+"#,
+    )
+    .expect("write runtime.rs");
+
+    let Some(out) = run(&[
+        "dump-resolve",
+        root.to_str().unwrap(),
+        "self.inner.spawn",
+        "--in-file",
+        "runtime.rs",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(out.trim()).expect("dump-resolve JSON must parse");
+    assert_eq!(parsed["resolution_scope"], "exact-call-site", "{out}");
+    assert_eq!(parsed["matched_call_sites"], 1, "{out}");
+    assert_eq!(parsed["analysis_complete"], true, "{out}");
+    assert_eq!(parsed["outcome"], "narrowed", "{out}");
+    let candidates = parsed["candidates"].as_array().expect("candidate array");
+    assert_eq!(candidates.len(), 1, "{out}");
+    assert_eq!(
+        candidates[0]["line"], 3,
+        "field receiver type must select Scheduler::spawn, not Handle::spawn:\n{out}"
+    );
+    assert!(
+        !root.join(".bonsai").exists(),
+        "a cold targeted resolver query must not write cache state into the scanned tree"
+    );
+}
+
+#[test]
+fn compiler_qualified_identity_round_trips_from_defs_to_hir_and_cfg() {
+    let root = tempdir_for_test("qualified-dump-round-trip");
+    std::fs::write(root.join("a.rs"), "pub fn helper() { let x = 1; }\n").expect("write a.rs");
+    std::fs::write(root.join("b.rs"), "pub fn helper() { let y = 2; }\n").expect("write b.rs");
+
+    let Some(defs) = run(&[
+        "defs",
+        root.to_str().unwrap(),
+        "--name",
+        "helper",
+        "--all",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let rows: serde_json::Value = serde_json::from_str(defs.trim()).expect("defs JSON");
+    let qualified = rows
+        .as_array()
+        .expect("defs array")
+        .iter()
+        .find(|row| row["file"] == "a.rs")
+        .and_then(|row| row["qualified_name"].as_str())
+        .expect("qualified identity printed by defs")
+        .to_string();
+
+    let Some(hir) = run(&["dump-hir", root.to_str().unwrap(), &qualified]) else {
+        return;
+    };
+    let hir: serde_json::Value = serde_json::from_str(hir.trim()).expect("HIR JSON");
+    assert_eq!(hir["qualified_name"], qualified, "defs identity must reopen HIR");
+
+    let Some(cfg) = run(&["dump-cfg", root.to_str().unwrap(), &qualified]) else {
+        return;
+    };
+    let cfg: serde_json::Value = serde_json::from_str(cfg.trim()).expect("CFG JSON");
+    assert_eq!(cfg["function"], "helper", "defs identity must reopen CFG");
 }
 
 #[test]

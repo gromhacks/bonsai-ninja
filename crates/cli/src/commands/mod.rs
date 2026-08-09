@@ -464,19 +464,7 @@ fn counted_usize(value: usize, singular: &str, plural: &str) -> String {
 /// Render a span as `(path, line, column)`. Used by every browse /
 /// inspect / dump renderer that needs a printable location.
 pub(crate) fn format_span(span: &bonsai_common::Span, ws: &Workspace) -> (String, u32, u32) {
-    let path = ws
-        .vfs()
-        .path(span.file)
-        .map_or_else(|_| "<unknown>".to_string(), |p| p.display().to_string());
-    let snapshot = ws.vfs().snapshot(span.file).ok();
-    let (line, col) = if let Some(s) = snapshot {
-        let map = bonsai_common::cached_span_map_arc(span.file, s.version, &s.text);
-        let lc = map.line_col(span.start);
-        (lc.line, lc.column)
-    } else {
-        (0, 0)
-    };
-    (path, line, col)
+    bonsai_sdk::format_span(span, ws)
 }
 
 #[cfg(test)]

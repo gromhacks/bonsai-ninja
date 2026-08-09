@@ -22,6 +22,21 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+// v34 (2026-08-08): qualified receiver-less calls cannot fall back to an
+// unrelated bare terminal name, and same-signature declaration families use
+// callable shape rather than parameter spelling.
+// v33 (2026-08-08): Rust namespace/type path calls no longer carry a false
+// instance receiver, and visible import facades participate in type lookup;
+// rebuild graphs so associated functions, module calls, re-exports, and
+// external paths use qualified compiler resolution.
+// v32 (2026-08-08): streamed receiver-ancestry enrichment preserves exact
+// qualified direct types instead of appending a weaker bare tail; rebuild
+// graphs that could prefer a same-named local type after body replay.
+// v31 (2026-08-08): nested type lookups through imported members constrain
+// fallback resolution to the complete member namespace, and enum methods are
+// class-like dispatch targets. A qualified receiver such as
+// `scheduler::Handle` can no longer bind a same-named type in a sibling
+// module.
 // v30 (2026-08-07): metadata binds the callgraph to the exact compiler
 // frontend ABI. Adapter-lowered call/callable facts can no longer change while
 // an older graph remains reusable under the same source snapshot.
@@ -76,7 +91,7 @@ use std::sync::Arc;
 // v13 (2026-07-18): metadata and graph payloads are independent factstore
 // entries, so freshness checks do not recursively decode millions of edges.
 // v12 (2026-07-16): MessagePack replaced the retired binary codec.
-pub const CALLGRAPH_CACHE_VERSION: u32 = 30;
+pub const CALLGRAPH_CACHE_VERSION: u32 = 34;
 
 const CALLGRAPH_TABLE_ID: u32 = 102;
 const METADATA_KEY: u64 = 0;

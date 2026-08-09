@@ -117,6 +117,11 @@ fn facade_indexes_and_exposes_workspace_basics() {
         .adapter_capabilities
         .iter()
         .any(|row| row.language == "python" && !row.file_extensions.is_empty()));
+    assert_eq!(
+        diagnostics.adapter_capabilities.len(),
+        1,
+        "a Python-only workspace must not pay to serialize unrelated adapter capabilities"
+    );
     assert!(project.rulepack().is_some());
     assert!(project.rulepack_root().is_some());
     let stats = project.cache().stats().expect("cache stats after index");

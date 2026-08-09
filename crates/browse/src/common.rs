@@ -145,6 +145,36 @@ pub fn workspace_relative_path(ws: &Workspace, path: &str) -> String {
     bonsai_common::workspace_relative_filter_path(ws.db().workspace_root().as_deref(), path)
 }
 
+/// Resolve either a workspace-relative rendered location or an explicit
+/// absolute path back to its immutable compiler file identity.
+///
+/// Renderers must not depend on absolute host paths, while source hydration
+/// must still join a displayed location to the VFS without basename guessing.
+#[must_use]
+pub fn workspace_file_id(ws: &Workspace, path: &str) -> Option<bonsai_common::FileId> {
+    let requested = std::path::Path::new(path);
+    if let Some(file) = ws.vfs().lookup(requested) {
+        return Some(file);
+    }
+    if !requested.is_absolute() {
+        if let Some(root) = ws.db().workspace_root().as_deref() {
+            if let Some(file) = ws.vfs().lookup(&root.join(requested)) {
+                return Some(file);
+            }
+        }
+    }
+    let requested = bonsai_common::normalize_path_for_filter(path);
+    ws.vfs().all_files().into_iter().find(|file| {
+        ws.vfs().path(*file).ok().is_some_and(|candidate| {
+            let candidate = candidate.to_string_lossy();
+            let absolute = bonsai_common::normalize_path_for_filter(&candidate);
+            absolute == requested
+                || workspace_relative_path(ws, &candidate)
+                    == bonsai_common::workspace_relative_filter_path(None, &requested)
+        })
+    })
+}
+
 /// Query relevance key for browse rows. Lower is better.
 ///
 /// Regex filters keep the pre-existing deterministic sort because a
@@ -347,6 +377,11 @@ pub fn format_span(span: &Span, ws: &Workspace) -> (String, u32, u32) {
         .vfs()
         .path(span.file)
         .map_or_else(|_| "<unknown>".to_string(), |p| p.display().to_string());
+    let path = if path == "<unknown>" {
+        path
+    } else {
+        workspace_relative_path(ws, &path)
+    };
     let snapshot = ws.vfs().snapshot(span.file).ok();
     let (line, column) = if let Some(snap) = snapshot {
         // Share the line index across calls for the same immutable snapshot.

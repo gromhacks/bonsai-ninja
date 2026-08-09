@@ -143,6 +143,33 @@ pub(crate) enum FactKindFilter {
 }
 
 impl FactKindFilter {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Decl => "decl",
+            Self::Call => "call",
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Arg => "arg",
+            Self::StringLit => "string",
+            Self::Import => "import",
+            Self::Class => "class",
+        }
+    }
+
+    pub(crate) fn from_stable_name(value: &str) -> Option<Self> {
+        match value {
+            "decl" => Some(Self::Decl),
+            "call" => Some(Self::Call),
+            "read" => Some(Self::Read),
+            "write" => Some(Self::Write),
+            "arg" => Some(Self::Arg),
+            "string" => Some(Self::StringLit),
+            "import" => Some(Self::Import),
+            "class" => Some(Self::Class),
+            _ => None,
+        }
+    }
+
     /// Map the clap-facing CLI variant to the SDK-level
     /// [`bonsai_sdk::FactKindFilter`]. Same shape, but the SDK
     /// type stays free of clap so the engine crate doesn't pull in
@@ -628,15 +655,17 @@ pub(crate) enum Cmd {
                       declarations. Flags adapter-level extraction issues \
                       (unsupported construct per language, tree-sitter parse \
                       errors, unresolved imports) and capability gaps before \
-                      they silently degrade inspect / taint output. Exits 0 \
+                      they silently degrade inspect / taint output. The report \
+                      is always JSON, matching the other compiler-only dumps; \
+                      there is no redundant --format switch. Exits 0 \
                       even when warnings are present — CI pipelines can still \
                       gate on specific fields."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Run every adapter's diagnostic pass\n  \
                       $ bonsai-ninja diagnostics ./src\n  \
                       \n  \
-                      # Grep for unsupported-construct warnings\n  \
-                      $ bonsai-ninja diagnostics ./src | grep -i unsupported")
+                      # Query the JSON report in automation\n  \
+                      $ bonsai-ninja diagnostics ./src --no-progress | jq '.diagnostics'")
     )]
     Diagnostics {
         /// Workspace root to analyze.
@@ -656,7 +685,9 @@ pub(crate) enum Cmd {
                       pipeline — when HIR is empty, every downstream layer \
                       (CFG, call graph, taint) will also be missing it.\n\
                       \n\
-                      Bare symbols must identify exactly one callable. When \
+                      Compiler-qualified identities printed by `defs` are \
+                      accepted directly. Bare symbols must identify exactly \
+                      one callable. When \
                       multiple files define the same name, pass \
                       `path:name` or `path:line:name` from the ambiguity \
                       candidate list.\n\
@@ -682,9 +713,9 @@ pub(crate) enum Cmd {
         workspace: PathBuf,
         /// Positional symbol to dump (alternative to `--symbol`).
         symbol_pos: Option<String>,
-        /// Function name to dump. Use `path:name` or `path:line:name`
-        /// when a bare name is ambiguous. The positional symbol takes
-        /// precedence when both are set.
+        /// Function name or compiler-qualified identity to dump. Use
+        /// `path:name` or `path:line:name` when a bare name is ambiguous.
+        /// The positional symbol takes precedence when both are set.
         #[arg(long)]
         symbol: Option<String>,
     },
@@ -702,7 +733,9 @@ pub(crate) enum Cmd {
                       adapter extracted, CFG tells you how they were \
                       linearized into blocks.\n\
                       \n\
-                      Bare symbols must identify exactly one callable. When \
+                      Compiler-qualified identities printed by `defs` are \
+                      accepted directly. Bare symbols must identify exactly \
+                      one callable. When \
                       multiple files define the same name, pass \
                       `path:name` or `path:line:name` from the ambiguity \
                       candidate list.\n\
@@ -728,9 +761,9 @@ pub(crate) enum Cmd {
         workspace: PathBuf,
         /// Positional symbol to dump (alternative to `--symbol`).
         symbol_pos: Option<String>,
-        /// Function name to dump. Use `path:name` or `path:line:name`
-        /// when a bare name is ambiguous. The positional symbol takes
-        /// precedence when both are set.
+        /// Function name or compiler-qualified identity to dump. Use
+        /// `path:name` or `path:line:name` when a bare name is ambiguous.
+        /// The positional symbol takes precedence when both are set.
         #[arg(long)]
         symbol: Option<String>,
     },
@@ -1003,16 +1036,19 @@ pub(crate) enum Cmd {
                       changes. Scripts can pin a specific resolution decision \
                       across runs for regression testing.\n\
                       \n\
-                      Zero candidates is a *valid* outcome (the name escapes \
-                      the workspace — external, FFI, dynamic). The command \
-                      still exits non-zero with did-you-mean suggestions so \
-                      scripts can detect surprise failures."),
+                      An exact call site with no in-workspace target is a \
+                      valid `external` outcome and exits successfully. A \
+                      genuinely unresolved lookup exits non-zero with \
+                      did-you-mean suggestions so scripts can detect surprise \
+                      failures."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Trace a single name (global lookup, no file context)\n  \
                       $ bonsai-ninja dump-resolve ./src run_admin_command\n  \
                       \n  \
                       # With a file context so the alias map is applied\n  \
                       $ bonsai-ninja dump-resolve ./src z --in-file gateway.py\n  \
+                      # Resolve one exact adapter-lowered call site\n  \
+                      $ bonsai-ninja dump-resolve ./src self.inner.spawn --in-file runtime.rs\n  \
                       \n  \
                       # Compact — one line per candidate\n  \
                       $ bonsai-ninja dump-resolve ./src execute --compact\n  \
@@ -1035,6 +1071,10 @@ pub(crate) enum Cmd {
         /// or top-level reference would resolve.
         #[arg(long = "in-file")]
         in_file: Option<String>,
+        /// Optional one-based call-site line used only when equal call
+        /// spellings in the selected file resolve to different targets.
+        #[arg(long, requires = "in_file")]
+        line: Option<u32>,
         /// Drop per-stage detail and emit one line per candidate
         /// (`R:id  name  location`). Same data, shorter render —
         /// mirrors `inspect --compact`.
@@ -1056,8 +1096,7 @@ pub(crate) enum Cmd {
     /// dump every resulting cross-function propagation.
     #[command(
         display_order = 36,
-        long_about = themed_subcommand_long_about("Run the full taint pipeline (intraprocedural CFG + \
-                      interprocedural call-graph propagation) for the requested \
+        long_about = themed_subcommand_long_about("Run the production sparse-IDG fixed-point taint pipeline for the requested \
                       `--source`. Provide `--seed` to override entry taint, or \
                       omit it to infer source parameters and local assignment targets. \
                       Emits one record per cross-function propagation: which \

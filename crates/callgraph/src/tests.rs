@@ -191,6 +191,38 @@ fn with_params_and_types(mut decl: Decl, params: &[(&str, &str)]) -> Decl {
 }
 
 #[test]
+fn same_signature_family_uses_parameter_types_not_parameter_spelling() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            with_params_and_types(decl(file, 0, "work", Vec::new()), &[("value", "Input")]),
+            with_params_and_types(decl(file, 1, "work", Vec::new()), &[("_value", "Input")]),
+            with_params_and_types(decl(file, 2, "work", Vec::new()), &[("value", "Other")]),
+        ],
+    );
+    let candidates = global
+        .find_by_name("work")
+        .iter()
+        .copied()
+        .map(|symbol| FuncId::new(symbol.raw()))
+        .collect::<Vec<_>>();
+
+    assert!(candidate_set_is_same_decl_family(
+        &global,
+        &candidates[..2],
+        CallableDeclarationFamily::SameSignature,
+    ));
+    assert!(!candidate_set_is_same_decl_family(
+        &global,
+        &[candidates[0], candidates[2]],
+        CallableDeclarationFamily::SameSignature,
+    ));
+}
+
+#[test]
 fn broad_actual_type_does_not_prove_specific_dispatch_type() {
     let universal = &["Object"];
     assert_eq!(type_name_match_score("Service", "Object", universal), Some(1));
@@ -3114,6 +3146,473 @@ fn typed_local_receiver_chain_does_not_fall_back_to_module_path() {
 }
 
 #[test]
+fn qualified_receiver_type_does_not_dispatch_to_same_named_local_type() {
+    let caller_file = FileId::new(1);
+    let scheduler_file = FileId::new(2);
+    let mut global = GlobalIndex::new();
+
+    let mut local_handle = with_module_path(
+        decl_with(caller_file, 2, "Handle", DeclKind::Struct, None, Vec::new()),
+        &["tokio", "runtime", "handle"],
+    );
+    local_handle.qualified_name = Some("tokio.runtime.handle.Handle".to_string());
+    let mut local_spawn = with_module_path(
+        with_params(
+            decl_with(caller_file, 0, "spawn", DeclKind::Method, Some(2), Vec::new()),
+            &["self"],
+        ),
+        &["tokio", "runtime", "handle"],
+    );
+    local_spawn.receiver_param_index = Some(0);
+    local_spawn.qualified_name = Some("tokio.runtime.handle.spawn".to_string());
+    let mut entry = with_module_path(
+        with_params(
+            decl_with(
+                caller_file,
+                1,
+                "spawn_named",
+                DeclKind::Method,
+                Some(2),
+                vec![method_call(
+                    caller_file,
+                    "self.inner.spawn",
+                    "self.inner",
+                    &["scheduler.Handle"],
+                )],
+            ),
+            &["self"],
+        ),
+        &["tokio", "runtime", "handle"],
+    );
+    entry.receiver_param_index = Some(0);
+    entry.type_aliases = vec![bonsai_lang_api::TypeAliasBinding {
+        name: "self.inner".to_string(),
+        type_name: "scheduler.Handle".to_string(),
+    }];
+    insert_file(&mut global, caller_file, vec![local_spawn, entry, local_handle]);
+
+    let mut scheduler_handle = with_module_path(
+        decl_with(scheduler_file, 1, "Handle", DeclKind::Enum, None, Vec::new()),
+        &["tokio", "runtime", "scheduler"],
+    );
+    scheduler_handle.qualified_name = Some("tokio.runtime.scheduler.Handle".to_string());
+    let mut scheduler_spawn = with_module_path(
+        with_params(
+            decl_with(scheduler_file, 0, "spawn", DeclKind::Method, Some(1), Vec::new()),
+            &["self"],
+        ),
+        &["tokio", "runtime", "scheduler"],
+    );
+    scheduler_spawn.receiver_param_index = Some(0);
+    scheduler_spawn.qualified_name = Some("tokio.runtime.scheduler.spawn".to_string());
+    insert_file(
+        &mut global,
+        scheduler_file,
+        vec![scheduler_spawn, scheduler_handle],
+    );
+
+    let caller_body = global.file_index(caller_file).expect("caller body").clone();
+    let scheduler_body = global.file_index(scheduler_file).expect("scheduler body").clone();
+    let mut headers = GlobalIndex::new();
+    headers.insert_header_preprocessed(caller_body.clone());
+    headers.insert_header_preprocessed(scheduler_body.clone());
+    headers.finalize_semantic_facts();
+    let remapped_caller_body = headers.remap_file_to_existing_symbols(caller_body.clone());
+    let remapped_entry = remapped_caller_body
+        .defs
+        .iter()
+        .find(|decl| decl.name == "spawn_named")
+        .expect("remapped spawn_named");
+    let FlowEvent::Call {
+        name,
+        receiver,
+        receiver_types,
+        call_kind,
+        span,
+        ..
+    } = remapped_entry.flow_events.first().expect("spawn call")
+    else {
+        panic!("expected spawn call")
+    };
+    let alias_targets = AHashMap::from_iter([(
+        "scheduler".to_string(),
+        AliasTarget::Member {
+            module: "crate::runtime".to_string(),
+            member: "scheduler".to_string(),
+        },
+    )]);
+    let mut method_cache =
+        MethodCandidateCache::with_peer_class_index(build_shared_peer_class_index(&headers));
+    let direct_targets = collect_receiver_method_targets(
+        &headers,
+        remapped_entry,
+        &alias_targets,
+        &|_| None,
+        receiver.as_deref(),
+        receiver_types,
+        *call_kind,
+        name,
+        *span,
+        &[],
+        bonsai_lang_api::ModulePathSyntax {
+            rooted_prefixes: &["crate::", "self::"],
+            repeatable_rooted_prefixes: &["super::"],
+        },
+        &mut method_cache,
+    );
+    let graph = ResolvedCallGraph::build_with_file_semantics_streaming(
+        &headers,
+        CallGraphFileSemantics::new(
+            |_| AHashMap::new(),
+            |file| {
+                if file == caller_file {
+                    AHashMap::from_iter([(
+                        "scheduler".to_string(),
+                        AliasTarget::Member {
+                            module: "crate::runtime".to_string(),
+                            member: "scheduler".to_string(),
+                        },
+                    )])
+                } else {
+                    AHashMap::new()
+                }
+            },
+            |_| None,
+            |_| Some("rust"),
+            |_| LanguageCapabilities {
+                module_path_syntax: bonsai_lang_api::ModulePathSyntax {
+                    rooted_prefixes: &["crate::", "self::"],
+                    repeatable_rooted_prefixes: &["super::"],
+                },
+                ..LanguageCapabilities::unsupported()
+            },
+        ),
+        |file| match file {
+            file if file == caller_file => Some(headers.remap_file_to_existing_symbols(caller_body.clone())),
+            file if file == scheduler_file => {
+                Some(headers.remap_file_to_existing_symbols(scheduler_body.clone()))
+            }
+            _ => None,
+        },
+    );
+    let entry = FuncId::new(headers.find_by_name("spawn_named")[0].raw());
+    let local_spawn = headers
+        .find_by_name("spawn")
+        .iter()
+        .copied()
+        .find(|symbol| headers.declaring_file(*symbol) == Some(caller_file))
+        .map(|symbol| FuncId::new(symbol.raw()))
+        .expect("local Handle::spawn");
+    let scheduler_spawn = headers
+        .find_by_name("spawn")
+        .iter()
+        .copied()
+        .find(|symbol| headers.declaring_file(*symbol) == Some(scheduler_file))
+        .map(|symbol| FuncId::new(symbol.raw()))
+        .expect("scheduler Handle::spawn");
+    let targets = graph.callees_of(entry).map(|edge| edge.to).collect::<Vec<_>>();
+
+    assert_eq!(direct_targets, vec![scheduler_spawn]);
+    assert_eq!(targets, vec![scheduler_spawn]);
+    assert!(!targets.contains(&local_spawn));
+}
+
+#[test]
+fn qualified_associated_call_accepts_ast_declared_constructor_target() {
+    let caller_file = FileId::new(10);
+    let type_file = FileId::new(11);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        caller_file,
+        vec![with_module_path(
+            decl(
+                caller_file,
+                0,
+                "spawn",
+                vec![FlowEvent::Call {
+                    span: Span::new(caller_file, 10, 20),
+                    name: "SpawnMeta::new_unnamed".to_string(),
+                    receiver: None,
+                    receiver_types: Vec::new(),
+                    call_kind: CallKind::Function,
+                    args: call_args(caller_file, &["size"]),
+                }],
+            ),
+            &["tokio", "runtime"],
+        )],
+    );
+    let mut spawn_meta = with_module_path(
+        decl_with(type_file, 0, "SpawnMeta", DeclKind::Struct, None, Vec::new()),
+        &["tokio", "util", "trace"],
+    );
+    spawn_meta.qualified_name = Some("tokio.util.trace.SpawnMeta".to_string());
+    let mut constructor = with_params(
+        with_module_path(
+            decl_with(
+                type_file,
+                1,
+                "new_unnamed",
+                DeclKind::Constructor,
+                Some(0),
+                Vec::new(),
+            ),
+            &["tokio", "util", "trace"],
+        ),
+        &["original_size"],
+    );
+    constructor.qualified_name = Some("tokio.util.trace.new_unnamed".to_string());
+    insert_file(&mut global, type_file, vec![spawn_meta, constructor]);
+
+    let graph = ResolvedCallGraph::build_with_file_semantics(
+        &global,
+        CallGraphFileSemantics::new(
+            |_| AHashMap::new(),
+            |file| {
+                if file == caller_file {
+                    AHashMap::from_iter([(
+                        "SpawnMeta".to_string(),
+                        AliasTarget::Namespace {
+                            module: "crate::util::trace::SpawnMeta".to_string(),
+                        },
+                    )])
+                } else {
+                    AHashMap::new()
+                }
+            },
+            |_| None,
+            |_| Some("rust"),
+            |_| LanguageCapabilities {
+                module_path_syntax: bonsai_lang_api::ModulePathSyntax {
+                    rooted_prefixes: &["crate::", "self::"],
+                    repeatable_rooted_prefixes: &["super::"],
+                },
+                ..LanguageCapabilities::unsupported()
+            },
+        ),
+    );
+    let caller = FuncId::new(global.find_by_name("spawn")[0].raw());
+    let constructor = FuncId::new(global.find_by_name("new_unnamed")[0].raw());
+
+    assert_eq!(
+        graph.callees_of(caller).map(|edge| edge.to).collect::<Vec<_>>(),
+        [constructor]
+    );
+}
+
+#[test]
+fn rooted_associated_function_call_resolves_method_declaration_without_receiver() {
+    let caller_file = FileId::new(14);
+    let type_file = FileId::new(15);
+    let export_file = FileId::new(16);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        caller_file,
+        vec![with_module_path(
+            decl(
+                caller_file,
+                0,
+                "spawn_named",
+                vec![FlowEvent::Call {
+                    span: Span::new(caller_file, 10, 20),
+                    name: "crate::runtime::task::Id::next".to_string(),
+                    receiver: None,
+                    receiver_types: Vec::new(),
+                    call_kind: CallKind::Function,
+                    args: Vec::new(),
+                }],
+            ),
+            &["tokio", "runtime", "handle"],
+        )],
+    );
+    let mut id = with_module_path(
+        decl_with(type_file, 0, "Id", DeclKind::Struct, None, Vec::new()),
+        &["tokio", "runtime", "task", "id"],
+    );
+    id.qualified_name = Some("tokio.runtime.task.id.Id".to_string());
+    let mut next = with_module_path(
+        decl_with(type_file, 1, "next", DeclKind::Method, Some(0), Vec::new()),
+        &["tokio", "runtime", "task", "id"],
+    );
+    next.qualified_name = Some("tokio.runtime.task.id.next".to_string());
+    insert_file(&mut global, type_file, vec![id, next]);
+    let mut exported_id = with_module_path(
+        decl_with(export_file, 0, "Id", DeclKind::Import, None, Vec::new()),
+        &["tokio", "runtime", "task"],
+    );
+    exported_id.qualified_name = Some("tokio.runtime.task.Id".to_string());
+    exported_id.visibility = bonsai_lang_api::Visibility::Crate;
+    exported_id.bases = vec!["id::Id".to_string()];
+    insert_file(&mut global, export_file, vec![exported_id]);
+
+    let caller_decl = global
+        .file_index(caller_file)
+        .and_then(|index| index.defs.iter().find(|decl| decl.name == "spawn_named"))
+        .expect("caller decl");
+    let module_syntax = bonsai_lang_api::ModulePathSyntax {
+        rooted_prefixes: &["crate::", "self::"],
+        repeatable_rooted_prefixes: &["super::"],
+    };
+    let resolve_context = bonsai_resolve::ResolveContext::new(caller_file, &caller_decl.module_path)
+        .with_module_path_syntax(module_syntax);
+    let exported_classes =
+        bonsai_resolve::resolve_class(&global, "crate::runtime::task::Id", &resolve_context);
+    let exported_id = global
+        .find_by_name("Id")
+        .iter()
+        .copied()
+        .find(|symbol| global.declaring_file(*symbol) == Some(export_file))
+        .expect("export facade symbol");
+    assert_eq!(exported_classes, [exported_id]);
+
+    let mut method_cache = MethodCandidateCache::default();
+    let direct_targets = collect_type_qualified_method_targets(
+        &global,
+        caller_decl,
+        &AHashMap::new(),
+        &|_| None,
+        "crate::runtime::task::Id::next",
+        module_syntax,
+        &mut method_cache,
+    );
+    let next_target = FuncId::new(global.find_by_name("next")[0].raw());
+    assert_eq!(direct_targets, [next_target]);
+
+    let graph = build_graph_with_capabilities(
+        &global,
+        |_| Some("rust"),
+        |_| LanguageCapabilities {
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax {
+                rooted_prefixes: &["crate::", "self::"],
+                repeatable_rooted_prefixes: &["super::"],
+            },
+            ..LanguageCapabilities::unsupported()
+        },
+    );
+    let caller = FuncId::new(global.find_by_name("spawn_named")[0].raw());
+    let next = next_target;
+
+    assert_eq!(
+        graph.callees_of(caller).map(|edge| edge.to).collect::<Vec<_>>(),
+        [next]
+    );
+}
+
+#[test]
+fn rust_conditional_same_signature_declarations_form_one_semantic_family() {
+    let caller_file = FileId::new(12);
+    let target_file = FileId::new(13);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        caller_file,
+        vec![with_module_path(
+            decl(
+                caller_file,
+                0,
+                "spawn_named",
+                vec![call_with_args(
+                    caller_file,
+                    "crate::util::trace::task",
+                    &["future", "kind", "meta", "id"],
+                )],
+            ),
+            &["tokio", "runtime"],
+        )],
+    );
+    let conditional = |symbol, params: &[&str]| {
+        let mut decl = with_params(
+            with_module_path(
+                decl(target_file, symbol, "task", Vec::new()),
+                &["tokio", "util", "trace"],
+            ),
+            params,
+        );
+        decl.qualified_name = Some("tokio.util.trace.task".to_string());
+        decl
+    };
+    insert_file(
+        &mut global,
+        target_file,
+        vec![
+            conditional(0, &["task", "kind", "meta", "id"]),
+            conditional(1, &["task", "_kind", "_meta", "_id"]),
+        ],
+    );
+
+    let graph = build_graph_with_capabilities(
+        &global,
+        |_| Some("rust"),
+        |_| LanguageCapabilities {
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax {
+                rooted_prefixes: &["crate::", "self::"],
+                repeatable_rooted_prefixes: &["super::"],
+            },
+            callable_declaration_family: CallableDeclarationFamily::SameSignature,
+            ..LanguageCapabilities::unsupported()
+        },
+    );
+    let caller = FuncId::new(global.find_by_name("spawn_named")[0].raw());
+    let edges = graph.callees_of(caller).collect::<Vec<_>>();
+
+    assert_eq!(edges.len(), 2);
+    assert!(edges.iter().all(|edge| edge.kind == EdgeKind::Virtual));
+    assert!(edges.iter().all(|edge| edge.precision == Precision::Narrowed));
+}
+
+#[test]
+fn receiverless_qualified_external_call_never_falls_back_to_bare_tail() {
+    let caller_file = FileId::new(17);
+    let unrelated_file = FileId::new(18);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        caller_file,
+        vec![with_module_path(
+            decl(
+                caller_file,
+                0,
+                "spawn",
+                vec![FlowEvent::Call {
+                    span: Span::new(caller_file, 10, 20),
+                    name: "external::Box::pin".to_string(),
+                    receiver: None,
+                    receiver_types: Vec::new(),
+                    call_kind: CallKind::Function,
+                    args: call_args(caller_file, &["future"]),
+                }],
+            ),
+            &["tokio", "runtime"],
+        )],
+    );
+    insert_file(
+        &mut global,
+        unrelated_file,
+        vec![with_module_path(
+            with_params(decl(unrelated_file, 0, "pin", Vec::new()), &["future"]),
+            &["tokio", "unrelated"],
+        )],
+    );
+
+    let graph = build_graph_with_capabilities(
+        &global,
+        |_| Some("rust"),
+        |_| LanguageCapabilities {
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax {
+                rooted_prefixes: &["crate::", "self::"],
+                repeatable_rooted_prefixes: &["super::"],
+            },
+            ..LanguageCapabilities::unsupported()
+        },
+    );
+    let caller = FuncId::new(global.find_by_name("spawn")[0].raw());
+
+    assert_eq!(graph.callees_of(caller).count(), 0);
+    assert_eq!(graph.unresolved_workspace_call_sites().count(), 0);
+}
+
+#[test]
 fn receiver_method_does_not_resolve_through_same_named_local_callable_binding() {
     let caller_file = FileId::new(1);
     let helper_file = FileId::new(2);
@@ -4049,6 +4548,7 @@ fn unresolved_external_constructor_does_not_fall_back_to_enclosing_class() {
             caller_decl,
             alias_targets: &AHashMap::new(),
             path_for_file: &|_| None,
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
             constructor_index: None,
         },
         "HashSet<>",

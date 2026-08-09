@@ -503,6 +503,11 @@ exponential. The legacy `complete_chains` switch is therefore intentionally
 absent, while schema compatibility fields report
 `mode=compressed_callgraph`, zero truncation, and explain that concrete path
 rows are represented by the graph.
+Schema v7 serializes code locations relative to the workspace root and carries
+that absolute root once as metadata. The relative path is the stable compiler
+identity; absolute paths are reconstructed only when a consumer performs host
+filesystem I/O. Changing this contract requires a native-schema and export
+cache version bump together.
 
 Export phase ownership is sequential and enforced by conformance tests:
 
@@ -589,6 +594,18 @@ semantic path only to the enclosing callable and attaches `terminal_call`
 evidence for the call site. It never fabricates a callee node for the
 external API.
 
+Targeted `trace --from/--to` runs over the selected semantic corridor. Calls
+outside that corridor are intentionally omitted evidence, not unresolved
+workspace calls, so they do not make an otherwise exact trace incomplete. A
+successful target hit terminates as `ReachedTarget`; a missing target is
+reported explicitly. This keeps trace completeness tied to the requested
+compiler graph rather than to unrelated sibling branches.
+Trace finalization preserves the absolute workspace root once as metadata and
+normalizes every step/module/span location to a workspace-relative path. The
+SDK `read-file` aggregator applies the same contract after composing all
+nested finding, flow, caller/callee, and taint-hop locators; internal source
+hydration joins those paths back to exact `FileId`s through the VFS.
+
 `slice` is the backwards-slice counterpart for "what influences this
 symbol?" It identifies exact adapter-emitted symbol sites first and infers the
 line when one site survives; ambiguous sites require explicit `--line` and
@@ -629,6 +646,17 @@ When a fresh partitioned callgraph is available, aggregate export completeness
 streams one caller-file partition and one exact compiler body at a time, then
 replays this same classification. Cached and uncached reports therefore count
 the same call sites without retaining the whole graph beside all bodies.
+
+`dump-resolve` is the call-site drilldown over that same evidence. `--in-file`
+and optional `--line` select an exact adapter-lowered `FlowEvent::Call`, then
+join its span to the persisted partitioned callgraph. On a cold cache the
+workspace reads complete linkage headers and decodes only the selected file's
+body; it never rebuilds every body just to resolve one call. Multiple
+compiler-justified virtual targets are complete/narrowed, an import-proven
+external call is complete/external, and only a genuinely unresolved site exits
+incomplete. Compiler-qualified identities printed by `defs` also round-trip
+directly into `dump-hir` and `dump-cfg`; those commands never recover a target
+with a raw-source name guess.
 
 **`crates/abstract_interp`** is the shared abstract-interpretation
 runtime. Its value lattice now carries constants, bounded integer ranges,
@@ -824,7 +852,12 @@ IDG over only the files/functions needed for the rendered lineage. Neither
 
 **`crates/inspect`** powers `inspect`: every call chain reaching a target,
 source-inlined with numbered annotations. Backed by a chain cache so
-repeated invocations stay fast.
+repeated invocations stay fast. Structural `F:`/`G:` ids hash the exact
+compiler chain. The CLI records the full originating query provenance,
+including qualified from/to identities and kind/file/function filters, so a
+later `show` reopens the same scoped corridor. Lexical-tail matching used
+inside an already-proven corridor is presentation state and must never replace
+that provenance.
 
 **`crates/browse`** powers the browse commands (`defs`, `calls`,
 `imports`, `refs`, `vars`, `strings`, `args`, `operations`, `classes`,

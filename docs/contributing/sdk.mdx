@@ -274,7 +274,9 @@ let diagnostics = project.diagnostics_report();
 
 `diagnostics_report()` is the SDK twin of `bonsai-ninja diagnostics`.
 It returns parser/adapter diagnostics, workspace languages, and the
-registered adapters' capability declarations. The older
+capability declarations for adapters that own workspace files. The complete
+registry is published by the generated capability matrix rather than repeated
+in every project response. The older
 `project.diagnostics()` accessor remains the bare diagnostic vector for
 callers that only need warnings/errors.
 
@@ -354,6 +356,12 @@ let networkx = project.export().networkx_json()?;
 let graphml = project.export().graphml()?;
 let cypher = project.export().cypher()?;
 ```
+
+Native JSON schema v7 emits workspace-relative code locations and one
+top-level absolute `workspace_root`. SDK consumers should join the two only at
+the filesystem boundary; storing or comparing location identities by absolute
+host path is unsupported. Explicit export-cache rebuilds validate the schema
+version before reuse.
 
 ---
 

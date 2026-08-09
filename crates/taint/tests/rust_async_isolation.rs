@@ -1,9 +1,6 @@
-//! P3.1: Rust async/await — adapter wraps detached-future bodies
-//! (`tokio::spawn`, `std::thread::spawn`, etc.) in Defer so taint
-//! flowing into the spawned body does not propagate to the caller's
-//! continuation. Taint inside the spawn body is still observed at
-//! sink calls inside the spawn (so security findings still fire);
-//! it just doesn't bleed forward into post-spawn statements.
+//! Rust async-block flow is syntax-driven. The adapter exposes calls inside an
+//! async argument without recognizing scheduler/library names; the rulepack
+//! remains the only owner of third-party API identities.
 
 use bonsai_common::FuncId;
 use bonsai_db::AnalyzerDb;
@@ -42,10 +39,10 @@ fn seed(names: &[&str]) -> TokenSet {
 }
 
 #[test]
-fn tokio_spawn_body_taint_is_observed_inside_but_not_post_spawn() {
+fn arbitrary_async_argument_body_preserves_taint_without_api_special_cases() {
     let src = r#"
 async fn entry(tainted: String, also_clean: String) {
-    tokio::spawn(async move {
+    any_scheduler(async move {
         sink(tainted);
     });
     sink(also_clean);
@@ -55,22 +52,20 @@ async fn entry(tainted: String, also_clean: String) {
     let entry = func(&db, "entry");
     let result = interprocedural_taint(entry, &seed(&["tainted"]), &config(), &db);
     let sink_taints: Vec<_> = result.tainted_calls.iter().filter(|c| c.name == "sink").collect();
-    // The spawn-body sink(tainted) IS observable as a tainted_call
-    // (the engine walks Defer body events) — so finding-style rules
-    // still fire on dangerous spawned futures.
+    // The async-body sink remains visible because Tree-sitter owns the body
+    // relationship. No scheduler name is required by the compiler pipeline.
     assert!(
         sink_taints
             .iter()
             .any(|c| c.tainted_args.iter().any(|a| a.value_text == "tainted")),
-        "spawn-body sink(tainted) should still appear as a tainted_call; got {sink_taints:?}"
+        "async-body sink(tainted) should appear as a tainted_call; got {sink_taints:?}"
     );
-    // The post-spawn sink(also_clean) must NOT be tainted — the
-    // spawn body's taint was isolated by Defer so it doesn't bleed
-    // into the caller's continuation state.
+    // Merely observing a tainted argument does not taint an unrelated value
+    // in the caller's continuation.
     assert!(
         !sink_taints
             .iter()
             .any(|c| c.tainted_args.iter().any(|a| a.value_text == "also_clean")),
-        "post-spawn sink(also_clean) must NOT inherit taint from the spawn body; got {sink_taints:?}"
+        "post-call sink(also_clean) must remain clean; got {sink_taints:?}"
     );
 }

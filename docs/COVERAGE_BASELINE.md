@@ -270,8 +270,9 @@ the matching static model and test coverage land:
   that aren't dynamic-import-shaped.
 - **Scala / Swift:** `Pattern matching -> Exact` (both have exhaustive-
   by-default match expressions with compiler-validated totality).
-- **Rust:** `Async / await -> Exact` once we model `Future::poll`
-  happens-before relations from `tokio::spawn` / `select!`.
+- **Rust:** scheduler happens-before precision once typed future-poll and
+  detachment summaries exist; executor API spellings must stay outside the
+  adapter and shared engine.
 
 Each promotion lands together with: (a) the adapter override
 declaration, (b) a per-language matrix test exercising the construct

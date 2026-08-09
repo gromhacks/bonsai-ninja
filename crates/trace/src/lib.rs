@@ -250,6 +250,7 @@ pub struct PathSummary {
 pub enum PathTermination {
     Return,
     Throw,
+    ReachedTarget,
     DepthLimit,
     LoopLimit,
     UnknownCall,
@@ -316,10 +317,13 @@ pub fn finalize(raw: RawTrace, ctx: FinalizeCtx<'_>, vfs: &Vfs) -> TraceResult {
     let mut analysis_incomplete_reasons = raw.incomplete_reasons.clone();
 
     for (idx, raw_step) in raw.steps.iter().enumerate() {
-        let source_span = span_to_source(&raw_step.span, vfs, &mut span_caches);
+        let mut source_span = span_to_source(&raw_step.span, vfs, &mut span_caches);
+        source_span.file = portable_trace_path(ctx.workspace_root, &source_span.file);
         let code = span_line_text(&raw_step.span, vfs, &mut span_caches);
         let func_name = (ctx.func_name)(raw_step.func).unwrap_or_else(|| format!("func#{}", raw_step.func));
-        let module = (ctx.func_module)(raw_step.func).unwrap_or_default();
+        let module = (ctx.func_module)(raw_step.func).map_or_else(String::new, |module| {
+            portable_trace_path(ctx.workspace_root, &module)
+        });
         let public_step = public_semantic_step(raw_step, &mut analysis_incomplete_reasons);
         precision = precision.meet(public_step.precision);
         // u64 ids prevent the wrap-to-zero / collapse-to-MAX hazards
@@ -405,6 +409,14 @@ pub fn finalize(raw: RawTrace, ctx: FinalizeCtx<'_>, vfs: &Vfs) -> TraceResult {
     }
 }
 
+fn portable_trace_path(workspace_root: &str, path: &str) -> String {
+    if path.is_empty() || path == "<unknown>" || !std::path::Path::new(path).is_absolute() {
+        return path.to_string();
+    }
+    let root = (!workspace_root.is_empty()).then(|| std::path::Path::new(workspace_root));
+    bonsai_common::workspace_relative_filter_path(root, path)
+}
+
 struct PublicStep {
     kind: TraceStepKind,
     message: String,
@@ -475,6 +487,21 @@ pub fn truncate_after_step(result: &mut TraceResult, step_index: usize) {
         .steps
         .iter()
         .fold(Precision::Exact, |acc, step| acc.meet(step.precision));
+}
+
+/// Mark the path containing the final retained step with its semantic outcome.
+///
+/// Source-to-sink traces stop when the requested declaration is entered. That
+/// is successful query completion, not an unknown call or an unexplained path
+/// ending. Keeping this as an explicit schema fact prevents renderers from
+/// guessing based on the last step's message.
+pub fn mark_last_step_termination(result: &mut TraceResult, termination: PathTermination) {
+    let Some(last) = result.steps.last() else {
+        return;
+    };
+    if let Some(path) = result.paths.iter_mut().find(|path| path.path_id == last.path_id) {
+        path.terminated_by = termination;
+    }
 }
 
 fn incomplete_reasons_for_steps(reasons: &[String], steps: &[TraceStep]) -> Vec<String> {

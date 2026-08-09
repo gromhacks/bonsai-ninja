@@ -48,12 +48,19 @@ const RENDER_CACHE_VERSION: u32 = 12;
 /// instead of probing the unrelated security engine or enumerating every
 /// callable in a large workspace.
 const STRUCTURAL_ID_HINTS_KEY: u64 = 0x5354_5255_4354_4944;
-const STRUCTURAL_ID_HINTS_KIND: &str = "structural-id-hints-v1";
+const STRUCTURAL_ID_HINTS_KIND: &str = "structural-id-hints-v2";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct StructuralIdHint {
     pub(crate) query: String,
     pub(crate) regex: bool,
+    pub(crate) kind_filter: Vec<String>,
+    pub(crate) from: Option<String>,
+    pub(crate) from_kind: Option<String>,
+    pub(crate) to: Option<String>,
+    pub(crate) to_kind: Option<String>,
+    pub(crate) file: Option<String>,
+    pub(crate) in_fn: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -326,10 +333,9 @@ pub(crate) fn read_keyed_payload<T: DeserializeOwned>(
 pub(crate) fn remember_structural_id_hints<'a>(
     workspace: &Path,
     ids: impl IntoIterator<Item = &'a str>,
-    query: &str,
-    regex: bool,
+    hint: StructuralIdHint,
 ) {
-    if cache_disabled() || query.is_empty() {
+    if cache_disabled() {
         return;
     }
     let mut registry = match read_keyed_payload::<StructuralIdHints>(
@@ -343,10 +349,6 @@ pub(crate) fn remember_structural_id_hints<'a>(
             tracing::debug!("structural id hint cache read failed: {error}");
             StructuralIdHints::default()
         }
-    };
-    let hint = StructuralIdHint {
-        query: query.to_string(),
-        regex,
     };
     let mut changed = false;
     for id in ids {
