@@ -32,6 +32,19 @@ fn step(id: u64, kind: TraceStepKind, precision: Precision) -> TraceStep {
 }
 
 #[test]
+fn trace_locations_are_workspace_relative_without_rewriting_module_names() {
+    assert_eq!(
+        portable_trace_path("/workspace", "/workspace/src/app.rs"),
+        "src/app.rs"
+    );
+    assert_eq!(
+        portable_trace_path("/workspace", "crate.runtime.Handle"),
+        "crate.runtime.Handle"
+    );
+    assert_eq!(portable_trace_path("", "/external/lib.rs"), "/external/lib.rs");
+}
+
+#[test]
 fn truncate_after_step_rebuilds_derived_trace_sections() {
     let mut trace = TraceResult {
         trace_id: "trace-test".to_string(),
@@ -93,6 +106,29 @@ fn truncate_after_step_rebuilds_derived_trace_sections() {
     assert_eq!(trace.paths.len(), 1);
     assert_eq!(trace.paths[0].last_step, 1);
     assert_eq!(trace.paths[0].precision, Precision::Narrowed);
+}
+
+#[test]
+fn selected_sink_marks_the_retained_path_as_an_intentional_stop() {
+    let mut trace = TraceResult {
+        steps: vec![
+            step(0, TraceStepKind::EnterFunction, Precision::Exact),
+            step(1, TraceStepKind::EnterFunction, Precision::Exact),
+        ],
+        paths: vec![PathSummary {
+            path_id: 1,
+            first_step: 0,
+            last_step: 1,
+            path_constraints: Vec::new(),
+            terminated_by: PathTermination::Unknown,
+            precision: Precision::Exact,
+        }],
+        ..TraceResult::default()
+    };
+
+    mark_last_step_termination(&mut trace, PathTermination::ReachedTarget);
+
+    assert_eq!(trace.paths[0].terminated_by, PathTermination::ReachedTarget);
 }
 
 #[test]

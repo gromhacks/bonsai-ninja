@@ -2,7 +2,7 @@
 
 use bonsai_common::FileId;
 use bonsai_lang_api::{
-    collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
+    collect_param_type_aliases, decl_index_from_tree_with_handler,
     kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of},
     AdapterContext, AdapterError, ArgumentPassingMode, CallKind, CapabilityLevel, DeclIndex, DeclKind,
     FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
@@ -189,15 +189,9 @@ impl LanguageAdapter for RustAdapter {
             macros: CapabilityLevel::Partial,
             dynamic_dispatch: CapabilityLevel::Partial,
             exceptions: CapabilityLevel::Unsupported,
-            // Async/await: the adapter wraps the body of detached
-            // futures (`tokio::spawn`, `async_std::task::spawn`,
-            // `std::thread::spawn`) in a `Defer` event so its taint
-            // effects don't propagate to the caller's continuation
-            // state. The spawned future runs concurrently; from the
-            // caller's perspective, taint flowing into its body
-            // can't reach a sequential post-spawn statement (that's
-            // a happens-before guarantee Rust's type system gives
-            // for free with `'static + Send` futures).
+            // Rust's async blocks and postfix `.await` are grammar-owned
+            // constructs. Runtime scheduling APIs are deliberately not
+            // classified here; package/API semantics belong in rule data.
             async_await: CapabilityLevel::Exact,
             coroutines: CapabilityLevel::Unsupported,
             reflection: CapabilityLevel::Unsupported,
@@ -226,7 +220,12 @@ impl LanguageAdapter for RustAdapter {
             receiver_type_syntax: bonsai_lang_api::ReceiverTypeSyntax::none(),
             same_directory_unqualified_calls: false,
             build_target_linkage: false,
-            callable_declaration_family: bonsai_lang_api::CallableDeclarationFamily::None,
+            // Rust forbids ordinary same-scope overloads. Multiple callable
+            // declarations with the same semantic owner and typed signature
+            // are statically admissible alternatives (most commonly
+            // mutually exclusive configuration items, or trait surfaces).
+            // The resolver retains every such body as narrowed evidence.
+            callable_declaration_family: bonsai_lang_api::CallableDeclarationFamily::SameSignature,
             quoted_callable_literals: false,
             callable_reference_syntax: bonsai_lang_api::CallableReferenceSyntax::none(),
             call_text_prefilter: bonsai_lang_api::CallTextPrefilter::Disabled,
@@ -235,29 +234,37 @@ impl LanguageAdapter for RustAdapter {
         }
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
-        let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
-            let src = snapshot.text.as_bytes();
-            // Phase-6 return-type extraction: `fn f() -> T {}` populates
-            // `Decl.return_type` for `apply_assign_call_result_types`.
-            bonsai_lang_api::populate_decl_return_types(&mut idx, &tree, src, &HANDLER);
-            let arm_spans = collect_rust_match_arm_spans(&tree, src, file);
-            let spawn_body_spans = collect_rust_spawn_body_spans(&tree, src, file);
-            let struct_literal_field_assigns = collect_rust_struct_literal_field_assigns(&tree, file, src);
-            let self_constructor_call_spans = collect_rust_self_constructor_call_spans(&tree, file, src);
-            for decl in &mut idx.defs {
-                enrich_rust_struct_literal_field_assigns(
-                    &mut decl.flow_events,
-                    &struct_literal_field_assigns,
-                );
-                bonsai_lang_api::kit::split_match_arms_in_branch_events(&mut decl.flow_events, &arm_spans);
-                isolate_rust_spawn_bodies(&mut decl.flow_events, &spawn_body_spans);
-                classify_rust_self_constructor_calls(&mut decl.flow_events, &self_constructor_call_spans);
-                enrich_rust_format_macro_operands(&mut decl.flow_events);
-                enrich_rust_tail_return_sources(&mut decl.flow_events, &decl.params);
-                enrich_rust_constructor_field_writes(decl);
-            }
+        let Some((snapshot, raw_tree)) = parse_with(PACK_NAME, file, ctx) else {
+            return DeclIndex {
+                file,
+                ..DeclIndex::default()
+            };
+        };
+        let raw_src = snapshot.text.as_bytes();
+        let compiler_view = rust_item_macro_compiler_view(raw_src, &raw_tree);
+        let src = compiler_view
+            .as_ref()
+            .map_or(raw_src, |(source, _)| source.as_slice());
+        let tree = compiler_view.as_ref().map_or(raw_tree.as_ref(), |(_, tree)| tree);
+        let mut idx = decl_index_from_tree_with_handler(file, src, tree, &HANDLER);
+        // Phase-6 return-type extraction: `fn f() -> T {}` populates
+        // `Decl.return_type` for `apply_assign_call_result_types`.
+        bonsai_lang_api::populate_decl_return_types(&mut idx, tree, src, &HANDLER);
+        let arm_spans = collect_rust_match_arm_spans(tree, src, file);
+        let struct_literal_field_assigns = collect_rust_struct_literal_field_assigns(tree, file, src);
+        let scoped_call_spans = collect_rust_scoped_call_spans(tree, file);
+        let self_constructor_call_spans = collect_rust_self_constructor_call_spans(tree, file, src);
+        let exported_import_aliases = collect_rust_exported_import_aliases(tree, file, src);
+        for decl in &mut idx.defs {
+            enrich_rust_struct_literal_field_assigns(&mut decl.flow_events, &struct_literal_field_assigns);
+            bonsai_lang_api::kit::split_match_arms_in_branch_events(&mut decl.flow_events, &arm_spans);
+            classify_rust_scoped_calls(&mut decl.flow_events, &scoped_call_spans);
+            classify_rust_self_constructor_calls(&mut decl.flow_events, &self_constructor_call_spans);
+            enrich_rust_format_macro_operands(&mut decl.flow_events);
+            enrich_rust_tail_return_sources(&mut decl.flow_events, &decl.params);
+            enrich_rust_constructor_field_writes(decl);
         }
+        append_rust_exported_import_decls(&mut idx, exported_import_aliases);
         // Rust module_path: relative file path under workspace root,
         // dropping `src/` and `lib.rs`/`mod.rs`/`<name>.rs` to produce
         // a `crate::mod::sub`-shaped path. Falls back to file-stem.
@@ -272,13 +279,12 @@ impl LanguageAdapter for RustAdapter {
         }
         // Rust visibility from `pub`, `pub(crate)`, `pub(super)`,
         // `pub(in path)`. Absence = private (file/mod-scoped).
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
-            let src = snapshot.text.as_bytes();
+        {
             let visibility_by_span = collect_rust_visibility(tree.root_node(), file, src);
-            let alias_map = collect_param_type_aliases(&tree, file, src, &RUST_TYPE_ALIASES);
-            let tuple_struct_bases = collect_rust_tuple_struct_bases(&tree, file, src);
-            let tuple_struct_field_aliases = collect_rust_tuple_struct_field_aliases(&tree, src);
-            let impl_method_parents = collect_rust_impl_method_parents(&tree, file, src);
+            let alias_map = collect_param_type_aliases(tree, file, src, &RUST_TYPE_ALIASES);
+            let tuple_struct_bases = collect_rust_tuple_struct_bases(tree, file, src);
+            let struct_field_aliases = collect_rust_struct_field_aliases(tree, src);
+            let impl_method_parents = collect_rust_impl_method_parents(tree, file, src);
             let impl_method_parent_symbols = impl_method_parents
                 .iter()
                 .filter_map(|(span, type_name)| {
@@ -292,6 +298,7 @@ impl LanguageAdapter for RustAdapter {
                                         | bonsai_lang_api::DeclKind::Struct
                                         | bonsai_lang_api::DeclKind::Trait
                                         | bonsai_lang_api::DeclKind::Interface
+                                        | bonsai_lang_api::DeclKind::Enum
                                 )
                         })
                         .map(|parent| (*span, parent.symbol))
@@ -318,7 +325,7 @@ impl LanguageAdapter for RustAdapter {
                     }
                 }
             }
-            apply_rust_tuple_struct_field_aliases(&mut idx, &tuple_struct_field_aliases);
+            apply_rust_struct_field_aliases(&mut idx, &struct_field_aliases);
             enrich_rust_self_tuple_constructor_returns(&mut idx);
             classify_rust_declared_constructor_calls(&mut idx);
         }
@@ -341,7 +348,242 @@ impl LanguageAdapter for RustAdapter {
         idx
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
-        extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+        let Some((snapshot, raw_tree)) = parse_with(PACK_NAME, file, ctx) else {
+            return ImportIndex {
+                file,
+                ..ImportIndex::default()
+            };
+        };
+        let raw_src = snapshot.text.as_bytes();
+        let compiler_view = rust_item_macro_compiler_view(raw_src, &raw_tree);
+        let src = compiler_view
+            .as_ref()
+            .map_or(raw_src, |(source, _)| source.as_slice());
+        let tree = compiler_view.as_ref().map_or(raw_tree.as_ref(), |(_, tree)| tree);
+        ImportIndex {
+            file,
+            imports: parse_imports(tree, src, file),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RustExportedImportAlias {
+    span: bonsai_common::Span,
+    name: String,
+    target: String,
+    visibility: Visibility,
+}
+
+/// Lower visible Rust `use` bindings as declaration-level namespace facades.
+///
+/// A path such as `crate::runtime::task::Id` can name a type physically
+/// declared in `runtime/task/id.rs` through `pub(crate) use self::id::Id` in
+/// `runtime/task/mod.rs`. The import declaration is the compiler fact that
+/// connects those identities; filename casing or identifier spelling is not.
+fn collect_rust_exported_import_aliases(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<RustExportedImportAlias> {
+    let mut out = Vec::new();
+    for node in collect_kinds(tree, &["use_declaration"]) {
+        let visibility = rust_node_visibility(&node, src);
+        if matches!(visibility, Visibility::Private) {
+            continue;
+        }
+        let Some(argument) = node.child_by_field_name("argument") else {
+            continue;
+        };
+        let span = span_of(file, &node);
+        let mut imports = Vec::new();
+        append_rust_use_argument(argument, &[], span, src, true, &mut imports);
+        for import in imports.into_iter().filter(|import| !import.is_wildcard) {
+            let (name, target) = if let Some(member) = import.original_name.as_deref() {
+                let name = import.alias.as_deref().unwrap_or(member).trim();
+                let target = if import.module.trim().is_empty() {
+                    member.to_string()
+                } else {
+                    format!("{}::{member}", import.module.trim())
+                };
+                (name.to_string(), target)
+            } else {
+                let Some(name) = import
+                    .alias
+                    .clone()
+                    .or_else(|| bonsai_lang_api::module_local_binding(&import.module))
+                else {
+                    continue;
+                };
+                (name, import.module)
+            };
+            if name.is_empty() || target.trim().is_empty() {
+                continue;
+            }
+            out.push(RustExportedImportAlias {
+                span,
+                name,
+                target,
+                visibility,
+            });
+        }
+    }
+    out.sort_by(|a, b| {
+        (a.span.start, a.span.end, a.name.as_str(), a.target.as_str()).cmp(&(
+            b.span.start,
+            b.span.end,
+            b.name.as_str(),
+            b.target.as_str(),
+        ))
+    });
+    out.dedup();
+    out
+}
+
+fn append_rust_exported_import_decls(idx: &mut DeclIndex, aliases: Vec<RustExportedImportAlias>) {
+    let mut next_symbol = idx
+        .defs
+        .iter()
+        .map(|decl| decl.symbol.raw())
+        .max()
+        .map_or(0, |symbol| symbol.saturating_add(1));
+    for alias in aliases {
+        idx.defs.push(bonsai_lang_api::Decl {
+            symbol: bonsai_common::SymbolId::new(next_symbol),
+            kind: DeclKind::Import,
+            name: alias.name,
+            qualified_name: None,
+            module_path: bonsai_lang_api::ModulePath::default(),
+            span: alias.span,
+            name_span: alias.span,
+            visibility: alias.visibility,
+            parent: None,
+            body_span: None,
+            flow_events: Vec::new(),
+            has_implicit_returns: false,
+            params: Vec::new(),
+            param_annotations: Vec::new(),
+            param_default_calls: Vec::new(),
+            type_aliases: Vec::new(),
+            bases: vec![alias.target],
+            receiver_param_index: None,
+            receiver_field_writes: Vec::new(),
+            implicit_receiver_names: Vec::new(),
+            receiver_state_sources: Vec::new(),
+            return_type: None,
+            is_variadic: false,
+        });
+        next_symbol = next_symbol.saturating_add(1);
+    }
+}
+
+/// Build a same-offset compiler view for declarative macros whose argument is
+/// itself valid Rust item syntax.
+///
+/// Tree-sitter intentionally represents a macro argument as an opaque
+/// `token_tree`; it cannot see an `impl` wrapped by configuration helpers such
+/// as `wrapper! { impl Type { ... } }`. Rust permits macros in item position,
+/// and production crates use that facility extensively. When—and only when—
+/// the token-tree interior parses cleanly as Rust items, erase the invocation
+/// wrapper while retaining every byte offset and parse again. Nested wrappers
+/// are exposed to a strict fixed point: each accepted pass removes at least
+/// one finite macro wrapper, so there is no semantic or numeric iteration cap.
+/// Expression macros remain untouched.
+fn rust_item_macro_compiler_view(src: &[u8], raw_tree: &Tree) -> Option<(Vec<u8>, Tree)> {
+    let language = language_from_pack(PACK_NAME).ok()?;
+    let mut source = src.to_vec();
+    let mut transformed_tree = None;
+
+    loop {
+        let tree = transformed_tree.as_ref().unwrap_or(raw_tree);
+        let ranges = rust_item_macro_wrapper_ranges(tree, &source, &language);
+        if ranges.is_empty() {
+            return transformed_tree.map(|tree| (source, tree));
+        }
+        for (wrapper_start, body_start, body_end, wrapper_end) in ranges {
+            erase_rust_macro_wrapper(&mut source[wrapper_start..body_start]);
+            erase_rust_macro_wrapper(&mut source[body_end..wrapper_end]);
+        }
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).ok()?;
+        transformed_tree = parser.parse(&source, None);
+    }
+}
+
+fn rust_item_macro_wrapper_ranges(
+    tree: &Tree,
+    src: &[u8],
+    language: &Language,
+) -> Vec<(usize, usize, usize, usize)> {
+    let mut ranges = Vec::new();
+    for invocation in collect_kinds(tree, &["macro_invocation"]) {
+        let Some(parent) = invocation.parent() else {
+            continue;
+        };
+        if !matches!(parent.kind(), "source_file" | "declaration_list") {
+            continue;
+        }
+        let Some(body) = first_named_child_of_kind_local(invocation, "token_tree") else {
+            continue;
+        };
+        let wrapper_start = invocation.start_byte();
+        let wrapper_end = invocation.end_byte();
+        let body_start = body.start_byte().saturating_add(1);
+        let body_end = body.end_byte().saturating_sub(1);
+        if wrapper_start >= body_start
+            || body_start > body_end
+            || body_end >= wrapper_end
+            || !rust_macro_body_is_item_syntax(&src[body_start..body_end], language)
+        {
+            continue;
+        }
+        ranges.push((wrapper_start, body_start, body_end, wrapper_end));
+    }
+    ranges.sort_unstable();
+    ranges
+}
+
+fn rust_macro_body_is_item_syntax(src: &[u8], language: &Language) -> bool {
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(language).is_err() {
+        return false;
+    }
+    let Some(tree) = parser.parse(src, None) else {
+        return false;
+    };
+    let root = tree.root_node();
+    if root.has_error() {
+        return false;
+    }
+    let mut cursor = root.walk();
+    let has_item = root.named_children(&mut cursor).any(|node| {
+        matches!(
+            node.kind(),
+            "const_item"
+                | "enum_item"
+                | "extern_crate_declaration"
+                | "foreign_mod_item"
+                | "function_item"
+                | "impl_item"
+                | "macro_definition"
+                | "macro_invocation"
+                | "mod_item"
+                | "static_item"
+                | "struct_item"
+                | "trait_item"
+                | "type_item"
+                | "union_item"
+                | "use_declaration"
+        )
+    });
+    has_item
+}
+
+fn erase_rust_macro_wrapper(bytes: &mut [u8]) {
+    for byte in bytes {
+        if !matches!(*byte, b'\n' | b'\r') {
+            *byte = b' ';
+        }
     }
 }
 
@@ -364,6 +606,83 @@ fn collect_rust_self_constructor_call_spans(
                 .then(|| span_of(file, &function))
         })
         .collect()
+}
+
+/// Call-target spans whose Tree-sitter syntax is a Rust path rather than an
+/// instance receiver expression.
+///
+/// `module::function()` and `Type::associated()` share the same Rust grammar
+/// shape. Neither supplies a runtime receiver argument; name resolution later
+/// decides whether the path owns a free function, associated method, or
+/// constructor. Keeping this distinction in the adapter prevents shared
+/// resolution from treating a namespace/type path like `value.method()`.
+fn collect_rust_scoped_call_spans(
+    tree: &Tree,
+    file: FileId,
+) -> std::collections::HashSet<bonsai_common::Span> {
+    collect_kinds(tree, &["call_expression"])
+        .into_iter()
+        .filter_map(|call| {
+            let function = call.child_by_field_name("function")?;
+            rust_call_target_is_scoped_path(function).then(|| span_of(file, &function))
+        })
+        .collect()
+}
+
+fn rust_call_target_is_scoped_path(node: Node<'_>) -> bool {
+    if node.kind() == "scoped_identifier" {
+        return true;
+    }
+    if node.kind() != "generic_function" {
+        return false;
+    }
+    node.child_by_field_name("function")
+        .or_else(|| node.child_by_field_name("name"))
+        .or_else(|| node.named_child(0))
+        .is_some_and(rust_call_target_is_scoped_path)
+}
+
+fn classify_rust_scoped_calls(
+    events: &mut [FlowEvent],
+    scoped_call_spans: &std::collections::HashSet<bonsai_common::Span>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span,
+                receiver,
+                receiver_types,
+                call_kind,
+                ..
+            } if scoped_call_spans.contains(span) => {
+                *receiver = None;
+                receiver_types.clear();
+                *call_kind = CallKind::Function;
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                classify_rust_scoped_calls(then_events, scoped_call_spans);
+                classify_rust_scoped_calls(else_events, scoped_call_spans);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                classify_rust_scoped_calls(body, scoped_call_spans);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                classify_rust_scoped_calls(body, scoped_call_spans);
+                classify_rust_scoped_calls(catch_events, scoped_call_spans);
+                classify_rust_scoped_calls(finally_events, scoped_call_spans);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn classify_rust_self_constructor_calls(
@@ -600,6 +919,7 @@ fn enrich_rust_self_tuple_constructor_returns(idx: &mut DeclIndex) {
                     | bonsai_lang_api::DeclKind::Struct
                     | bonsai_lang_api::DeclKind::Trait
                     | bonsai_lang_api::DeclKind::Interface
+                    | bonsai_lang_api::DeclKind::Enum
             )
         })
         .map(|decl| (decl.symbol, decl.name.clone()))
@@ -679,6 +999,7 @@ fn classify_rust_declared_constructor_calls(idx: &mut DeclIndex) {
                     | bonsai_lang_api::DeclKind::Struct
                     | bonsai_lang_api::DeclKind::Trait
                     | bonsai_lang_api::DeclKind::Interface
+                    | bonsai_lang_api::DeclKind::Enum
             )
         })
         .map(|decl| (decl.symbol, decl.name.clone()))
@@ -1439,156 +1760,6 @@ fn collect_rust_match_arm_spans(tree: &Tree, _src: &[u8], file: FileId) -> Vec<V
     out
 }
 
-/// Spans of `async_block` / closure arguments to detached-future
-/// spawn calls (`tokio::spawn`, `async_std::task::spawn`,
-/// `std::thread::spawn`). Events whose span falls inside any of
-/// these get wrapped in a `Defer` so the engine isolates them from
-/// the caller's continuation state.
-fn collect_rust_spawn_body_spans(tree: &Tree, src: &[u8], file: FileId) -> Vec<bonsai_common::Span> {
-    let mut spawn_body_spans = Vec::new();
-    for call_node in collect_kinds(tree, &["call_expression"]) {
-        // Only the `name` of the callee — `tokio::spawn` / `thread::spawn`
-        // / etc. — gates the rewrite. Method calls and unrelated
-        // expressions skip outright.
-        let Some(callee_node) = call_node.child_by_field_name("function") else {
-            continue;
-        };
-        let callee_path = node_text(&callee_node, src).trim();
-        if !is_rust_spawn_callee(callee_path) {
-            continue;
-        }
-        let Some(args_node) = call_node.child_by_field_name("arguments") else {
-            continue;
-        };
-        // The body to isolate is the `async { ... }` or closure
-        // argument — that's the future being detached. Plain values
-        // passed to spawn (rare; usually a pre-built future) don't
-        // need wrapping because their flow_events are already part of
-        // the caller's continuation, not a detached body.
-        let mut arg_cursor = args_node.walk();
-        for arg_node in args_node.named_children(&mut arg_cursor) {
-            if matches!(arg_node.kind(), "async_block" | "closure_expression") {
-                spawn_body_spans.push(span_of(file, &arg_node));
-            }
-        }
-    }
-    spawn_body_spans
-}
-
-/// Hardcoded set of Rust APIs that detach a future from the caller's
-/// continuation. `block_on` is included because its body genuinely
-/// runs to completion before continuing — the caller's post-call
-/// state isn't poisoned by intermediate work.
-fn is_rust_spawn_callee(callee_path: &str) -> bool {
-    matches!(
-        callee_path,
-        "tokio::spawn"
-            | "tokio::task::spawn"
-            | "async_std::task::spawn"
-            | "std::thread::spawn"
-            | "thread::spawn"
-            | "smol::spawn"
-            | "futures::executor::block_on"
-            | "rayon::spawn"
-    )
-}
-
-/// Walk `events` and, for any event whose span lies inside one of
-/// `spawn_body_spans`, wrap that event in a `Defer` so the engine
-/// observes it without propagating its state to the post-spawn
-/// continuation.
-fn isolate_rust_spawn_bodies(
-    events: &mut Vec<bonsai_lang_api::FlowEvent>,
-    spawn_body_spans: &[bonsai_common::Span],
-) {
-    use bonsai_lang_api::FlowEvent;
-    if spawn_body_spans.is_empty() {
-        return;
-    }
-    let mut new_events: Vec<FlowEvent> = Vec::with_capacity(events.len());
-    let mut buffered_spawn: Option<(bonsai_common::Span, Vec<FlowEvent>)> = None;
-    for ev in events.drain(..) {
-        // Recurse into nested containers first.
-        let span = match &ev {
-            FlowEvent::Call { span, .. }
-            | FlowEvent::Assign { span, .. }
-            | FlowEvent::AggregateAssign { span, .. }
-            | FlowEvent::Return { span, .. }
-            | FlowEvent::Throw { span, .. }
-            | FlowEvent::Branch { span, .. }
-            | FlowEvent::Loop { span, .. }
-            | FlowEvent::Try { span, .. }
-            | FlowEvent::Defer { span, .. }
-            | FlowEvent::Using { span, .. }
-            | FlowEvent::Yield { span, .. }
-            | FlowEvent::Await { span, .. }
-            | FlowEvent::Break { span, .. }
-            | FlowEvent::Continue { span, .. }
-            | FlowEvent::Lifecycle { span, .. } => *span,
-        };
-        let mut ev = ev;
-        match &mut ev {
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                isolate_rust_spawn_bodies(then_events, spawn_body_spans);
-                isolate_rust_spawn_bodies(else_events, spawn_body_spans);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                isolate_rust_spawn_bodies(body, spawn_body_spans);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                isolate_rust_spawn_bodies(body, spawn_body_spans);
-                isolate_rust_spawn_bodies(catch_events, spawn_body_spans);
-                isolate_rust_spawn_bodies(finally_events, spawn_body_spans);
-            }
-            _ => {}
-        }
-        let inside_spawn = spawn_body_spans
-            .iter()
-            .find(|s| span.file == s.file && span.start >= s.start && span.end <= s.end);
-        let flush = |slot: &mut Option<(bonsai_common::Span, Vec<FlowEvent>)>, out: &mut Vec<FlowEvent>| {
-            if let Some((prev_span, prev_buf)) = slot.take() {
-                out.push(FlowEvent::Defer {
-                    span: prev_span,
-                    body: prev_buf,
-                });
-            }
-        };
-        match (inside_spawn, &mut buffered_spawn) {
-            // Continue accumulating into the current spawn buffer.
-            (Some(s), Some((cur_span, buf))) if cur_span == s => {
-                buf.push(ev);
-            }
-            // Switching to a new spawn region — flush old buffer first.
-            (Some(s), _) => {
-                flush(&mut buffered_spawn, &mut new_events);
-                buffered_spawn = Some((*s, vec![ev]));
-            }
-            // Outside any spawn region — flush any buffered spawn,
-            // then emit the event sequentially.
-            (None, _) => {
-                flush(&mut buffered_spawn, &mut new_events);
-                new_events.push(ev);
-            }
-        }
-    }
-    if let Some((prev_span, prev_buf)) = buffered_spawn.take() {
-        new_events.push(FlowEvent::Defer {
-            span: prev_span,
-            body: prev_buf,
-        });
-    }
-    *events = new_events;
-}
-
 /// Walk the Rust tree and map function/struct/enum/trait/impl spans
 /// to their syntactic Visibility:
 ///
@@ -1661,42 +1832,20 @@ fn collect_rust_tuple_struct_bases(
             .child_by_field_name("name")
             .map(|n| node_text(&n, src).to_string())
             .unwrap_or_default();
-        let text = node_text(&node, src);
-        let Some(open) = text.find('(') else {
+        let Some(fields) = node.child_by_field_name("body") else {
             continue;
         };
-        let Some(close) = text[open + 1..].find(')').map(|idx| open + 1 + idx) else {
-            continue;
-        };
-        if text[..open].contains('{') {
+        if fields.kind() != "ordered_field_declaration_list" {
             continue;
         }
         let mut bases = Vec::new();
-        for field in text[open + 1..close].split(',') {
-            let field = field.trim();
-            if field.is_empty() {
-                continue;
-            }
-            let ty = field
-                .split(':')
-                .next_back()
-                .unwrap_or(field)
-                .trim()
-                .trim_start_matches("pub ")
-                .trim();
-            let ty = ty
-                .split(|ch: char| !(ch == '_' || ch == ':' || ch.is_ascii_alphanumeric()))
-                .find(|part| !part.is_empty())
-                .unwrap_or("");
-            let Some(base) = ty.rsplit("::").next().filter(|base| {
-                base.chars()
-                    .next()
-                    .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
-            }) else {
+        let mut cursor = fields.walk();
+        for field_type in fields.children_by_field_name("type", &mut cursor) {
+            let Some(base) = rust_nominal_tuple_field_type(field_type, src) else {
                 continue;
             };
-            if !bases.iter().any(|existing| existing == base) {
-                bases.push(base.to_string());
+            if !bases.iter().any(|existing| existing == &base) {
+                bases.push(base);
             }
         }
         if !bases.is_empty() {
@@ -1706,7 +1855,7 @@ fn collect_rust_tuple_struct_bases(
     out
 }
 
-fn collect_rust_tuple_struct_field_aliases(
+fn collect_rust_struct_field_aliases(
     tree: &Tree,
     src: &[u8],
 ) -> Vec<(String, Vec<bonsai_lang_api::TypeAliasBinding>)> {
@@ -1719,30 +1868,48 @@ fn collect_rust_tuple_struct_field_aliases(
         if name.is_empty() {
             continue;
         }
-        let text = node_text(&node, src);
-        let Some(open) = text.find('(') else {
+        let Some(fields) = node.child_by_field_name("body") else {
             continue;
         };
-        let Some(close) = text[open + 1..].find(')').map(|idx| open + 1 + idx) else {
-            continue;
-        };
-        if text[..open].contains('{') {
-            continue;
-        }
         let mut aliases = Vec::new();
-        for (idx, field) in text[open + 1..close]
-            .split(',')
-            .map(str::trim)
-            .filter(|field| !field.is_empty())
-            .enumerate()
-        {
-            let Some(type_name) = rust_tuple_struct_field_type(field) else {
-                continue;
-            };
-            aliases.push(bonsai_lang_api::TypeAliasBinding {
-                name: format!("self.{idx}"),
-                type_name,
-            });
+        match fields.kind() {
+            "field_declaration_list" => {
+                let mut cursor = fields.walk();
+                for field in fields
+                    .named_children(&mut cursor)
+                    .filter(|field| field.kind() == "field_declaration")
+                {
+                    let Some(field_name) = field.child_by_field_name("name") else {
+                        continue;
+                    };
+                    let Some(field_type) = field.child_by_field_name("type") else {
+                        continue;
+                    };
+                    let field_name = node_text(&field_name, src).trim();
+                    let type_name = rust_declared_field_type_name(field_type, src);
+                    if field_name.is_empty() || type_name.is_empty() {
+                        continue;
+                    }
+                    aliases.push(bonsai_lang_api::TypeAliasBinding {
+                        name: format!("self.{field_name}"),
+                        type_name,
+                    });
+                }
+            }
+            "ordered_field_declaration_list" => {
+                let mut cursor = fields.walk();
+                for (idx, field_type) in fields.children_by_field_name("type", &mut cursor).enumerate() {
+                    let type_name = rust_declared_field_type_name(field_type, src);
+                    if type_name.is_empty() {
+                        continue;
+                    }
+                    aliases.push(bonsai_lang_api::TypeAliasBinding {
+                        name: format!("self.{idx}"),
+                        type_name,
+                    });
+                }
+            }
+            _ => continue,
         }
         if !aliases.is_empty() {
             out.push((name, aliases));
@@ -1751,36 +1918,53 @@ fn collect_rust_tuple_struct_field_aliases(
     out
 }
 
-fn rust_tuple_struct_field_type(field: &str) -> Option<String> {
-    let ty = field
-        .split(':')
-        .next_back()
-        .unwrap_or(field)
-        .trim()
-        .trim_start_matches("pub ")
-        .trim();
-    let ty = ty
-        .split(|ch: char| !(ch == '_' || ch == ':' || ch.is_ascii_alphanumeric()))
-        .find(|part| !part.is_empty())
-        .unwrap_or("");
-    ty.rsplit("::")
-        .next()
-        .filter(|base| {
-            base.chars()
-                .next()
-                .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
-        })
-        .map(ToString::to_string)
+/// Preserve an adapter-classified Rust type path for receiver dispatch.
+///
+/// A bare tail is insufficient for Rust because a field commonly names a
+/// sibling module type (`scheduler::Handle`) while the enclosing module also
+/// declares a different `Handle`. Tree-sitter has already classified the
+/// exact type node here, so retaining its path is syntax lowering rather than
+/// a shared-engine name guess. Generic constructors keep their outer type,
+/// matching the existing field-type contract; reference/pointer wrappers are
+/// transparent for method dispatch.
+fn rust_declared_field_type_name(mut node: Node<'_>, src: &[u8]) -> String {
+    while matches!(node.kind(), "reference_type" | "pointer_type") {
+        let Some(inner) = node.child_by_field_name("type") else {
+            break;
+        };
+        node = inner;
+    }
+    if node.kind() == "generic_type" {
+        if let Some(outer) = node.child_by_field_name("type") {
+            node = outer;
+        }
+    }
+    if node.kind() == "scoped_type_identifier" {
+        return bonsai_common::normalize_qualified_name(node_text(&node, src));
+    }
+    bonsai_lang_api::kit::canonical_simple_type_name(node_text(&node, src))
 }
 
-fn apply_rust_tuple_struct_field_aliases(
+fn rust_nominal_tuple_field_type(mut node: Node<'_>, src: &[u8]) -> Option<String> {
+    while matches!(node.kind(), "reference_type" | "pointer_type") {
+        node = node.child_by_field_name("type")?;
+    }
+    if node.kind() == "generic_type" {
+        node = node.child_by_field_name("type")?;
+    }
+    matches!(node.kind(), "type_identifier" | "scoped_type_identifier")
+        .then(|| bonsai_common::normalize_qualified_name(node_text(&node, src)))
+        .filter(|type_name| !type_name.is_empty())
+}
+
+fn apply_rust_struct_field_aliases(
     idx: &mut DeclIndex,
-    tuple_struct_field_aliases: &[(String, Vec<bonsai_lang_api::TypeAliasBinding>)],
+    struct_field_aliases: &[(String, Vec<bonsai_lang_api::TypeAliasBinding>)],
 ) {
-    if tuple_struct_field_aliases.is_empty() {
+    if struct_field_aliases.is_empty() {
         return;
     }
-    let aliases_by_class = tuple_struct_field_aliases
+    let aliases_by_class = struct_field_aliases
         .iter()
         .map(|(name, aliases)| (name.as_str(), aliases))
         .collect::<std::collections::HashMap<_, _>>();
@@ -1794,6 +1978,7 @@ fn apply_rust_tuple_struct_field_aliases(
                     | bonsai_lang_api::DeclKind::Struct
                     | bonsai_lang_api::DeclKind::Trait
                     | bonsai_lang_api::DeclKind::Interface
+                    | bonsai_lang_api::DeclKind::Enum
             )
         })
         .map(|decl| (decl.symbol, decl.name.clone()))
@@ -2023,19 +2208,6 @@ fn append_rust_use_argument(
                     original_name: None,
                     scope: ImportScope::Module,
                 });
-                if rust_path_is_workspace_relative(&segments) {
-                    let local = segments.last().cloned().unwrap_or_default();
-                    if !local.is_empty() {
-                        out.push(ImportSpec {
-                            span,
-                            module: local.clone(),
-                            alias: Some(local),
-                            is_wildcard: false,
-                            original_name: None,
-                            scope: ImportScope::Module,
-                        });
-                    }
-                }
                 return;
             }
 
@@ -2078,13 +2250,6 @@ fn rust_path_segments(path: Node<'_>, src: &[u8]) -> Vec<String> {
         }
     }
     Vec::new()
-}
-
-fn rust_path_is_workspace_relative(segments: &[String]) -> bool {
-    matches!(
-        segments.first().map(String::as_str),
-        Some("crate" | "self" | "super")
-    )
 }
 
 fn rust_module_segments(path: &std::path::Path) -> Vec<String> {

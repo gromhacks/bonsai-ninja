@@ -67,6 +67,17 @@ pub(crate) struct CrossModuleTracer<'a> {
     headers: Arc<GlobalIndex>,
     call_graph: &'a ResolvedCallGraph,
     opts: CrossModuleOptions,
+    scope: TraceGraphScope,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TraceGraphScope {
+    /// The graph contains every semantic target reachable from the entry.
+    Reachable,
+    /// The graph was projected to edges that lie on a selected
+    /// source-to-target corridor. A call without an edge is outside that
+    /// corridor; it is not evidence of failed workspace resolution.
+    SelectedCorridor,
 }
 
 struct TraceBuilder<'a> {
@@ -74,6 +85,7 @@ struct TraceBuilder<'a> {
     headers: Arc<GlobalIndex>,
     call_graph: &'a ResolvedCallGraph,
     opts: CrossModuleOptions,
+    scope: TraceGraphScope,
     out: RawTrace,
     next_step: u32,
     next_path: u32,
@@ -220,12 +232,14 @@ impl<'a> CrossModuleTracer<'a> {
         headers: Arc<GlobalIndex>,
         call_graph: &'a ResolvedCallGraph,
         opts: CrossModuleOptions,
+        scope: TraceGraphScope,
     ) -> Self {
         Self {
             workspace,
             headers,
             call_graph,
             opts,
+            scope,
         }
     }
 
@@ -235,6 +249,7 @@ impl<'a> CrossModuleTracer<'a> {
             headers: Arc::clone(&self.headers),
             call_graph: self.call_graph,
             opts: self.opts,
+            scope: self.scope,
             out: RawTrace::default(),
             next_step: 0,
             next_path: 1,
@@ -784,6 +799,14 @@ impl<'a> TraceBuilder<'a> {
 
         if resolved_calls.is_empty() {
             let call_name = site.name.trim();
+            if self.scope == TraceGraphScope::SelectedCorridor {
+                // The graph was deliberately projected to source-to-target
+                // edges. Calls with no surviving edge are outside the user's
+                // selected behavior, not unresolved compiler work and not
+                // useful trace steps. Keep walking the enclosing body without
+                // emitting diagnostic noise for those excluded branches.
+                return true;
+            }
             self.out.mark_incomplete(format!("unresolved-call:{call_name}"));
             return self.emit(
                 StepKind::Diagnostic,

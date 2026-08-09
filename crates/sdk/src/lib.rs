@@ -38,10 +38,10 @@ use std::{
     time::Duration,
 };
 
-const DEFAULT_EXPORT_CACHE_FILE: &str = "export.default.v13.json";
-const DEFAULT_EXPORT_CACHE_METADATA_FILE: &str = "export.default.v13.meta.json";
+const DEFAULT_EXPORT_CACHE_FILE: &str = "export.default.v14.json";
+const DEFAULT_EXPORT_CACHE_METADATA_FILE: &str = "export.default.v14.meta.json";
 const DEFAULT_EXPORT_CACHE_METADATA_VERSION: u32 = 1;
-const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v16";
+const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v17";
 const CACHE_MANIFEST_FILE: &str = "manifest.json";
 // v6 records an exact Git/HEAD/worktree source-state snapshot. Fresh CLI
 // processes can therefore reuse the manifest's complete compiler input table
@@ -67,15 +67,15 @@ pub use tree::{
 
 pub use bonsai_browse::{
     collect_callee_names, dump_callable_file_qualifier, file_path_excluded_by_filters,
-    file_path_matches_filter, ArgOut, ArgsFilters, AstFileDump, AstFilters, AstFunctionCandidate, AstNode,
-    AstOutcome, CallOut, CallgraphRow, CallsFilters, ClassOut, ClassesFilters, CommentOut, CommentsFilters,
-    DefOut, DefsFilters, EdgeRecord, EdgesFilters, EntryPointOut, EntryPointsFilters, FlowAnnotator,
-    GraphExportFormat, GraphProjection, HirDump, ImportOut, ImportsFilters, Locator, OperationOperandOut,
-    OperationOut, OperationsFilters, PathFilters, PathFunctionRow, PathOutcome, PathRow, PrecisionClass,
-    RefOut, RefsFilters, ResolutionCoverageDeclRow, ResolutionCoverageFileRow, ResolutionCoverageFilters,
-    ResolveFilters, ResolveOutcome, ResolveTrace, SearchFilters, SearchHit, SliceFilters, SliceOutcome,
-    SliceRow, SliceStep, StringOut, StringsFilters, TaintFilters, TaintOutcome, TaintReport, VarOut,
-    VarsFilters,
+    file_path_matches_filter, format_span, workspace_file_id, ArgOut, ArgsFilters, AstFileDump, AstFilters,
+    AstFunctionCandidate, AstNode, AstOutcome, CallOut, CallgraphRow, CallsFilters, ClassOut, ClassesFilters,
+    CommentOut, CommentsFilters, DefOut, DefsFilters, EdgeRecord, EdgesFilters, EntryPointOut,
+    EntryPointsFilters, FlowAnnotator, GraphExportFormat, GraphProjection, HirDump, ImportOut,
+    ImportsFilters, Locator, OperationOperandOut, OperationOut, OperationsFilters, PathFilters,
+    PathFunctionRow, PathOutcome, PathRow, PrecisionClass, RefOut, RefsFilters, ResolutionCoverageDeclRow,
+    ResolutionCoverageFileRow, ResolutionCoverageFilters, ResolveFilters, ResolveOutcome, ResolveTrace,
+    SearchFilters, SearchHit, SliceFilters, SliceOutcome, SliceRow, SliceStep, StringOut, StringsFilters,
+    TaintFilters, TaintOutcome, TaintReport, VarOut, VarsFilters,
 };
 pub use bonsai_inspect::{
     chain_matches_filters, chain_matches_filters_for_hit, chain_to_names, compute_flow_id,
@@ -141,9 +141,10 @@ pub mod trace_render {
 /// Full diagnostics report shared by the SDK and CLI.
 ///
 /// `diagnostics` is the traditional adapter/parser warning stream.
-/// `adapter_capabilities` is the machine-readable capability declaration
-/// for every registered adapter, so diagnostics consumers do not have to
-/// cross-reference generated docs by hand.
+/// `adapter_capabilities` contains the machine-readable declarations for the
+/// adapters that own files in this workspace. The complete registry belongs
+/// in the generated capability matrix; omitting unrelated languages keeps a
+/// diagnostics response proportional to the code being analyzed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DiagnosticsReport {
     pub diagnostics: Vec<bonsai_diagnostics::Diagnostic>,
@@ -841,13 +842,16 @@ impl Bonsai {
                 Ok(bonsai_browse::CallgraphRow {
                     function: row.name,
                     qualified_name: row.qualified_name,
-                    file: paths.get(&row.file.raw()).cloned().ok_or_else(|| {
-                        anyhow!(
-                            "callgraph function {} references missing compiler source {}",
-                            row.function.raw(),
-                            row.file.raw()
-                        )
-                    })?,
+                    file: paths
+                        .get(&row.file.raw())
+                        .map(|path| bonsai_common::workspace_relative_filter_path(Some(root), path))
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "callgraph function {} references missing compiler source {}",
+                                row.function.raw(),
+                                row.file.raw()
+                            )
+                        })?,
                     name_start: row.name_start,
                     callers: row.callers,
                     outgoing: row.outgoing,
@@ -1197,11 +1201,12 @@ impl Project {
     pub fn diagnostics_report(&self) -> DiagnosticsReport {
         self.refresh_from_disk_best_effort();
         let diagnostics = self.workspace.diagnostics();
+        let workspace_languages = self.workspace_languages();
         DiagnosticsReport {
             diagnostic_files: self.diagnostic_file_rows(&diagnostics),
             diagnostics,
-            workspace_languages: self.workspace_languages(),
-            adapter_capabilities: self.adapter_capability_rows(),
+            adapter_capabilities: self.adapter_capability_rows(&workspace_languages),
+            workspace_languages,
         }
     }
 
@@ -1259,11 +1264,16 @@ impl Project {
         langs.into_iter().collect()
     }
 
-    fn adapter_capability_rows(&self) -> Vec<AdapterCapabilityRow> {
+    fn adapter_capability_rows(&self, workspace_languages: &[String]) -> Vec<AdapterCapabilityRow> {
+        let workspace_languages = workspace_languages
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
         let mut rows: Vec<AdapterCapabilityRow> = self
             .registry
             .all()
             .into_iter()
+            .filter(|adapter| workspace_languages.contains(adapter.language_id().as_str()))
             .map(|adapter| {
                 let caps = adapter.capabilities();
                 AdapterCapabilityRow {
@@ -4607,6 +4617,7 @@ impl Show<'_> {
             query,
             ResolveFilters {
                 in_file: options.in_file,
+                line: None,
                 candidate_id: Some(candidate_id),
             },
         ) {

@@ -401,6 +401,10 @@ impl<'a> InspectFilters<'a> {
 // `bonsai_sdk::chain_matches_filters`.
 use bonsai_sdk::name_token_match;
 
+fn fact_kind_filter_name(kind: FactKindFilter) -> &'static str {
+    kind.as_str()
+}
+
 // `chain_matches_filters` lives in `bonsai_sdk::filter` — the
 // CLI just calls `bonsai_sdk::chain_matches_filters(...)` after
 // converting its `InspectFilters` to the SDK struct via `to_sdk()`.
@@ -1619,6 +1623,7 @@ struct InspectFinish<'a> {
     is_regex: bool,
     kind_filter: &'a [String],
     filters: InspectFilters<'a>,
+    provenance_filters: InspectFilters<'a>,
     render: InspectRenderOptions,
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
@@ -1640,6 +1645,7 @@ fn finish_inspect(
         is_regex,
         kind_filter,
         filters,
+        provenance_filters,
         render,
         paging_cfg,
         format,
@@ -1722,25 +1728,43 @@ fn finish_inspect(
     // can reopen the same compiler-scoped graph instead of enumerating the
     // workspace or speculatively invoking security analysis.
     if graph_flows_enabled {
-        if let Some(query) = pattern.filter(|query| !query.is_empty()) {
-            let ids = report
-                .decl_hits
-                .iter()
-                .flat_map(|hit| {
-                    hit.flows
-                        .iter()
-                        .map(|flow| flow.flow_id.as_str())
-                        .chain(hit.groups.iter().map(|group| group.group_id.as_str()))
-                })
-                .chain(report.hits.iter().flat_map(|hit| {
-                    hit.flows
-                        .iter()
-                        .map(|flow| flow.flow_id.as_str())
-                        .chain(hit.groups.iter().map(|group| group.group_id.as_str()))
-                }))
-                .collect::<Vec<_>>();
-            crate::page_cache::remember_structural_id_hints(root, ids, query, is_regex);
-        }
+        let ids = report
+            .decl_hits
+            .iter()
+            .flat_map(|hit| {
+                hit.flows
+                    .iter()
+                    .map(|flow| flow.flow_id.as_str())
+                    .chain(hit.groups.iter().map(|group| group.group_id.as_str()))
+            })
+            .chain(report.hits.iter().flat_map(|hit| {
+                hit.flows
+                    .iter()
+                    .map(|flow| flow.flow_id.as_str())
+                    .chain(hit.groups.iter().map(|group| group.group_id.as_str()))
+            }))
+            .collect::<Vec<_>>();
+        crate::page_cache::remember_structural_id_hints(
+            root,
+            ids,
+            crate::page_cache::StructuralIdHint {
+                query: pattern.unwrap_or_default().to_string(),
+                regex: is_regex,
+                kind_filter: kind_filter.to_vec(),
+                from: provenance_filters.from.map(str::to_string),
+                from_kind: provenance_filters
+                    .from_kind
+                    .map(fact_kind_filter_name)
+                    .map(str::to_string),
+                to: provenance_filters.to.map(str::to_string),
+                to_kind: provenance_filters
+                    .to_kind
+                    .map(fact_kind_filter_name)
+                    .map(str::to_string),
+                file: provenance_filters.file.map(str::to_string),
+                in_fn: provenance_filters.in_fn.map(str::to_string),
+            },
+        );
     }
 
     // Secondary `--contains` / `--not-contains`: keep only the decl /
@@ -2108,6 +2132,11 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             }
         }
     }
+    // Keep the compiler-qualified endpoint identities before the exact
+    // corridor narrows its presentation matcher to lexical tails below. A
+    // short tail is exact only inside that proven corridor; persisting it as
+    // `show F:` provenance would reopen an unrelated broad query.
+    let provenance_filters = filters;
     let exact_file_path = filters.file.and_then(|file| {
         let requested = std::path::Path::new(file);
         let absolute = if requested.is_absolute() {
@@ -2684,6 +2713,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             is_regex,
             kind_filter,
             filters,
+            provenance_filters,
             render,
             paging_cfg,
             format,
@@ -5578,7 +5608,7 @@ fn render_full_source_bodies(u: &Ui, flow: &InspectFlowRendered, seen: &mut Body
             annotation_fingerprint(func),
         );
         cli_println!();
-        cli_println!("{} {}", u.dim("[module]"), u.path(&short_file(&func.module_path)));
+        cli_println!("{} {}", u.dim("[module]"), u.path(&func.module_path));
         render_owner_context(u, func);
         if seen.contains(&key) {
             // Body already rendered earlier in this section — just
@@ -5672,7 +5702,7 @@ fn render_compact_step_list(u: &Ui, flow: &InspectFlowRendered) {
     if annotated_lines.is_empty() {
         for (index, func) in flow.functions.iter().enumerate() {
             let step_no = index + 1;
-            let location = u.loc(&format!("{}:{}", short_file(&func.module_path), func.start_line));
+            let location = u.loc(&format!("{}:{}", func.module_path, func.start_line));
             cli_println!(
                 "  {} {} {}{}  {}",
                 u.step(&format!("{:>3}", step_no)),
@@ -5692,7 +5722,7 @@ fn render_compact_step_list(u: &Ui, flow: &InspectFlowRendered) {
         } else {
             u.step(&format!("{:>3}", step_no))
         };
-        let location = u.loc(&format!("{}:{}", short_file(&func.module_path), line.line_no));
+        let location = u.loc(&format!("{}:{}", func.module_path, line.line_no));
         let annotation = line.annotation.as_deref().unwrap_or("");
         if annotation.len() > 90 {
             cli_println!(
@@ -6747,7 +6777,10 @@ fn render_function_source(
     let file = decl.span.file;
     let snapshot = ws.vfs().snapshot(file).ok()?;
     let src = snapshot.text.as_ref();
-    let module_path = snapshot.path.display().to_string();
+    let module_path = bonsai_common::workspace_relative_filter_path(
+        ws.db().workspace_root().as_deref(),
+        &snapshot.path.display().to_string(),
+    );
 
     let span_map = bonsai_common::cached_span_map_arc(file, snapshot.version, &snapshot.text);
     let body_span = decl.body_span.unwrap_or(decl.span);

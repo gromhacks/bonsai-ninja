@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::args::{BrowseFormat, InspectView, OutputPathArg, SecurityAction};
+use crate::args::{BrowseFormat, FactKindFilter, InspectView, OutputPathArg, SecurityAction};
 use crate::cli_println;
 use crate::paging;
 
@@ -95,6 +95,7 @@ pub(crate) fn cmd_show(args: ShowArgs<'_>) -> Result<()> {
                 args.workspace,
                 query,
                 args.in_file,
+                None,
                 args.compact,
                 Some(id),
                 args.format,
@@ -111,33 +112,42 @@ impl ShowArgs<'_> {
     }
 }
 
-fn show_structural_flow(
-    workspace: &Path,
-    id: &str,
-    query: Option<&str>,
+struct StructuralShowOptions<'a> {
+    query: Option<&'a str>,
     is_regex: bool,
+    kind_filter: &'a [String],
+    filters: InspectFilters<'a>,
     compact: bool,
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
-) -> Result<()> {
+}
+
+fn show_structural_flow(workspace: &Path, id: &str, options: StructuralShowOptions<'_>) -> Result<()> {
+    let structural_drilldown = options.query.is_some();
     cmd_inspect(
         workspace,
         InspectCommandOptions {
-            pattern: query,
-            is_regex,
-            kind_filter: &[],
-            filters: InspectFilters::default(),
+            pattern: options.query,
+            is_regex: options.is_regex,
+            kind_filter: options.kind_filter,
+            filters: options.filters,
             render: InspectRenderOptions {
-                compact,
+                compact: options.compact,
                 flow_id_filter: Some(id.to_string()),
                 view: InspectView::Trace,
                 group_id_filter: None,
-                structural_drilldown: true,
+                // A query-backed id already has declaration/occurrence
+                // anchors and can skip the unrelated syntax scan. A pure
+                // endpoint scope (`--from/--to` with no query) derives its
+                // rendered target from those filtered occurrences, so it
+                // must replay that exact candidate phase before the id-only
+                // render narrow is applied.
+                structural_drilldown,
             },
             graph_flow: true,
             taint_flow: false,
-            paging_cfg,
-            format,
+            paging_cfg: options.paging_cfg,
+            format: options.format,
         },
     )
 }
@@ -155,23 +165,32 @@ fn show_security_or_structural_flow(
         return show_structural_flow(
             args.workspace,
             id,
-            Some(query),
-            false,
-            args.compact,
-            paging_cfg,
-            args.format,
+            StructuralShowOptions {
+                query: Some(query),
+                is_regex: false,
+                kind_filter: &[],
+                filters: InspectFilters::default(),
+                compact: args.compact,
+                paging_cfg,
+                format: args.format,
+            },
         );
     }
     if args.rules_dir.is_none() {
         if let Some(hint) = crate::page_cache::structural_id_hint(args.workspace, id)? {
+            let filters = inspect_filters_from_hint(&hint)?;
             return show_structural_flow(
                 args.workspace,
                 id,
-                Some(&hint.query),
-                hint.regex,
-                args.compact,
-                paging_cfg,
-                args.format,
+                StructuralShowOptions {
+                    query: (!hint.query.is_empty()).then_some(hint.query.as_str()),
+                    is_regex: hint.regex,
+                    kind_filter: &hint.kind_filter,
+                    filters,
+                    compact: args.compact,
+                    paging_cfg,
+                    format: args.format,
+                },
             );
         }
     }
@@ -183,58 +202,38 @@ fn show_security_or_structural_flow(
     // id belonged to security (eight minutes on Elasticsearch).
     match show_security_flow(args, id) {
         Ok(()) => Ok(()),
-        Err(security_err) => {
-            match show_structural_flow(
-                args.workspace,
-                id,
-                None,
-                false,
-                args.compact,
-                paging_cfg.clone(),
-                args.format,
-            ) {
-                Ok(()) => Ok(()),
-                Err(err) if err.to_string().contains("no flow matching") => {
-                    match show_sdk_structural_flow(args.workspace, id, args.format) {
-                        Ok(()) => Ok(()),
-                        Err(sdk_err) => Err(anyhow::anyhow!(
-                            "flow id `{id}` was not found by security taint flow, inspect render, or SDK structural chains: {security_err}; {err}; {sdk_err}"
-                        )),
-                    }
-                }
-                Err(err) => Err(err),
-            }
-        }
+        // With no query provenance, the SDK's stable structural identity is
+        // the only exact target. Re-running unfiltered inspect would render
+        // the same chain once for every declaration/occurrence along it and
+        // could enumerate an entire large workspace needlessly.
+        Err(security_err) => show_sdk_structural_flow(args.workspace, id, args.format).map_err(|sdk_err| {
+            anyhow::anyhow!(
+                "flow id `{id}` was not found by security taint flow or SDK structural chains: {security_err}; {sdk_err}"
+            )
+        }),
     }
 }
 
-fn show_flow_group(
-    workspace: &Path,
-    id: &str,
-    query: Option<&str>,
-    is_regex: bool,
-    compact: bool,
-    paging_cfg: paging::PagingConfig,
-    format: BrowseFormat,
-) -> Result<()> {
+fn show_flow_group(workspace: &Path, id: &str, options: StructuralShowOptions<'_>) -> Result<()> {
+    let structural_drilldown = options.query.is_some();
     cmd_inspect(
         workspace,
         InspectCommandOptions {
-            pattern: query,
-            is_regex,
-            kind_filter: &[],
-            filters: InspectFilters::default(),
+            pattern: options.query,
+            is_regex: options.is_regex,
+            kind_filter: options.kind_filter,
+            filters: options.filters,
             render: InspectRenderOptions {
-                compact,
+                compact: options.compact,
                 flow_id_filter: None,
                 view: InspectView::Grouped,
                 group_id_filter: Some(id.to_string()),
-                structural_drilldown: true,
+                structural_drilldown,
             },
             graph_flow: true,
             taint_flow: false,
-            paging_cfg,
-            format,
+            paging_cfg: options.paging_cfg,
+            format: options.format,
         },
     )
 }
@@ -248,51 +247,65 @@ fn show_security_or_structural_group(
         return show_flow_group(
             args.workspace,
             id,
-            Some(query),
-            false,
-            args.compact,
-            paging_cfg,
-            args.format,
+            StructuralShowOptions {
+                query: Some(query),
+                is_regex: false,
+                kind_filter: &[],
+                filters: InspectFilters::default(),
+                compact: args.compact,
+                paging_cfg,
+                format: args.format,
+            },
         );
     }
     if args.rules_dir.is_none() {
         if let Some(hint) = crate::page_cache::structural_id_hint(args.workspace, id)? {
+            let filters = inspect_filters_from_hint(&hint)?;
             return show_flow_group(
                 args.workspace,
                 id,
-                Some(&hint.query),
-                hint.regex,
-                args.compact,
-                paging_cfg,
-                args.format,
+                StructuralShowOptions {
+                    query: (!hint.query.is_empty()).then_some(hint.query.as_str()),
+                    is_regex: hint.regex,
+                    kind_filter: &hint.kind_filter,
+                    filters,
+                    compact: args.compact,
+                    paging_cfg,
+                    format: args.format,
+                },
             );
         }
     }
     match show_security_group(args, id) {
         Ok(()) => Ok(()),
-        Err(security_err) => {
-            match show_flow_group(
-                args.workspace,
-                id,
-                None,
-                false,
-                args.compact,
-                paging_cfg.clone(),
-                args.format,
-            ) {
-                Ok(()) => Ok(()),
-                Err(err) if err.to_string().contains("no flow group matching") => {
-                    match show_sdk_structural_group(args.workspace, id, args.format) {
-                        Ok(()) => Ok(()),
-                        Err(sdk_err) => Err(anyhow::anyhow!(
-                            "group id `{id}` was not found by security taint group, inspect render, or SDK structural chains: {security_err}; {err}; {sdk_err}"
-                        )),
-                    }
-                }
-                Err(err) => Err(err),
-            }
-        }
+        Err(security_err) => show_sdk_structural_group(args.workspace, id, args.format).map_err(|sdk_err| {
+            anyhow::anyhow!(
+                "group id `{id}` was not found by security taint group or SDK structural chains: {security_err}; {sdk_err}"
+            )
+        }),
     }
+}
+
+fn inspect_filters_from_hint<'a>(
+    hint: &'a crate::page_cache::StructuralIdHint,
+) -> Result<InspectFilters<'a>> {
+    let parse_kind = |value: Option<&'a str>| -> Result<Option<FactKindFilter>> {
+        value
+            .map(|value| {
+                FactKindFilter::from_stable_name(value).ok_or_else(|| {
+                    anyhow::anyhow!("invalid structural-id endpoint kind `{value}` in query provenance")
+                })
+            })
+            .transpose()
+    };
+    Ok(InspectFilters {
+        from: hint.from.as_deref(),
+        from_kind: parse_kind(hint.from_kind.as_deref())?,
+        to: hint.to.as_deref(),
+        to_kind: parse_kind(hint.to_kind.as_deref())?,
+        file: hint.file.as_deref(),
+        in_fn: hint.in_fn.as_deref(),
+    })
 }
 
 /*
@@ -324,7 +337,7 @@ fn emit_sdk_inspect_flow(flow: &bonsai_sdk::InspectFlowShow, format: BrowseForma
             cli_println!("{}", serde_json::to_string_pretty(flow)?);
         }
         BrowseFormat::Text => {
-            cli_println!("FLOW {}", flow.flow_id);
+            cli_println!("FLOW 1 {}", flow.flow_id);
             for matched in &flow.matches {
                 cli_println!(
                     "{}  target={}  chain={}",

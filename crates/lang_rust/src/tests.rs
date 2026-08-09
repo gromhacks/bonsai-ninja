@@ -37,6 +37,52 @@ fn use_trees_are_lowered_from_cst_nodes() {
 }
 
 #[test]
+fn direct_rooted_use_retains_its_complete_target_once() {
+    let imports = parse_import_specs("use crate::util::trace::SpawnMeta;\n");
+
+    assert_eq!(imports.len(), 1);
+    assert_eq!(imports[0].module, "crate::util::trace::SpawnMeta");
+    assert_eq!(imports[0].alias, None);
+    assert_eq!(imports[0].original_name, None);
+}
+
+#[test]
+fn visible_use_member_lowers_as_an_exact_import_facade() {
+    let ws = workspace_with(
+        vec![Arc::new(RustAdapter::new())],
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"adapter-fixture\"\nversion = \"0.1.0\"\n",
+            ),
+            ("src/runtime/task/mod.rs", "pub(crate) use self::id::Id;\n"),
+        ],
+    );
+    let file = ws
+        .vfs()
+        .all_files()
+        .iter()
+        .copied()
+        .find(|file| {
+            ws.vfs()
+                .path(*file)
+                .is_ok_and(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        })
+        .expect("Rust fixture file");
+    let idx = ws.db().decl_index(file).unwrap();
+    let alias = idx
+        .defs
+        .iter()
+        .find(|decl| decl.kind == DeclKind::Import && decl.name == "Id")
+        .expect("exported Id facade");
+
+    assert_eq!(alias.visibility, Visibility::Crate);
+    assert_eq!(alias.bases, ["self::id::Id"]);
+    let expected_identity = format!("{}.Id", alias.module_path.segments.join("."));
+    assert_eq!(alias.qualified_name.as_deref(), Some(expected_identity.as_str()));
+}
+
+#[test]
 fn extracts_top_level_function() {
     let ws = workspace_with(
         vec![Arc::new(RustAdapter::new())],
@@ -88,7 +134,7 @@ sink(format!("ping {cmd}"));
 }
 
 #[test]
-fn module_qualified_value_call_records_receiver_for_resolution() {
+fn module_qualified_call_is_a_receiverless_path_call() {
     let ws = workspace_with(
         vec![Arc::new(RustAdapter::new())],
         &[(
@@ -108,12 +154,56 @@ fn run(valid: Envelope) {
         .flow_events
         .iter()
         .find_map(|event| match event {
-            FlowEvent::Call { name, receiver, .. } if name == "store::persist" => Some(receiver.as_deref()),
+            FlowEvent::Call {
+                name,
+                receiver,
+                receiver_types,
+                call_kind,
+                ..
+            } if name == "store::persist" => Some((receiver, receiver_types, call_kind)),
             _ => None,
         })
-        .flatten();
+        .expect("store::persist call");
 
-    assert_eq!(call, Some("store"));
+    assert_eq!(call.0, &None);
+    assert!(call.1.is_empty());
+    assert_eq!(*call.2, CallKind::Function);
+}
+
+#[test]
+fn generic_scoped_call_is_a_receiverless_path_call() {
+    let ws = workspace_with(
+        vec![Arc::new(RustAdapter::new())],
+        &[(
+            "src/runtime.rs",
+            r#"
+fn spawn<F>() {
+    let _ = core::mem::size_of::<F>();
+}
+"#,
+        )],
+    );
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).unwrap();
+    let spawn = idx.defs.iter().find(|decl| decl.name == "spawn").unwrap();
+    let call = spawn
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call {
+                name,
+                receiver,
+                receiver_types,
+                call_kind,
+                ..
+            } if name == "core::mem::size_of::<F>" => Some((receiver, receiver_types, call_kind)),
+            _ => None,
+        })
+        .expect("size_of call");
+
+    assert_eq!(call.0, &None);
+    assert!(call.1.is_empty());
+    assert_eq!(*call.2, CallKind::Function);
 }
 
 #[test]
@@ -203,15 +293,17 @@ fn tuple_struct_field_receiver_records_projected_type() {
         &[(
             "src/storage.rs",
             r#"
-struct Repository;
-impl Repository {
-    fn run(&self) {}
+mod scheduler {
+    pub struct Repository;
+    impl Repository {
+        pub fn run(&self) {}
+    }
 }
 
-struct AuditedRepository(Repository);
+struct AuditedRepository(u32, pub(crate) scheduler::Repository);
 impl AuditedRepository {
     fn run(&self) {
-        self.0.run();
+        self.1.run();
     }
 }
 "#,
@@ -227,7 +319,7 @@ impl AuditedRepository {
                 && decl
                     .type_aliases
                     .iter()
-                    .any(|alias| alias.name == "self.0" && alias.type_name == "Repository")
+                    .any(|alias| alias.name == "self.1" && alias.type_name == "scheduler.Repository")
         })
         .unwrap();
     let receiver_types = audited_run.flow_events.iter().find_map(|event| match event {
@@ -236,11 +328,125 @@ impl AuditedRepository {
             receiver,
             receiver_types,
             ..
-        } if name == "self.0.run" && receiver.as_deref() == Some("self.0") => Some(receiver_types),
+        } if name == "self.1.run" && receiver.as_deref() == Some("self.1") => Some(receiver_types),
         _ => None,
     });
 
-    assert!(receiver_types.is_some_and(|types| types.iter().any(|ty| ty == "Repository")));
+    assert!(receiver_types.is_some_and(|types| types.iter().any(|ty| ty == "scheduler.Repository")));
+}
+
+#[test]
+fn named_struct_field_receiver_records_declared_type() {
+    let ws = workspace_with(
+        vec![Arc::new(RustAdapter::new())],
+        &[(
+            "src/runtime.rs",
+            r#"
+mod scheduler {
+    struct Handle;
+    impl Handle {
+        fn spawn_named(&self) {}
+    }
+}
+
+struct Runtime {
+    handle: scheduler::Handle,
+}
+impl Runtime {
+    fn spawn(&self) {
+        self.handle.spawn_named();
+    }
+}
+"#,
+        )],
+    );
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).unwrap();
+    let spawn = idx
+        .defs
+        .iter()
+        .find(|decl| {
+            decl.name == "spawn"
+                && decl
+                    .type_aliases
+                    .iter()
+                    .any(|alias| alias.name == "self.handle" && alias.type_name == "scheduler.Handle")
+        })
+        .expect("Runtime::spawn should inherit the named field's declared type");
+    let receiver_types = spawn.flow_events.iter().find_map(|event| match event {
+        FlowEvent::Call {
+            name,
+            receiver,
+            receiver_types,
+            ..
+        } if name == "self.handle.spawn_named" && receiver.as_deref() == Some("self.handle") => {
+            Some(receiver_types)
+        }
+        _ => None,
+    });
+
+    let receiver_types = receiver_types.expect("self.handle.spawn_named call should be lowered");
+    assert_eq!(
+        receiver_types.as_slice(),
+        ["scheduler.Handle"],
+        "the qualified field type must not be weakened to a same-named local type"
+    );
+}
+
+#[test]
+fn item_macro_wrapped_impl_is_lowered_at_original_offsets() {
+    let source = r#"
+macro_rules! configured_items {
+    ($($item:item)*) => { $($item)* };
+}
+
+enum Scheduler {
+    Current,
+}
+
+configured_items! {
+    impl Scheduler {
+        fn dispatch(&self) {
+            self.run_queue();
+        }
+
+        fn run_queue(&self) {}
+    }
+}
+"#;
+    let ws = workspace_with(
+        vec![Arc::new(RustAdapter::new())],
+        &[("src/scheduler.rs", source)],
+    );
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).unwrap();
+    let scheduler = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "Scheduler" && decl.kind == DeclKind::Enum)
+        .expect("macro fixture enum");
+    let dispatch = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "dispatch")
+        .expect("item-macro impl method should be compiled");
+    let run_queue = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "run_queue")
+        .expect("every item in the macro body should be compiled");
+
+    assert_eq!(dispatch.parent, Some(scheduler.symbol));
+    assert_eq!(run_queue.parent, Some(scheduler.symbol));
+    assert_eq!(
+        &source.as_bytes()[dispatch.name_span.start as usize..dispatch.name_span.end as usize],
+        b"dispatch",
+        "the compiler view must preserve source byte offsets"
+    );
+    assert!(dispatch.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Call { name, .. } if name == "self.run_queue"
+    )));
 }
 
 #[test]

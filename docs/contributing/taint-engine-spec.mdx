@@ -377,11 +377,13 @@ least one body throw is type-assignable:
 - `RuntimeException` is intentionally NOT a root — it doesn't catch
   checked exceptions.
 
-**Detached futures.** Rust `tokio::spawn` / `std::thread::spawn` bodies
-are wrapped in `FlowEvent::Defer` by the adapter. The engine's Defer
-handler observes the body's effects (so dangerous spawned sinks still
-surface) but doesn't propagate spawn taint into the caller's
-post-spawn continuation.
+**Async and deferred bodies.** Tree-sitter-owned async bodies remain visible
+to the engine regardless of the runtime API that receives them. Shared code
+does not recognize executor names. `FlowEvent::Defer` bodies are observed so
+dangerous sinks still surface, while their state stays outside the caller's
+sequential continuation; an adapter may emit that event only from syntax that
+proves a deferred scope. Runtime-specific detachment needs an explicit typed
+summary capability and must not be guessed from call text.
 
 ### 10. Summary generation
 

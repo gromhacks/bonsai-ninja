@@ -641,7 +641,11 @@ fn alias_rewrite_from_target(
             AliasRewriteMode::Type => current.target_text(),
         },
     };
-    AliasRewrite::from_target(current, rewritten)
+    AliasRewrite::from_target(
+        current,
+        rewritten,
+        matches!(mode, AliasRewriteMode::Type) && tail.is_some(),
+    )
 }
 
 /// Split `name` into (head, tail) using the longest-form module
@@ -675,9 +679,19 @@ struct AliasRewrite {
 }
 
 impl AliasRewrite {
-    fn from_target(target: &AliasTarget, rewritten: String) -> Self {
+    fn from_target(target: &AliasTarget, rewritten: String, nested_type_member: bool) -> Self {
         let target_module = match target {
             AliasTarget::Namespace { module } if !module.trim().is_empty() => Some(module.clone()),
+            AliasTarget::Member { module, member }
+                if nested_type_member && !module.trim().is_empty() && !member.trim().is_empty() =>
+            {
+                // `use parent::{child}` followed by `child::Type` makes the
+                // imported member a namespace segment. Constraining a bare
+                // fallback to only `parent` would admit same-named types from
+                // sibling modules (for example `runtime::Handle` for
+                // `runtime::scheduler::Handle`).
+                Some(format!("{module}.{member}"))
+            }
             AliasTarget::Member { module, .. } if !module.trim().is_empty() => Some(module.clone()),
             _ => None,
         };
@@ -1042,7 +1056,7 @@ pub fn enclosing_class_for_decl<'a>(
         if let Some(parent_decl) = global.decl_of(parent) {
             if matches!(
                 parent_decl.kind,
-                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface | DeclKind::Enum
             ) {
                 return Some(parent_decl);
             }
@@ -1243,7 +1257,12 @@ fn collect_method_candidates_for_class_cached_inner(
     };
     if !matches!(
         class_decl.kind,
-        DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+        DeclKind::Class
+            | DeclKind::Struct
+            | DeclKind::Trait
+            | DeclKind::Interface
+            | DeclKind::Enum
+            | DeclKind::Import
     ) {
         return Vec::new();
     }
@@ -1337,7 +1356,12 @@ fn collect_method_candidates_for_class_inner(
     };
     if !matches!(
         class_decl.kind,
-        DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+        DeclKind::Class
+            | DeclKind::Struct
+            | DeclKind::Trait
+            | DeclKind::Interface
+            | DeclKind::Enum
+            | DeclKind::Import
     ) {
         return;
     }
@@ -1442,7 +1466,7 @@ fn collect_peer_partial_class_method_candidates(
         };
         if !matches!(
             peer_decl.kind,
-            DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+            DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface | DeclKind::Enum
         ) || peer_decl.name != class_decl.name
             || !peer_partial_class_matches(class_decl, class_sym, peer_decl, peer_sym, global)
             || !visibility_allows(peer_decl, peer_file, &peer_decl.module_path, ctx)
@@ -1489,7 +1513,7 @@ fn collect_peer_partial_class_method_candidates_cached(
         };
         if !matches!(
             peer_decl.kind,
-            DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+            DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface | DeclKind::Enum
         ) || peer_decl.name != class_decl.name
             || !peer_partial_class_matches(class_decl, class_sym, peer_decl, peer_sym, global)
             || !visibility_allows(peer_decl, peer_file, &peer_decl.module_path, ctx)
@@ -1527,7 +1551,11 @@ fn peer_partial_class_symbols(
                     && decl.name == class_decl.name
                     && matches!(
                         decl.kind,
-                        DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+                        DeclKind::Class
+                            | DeclKind::Struct
+                            | DeclKind::Trait
+                            | DeclKind::Interface
+                            | DeclKind::Enum
                     )
             })
             .map(|decl| decl.symbol)
@@ -1551,7 +1579,11 @@ fn build_peer_class_index(global: &GlobalIndex) -> PeerClassIndex {
             if decl.module_path.is_empty()
                 || !matches!(
                     decl.kind,
-                    DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+                    DeclKind::Class
+                        | DeclKind::Struct
+                        | DeclKind::Trait
+                        | DeclKind::Interface
+                        | DeclKind::Enum
                 )
             {
                 continue;
@@ -1607,7 +1639,7 @@ pub fn class_symbols_share_semantic_identity(global: &GlobalIndex, left: SymbolI
     let class_like = |decl: &bonsai_lang_api::Decl| {
         matches!(
             decl.kind,
-            DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+            DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface | DeclKind::Enum
         )
     };
     class_like(left_decl)
@@ -1670,6 +1702,7 @@ fn class_decl_context<'a>(
         ctx = ctx.with_file_path_match_lookup(file_path_match_lookup.lookup);
     }
     ctx = ctx.with_same_directory_unqualified_calls(inherited.same_directory_unqualified_calls);
+    ctx = ctx.with_module_path_syntax(inherited.module_path_syntax);
     ctx
 }
 
@@ -1844,6 +1877,7 @@ pub fn resolve_class(
     ctx: &ResolveContext<'_>,
 ) -> Vec<bonsai_common::SymbolId> {
     use bonsai_lang_api::DeclKind;
+    let name = strip_module_path_prefix(name, ctx.module_path_syntax);
     let collect = |lookup: &str| {
         global
             // CONTEXTLESS_LOOKUP_JUSTIFICATION: this is the semantic
@@ -1865,6 +1899,7 @@ pub fn resolve_class(
                         | DeclKind::Trait
                         | DeclKind::Interface
                         | DeclKind::Enum
+                        | DeclKind::Import
                 )
             })
             .filter(|(decl, decl_file)| visibility_allows(decl, *decl_file, &decl.module_path, ctx))
@@ -1895,6 +1930,7 @@ pub fn resolve_class(
                         | DeclKind::Trait
                         | DeclKind::Interface
                         | DeclKind::Enum
+                        | DeclKind::Import
                 )
             })
             .filter(|decl| visibility_allows(decl, ctx.caller_file, &decl.module_path, ctx))
@@ -1906,14 +1942,20 @@ pub fn resolve_class(
         let Some(tail) = wanted.last().copied().filter(|_| wanted.len() > 1) else {
             return Vec::new();
         };
-        let mut candidates = collect_caller_lexical_scope(tail);
+        // The qualifier itself is reachability evidence. Start from every
+        // visible declaration with the exact terminal name, then retain only
+        // complete qualified-name suffix matches. Applying the unqualified
+        // lexical-scope gate here would incorrectly discard rooted or
+        // explicitly qualified cross-module paths before their owner can be
+        // checked (for example a Rust `crate::module::ReExport`).
+        let mut candidates = collect(tail);
         candidates.retain(|symbol| {
             global
                 .decl_of(*symbol)
                 .and_then(|decl| decl.qualified_name.as_deref())
                 .is_some_and(|qualified| {
                     let observed = qualified_name_segments(qualified);
-                    observed.len() >= wanted.len() && observed[observed.len() - wanted.len()..] == wanted[..]
+                    relative_qualified_type_matches(&observed, &wanted, ctx.caller_module)
                 })
         });
         candidates
@@ -2018,6 +2060,24 @@ pub fn resolve_class(
         }
     }
     out
+}
+
+fn relative_qualified_type_matches(
+    observed: &[&str],
+    wanted: &[&str],
+    caller_module: &bonsai_lang_api::ModulePath,
+) -> bool {
+    if observed == wanted {
+        return true;
+    }
+    (1..=caller_module.segments.len()).rev().any(|prefix_len| {
+        observed.len() == prefix_len + wanted.len()
+            && observed[..prefix_len]
+                .iter()
+                .zip(&caller_module.segments[..prefix_len])
+                .all(|(observed, expected)| *observed == expected)
+            && observed[prefix_len..] == *wanted
+    })
 }
 
 fn alias_target_qualified_class_lookup_names(

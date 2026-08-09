@@ -1372,6 +1372,52 @@ fn receiver_type_uses_declared_class_facts_without_factory_name_knowledge() {
 }
 
 #[test]
+fn qualified_receiverless_call_does_not_inherit_enclosing_class_type() {
+    let file = FileId::new(0);
+    let mut idx = DeclIndex::default();
+    let mut runtime = m9_func_decl(0, "Runtime", None, Vec::new());
+    runtime.kind = DeclKind::Struct;
+    let mut spawn = m9_func_decl(
+        1,
+        "spawn",
+        None,
+        vec![
+            FlowEvent::Call {
+                span: Span::new(file, 10, 20),
+                name: "SpawnMeta::new_unnamed".to_string(),
+                receiver: None,
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Method,
+                args: Vec::new(),
+            },
+            FlowEvent::Call {
+                span: Span::new(file, 30, 40),
+                name: "poll".to_string(),
+                receiver: None,
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Method,
+                args: Vec::new(),
+            },
+        ],
+    );
+    spawn.kind = DeclKind::Method;
+    spawn.parent = Some(runtime.symbol);
+    idx.defs.extend([runtime, spawn]);
+
+    apply_call_receiver_types(&mut idx);
+
+    let method = &idx.defs[1];
+    assert!(matches!(
+        &method.flow_events[0],
+        FlowEvent::Call { receiver_types, .. } if receiver_types.is_empty()
+    ));
+    assert!(matches!(
+        &method.flow_events[1],
+        FlowEvent::Call { receiver_types, .. } if receiver_types == &["Runtime"]
+    ));
+}
+
+#[test]
 fn receiver_type_joins_sigiled_ast_aliases_by_canonical_binding_name() {
     let mut idx = DeclIndex::default();
     let mut child = m9_func_decl(0, "Child", None, Vec::new());

@@ -172,6 +172,7 @@ impl ReceiverAncestry {
             }
             let mut seen = AHashSet::new();
             for receiver_type in direct_types {
+                push_unique(&mut call.receiver_types, receiver_type.clone());
                 push_type_and_bases(&mut call.receiver_types, &receiver_type, &self.by_type, &mut seen);
             }
             dedup_strings(&mut call.receiver_types);
@@ -659,7 +660,7 @@ impl GlobalIndex {
         for decl in self.by_file.values().flat_map(|index| index.defs.iter()) {
             if !matches!(
                 decl.kind,
-                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface | DeclKind::Enum
             ) || decl.bases.is_empty()
             {
                 continue;
@@ -1442,22 +1443,25 @@ fn push_type_and_bases(
     bases_by_type: &AHashMap<String, Vec<String>>,
     seen: &mut AHashSet<String>,
 ) {
-    let key = type_name_key(ty);
-    if key.is_empty() || !seen.insert(key.clone()) {
+    let identity = type_name_identity(ty);
+    if identity.is_empty() || !seen.insert(identity.clone()) {
         return;
     }
-    push_unique(receiver_types, key.clone());
-    if let Some(bases) = bases_by_type.get(&key) {
+    let bases = bases_by_type
+        .get(&identity)
+        .or_else(|| bases_by_type.get(&type_name_key(&identity)));
+    if let Some(bases) = bases {
         for base in bases {
+            push_unique(receiver_types, base.clone());
             push_type_and_bases(receiver_types, base, bases_by_type, seen);
         }
     }
 }
 
 fn type_name_keys(name: &str, qualified_name: Option<&str>) -> Vec<String> {
-    let mut out = vec![type_name_key(name)];
+    let mut out = vec![type_name_identity(name), type_name_key(name)];
     if let Some(qname) = qualified_name {
-        out.push(type_name_key(qname));
+        out.push(type_name_identity(qname));
     }
     dedup_strings(&mut out);
     out.retain(|key| !key.is_empty());
@@ -1465,12 +1469,16 @@ fn type_name_keys(name: &str, qualified_name: Option<&str>) -> Vec<String> {
 }
 
 fn type_name_key(name: &str) -> String {
+    short_qualified_tail(&type_name_identity(name)).to_string()
+}
+
+fn type_name_identity(name: &str) -> String {
     let normalized = name
         .trim()
         .trim_start_matches(bonsai_common::is_name_punctuation)
         .trim_end_matches("()")
         .replace('\\', "::");
-    short_qualified_tail(&normalized)
+    bonsai_common::normalize_qualified_name(&normalized)
         .split('<')
         .next()
         .unwrap_or_default()

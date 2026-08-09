@@ -10,6 +10,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 /// Engine crates per `docs/contributing/architecture.mdx` — the layer that must
 /// remain language-agnostic. None of these may depend on any
@@ -2194,12 +2195,18 @@ fn every_language_adapter_owns_its_tree_sitter_lowering() {
             "call_kinds:",
             "call_ref_kinds:",
             "argument_passing_mode_extractor:",
-            "decl_index_with_handler(",
             "fn extract_imports",
         ] {
             if !source.contains(required) {
                 violations.push(format!("{name}: missing adapter-owned `{required}`"));
             }
+        }
+        if !source.contains("decl_index_with_handler(")
+            && !source.contains("decl_index_from_tree_with_handler(")
+        {
+            violations.push(format!(
+                "{name}: missing adapter-owned Tree-sitter declaration lowering entrypoint"
+            ));
         }
         for forbidden in ["GENERIC_HANDLER", "COMMON_CALL_KINDS", "with_fn_kinds"] {
             if source.contains(forbidden) {
@@ -5421,7 +5428,7 @@ fn structured_security_guards_are_rulepack_driven() {
     );
     assert!(
         language_types.contains("pub struct BranchConditionFact")
-            && language_kit.contains("extract_branch_condition_facts(&tree")
+            && language_kit.contains("extract_branch_condition_facts(tree, file, handler, src)")
             && ruby.contains("extract_branch_condition_facts(&tree")
             && native_export.contains("branch_conditions: index.branch_conditions.clone()"),
         "branch-condition compiler facts must be emitted by shared/custom frontend paths and preserved by export"
@@ -5741,4 +5748,44 @@ fn workspace_test_profile_keeps_debug_link_graphs_disabled() {
         profile.lines().any(|line| line.trim() == "debug = 0"),
         "[profile.test] must keep debug = 0 so exhaustive workspace gates do not relink full DWARF graphs"
     );
+}
+
+#[test]
+fn hardcoded_audit_refuses_destructive_output_paths() {
+    let root = repo_root();
+    let output = root
+        .join("target")
+        .join(format!("hardcoded-audit-safety-{}", std::process::id()));
+    let sentinel = output.join("sentinel");
+    fs::create_dir_all(&output).expect("create audit safety fixture");
+    fs::write(&sentinel, "must survive").expect("write audit safety sentinel");
+
+    let script = root.join("scripts/audit-hardcoded.sh");
+    let extra_argument = Command::new("bash")
+        .arg(&script)
+        .arg("--check")
+        .arg(&output)
+        .arg("security-patterns")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run hardcoded audit with an extra argument");
+    assert!(!extra_argument.success(), "extra arguments must be rejected");
+    assert!(sentinel.exists(), "argument errors must not remove output data");
+
+    let repository_output = Command::new("bash")
+        .arg(&script)
+        .arg("--check")
+        .arg(&output)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run hardcoded audit with a repository output path");
+    assert!(
+        !repository_output.success(),
+        "repository-local audit output must be rejected"
+    );
+    assert!(sentinel.exists(), "rejected output paths must remain untouched");
+
+    fs::remove_dir_all(output).expect("remove audit safety fixture");
 }

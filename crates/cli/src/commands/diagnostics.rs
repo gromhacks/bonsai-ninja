@@ -568,7 +568,11 @@ fn open_project_for_dump_target(
     if let Some(file) = bonsai_sdk::dump_callable_file_qualifier(symbol) {
         return open_project_index_matching_path(root, std::path::Path::new(file));
     }
-    open_project_index_matching_literal(root, symbol)
+    // A compiler-qualified identity (for example the exact `qualified_name`
+    // printed by `defs`) need not appear verbatim in source. Use its terminal
+    // declaration token only for candidate-file selection; the browse layer
+    // then resolves the complete qualified identity against typed headers.
+    open_project_index_matching_literal(root, bonsai_callgraph::short_callee(symbol))
 }
 
 #[cfg(test)]

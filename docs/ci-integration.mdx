@@ -126,6 +126,21 @@ seconds. The broad inspect result retained all 12,233 entry closures and
 target ownership now avoid redundant header/relevance lookups without changing
 the IDG fixed point.
 
+The current 2026-08-08 ABI-v68 migration pass passed all five tests in
+1,822.56 seconds. Its required one-time exact generation took 1,619.68 seconds
+and immediate reuse took 2.35 seconds. Default inspect took 6.76 seconds,
+broad raw-taint inspect 24.20 seconds, fresh-cache production taint 29.51
+seconds, and warm production taint 25.42 seconds. The scoped `read-file` probe
+took 1.71 seconds. All navigation and security-inventory SLOs passed; the
+compiler worker stayed near 1.04 GiB RSS and the IDG worker near 2.67 GiB under
+the 3 GiB scheduling budget. This is the current cache-compatibility reference.
+
+The final 2026-08-09 ABI-v68 warm release-candidate repeat passed 5/5 in
+219.44 seconds. Semantic readiness/reuse took 5.29/2.38 seconds, default and
+exact broad raw-taint inspect 7.12/25.81 seconds, and fresh-cache/warm
+production taint 30.16/29.23 seconds. Every navigation and security inventory
+remained below its 30-second SLO without limiting semantic work.
+
 The 2026-08-07 ABI-v64 migration pass passed all five tests in 1,883.15
 seconds. Its required one-time exact generation took 1,672.82 seconds and
 immediate reuse took 2.34 seconds. Default inspect took 7.38 seconds, broad
@@ -135,7 +150,7 @@ and warm production taint 28.46 seconds. The scoped `read-file` probe took
 lowering stayed near 0.9 GiB RSS under the 3 GiB scheduling budget. ABI-v64
 also binds every callgraph and compatibility flow artifact to the compiler
 frontend ABI, preventing stale adapter IR from surviving an upgrade. This is
-the current cache-compatibility reference.
+the prior ABI-v64 cache-compatibility reference.
 
 The prior 2026-08-07 ABI-v63 migration pass also passed all five tests. Its required
 one-time exact generation took 1,720.68 seconds and immediate reuse took 2.34

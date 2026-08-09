@@ -23,7 +23,7 @@ def process(value):
     let exported = native_export_json(&ws, dir.path(), false).expect("native export");
 
     assert_eq!(exported["schema"], "bonsai-native-export");
-    assert_eq!(exported["schema_version"], 6);
+    assert_eq!(exported["schema_version"], 7);
     let file = exported["files"]
         .as_array()
         .and_then(|files| {
@@ -32,6 +32,11 @@ def process(value):
                 .find(|file| file["path"].as_str().is_some_and(|p| p.ends_with("app.py")))
         })
         .expect("exported app.py");
+    assert_eq!(
+        file["path"], "app.py",
+        "native export v7 paths are portable and workspace-relative"
+    );
+    assert_portable_code_locations(&exported);
     let events = file["flow_events"].as_array().expect("flat flow event table");
     assert!(!events.is_empty(), "flow event table must contain parsed events");
     let assignment_values = file["assignment_values"]
@@ -119,6 +124,39 @@ def process(value):
     assert!(events.iter().any(|event| event["region"] == "finally"));
 }
 
+fn assert_portable_code_locations(value: &serde_json::Value) {
+    fn visit(value: &serde_json::Value, key: Option<&str>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                for (field, value) in object {
+                    visit(value, Some(field));
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    visit(value, key);
+                }
+            }
+            serde_json::Value::String(path)
+                if key.is_some_and(|field| {
+                    matches!(
+                        field,
+                        "file" | "path" | "caller_file" | "callee_file" | "call_file"
+                    )
+                }) =>
+            {
+                assert!(
+                    !std::path::Path::new(path).is_absolute(),
+                    "native export code location must be workspace-relative: {key:?}={path}"
+                );
+            }
+            _ => {}
+        }
+    }
+
+    visit(value, None);
+}
+
 #[test]
 fn compressed_complete_rows_are_honestly_non_materialized() {
     let compiled = NativeExportConfig {
@@ -168,7 +206,7 @@ fn parser_gaps_make_buffered_and_streaming_exports_incomplete() {
 }
 
 #[test]
-fn unresolved_calls_make_native_export_incomplete() {
+fn unknown_external_calls_do_not_make_native_export_incomplete() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         dir.path().join("app.py"),
@@ -186,11 +224,8 @@ fn unresolved_calls_make_native_export_incomplete() {
     )
     .expect("native export");
 
-    assert_eq!(exported["analysis_complete"], false);
-    assert_eq!(
-        exported["analysis_incomplete_reasons"],
-        serde_json::json!(["unresolved-call-sites:1"])
-    );
+    assert_eq!(exported["analysis_complete"], true);
+    assert_eq!(exported["analysis_incomplete_reasons"], serde_json::json!([]));
 }
 
 #[test]

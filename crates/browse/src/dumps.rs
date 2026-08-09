@@ -3,7 +3,7 @@
 //! `dump-ast`). The data extraction lives here; the CLI binary
 //! renders the structured results.
 
-use crate::common::format_span;
+use crate::common::{format_span, workspace_relative_path};
 use bonsai_callgraph::ResolvedCallGraph;
 use bonsai_common::FuncId;
 use bonsai_lang_api::{Decl, DeclKind, FlowEvent};
@@ -188,10 +188,10 @@ pub fn callgraph_summary(ws: &Workspace, resolved: &ResolvedCallGraph) -> Vec<Ca
                 per_file.push(CallgraphRow {
                     function: func_decl.name.clone(),
                     qualified_name: func_decl.qualified_name.clone(),
-                    file: ws
-                        .vfs()
-                        .path(file)
-                        .map_or_else(|_| "<unknown>".to_string(), |path| path.display().to_string()),
+                    file: ws.vfs().path(file).map_or_else(
+                        |_| "<unknown>".to_string(),
+                        |path| workspace_relative_path(ws, &path.display().to_string()),
+                    ),
                     name_start: func_decl.name_span.start,
                     callers: caller_count,
                     outgoing: outgoing_count,
@@ -298,8 +298,24 @@ fn resolve_single_callable(ws: &Workspace, symbol: &str) -> Result<Option<Decl>,
     let spec = split_callable_spec(symbol);
     let global = ws.compiler_linkage_index();
     let vfs = ws.db().vfs();
-    let mut candidates: Vec<Decl> = bonsai_resolve::resolve_callable(&global, spec.name)
-        .into_iter()
+    let wanted_segments = bonsai_common::qualified_name_segments(spec.name);
+    let lookup_name = wanted_segments.last().copied().unwrap_or(spec.name);
+    let qualified_query = wanted_segments.len() > 1;
+    let mut candidates: Vec<Decl> = global
+        .find_by_name(lookup_name)
+        .iter()
+        .filter_map(|symbol| global.decl_of(*symbol))
+        .filter(|decl| {
+            if !qualified_query {
+                return decl.name == spec.name;
+            }
+            decl.qualified_name.as_deref().is_some_and(|qualified| {
+                let observed = bonsai_common::qualified_name_segments(qualified);
+                observed.len() >= wanted_segments.len()
+                    && observed[observed.len() - wanted_segments.len()..] == wanted_segments[..]
+            })
+        })
+        .map(|decl| FuncId::new(decl.symbol.raw()))
         .filter_map(|func| {
             ws.exact_frontend_decl(bonsai_common::SymbolId::new(func.raw()))
                 .map(|decl| (*decl).clone())
@@ -312,9 +328,9 @@ fn resolve_single_callable(ws: &Workspace, symbol: &str) -> Result<Option<Decl>,
         })
         .filter(|decl| {
             let (file, line, _) = format_span(&decl.name_span, ws);
-            spec.file
-                .is_none_or(|qualifier| file_matches_qualifier(&file, qualifier))
-                && spec.line.is_none_or(|wanted| line == wanted)
+            spec.file.is_none_or(|qualifier| {
+                file_matches_qualifier(&file, qualifier, ws.db().workspace_root().as_deref())
+            }) && spec.line.is_none_or(|wanted| line == wanted)
         })
         .collect();
     candidates.sort_by(|a, b| {
@@ -341,11 +357,15 @@ fn resolve_single_callable(ws: &Workspace, symbol: &str) -> Result<Option<Decl>,
     }
 }
 
-fn file_matches_qualifier(decl_file: &str, qualifier: &str) -> bool {
+fn file_matches_qualifier(decl_file: &str, qualifier: &str, workspace_root: Option<&Path>) -> bool {
     if decl_file == qualifier {
         return true;
     }
-    let canonical_decl = Path::new(decl_file)
+    let decl_path = Path::new(decl_file);
+    let rooted_decl = workspace_root
+        .filter(|_| !decl_path.is_absolute())
+        .map_or_else(|| decl_path.to_path_buf(), |root| root.join(decl_path));
+    let canonical_decl = rooted_decl
         .canonicalize()
         .ok()
         .map(|path| path.to_string_lossy().into_owned());

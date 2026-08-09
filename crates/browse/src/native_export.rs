@@ -725,10 +725,10 @@ impl ExportSpanCache {
     fn new(ws: &Workspace) -> Self {
         let mut files = ahash::AHashMap::default();
         for file in ws.db().vfs().all_files() {
-            let path = ws
-                .vfs()
-                .path(file)
-                .map_or_else(|_| "<unknown>".to_string(), |p| p.display().to_string());
+            let path = ws.vfs().path(file).map_or_else(
+                |_| "<unknown>".to_string(),
+                |path| crate::workspace_relative_path(ws, &path.display().to_string()),
+            );
             if let Ok(snap) = ws.vfs().snapshot(file) {
                 files.insert(file, (path, SpanMap::new(snap.text.as_ref())));
             }
@@ -866,7 +866,7 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     let mut map = serializer.serialize_map(None)?;
 
     map.serialize_entry("schema", "bonsai-native-export")?;
-    map.serialize_entry("schema_version", &6_u32)?;
+    map.serialize_entry("schema_version", &7_u32)?;
     map.serialize_entry("engine_version", env!("CARGO_PKG_VERSION"))?;
     map.serialize_entry("workspace_root", &root.display().to_string())?;
     map.serialize_entry("generated_at_unix_ms", &generated_at_unix_ms())?;
@@ -1077,11 +1077,10 @@ fn export_files_in_path_order(ws: &Workspace) -> Vec<(FileId, String)> {
         .all_files()
         .into_iter()
         .map(|file| {
-            let path = ws
-                .vfs()
-                .path(file)
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|_| "<unknown>".to_string());
+            let path = ws.vfs().path(file).map_or_else(
+                |_| "<unknown>".to_string(),
+                |path| crate::workspace_relative_path(ws, &path.display().to_string()),
+            );
             (file, path)
         })
         .collect();
@@ -2252,10 +2251,10 @@ fn export_alias_maps(ws: &Workspace) -> Vec<ExportAliasMap> {
         if map.is_empty() {
             continue;
         }
-        let path = ws
-            .vfs()
-            .path(file)
-            .map_or_else(|_| "<unknown>".to_string(), |p| p.display().to_string());
+        let path = ws.vfs().path(file).map_or_else(
+            |_| "<unknown>".to_string(),
+            |path| crate::workspace_relative_path(ws, &path.display().to_string()),
+        );
         let mut entries: Vec<ExportAliasEntry> = map
             .into_iter()
             .map(|(local, target)| match target {

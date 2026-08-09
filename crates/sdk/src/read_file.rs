@@ -452,7 +452,7 @@ fn read_file_with_taint_options(
     analysis_incomplete_reasons.dedup();
     let analysis_complete = analysis_incomplete_reasons.is_empty();
 
-    Ok(ReadFileOut {
+    let mut out = ReadFileOut {
         locator: primary_locator,
         lines_total: total_lines,
         indexed: IndexedStatus::Complete,
@@ -469,7 +469,59 @@ fn read_file_with_taint_options(
         findings_in_view,
         truncated,
         page_cursor: None,
-    })
+    };
+    make_read_file_locations_portable(ws, &mut out);
+    Ok(out)
+}
+
+fn make_read_file_locations_portable(ws: &Workspace, out: &mut ReadFileOut) {
+    fn normalize(ws: &Workspace, locator: &mut Locator) {
+        locator.file = bonsai_browse::workspace_relative_path(ws, &locator.file);
+    }
+
+    fn normalize_edge(ws: &Workspace, edge: &mut CrossEdge) {
+        normalize(ws, &mut edge.caller);
+        normalize(ws, &mut edge.callee);
+        normalize(ws, &mut edge.call_site);
+    }
+
+    fn normalize_inlined(ws: &Workspace, decl: &mut InlinedDecl) {
+        normalize(ws, &mut decl.locator);
+        if let Some(bridge) = &mut decl.bridges_to {
+            normalize(ws, bridge);
+        }
+        for edge in decl.callers_in.iter_mut().chain(&mut decl.callees_out) {
+            normalize_edge(ws, edge);
+        }
+    }
+
+    normalize(ws, &mut out.locator);
+    for flow in &mut out.flows_in_view {
+        normalize(ws, &mut flow.enters_at);
+        normalize(ws, &mut flow.exits_at);
+    }
+    for decl in &mut out.line_decl_index {
+        normalize(ws, &mut decl.locator);
+    }
+    for mark in &mut out.marks {
+        normalize(ws, &mut mark.at);
+        if let Some(target) = &mut mark.target {
+            normalize(ws, target);
+        }
+        if let Some(sanitizer) = &mut mark.sanitizer_seen_at {
+            normalize(ws, sanitizer);
+        }
+        for hop in &mut mark.taint_history {
+            normalize(ws, &mut hop.locator);
+        }
+    }
+    for decl in out.callers_in.iter_mut().chain(&mut out.callees_out) {
+        normalize_inlined(ws, decl);
+    }
+    for finding in &mut out.findings_in_view {
+        normalize(ws, &mut finding.source);
+        normalize(ws, &mut finding.sink);
+    }
 }
 
 fn semantic_read_file_taint_options(options: TaintAnalysisOptions) -> TaintAnalysisOptions {
@@ -711,14 +763,7 @@ fn func_to_locator(func: FuncId, ws: &Workspace) -> Locator {
 mod tests;
 
 fn read_decl_body(loc: &Locator, ws: &Workspace) -> Option<String> {
-    // Find file id by path match.
-    let file_id = ws.vfs().all_files().into_iter().find(|fid| {
-        ws.vfs()
-            .path(*fid)
-            .ok()
-            .map(|p| p.display().to_string() == loc.file)
-            .unwrap_or(false)
-    })?;
+    let file_id = bonsai_browse::workspace_file_id(ws, &loc.file)?;
     let snap = ws.vfs().snapshot(file_id).ok()?;
     let local_decls = ws.exact_decl_index_shared(file_id)?;
     // Find decl by name + line.

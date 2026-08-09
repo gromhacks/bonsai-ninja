@@ -188,6 +188,43 @@ entries that own exact target nodes. Fresh-cache production taint completed in
 34.28 seconds, warm production taint in 27.74 seconds, and immediate semantic
 reuse in 2.48 seconds under the same 3 GiB schedule and unchanged SLOs.
 
+The current 2026-08-08 ABI-v68 Elasticsearch migration gate passed 5/5 in
+1,822.56 seconds. Its one-time exact compiler-object/IDG generation completed
+in 1,619.68 seconds, faster than the ABI-v64 migration reference, and
+immediate fresh-process reuse completed in 2.35 seconds. Fresh-cache and warm
+production taint completed in 29.51/25.42 seconds; default and exact broad
+raw-taint inspect completed in 6.76/24.20 seconds. The compiler worker stayed
+near 1.04 GiB RSS and released before the IDG worker peaked near 2.67 GiB,
+under the same 3 GiB schedule. Every navigation and security-inventory SLO
+passed without capping files, edges, paths, or fixed-point work.
+
+The final 2026-08-09 ABI-v68 warm release-candidate repeat passed 5/5 in
+219.44 seconds. Semantic readiness and immediate reuse took 5.29/2.38
+seconds; fresh-cache and warm production taint took 30.16/29.23 seconds;
+default and exact broad raw-taint inspect took 7.12/25.81 seconds. Every
+navigation and security-inventory command remained below its 30-second SLO.
+
+A pinned Tokio production-repository trial at
+`ecd621dd2c1a5205a84f579225e1454b62af211c` compiled 790 Rust source objects
+with zero parser diagnostics. The tool resolved the exact
+`Runtime::spawn -> spawn_named -> scheduler::Handle::spawn` route from
+Tree-sitter/compiler facts without runtime API-name special cases. A fresh
+ABI-v68 semantic generation completed in 5.85 seconds at 189 MB RSS and
+immediate reuse in 0.11 seconds at 13.9 MB. Exact call-site resolution and a
+source-to-target trace completed in 0.22/0.24 seconds; graph-flow inspection
+completed in 3.28 seconds, and production taint in 0.57 seconds with complete
+scope. Native schema-v7 export streamed 8,462 exact call edges in 1.15 seconds
+at 169 MB RSS. Stable flow IDs reopen the same qualified endpoint corridor,
+and every code location is a portable workspace-relative path.
+
+The same unfiltered Tokio export also reports its remaining static-evidence
+boundary instead of silently guessing: 11 dynamic call sites, 9,713 receiver
+type gaps, and 10,248 unresolved call sites. Targeted resolution, tracing,
+inspection, and security scope were complete; broad Rust linkage is not yet
+claimed complete for receivers whose types are absent from Tree-sitter-visible
+syntax. These are semantic completeness counters, not parser, memory, depth,
+or result caps.
+
 ## Human-First And LLM-First
 
 Most code tooling and most LLM coding workflows still force a model to

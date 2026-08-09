@@ -290,12 +290,29 @@ fn structural_id_hint_round_trips_and_invalidates_with_source() {
     let cache_root = bonsai_common::workspace_bonsai_dir(&root);
     let id = "F:0123456789abcdef";
 
-    remember_structural_id_hints(&root, [id], "pkg.Target.target", false);
+    remember_structural_id_hints(
+        &root,
+        [id],
+        super::StructuralIdHint {
+            query: "pkg.Target.target".to_string(),
+            regex: false,
+            kind_filter: vec!["call".to_string()],
+            from: Some("entry".to_string()),
+            from_kind: Some("decl".to_string()),
+            to: Some("target".to_string()),
+            to_kind: Some("call".to_string()),
+            file: Some("app.py".to_string()),
+            in_fn: Some("target".to_string()),
+        },
+    );
     let hint = structural_id_hint(&root, id)
         .expect("read hint")
         .expect("stored hint");
     assert_eq!(hint.query, "pkg.Target.target");
     assert!(!hint.regex);
+    assert_eq!(hint.kind_filter, ["call"]);
+    assert_eq!(hint.from.as_deref(), Some("entry"));
+    assert_eq!(hint.to.as_deref(), Some("target"));
 
     std::fs::write(root.join("app.py"), "def target():\n    return 2\n").expect("change source");
     assert!(

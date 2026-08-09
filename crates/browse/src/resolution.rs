@@ -6,7 +6,7 @@
 //! collector never falls back to text search or language-specific
 //! heuristics.
 
-use crate::common::{file_path_matches_filter, format_span};
+use crate::common::{file_path_matches_filter, format_span, workspace_relative_path};
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::EdgeKind;
 use bonsai_common::{FuncId, Span};
@@ -100,16 +100,22 @@ struct EdgeCounts {
 /// workspace for every call site.
 struct ResolutionIndex {
     resolved: std::sync::Arc<bonsai_callgraph::ResolvedCallGraph>,
+    unresolved: AHashSet<CallSiteKey>,
     workspace_module_tails: AHashSet<String>,
 }
 
 impl ResolutionIndex {
     fn new(ws: &Workspace) -> Self {
         let resolved = ws.cached_resolved_call_graph();
+        let unresolved = resolved
+            .unresolved_workspace_call_sites()
+            .map(|(caller, span)| CallSiteKey::new(caller, span))
+            .collect();
         let workspace_module_tails = workspace_module_tails(ws);
 
         Self {
             resolved,
+            unresolved,
             workspace_module_tails,
         }
     }
@@ -153,15 +159,15 @@ pub fn resolution_coverage(
         let Ok(path) = ws.vfs().path(file) else {
             continue;
         };
-        let file_path = path.to_string_lossy().to_string();
+        let absolute_file_path = path.to_string_lossy().to_string();
         if filters
             .file
-            .is_some_and(|needle| !file_path_matches_filter(ws, &file_path, needle))
+            .is_some_and(|needle| !file_path_matches_filter(ws, &absolute_file_path, needle))
         {
             continue;
         }
         let mut file_row = ResolutionCoverageFileRow {
-            file: file_path,
+            file: workspace_relative_path(ws, &absolute_file_path),
             ..ResolutionCoverageFileRow::default()
         };
         let Some(file_index) = ws.exact_decl_index_shared(file) else {
@@ -270,7 +276,7 @@ fn persisted_resolution_incomplete_reasons(ws: &Workspace) -> Option<Vec<String>
     let mut macro_call_sites = 0usize;
     let mut receiver_type_gaps = 0usize;
     match ws.visit_persisted_callgraph_partitions(
-        |file, _nodes, outgoing, _incoming, _ambiguous_workspace_sites| {
+        |file, _nodes, outgoing, _incoming, ambiguous_workspace_sites| {
             // Reconstruct only this file's semantic call-site index. The
             // persisted graph is partitioned by caller file, so this keeps
             // memory bounded by one compiler object while producing the same
@@ -287,6 +293,10 @@ fn persisted_resolution_incomplete_reasons(ws: &Workspace) -> Option<Vec<String>
                     EdgeKind::Unknown => {}
                 }
             }
+            let unresolved_sites = ambiguous_workspace_sites
+                .iter()
+                .map(|site| CallSiteKey::new(site.caller, site.span))
+                .collect::<AHashSet<_>>();
 
             let Some(file_index) = ws.exact_decl_index_shared(file) else {
                 return;
@@ -302,6 +312,7 @@ fn persisted_resolution_incomplete_reasons(ws: &Workspace) -> Option<Vec<String>
                 let row = coverage_counts_for_decl_with_resolved_sites(
                     decl,
                     &resolved_sites,
+                    &unresolved_sites,
                     &file_alias_targets,
                     &workspace_module_tails,
                 );
@@ -407,6 +418,7 @@ fn coverage_counts_for_decl(
     coverage_counts_for_decl_with_resolved_sites(
         decl,
         &resolved_sites,
+        &index.unresolved,
         file_alias_targets,
         &index.workspace_module_tails,
     )
@@ -415,6 +427,7 @@ fn coverage_counts_for_decl(
 fn coverage_counts_for_decl_with_resolved_sites(
     decl: &Decl,
     resolved_sites: &AHashMap<CallSiteKey, EdgeCounts>,
+    unresolved_sites: &AHashSet<CallSiteKey>,
     file_alias_targets: &AHashMap<String, AliasTarget>,
     workspace_module_tails: &AHashSet<String>,
 ) -> ResolutionCoverageDeclRow {
@@ -427,6 +440,7 @@ fn coverage_counts_for_decl_with_resolved_sites(
         decl,
         &decl.flow_events,
         resolved_sites,
+        unresolved_sites,
         &alias_targets,
         workspace_module_tails,
         &mut external_receivers,
@@ -454,6 +468,7 @@ fn collect_decl_call_sites(
     decl: &Decl,
     events: &[FlowEvent],
     resolved_sites: &AHashMap<CallSiteKey, EdgeCounts>,
+    unresolved_sites: &AHashSet<CallSiteKey>,
     alias_targets: &AHashMap<String, AliasTarget>,
     workspace_module_tails: &AHashSet<String>,
     external_receivers: &mut AHashSet<String>,
@@ -485,18 +500,19 @@ fn collect_decl_call_sites(
                             workspace_module_tails,
                             external_receivers,
                         ));
+                let explicit_workspace_gap = unresolved_sites.contains(&key);
                 if matches!(call_kind, CallKind::Indirect) {
                     row.dynamic_call_sites += 1;
                 }
                 if matches!(call_kind, CallKind::Macro) {
                     row.macro_call_sites += 1;
                 }
-                if resolved_counts.is_none()
+                let receiver_type_gap = resolved_counts.is_none()
                     && !known_external
                     && matches!(call_kind, CallKind::Method | CallKind::Constructor)
                     && receiver.is_some()
-                    && receiver_types.is_empty()
-                {
+                    && receiver_types.is_empty();
+                if receiver_type_gap {
                     row.receiver_type_gaps += 1;
                 }
                 if let Some(counts) = resolved_counts {
@@ -506,8 +522,17 @@ fn collect_decl_call_sites(
                     row.indirect_edges += counts.indirect;
                 } else if known_external {
                     row.external_call_sites += 1;
-                } else {
+                } else if explicit_workspace_gap
+                    || receiver_type_gap
+                    || matches!(call_kind, CallKind::Indirect | CallKind::Macro)
+                {
                     row.unresolved_call_sites += 1;
+                } else {
+                    // No workspace candidate survived compiler resolution.
+                    // This is an external/unknown boundary, not evidence that
+                    // the workspace graph is incomplete. Exact ambiguous
+                    // workspace sites are recorded explicitly above.
+                    row.external_call_sites += 1;
                 }
             }
             FlowEvent::Assign {
@@ -552,6 +577,7 @@ fn collect_decl_call_sites(
                     decl,
                     then_events,
                     resolved_sites,
+                    unresolved_sites,
                     alias_targets,
                     workspace_module_tails,
                     &mut then_external,
@@ -563,6 +589,7 @@ fn collect_decl_call_sites(
                     decl,
                     else_events,
                     resolved_sites,
+                    unresolved_sites,
                     alias_targets,
                     workspace_module_tails,
                     &mut else_external,
@@ -576,6 +603,7 @@ fn collect_decl_call_sites(
                     decl,
                     body,
                     resolved_sites,
+                    unresolved_sites,
                     alias_targets,
                     workspace_module_tails,
                     &mut body_external,
@@ -594,6 +622,7 @@ fn collect_decl_call_sites(
                     decl,
                     body,
                     resolved_sites,
+                    unresolved_sites,
                     alias_targets,
                     workspace_module_tails,
                     &mut body_external,
@@ -605,6 +634,7 @@ fn collect_decl_call_sites(
                     decl,
                     catch_events,
                     resolved_sites,
+                    unresolved_sites,
                     alias_targets,
                     workspace_module_tails,
                     &mut catch_external,
@@ -616,6 +646,7 @@ fn collect_decl_call_sites(
                     decl,
                     finally_events,
                     resolved_sites,
+                    unresolved_sites,
                     alias_targets,
                     workspace_module_tails,
                     &mut finally_external,
@@ -888,6 +919,11 @@ def load():
             .find(|row| row.file.ends_with("app.py"))
             .expect("app.py row");
 
+        assert_eq!(
+            row.file, "app.py",
+            "resolution locators must be workspace-relative"
+        );
+
         assert_eq!(row.call_sites, 4, "fixture call count changed: {row:#?}");
         assert_eq!(
             row.external_call_sites, 4,
@@ -908,6 +944,37 @@ def load():
             Vec::<String>::new(),
             "aggregate export coverage must use the same external-call classification"
         );
+    }
+
+    #[test]
+    fn qualified_external_path_does_not_collide_with_workspace_bare_tail() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            r#"
+fn pin(_value: usize) {}
+
+fn run(value: usize) {
+    let _ = Box::pin(value);
+}
+"#,
+        )
+        .expect("write fixture");
+        let ws =
+            Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+
+        let rows = resolution_coverage(&ws, &ResolutionCoverageFilters::default());
+        let row = rows
+            .iter()
+            .find(|row| row.file.ends_with("lib.rs"))
+            .expect("lib.rs row");
+        let run = row.decls.iter().find(|decl| decl.name == "run").expect("run row");
+
+        assert_eq!(run.call_sites, 1, "{run:#?}");
+        assert_eq!(run.resolved_call_sites, 0, "{run:#?}");
+        assert_eq!(run.external_call_sites, 1, "{run:#?}");
+        assert_eq!(run.unresolved_call_sites, 0, "{run:#?}");
+        assert!(run.analysis_complete, "{run:#?}");
     }
 
     #[test]

@@ -367,7 +367,7 @@ fn render_edge_records_text(records: &[bonsai_sdk::EdgeRecord], compact: bool, t
 /// `unknown`, and `unresolved` get the palette's warning color.
 fn precision_tag(u: &Ui, precision: &str) -> String {
     match precision {
-        "exact" | "narrowed" => u.dim(precision),
+        "exact" | "narrowed" | "external" => u.dim(precision),
         _ => u.warn(precision),
     }
 }
@@ -556,6 +556,7 @@ pub(crate) fn cmd_dump_resolve(
     root: &std::path::Path,
     query: &str,
     in_file_filter: Option<&str>,
+    line: Option<u32>,
     compact: bool,
     candidate_id_filter: Option<&str>,
     format: BrowseFormat,
@@ -563,6 +564,7 @@ pub(crate) fn cmd_dump_resolve(
     let (project, _footer) = open_project(root)?;
     let filters = bonsai_sdk::ResolveFilters {
         in_file: in_file_filter,
+        line,
         candidate_id: candidate_id_filter,
     };
     let stage = progress::ScopedSpinner::new("resolving symbol candidates");
@@ -662,6 +664,19 @@ fn render_resolve_full(u: &Ui, trace: &bonsai_sdk::ResolveTrace) {
     );
     render_resolve_incomplete_note(u, trace);
 
+    if trace.resolution_scope == "exact-call-site" {
+        let location = trace
+            .call_site_line
+            .map_or_else(|| "multiple lines".to_string(), |line| format!("line {line}"));
+        cli_println!(
+            "  {} {} {} {}",
+            u.dim("scope:"),
+            u.name("exact adapter call site"),
+            u.dim(&format!("({} match(es),", trace.matched_call_sites)),
+            u.dim(&format!("{location})")),
+        );
+    }
+
     // Stage 1: short_callee. `u.heading` already prepends a
     // leading `\n` so section separation comes for free — no manual
     // `cli_println!()` between stages.
@@ -745,7 +760,12 @@ fn render_resolve_full(u: &Ui, trace: &bonsai_sdk::ResolveTrace) {
     cli_println!();
 
     if trace.candidates.is_empty() {
-        cli_println!("    {}", u.dim("unresolved — call would escape the workspace"));
+        let empty_note = if trace.outcome == "external" {
+            "external — exact call site has no in-workspace target"
+        } else {
+            "unresolved — no compiler-justified target"
+        };
+        cli_println!("    {}", u.dim(empty_note));
         if !trace.suggestions.is_empty() {
             cli_println!("    {} {}", u.dim("did you mean:"), trace.suggestions.join(", "),);
         }

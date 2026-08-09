@@ -158,3 +158,151 @@ pub fn method(token: String) {
          that lets `Envelope::method` resolve to an unrelated workspace function; got {danger_taints:?}"
     );
 }
+
+#[test]
+fn grouped_crate_member_type_dispatches_to_macro_wrapped_enum_impl() {
+    let handle_rs = r#"
+use crate::runtime::{context, scheduler};
+
+pub struct Handle {
+    inner: scheduler::Handle,
+}
+
+impl Handle {
+    pub(crate) fn spawn(&self, future: String) {}
+
+    pub(crate) fn spawn_named(&self, future: String) {
+        self.inner.spawn(future);
+    }
+}
+"#;
+    let scheduler_rs = r#"
+macro_rules! cfg_rt { ($($item:item)*) => { $($item)* } }
+
+cfg_rt! {
+    pub(crate) enum Handle {
+        Current,
+        Multi,
+    }
+
+    impl Handle {
+        pub(crate) fn spawn(&self, future: String) {}
+    }
+}
+"#;
+    let db = ws(
+        Arc::new(bonsai_lang_rust::RustAdapter::new()),
+        &[
+            ("tokio/src/runtime/handle.rs", handle_rs),
+            ("tokio/src/runtime/scheduler/mod.rs", scheduler_rs),
+        ],
+    );
+    let global = db.global_index();
+    let caller = FuncId::new(
+        global
+            .find_by_name("spawn_named")
+            .first()
+            .copied()
+            .expect("spawn_named")
+            .raw(),
+    );
+    let scheduler_file = db
+        .vfs()
+        .all_files()
+        .into_iter()
+        .find(|file| {
+            db.vfs()
+                .path(*file)
+                .is_ok_and(|path| path.ends_with("tokio/src/runtime/scheduler/mod.rs"))
+        })
+        .expect("scheduler file");
+    let scheduler_spawn = global
+        .find_by_name("spawn")
+        .iter()
+        .copied()
+        .find(|symbol| global.declaring_file(*symbol) == Some(scheduler_file))
+        .map(|symbol| FuncId::new(symbol.raw()))
+        .expect("scheduler Handle::spawn");
+    let caller_decl = global
+        .decl_of(bonsai_common::SymbolId::new(caller.raw()))
+        .expect("spawn_named decl");
+    let caller_file = global
+        .declaring_file(caller_decl.symbol)
+        .expect("spawn_named file");
+    let alias_targets = bonsai_lang_api::alias_map_from_import_specs(&db.imports_for_uncached(caller_file))
+        .into_iter()
+        .collect::<ahash::AHashMap<_, _>>();
+    let path_lookup = |file| {
+        db.vfs()
+            .path(file)
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned())
+    };
+    let resolve_context = bonsai_resolve::ResolveContext::new(caller_file, &caller_decl.module_path)
+        .with_alias_map(&alias_targets)
+        .with_file_path_lookup(&path_lookup)
+        .with_module_path_syntax(bonsai_lang_api::ModulePathSyntax {
+            rooted_prefixes: &["crate::", "self::"],
+            repeatable_rooted_prefixes: &["super::"],
+        });
+    let resolved_types = bonsai_resolve::resolve_class(&global, "scheduler.Handle", &resolve_context);
+    assert_eq!(
+        resolved_types,
+        vec![global
+            .decl_of(bonsai_common::SymbolId::new(scheduler_spawn.raw()))
+            .and_then(|method| method.parent)
+            .expect("scheduler Handle")],
+        "rooted grouped member type resolution must select scheduler.Handle; aliases={alias_targets:?}"
+    );
+    let headers = db.build_global_header_index();
+    let header_caller = headers
+        .find_by_name("spawn_named")
+        .first()
+        .copied()
+        .expect("spawn_named header");
+    let header_caller_decl = headers.decl_of(header_caller).expect("spawn_named header decl");
+    let header_context = bonsai_resolve::ResolveContext::new(caller_file, &header_caller_decl.module_path)
+        .with_alias_map(&alias_targets)
+        .with_file_path_lookup(&path_lookup)
+        .with_module_path_syntax(bonsai_lang_api::ModulePathSyntax {
+            rooted_prefixes: &["crate::", "self::"],
+            repeatable_rooted_prefixes: &["super::"],
+        });
+    let header_types = bonsai_resolve::resolve_class(&headers, "scheduler.Handle", &header_context);
+    assert_eq!(
+        header_types.iter().map(|symbol| symbol.raw()).collect::<Vec<_>>(),
+        resolved_types
+            .iter()
+            .map(|symbol| symbol.raw())
+            .collect::<Vec<_>>(),
+        "streaming headers must preserve type resolution"
+    );
+    let remapped_caller = db
+        .decl_index_remapped_to_headers(&headers, caller_file)
+        .expect("remapped caller body")
+        .defs
+        .into_iter()
+        .find(|decl| decl.name == "spawn_named")
+        .expect("remapped spawn_named body");
+    assert_eq!(
+        remapped_caller.type_aliases, caller_decl.type_aliases,
+        "streaming body remap must preserve receiver types"
+    );
+    let receiver_types = remapped_caller
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            bonsai_lang_api::FlowEvent::Call {
+                name, receiver_types, ..
+            } if name == "self.inner.spawn" => Some(receiver_types.as_slice()),
+            _ => None,
+        })
+        .expect("self.inner.spawn call fact");
+    assert_eq!(receiver_types, ["scheduler.Handle"]);
+    let targets = bonsai_taint::build_resolved_call_graph_snapshot(&db)
+        .callees_of(caller)
+        .map(|edge| edge.to)
+        .collect::<Vec<_>>();
+
+    assert_eq!(targets, vec![scheduler_spawn]);
+}

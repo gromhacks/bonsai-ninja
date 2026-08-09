@@ -256,7 +256,7 @@ pub fn qualify_bare_hierarchy_member_calls(index: &mut DeclIndex) {
     for decl in &index.defs {
         if matches!(
             decl.kind,
-            DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+            DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface | DeclKind::Enum
         ) {
             classes_by_name
                 .entry(decl.name.clone())
@@ -5288,7 +5288,23 @@ pub fn decl_index_with_handler(
             ..Default::default()
         };
     };
-    let src = snapshot.text.as_bytes();
+    decl_index_from_tree_with_handler(file, snapshot.text.as_bytes(), &tree, handler)
+}
+
+/// Lower declarations and flow facts from an adapter-owned Tree-sitter view.
+///
+/// Most adapters use [`decl_index_with_handler`] directly. An adapter may use
+/// this entry point when the language grammar represents a syntax-preserving
+/// compiler view differently from the raw file tree—for example, Rust item
+/// bodies wrapped in declarative configuration macros. The adapter remains
+/// responsible for producing a same-offset tree from the exact source
+/// snapshot; shared lowering only consumes the supplied typed CST.
+pub fn decl_index_from_tree_with_handler(
+    file: FileId,
+    src: &[u8],
+    tree: &Tree,
+    handler: &GrammarHandler,
+) -> crate::DeclIndex {
     // Cheap subtree flag; per-decl gates below only fire when true.
     let file_has_syntax_errors = tree.root_node().has_error();
     // Exact ERROR / MISSING spans, computed once. A callable with a
@@ -5298,13 +5314,13 @@ pub fn decl_index_with_handler(
     // (a complex string interpolation, an unsupported attribute) no
     // longer discards every call/flow in the enclosing function.
     let error_spans: Vec<Span> = if file_has_syntax_errors {
-        syntax_error_spans(&tree, file)
+        syntax_error_spans(tree, file)
     } else {
         Vec::new()
     };
 
     // Pass 1: collect classes — needed to recognize ctor calls during walk.
-    let class_nodes = collect_kinds(&tree, handler.class_kinds);
+    let class_nodes = collect_kinds(tree, handler.class_kinds);
     let mut class_names: Vec<String> = Vec::new();
     for n in &class_nodes {
         if let Some(nm) = n
@@ -5319,7 +5335,7 @@ pub fn decl_index_with_handler(
     }
 
     // Pass 2: function-like declarations.
-    let fn_nodes = collect_kinds(&tree, handler.fn_kinds);
+    let fn_nodes = collect_kinds(tree, handler.fn_kinds);
     let mut defs: Vec<crate::Decl> = Vec::new();
     let mut function_parent_spans: Vec<(bonsai_common::SymbolId, bonsai_common::Span)> = Vec::new();
     let mut next: u32 = 0;
@@ -5473,7 +5489,7 @@ pub fn decl_index_with_handler(
                 handler.syntax_error_tolerant_call_names,
             );
         }
-        annotate_tuple_call_result_bindings(&mut flow_events, &tree, src);
+        annotate_tuple_call_result_bindings(&mut flow_events, tree, src);
 
         // For Elixir def-macros, params live on the SIGNATURE call
         // (the first argument of the outer call), not on the outer
@@ -5563,7 +5579,7 @@ pub fn decl_index_with_handler(
     // This is a distinct compiler pass because lambda ownership differs from
     // named callable ownership in higher-order calls.
     let lowering = CallableLowering {
-        tree: &tree,
+        tree,
         file,
         src,
         handler,
@@ -5598,16 +5614,16 @@ pub fn decl_index_with_handler(
     // handled by that callable's own gate above.
     lower_module_declaration(&lowering, &mut defs, &mut next);
 
-    let mut refs = extract_call_refs(&tree, file, src, handler);
-    refs.extend(extract_decorators(&tree, file, src));
-    refs.extend(extract_read_write_refs(&tree, file, src, handler));
-    let strings = extract_string_literals(&tree, file, src);
-    let comments = extract_comments(&tree, file, src);
-    let assignment_values = extract_assignment_value_facts(&tree, file, handler, src);
-    let call_receivers = extract_call_receiver_facts(&tree, file, handler, src);
-    let call_argument_values = extract_call_argument_value_facts(&tree, file, &defs, src, handler);
-    let runtime_type_narrowings = extract_runtime_type_narrowing_facts(&tree, file, handler, src);
-    let branch_conditions = extract_branch_condition_facts(&tree, file, handler, src);
+    let mut refs = extract_call_refs(tree, file, src, handler);
+    refs.extend(extract_decorators(tree, file, src));
+    refs.extend(extract_read_write_refs(tree, file, src, handler));
+    let strings = extract_string_literals(tree, file, src);
+    let comments = extract_comments(tree, file, src);
+    let assignment_values = extract_assignment_value_facts(tree, file, handler, src);
+    let call_receivers = extract_call_receiver_facts(tree, file, handler, src);
+    let call_argument_values = extract_call_argument_value_facts(tree, file, &defs, src, handler);
+    let runtime_type_narrowings = extract_runtime_type_narrowing_facts(tree, file, handler, src);
+    let branch_conditions = extract_branch_condition_facts(tree, file, handler, src);
     crate::DeclIndex {
         file,
         defs,
@@ -9260,6 +9276,7 @@ pub fn apply_call_receiver_types_with_language_syntax(
                 | crate::DeclKind::Struct
                 | crate::DeclKind::Trait
                 | crate::DeclKind::Interface
+                | crate::DeclKind::Enum
         ) {
             continue;
         }
@@ -9368,7 +9385,7 @@ fn apply_call_receiver_types_to_events(
                             }
                         }
                     }
-                } else {
+                } else if bonsai_common::qualified_name_owner(name).is_none() {
                     let Some(types) = implicit_receiver_types else {
                         continue;
                     };
@@ -9382,12 +9399,10 @@ fn apply_call_receiver_types_to_events(
                     // `this.foo()`. The narrowing isn't always
                     // accurate (free top-level functions called
                     // from within a method body inherit the
-                    // class's type incorrectly), but the
-                    // downstream resolver checks whether the
-                    // callee actually exists on the class
-                    // via Visibility + module_path gating, so
-                    // over-fill at the receiver-type layer is
-                    // bounded by that semantic check.
+                    // class's type incorrectly). Qualified syntax is never
+                    // implicit-self evidence: `Type::factory()` and
+                    // `module.function()` retain their compiler-qualified
+                    // owner and must not inherit the enclosing class.
                     for ty in types {
                         push_unique_receiver_type(receiver_types, ty.clone());
                     }
@@ -9652,10 +9667,18 @@ fn push_receiver_type_and_bases_inner(
     }
     let first_canonical_visit = seen.insert(canonical.clone());
     if first_canonical_visit {
-        push_unique_receiver_type(out, canonical.clone());
-    }
-    if let Some(qualified) = qualified_receiver_type_evidence(&ty, &canonical) {
-        push_unique_receiver_type(out, qualified);
+        if let Some(qualified) = qualified_receiver_type_evidence(&ty, &canonical) {
+            // A qualified compiler type is stronger evidence than its bare
+            // tail. Keeping both lets a same-named type in the caller's file
+            // win lexical resolution before the qualified identity is ever
+            // considered (`scheduler.Handle` becoming local `Handle`).
+            // Preserve the exact adapter-lowered identity; the semantic
+            // resolver already performs a constrained bare-tail fallback
+            // when that identity genuinely needs import resolution.
+            push_unique_receiver_type(out, qualified);
+        } else {
+            push_unique_receiver_type(out, canonical.clone());
+        }
     }
     if !first_canonical_visit {
         return;

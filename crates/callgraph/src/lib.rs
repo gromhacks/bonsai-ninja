@@ -17,7 +17,7 @@ use bonsai_common::{qualified_names_match, short_qualified_tail, FileId, FuncId,
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
     collect_return_spans, AliasTarget, AssignValueKind, CallArg, CallKind, CallableDeclarationFamily, Decl,
-    DeclKind, FlowEvent, LanguageCapabilities, ModulePath,
+    DeclKind, FlowEvent, LanguageCapabilities, ModulePath, ModulePathSyntax,
 };
 use bonsai_resolve::{
     build_shared_peer_class_index, callee_without_call_args, class_symbols_share_semantic_identity,
@@ -2053,6 +2053,7 @@ fn collect_ast_bound_call_candidates(
         caller_decl: context.caller_decl,
         alias_targets: context.alias_targets,
         path_for_file: context.path_for_file,
+        module_path_syntax: context.caller_capabilities.module_path_syntax,
         constructor_index: Some(context.constructor_index),
     };
     let mut values = collect_local_callable_binding_targets(
@@ -2104,6 +2105,7 @@ fn collect_ast_bound_call_candidates(
             facts.name,
             facts.span,
             context.caller_capabilities.effective_super_receiver_tokens(),
+            context.caller_capabilities.module_path_syntax,
             state.method_candidate_cache,
         );
     }
@@ -2114,6 +2116,7 @@ fn collect_ast_bound_call_candidates(
             context.alias_targets,
             context.path_for_file,
             facts.name,
+            context.caller_capabilities.module_path_syntax,
             state.method_candidate_cache,
         );
     }
@@ -2172,7 +2175,15 @@ fn collect_workspace_call_candidates(
         && facts.call_kind == CallKind::Method
         && facts.semantic_receiver.is_some()
         && !facts.alias_qualified;
-    if values.is_empty() && !unresolved_method_receiver && !facts.local_value_shadow {
+    if values.is_empty()
+        && !unresolved_method_receiver
+        && !facts.local_value_shadow
+        && bonsai_common::qualified_name_owner(facts.name).is_none()
+    {
+        // A qualified owner is semantic lookup evidence, never permission to
+        // retry the terminal name as an unrelated bare callable. Exact
+        // module/type and import-alias resolution ran above; if they found no
+        // workspace owner, the call is external or unknown.
         values = collect_callable_targets_with_context_aliases_paths_and_method_cache(
             context.global,
             facts.name,
@@ -2292,6 +2303,7 @@ fn discover_call_site_candidates(
         caller_decl: context.caller_decl,
         alias_targets: context.alias_targets,
         path_for_file: context.path_for_file,
+        module_path_syntax: context.caller_capabilities.module_path_syntax,
         constructor_index: Some(context.constructor_index),
     };
     let (workspace_candidates, unresolved_method_receiver) =
@@ -2423,14 +2435,19 @@ fn resolve_and_emit_call_site(
             caller_capabilities.universal_type_names,
         );
     }
-    let resolved_call_kind = if caller_capabilities.bare_call_constructor_syntax
-        && call_kind == CallKind::Function
-        && !candidates.is_empty()
+    let candidates_are_constructors = !candidates.is_empty()
         && candidates.iter().all(|func| {
             global
                 .decl_of(SymbolId::new(func.raw()))
                 .is_some_and(|decl| decl.kind == DeclKind::Constructor)
-        }) {
+        });
+    let exact_qualified_constructor = candidates_are_constructors
+        && semantic_receiver.is_none()
+        && bonsai_common::qualified_name_owner(facts.name).is_some();
+    let adapter_bare_constructor = candidates_are_constructors
+        && caller_capabilities.bare_call_constructor_syntax
+        && call_kind == CallKind::Function;
+    let resolved_call_kind = if exact_qualified_constructor || adapter_bare_constructor {
         CallKind::Constructor
     } else {
         call_kind
@@ -3118,7 +3135,9 @@ fn candidate_set_is_same_decl_family(
         Option<SymbolId>,
         Option<String>,
         String,
-        Vec<String>,
+        Vec<Option<String>>,
+        Option<usize>,
+        bool,
     );
 
     if candidates.len() <= 1 {
@@ -3144,7 +3163,17 @@ fn candidate_set_is_same_decl_family(
             decl.parent,
             decl.qualified_name.clone(),
             decl.name.clone(),
-            decl.params.clone(),
+            decl.params
+                .iter()
+                .map(|param| {
+                    decl.type_aliases
+                        .iter()
+                        .find(|binding| binding.name == *param)
+                        .map(|binding| binding.type_name.clone())
+                })
+                .collect(),
+            decl.receiver_param_index,
+            decl.is_variadic,
         );
         match &first {
             Some(existing) if existing != &key => return false,
@@ -4463,6 +4492,7 @@ fn collect_receiver_method_targets(
     call_name: &str,
     call_span: Span,
     super_receiver_tokens: &[&str],
+    module_path_syntax: ModulePathSyntax,
     method_candidate_cache: &mut MethodCandidateCache,
 ) -> Vec<FuncId> {
     if call_kind != CallKind::Method {
@@ -4479,6 +4509,7 @@ fn collect_receiver_method_targets(
             alias_targets,
             path_for_file,
             method_name,
+            module_path_syntax,
             method_candidate_cache,
         );
     }
@@ -4488,7 +4519,8 @@ fn collect_receiver_method_targets(
     let caller_module = caller_decl.module_path.clone();
     let ctx = ResolveContext::new(caller_file, &caller_module)
         .with_alias_map(alias_targets)
-        .with_file_path_lookup(path_for_file);
+        .with_file_path_lookup(path_for_file)
+        .with_module_path_syntax(module_path_syntax);
     let mut receiver_type_names = receiver_types.to_vec();
     if receiver_type_names.is_empty() {
         receiver_type_names = assigned_receiver_type_names(
@@ -4551,6 +4583,7 @@ fn collect_super_method_targets(
     alias_targets: &AHashMap<String, AliasTarget>,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
     method_name: &str,
+    module_path_syntax: ModulePathSyntax,
     method_candidate_cache: &mut MethodCandidateCache,
 ) -> Vec<FuncId> {
     let Some(caller_file) = caller_decl_file(global, caller_decl) else {
@@ -4561,7 +4594,8 @@ fn collect_super_method_targets(
     };
     let ctx = ResolveContext::new(caller_file, &caller_decl.module_path)
         .with_alias_map(alias_targets)
-        .with_file_path_lookup(path_for_file);
+        .with_file_path_lookup(path_for_file)
+        .with_module_path_syntax(module_path_syntax);
     let mut targets = Vec::new();
     let mut seen = AHashSet::new();
     for base in &class_decl.bases {
@@ -4586,6 +4620,7 @@ fn collect_type_qualified_method_targets(
     alias_targets: &AHashMap<String, AliasTarget>,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
     call_name: &str,
+    module_path_syntax: ModulePathSyntax,
     method_candidate_cache: &mut MethodCandidateCache,
 ) -> Vec<FuncId> {
     let Some((type_name, method_name)) = type_qualified_method_tail(call_name) else {
@@ -4596,7 +4631,8 @@ fn collect_type_qualified_method_targets(
     };
     let ctx = ResolveContext::new(caller_file, &caller_decl.module_path)
         .with_alias_map(alias_targets)
-        .with_file_path_lookup(path_for_file);
+        .with_file_path_lookup(path_for_file)
+        .with_module_path_syntax(module_path_syntax);
     let class_candidates = resolve_class(global, type_name, &ctx);
     if class_candidates.is_empty() {
         return Vec::new();
@@ -4623,6 +4659,7 @@ struct ConstructorResolutionContext<'a> {
     caller_decl: &'a Decl,
     alias_targets: &'a AHashMap<String, AliasTarget>,
     path_for_file: &'a dyn Fn(FileId) -> Option<String>,
+    module_path_syntax: ModulePathSyntax,
     constructor_index: Option<&'a ConstructorIndex>,
 }
 
@@ -4638,6 +4675,7 @@ fn collect_constructor_targets_for_class_call(
         caller_decl,
         alias_targets,
         path_for_file,
+        module_path_syntax,
         constructor_index,
     } = *resolution;
     let Some(caller_file) = caller_decl_file(global, caller_decl) else {
@@ -4645,7 +4683,8 @@ fn collect_constructor_targets_for_class_call(
     };
     let ctx = ResolveContext::new(caller_file, &caller_decl.module_path)
         .with_alias_map(alias_targets)
-        .with_file_path_lookup(path_for_file);
+        .with_file_path_lookup(path_for_file)
+        .with_module_path_syntax(module_path_syntax);
     let mut class_candidates = Vec::new();
     let mut seen_classes = AHashSet::new();
     let mut declared_factory_name = None;
@@ -6571,6 +6610,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
         caller_decl,
         alias_targets,
         path_for_file,
+        module_path_syntax: caller_capabilities.module_path_syntax,
         constructor_index: None,
     };
     if targets.is_empty() && explicit_ancestor_constructor {
@@ -6597,6 +6637,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
             name,
             call_span,
             caller_super_receiver_tokens,
+            caller_capabilities.module_path_syntax,
             &mut method_candidate_cache,
         );
     }
@@ -6607,6 +6648,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
             alias_targets,
             path_for_file,
             name,
+            caller_capabilities.module_path_syntax,
             &mut method_candidate_cache,
         );
     }

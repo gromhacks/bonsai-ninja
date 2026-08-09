@@ -72,8 +72,8 @@ Examples that follow this rule:
 - Ruby `class Child < Parent` header fallback — `lang_ruby`.
 - Ruby `module_function` scope flip — `lang_ruby`.
 - Rust tuple struct base extraction — `lang_rust`.
-- Rust `tokio::spawn` body isolation —
-  `lang_rust::isolate_rust_spawn_bodies`.
+- Rust scoped-path calls, `async_block` bodies, `.await`, and item-macro
+  compiler views — `lang_rust`; executor API names are not frontend facts.
 - Java / Kotlin / C# typed-exception extraction —
   `populate_*_exception_types` in each adapter.
 - Java `Class.forName(...).getMethod(...).invoke(...)` chain rewriting —

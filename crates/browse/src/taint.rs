@@ -128,23 +128,16 @@ pub enum TaintOutcome {
 /// * `decl_file` ends with `qualifier` as a path suffix (handles
 ///   relative-vs-absolute mismatches)
 /// * basename equality (`main.c` matches `/abs/dir/main.c`)
-fn file_matches_qualifier(decl_file: &str, qualifier: &str) -> bool {
-    if decl_file == qualifier {
-        return true;
-    }
-    if decl_file.ends_with(qualifier)
-        && decl_file
-            .as_bytes()
-            .get(decl_file.len() - qualifier.len() - 1)
-            .is_some_and(|b| *b == b'/' || *b == b'\\')
-    {
-        return true;
-    }
-    let decl_basename = decl_file
-        .rsplit_once(['/', '\\'])
-        .map(|(_, tail)| tail)
-        .unwrap_or(decl_file);
-    decl_basename == qualifier
+fn file_matches_qualifier(
+    decl_file: &str,
+    qualifier: &str,
+    workspace_root: Option<&std::path::Path>,
+) -> bool {
+    let path = std::path::Path::new(decl_file);
+    let rooted = workspace_root
+        .filter(|_| !path.is_absolute())
+        .map_or_else(|| path.to_path_buf(), |root| root.join(path));
+    bonsai_common::path_filter_matches_with_root(workspace_root, &rooted.to_string_lossy(), qualifier)
 }
 
 /// Parsed `--source` spec — bare callable name with optional path /
@@ -212,7 +205,7 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
                 .filter_map(|node| {
                     let (file, line, column) = format_span(&node.name_span, ws);
                     if let Some(qualifier) = spec.file {
-                        if !file_matches_qualifier(&file, qualifier) {
+                        if !file_matches_qualifier(&file, qualifier, ws.db().workspace_root().as_deref()) {
                             return None;
                         }
                     }
@@ -242,7 +235,7 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
                     let decl = global.decl_of(symbol)?;
                     let (file, line, column) = format_span(&decl.name_span, ws);
                     if let Some(qualifier) = spec.file {
-                        if !file_matches_qualifier(&file, qualifier) {
+                        if !file_matches_qualifier(&file, qualifier, ws.db().workspace_root().as_deref()) {
                             return None;
                         }
                     }

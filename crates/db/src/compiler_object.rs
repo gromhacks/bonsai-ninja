@@ -30,6 +30,17 @@ use std::sync::Arc;
 /// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
 /// or the object validation contract changes in a way that can alter compiler
 /// facts.
+// v68: Rust tuple-struct fields lower directly from Tree-sitter's ordered
+// field type nodes, preserving positional receiver types such as `self.0`.
+// Cached v67 objects can omit those projected receiver/call edges.
+// v67: Rust scoped call targets are receiver-less path calls, and visible
+// `use` bindings retain their declaration-level facade/target identity.
+// Module and type ownership is resolved semantically instead of being lowered
+// as an instance receiver or inferred from a physical filename.
+// v66: Rust named-struct field declarations and item-macro-wrapped impls
+// propagate exact receiver/callable facts; qualified receiver identities no
+// longer replay a weaker same-named bare type; enum methods participate in
+// receiver typing. Cached v64 objects can omit or misresolve those edges.
 // v64: Erlang `fun name/arity` and Perl `\&name` call arguments retain an
 // adapter-proven exact callable place. Cached v63 objects can omit callback
 // edges after the callgraph correctly rejects compound data expressions.
@@ -133,7 +144,7 @@ use std::sync::Arc;
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 64;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 68;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;

@@ -1919,6 +1919,62 @@ impl Workspace {
         Some(service.visit_partitions(visit))
     }
 
+    /// Resolve the exact compiler callgraph for the selected source files.
+    ///
+    /// Targeted semantic diagnostics use this cold-cache fallback when no
+    /// partitioned callgraph generation exists yet. Complete declaration,
+    /// import, type, and inheritance headers remain available to the shared
+    /// resolver, but only the requested adapter-lowered bodies are decoded.
+    /// Storage warmth therefore changes latency only: it never changes the
+    /// call sites or targets admitted by the query.
+    #[must_use]
+    pub fn resolved_call_graph_for_files(&self, files: &[FileId]) -> bonsai_callgraph::ResolvedCallGraph {
+        if files.is_empty() {
+            return bonsai_callgraph::ResolvedCallGraph::default();
+        }
+        let global = self.compiler_linkage_index();
+        let context = bonsai_callgraph::ResolvedCallGraph::build_context(
+            global.as_ref(),
+            |file| {
+                self.inner
+                    .db
+                    .vfs()
+                    .path(file)
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned())
+            },
+            |file| {
+                self.inner
+                    .db
+                    .adapter_for(file)
+                    .map(|adapter| adapter.language_id().as_str())
+            },
+            |file| {
+                self.inner
+                    .db
+                    .adapter_for(file)
+                    .map(|adapter| adapter.capabilities())
+                    .unwrap_or_else(bonsai_lang_api::LanguageCapabilities::unsupported)
+            },
+        );
+        bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files_streaming_with_context(
+            global.as_ref(),
+            |file| bonsai_resolve::alias_map_for_file(&self.inner.db.imports_for_uncached(file)),
+            |file| {
+                bonsai_lang_api::alias_map_from_import_specs(&self.inner.db.imports_for_uncached(file))
+                    .into_iter()
+                    .collect()
+            },
+            files,
+            &context,
+            |file| {
+                self.inner
+                    .db
+                    .decl_index_remapped_to_headers(global.as_ref(), file)
+            },
+        )
+    }
+
     /// Load one callable node from the validated partitioned callgraph.
     ///
     /// Filtered graph renderers use this to join an edge with its opposite
@@ -4884,7 +4940,14 @@ impl Workspace {
             .map(|node| node.file)
             .collect::<Vec<_>>();
         let headers = self.compiler_header_index_for_files(&header_files);
-        let raw = CrossModuleTracer::new(self, Arc::clone(&headers), call_graph.as_ref(), opts).trace(symbol);
+        let raw = CrossModuleTracer::new(
+            self,
+            Arc::clone(&headers),
+            call_graph.as_ref(),
+            opts,
+            cross_module::TraceGraphScope::Reachable,
+        )
+        .trace(symbol);
         Ok(self.finalize_trace(
             raw,
             TraceQuery {
@@ -4964,8 +5027,14 @@ impl Workspace {
         header_files.sort_unstable_by_key(|file| file.raw());
         header_files.dedup();
         let headers = self.compiler_header_index_for_files(&header_files);
+        let trace_scope = if sink_symbol.is_some() {
+            cross_module::TraceGraphScope::SelectedCorridor
+        } else {
+            cross_module::TraceGraphScope::Reachable
+        };
         let mut raw =
-            CrossModuleTracer::new(self, Arc::clone(&headers), call_graph.as_ref(), opts).trace(src);
+            CrossModuleTracer::new(self, Arc::clone(&headers), call_graph.as_ref(), opts, trace_scope)
+                .trace(src);
         let declared_sink_hit = sink_func.and_then(|target| {
             raw.steps.iter().position(|step| {
                 step.func == target && step.kind == bonsai_abstract_interp::StepKind::EnterFunction
@@ -4991,7 +5060,17 @@ impl Workspace {
             headers,
         );
         if sink_func.is_some() {
-            if declared_sink_hit.is_none() {
+            if declared_sink_hit.is_some() {
+                bonsai_trace::mark_last_step_termination(
+                    &mut result,
+                    bonsai_trace::PathTermination::ReachedTarget,
+                );
+            } else {
+                result.summary.analysis_complete = false;
+                result
+                    .summary
+                    .analysis_incomplete_reasons
+                    .push("sink-not-reached".into());
                 result.diagnostics.push(bonsai_trace::TraceDiagnostic {
                     severity: "warning".into(),
                     message: format!("sink {sink} not reached from {source}"),

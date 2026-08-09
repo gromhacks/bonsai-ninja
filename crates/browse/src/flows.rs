@@ -121,7 +121,10 @@ impl<'ws> FlowAnnotator<'ws> {
             let mut files = ahash::AHashMap::new();
             for file in global.all_files() {
                 if let Ok(path) = self.ws.vfs().path(file) {
-                    files.insert(path.display().to_string(), file);
+                    files.insert(
+                        crate::common::workspace_relative_path(self.ws, &path.display().to_string()),
+                        file,
+                    );
                 }
             }
             files
