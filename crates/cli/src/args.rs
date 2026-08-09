@@ -395,6 +395,9 @@ pub(crate) enum Cmd {
                       # Trace every flow that starts at handle_request\n  \
                       $ bonsai-ninja trace ./src handle_request\n  \
                       \n  \
+                      # Disambiguate a same-named method by compiler owner\n  \
+                      $ bonsai-ninja trace ./src Flask.__call__\n  \
+                      \n  \
                       # Only flows that reach os.system starting from handle_request\n  \
                       $ bonsai-ninja trace ./src --from handle_request --to os.system\n  \
                       \n  \
@@ -404,19 +407,21 @@ pub(crate) enum Cmd {
     Trace {
         /// Workspace root to analyze.
         workspace: PathBuf,
-        /// Positional symbol to trace (alternative to `--symbol`).
+        /// Positional symbol selector to trace. Accepts qualified
+        /// `Owner.member`, `path:name`, and `path:line:name` forms.
         target: Option<String>,
-        /// Function/symbol name to trace. Takes precedence over the
-        /// positional target. `--function` remains a compatibility alias.
+        /// Function/symbol selector to trace. Takes precedence over the
+        /// positional target. Accepts the same qualified/file selectors;
+        /// `--function` remains a compatibility alias.
         #[arg(long = "symbol", visible_alias = "function")]
         function: Option<String>,
-        /// Restrict to flows that start at (or pass through) a name
-        /// containing this substring. Pairs with `--to` to bracket a
+        /// Restrict to flows from this symbol selector. Qualified owner and
+        /// exact file selectors are accepted. Pairs with `--to` to bracket a
         /// specific entry → sink window.
         #[arg(long)]
         from: Option<String>,
-        /// Restrict to flows that reach a name containing this
-        /// substring. Requires `--from`.
+        /// Restrict to flows that reach this symbol selector. Qualified owner
+        /// and exact file selectors are accepted. Requires `--from`.
         #[arg(long, requires = "from")]
         to: Option<String>,
         /// Token-budget ceiling for rendered output. Long traces page at

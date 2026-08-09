@@ -202,6 +202,12 @@ Understand behavior:
 ./target/release/bonsai-ninja read-file <workspace> <path> --lines A:B --context 16k --no-color --no-progress
 ```
 
+Use qualified `Owner.member` trace selectors when short method names collide;
+`path:name` and `path:line:name` provide exact file disambiguation. When both
+endpoints are known, prefer `trace --from <entry> --to <target>`: declared
+endpoints are projected to the complete compiler-resolved graph corridor
+before symbolic interpretation, without interpreting sibling branches first.
+
 For `slice`, omit `--line` when the symbol has one compiler syntax-flow site.
 If the result reports ambiguity, add the printed `--line` and optionally
 `--file`; the command never falls back to raw-text matching.

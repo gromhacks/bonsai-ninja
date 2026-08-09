@@ -96,14 +96,12 @@ fn dependency_inventory_scans_deep_workspace_manifests() {
 
     let ws = Workspace::new(Arc::new(LanguageRegistry::new()));
     let inventory = build_inventory(&pack, &ws, &root);
+    let expected = "services/payments/src/main/resources/module/pom.xml";
     assert!(
         inventory.rows.iter().any(|row| {
             row.key == "log4j-core"
                 && row.signals.iter().any(|signal| signal == "packages:log4j-core")
-                && row
-                    .evidence_files
-                    .iter()
-                    .any(|file| file.ends_with("module/pom.xml"))
+                && row.evidence_files.iter().any(|file| file == expected)
         }),
         "expected deep log4j-core manifest evidence, got {:?}",
         inventory.rows

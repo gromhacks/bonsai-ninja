@@ -835,8 +835,14 @@ ranks plain filters as exact > prefix > substring while regex filters
 retain the deterministic structural order; the ranking happens in the
 browse data layer so CLI and SDK ordering cannot drift.
 
-**`crates/trace`** powers `trace`: walk a flow from source to sink as a
-call tree. Supports text, JSON, and DOT.
+**`crates/trace`** owns the stable text, JSON, and DOT trace schema.
+`crates/workspace` resolves adapter-emitted callable identities and drives the
+cross-module interpreter. A declared source/target query projects the
+resolved graph with an uncapped linear reverse/forward reachability pass
+before interpretation; sibling/downstream branches are never interpreted and
+discarded afterward. An external target has no compiler declaration, so that
+shape retains source-reachable interpretation and terminates on the exact
+call step. Presentation paging never changes either semantic scope.
 
 ## CLI / SDK
 

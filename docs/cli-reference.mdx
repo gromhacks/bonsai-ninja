@@ -145,7 +145,7 @@ bonsai-ninja security ./src pack --audit --rules-dir ./security-patterns
 | `sources` | None | Enumerate source-rule matches. |
 | `sinks` | None | Enumerate sink-rule matches. |
 | `sanitizers` | None | Enumerate matched rules that can make a credit-bearing sanitizer claim. Passthrough transforms and generic non-crediting validation markers are excluded. |
-| `deps` | None | Show package/framework imports referenced by the rulepack, with evidence files, signals, and rule descriptions. |
+| `deps` | None | Show package/framework imports referenced by the rulepack, with complete workspace-relative evidence paths, signals, and rule descriptions. |
 | `taint-analysis` | None | Run source-to-sink taint analysis. |
 | `source-analysis` | None | Map downstream paths from sources without requiring sinks. |
 | `pack` | None | Audit (`--audit`), list, tree (`--tree`), or validate (`--validate`) the rulepack. |
@@ -359,16 +359,17 @@ bonsai-ninja show ./src T:aabbccdd --taint-source update_user --taint-seed token
 
 ```bash
 bonsai-ninja trace ./src handle_request
+bonsai-ninja trace ./src Flask.__call__
 bonsai-ninja trace ./src --from handle_request --to os.system --format dot --output-path flow.dot
 ```
 
 | Flag | Default | Description |
 |---|---:|---|
 | `<WORKSPACE>` | Required | Workspace root. |
-| `[TARGET]` | None | Positional function/symbol to trace. |
-| `--symbol <NAME>` | None | Function/symbol name; takes precedence over the positional target. `--function` is a compatibility alias. |
-| `--from <TEXT>` | None | Restrict to flows starting at or passing through this text. |
-| `--to <TEXT>` | None | Restrict to flows reaching this text. Requires `--from`. |
+| `[TARGET]` | None | Positional function/symbol to trace. Accepts qualified `Owner.member` and exact `path:name` or `path:line:name` selectors. |
+| `--symbol <NAME>` | None | Function/symbol selector; takes precedence over the positional target. `--function` is a compatibility alias. |
+| `--from <TEXT>` | None | Restrict to flows starting at or passing through this selector. Qualified callable names are accepted. |
+| `--to <TEXT>` | None | Restrict to flows reaching this selector. Qualified callable names are accepted; requires `--from`. |
 | `--context <BUDGET>` | 32k | Token budget for text. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Emit full trace. |
@@ -381,6 +382,16 @@ cannot resolve a call it would need to expand. Semantic gaps such as unresolved 
 are listed in `summary.analysis_incomplete_reasons`. Text renderers keep
 unresolved syntactic call breadcrumbs visible, but mark those steps inline
 as `non-semantic`; they are not reviewed flow evidence.
+For two declared endpoints, `--from`/`--to` first projects every exact
+source-to-target callgraph path with linear forward/reverse reachability, then
+interprets only that graph. It never interprets the whole downstream program
+and trims afterward. External call targets cannot supply a declaration
+identity, so they use source-reachable interpretation and stop at the exact
+adapter-emitted call step.
+Qualified selectors are matched against adapter-emitted compiler identities;
+the short callable tail is used only to locate candidates, then the owner
+suffix is checked at an identifier boundary. No source-language or framework
+name inventory participates in trace resolution.
 
 ## path
 

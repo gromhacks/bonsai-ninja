@@ -338,6 +338,9 @@ source build path for that platform. See
 # Trace a function
 ./target/release/bonsai-ninja trace ./my-app handle_request
 
+# Disambiguate same-named methods with a compiler-qualified owner
+./target/release/bonsai-ninja trace ./my-app Gateway.handle_request
+
 # Find ranked semantic call paths between two callables
 ./target/release/bonsai-ninja path ./my-app --from handle_request --to run_admin_command
 

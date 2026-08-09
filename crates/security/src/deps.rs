@@ -22,6 +22,7 @@ use crate::loader::Rulepack;
 use crate::rule::{Rule, Severity};
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::dependency_metadata::dependency_metadata_dir_skipped;
+use bonsai_common::workspace_relative_filter_path;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 use std::path::Path;
@@ -93,6 +94,7 @@ pub fn build_inventory(pack: &Rulepack, ws: &Workspace, root: &Path) -> Dependen
                 }
             }
             for e in evidence {
+                let e = workspace_relative_filter_path(Some(root), &e);
                 if !entry.evidence_files.contains(&e) {
                     entry.evidence_files.push(e);
                 }

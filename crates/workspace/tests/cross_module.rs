@@ -365,6 +365,72 @@ fn explicit_loop_state_cutoff_is_visible() {
 }
 
 #[test]
+fn python_trace_resolves_owner_qualified_method_without_name_guessing() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_python::PythonAdapter::new()),
+        &[(
+            "/w/app.py",
+            concat!(
+                "class Alpha:\n",
+                "    def run(self):\n        target()\n\n",
+                "class Beta:\n",
+                "    def run(self):\n        decoy()\n\n",
+                "def target():\n    pass\n\n",
+                "def decoy():\n    pass\n",
+            ),
+        )],
+    );
+
+    let trace = ws.trace_from("Alpha.run").expect("qualified method trace");
+    assert!(
+        trace
+            .steps
+            .iter()
+            .any(|step| step.kind == TraceStepKind::Call && step.message.contains("target")),
+        "qualified trace did not enter Alpha.run: {:#?}",
+        trace.steps
+    );
+    assert!(
+        !trace
+            .steps
+            .iter()
+            .any(|step| step.kind == TraceStepKind::Call && step.message.contains("decoy")),
+        "qualified trace leaked through the same-named Beta.run: {:#?}",
+        trace.steps
+    );
+}
+
+#[test]
+fn source_to_sink_trace_projects_declared_target_corridor_before_interpretation() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_python::PythonAdapter::new()),
+        &[(
+            "/w/app.py",
+            concat!(
+                "def entry():\n    middle()\n    sibling()\n\n",
+                "def middle():\n    target()\n\n",
+                "def target():\n    after_target()\n\n",
+                "def sibling():\n    decoy()\n\n",
+                "def after_target():\n    pass\n\n",
+                "def decoy():\n    pass\n",
+            ),
+        )],
+    );
+
+    let trace = ws
+        .trace_source_to_sink("entry", "target")
+        .expect("declared source-to-sink trace");
+    assert!(trace.steps.iter().any(|step| step.function == "target"));
+    for excluded in ["sibling", "decoy", "after_target"] {
+        assert!(
+            trace.steps.iter().all(|step| step.function != excluded),
+            "source-target trace leaked `{excluded}` outside its exact corridor: {:#?}",
+            trace.steps
+        );
+    }
+}
+
+#[test]
 fn rust_cross_file_trace() {
     let ws = ws_with(
         Arc::new(bonsai_lang_rust::RustAdapter::new()),

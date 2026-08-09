@@ -73,6 +73,22 @@ Validated through 2026-08-08 (dated measurements below retain their run date):
   connected corridor; resolver diagnostics report the same workspace-relative
   path spelling accepted by `--in-file`.
 
+- A Flask `6a2f545bfd8ed31e19066a299296917e034aca58` real-repository trial
+  exercised qualified method lookup, targeted symbolic tracing, graph-flow
+  inspection, dependency inventory, and production security. Owner-qualified
+  selectors such as `Flask.__call__` now resolve through compiler symbol
+  identity rather than short-name guessing. A declared
+  `Flask.__call__`-to-`Flask.dispatch_request` trace projects the exact uncapped
+  graph corridor before symbolic interpretation: 24 steps completed in 0.91
+  seconds at 22.6 MB maximum RSS. Graph-flow inspection rendered the exact
+  four-function corridor with no sibling or post-target branch leakage in 1.03
+  seconds at 151.7 MB maximum RSS. Dependency inventory completed in 0.37
+  seconds and retained complete workspace-relative evidence paths for all 37
+  entries; no absolute or suffix-truncated paths remained. The broader
+  qualified-method trace emitted all 751 steps across 17 semantic paths in
+  0.10 seconds at 20.2 MB maximum RSS; its default paged form reports all six
+  pages instead of hiding the remaining output.
+
 - Commit `bdd6125` removes the Solidity frontend, grammar dependency,
   fixtures, rulepack, package metadata, and documentation after the product
   decision to keep one application/code-analysis model. The shipped registry
