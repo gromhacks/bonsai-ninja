@@ -308,6 +308,10 @@ layouts. These values and test conventions come from
 test-path filter. Security file and profile filters are workspace-relative:
 an ancestor directory outside the selected workspace does not make the
 workspace generated, vendored, or test code.
+An unfiltered taint analysis preserves exact local-trust flows and caps their
+emitted severity at medium. Use the production profile for the remote/high
+deployment boundary; do not interpret an intentionally filtered local flow as
+missing compiler or taint evidence.
 
 Inventory when needed:
 

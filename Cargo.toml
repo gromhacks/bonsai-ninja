@@ -87,7 +87,7 @@ zstd = "0.13"
 crossbeam-channel = "0.5"
 fs2 = "0.4"
 ignore = "0.4"
-lru = "0.16.3"
+lru = "0.18.2"
 tempfile = "3"
 dirs = "6"
 mimalloc = { version = "0.1.52", features = ["v2"] }

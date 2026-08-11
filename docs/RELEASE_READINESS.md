@@ -47,17 +47,8 @@ Validated through 2026-08-11 (dated measurements below retain their run date):
   passed strict all-target release Clippy, private-item release rustdoc with
   warnings denied, formatting, diff hygiene, and direct deep rulepack replay
   of all 10,044 enabled examples from 7,130 rules with zero errors or warnings.
-
-- The 2026-08-11 CVEBench-SAST regression run executed 458 fresh release-
-  binary scans across 229 vulnerable/fixed pairs in 211.50 seconds. Every
-  vulnerable case scored 5.0 and every repaired snapshot was clean:
-  detection, file, line, source, sink, flow, sanitizer recognition, and fix
-  validation were all 100%; decoy trips and false positives per kLOC were
-  zero; mean score was 5.00. The regression set pins hardened lxml parsers,
-  finite TypeScript allowlists, Go multi-result URL reconstruction, and the
-  cross-file fast-xml-parser configured-receiver flow. Its compiler-object
-  ABI is v84 and matcher policy is v57, so older syntax or match sidecars are
-  rejected before reuse.
+  The compiler-object ABI is v84 and matcher policy is v57, so older syntax or
+  match sidecars are rejected before reuse.
 
 - The ABI-v64 release candidate passed `cargo check --release --workspace
   --all-targets --locked`, strict release all-target Clippy with warnings
@@ -174,9 +165,8 @@ Validated through 2026-08-11 (dated measurements below retain their run date):
   adapter records parsed callback parameter bindings on the exact call
   argument; rule data selects the callback and delivered parameter positions;
   the IDG binds that source into the already-inlined body. Positive JavaScript
-  and destructured TypeScript cases, a no-source negative, and the complete
-  vulnerable/fixed CVEBench pair set pass without provider names in shared
-  Rust.
+  and destructured TypeScript cases, a no-source negative, and complete paired
+  regression fixtures pass without provider names in shared Rust.
 - `security sanitizers` inventories only credit-bearing sanitizer matches.
   Rulepack-compatible passthrough transfers and generic non-crediting
   validation markers remain available to taint propagation but cannot be
@@ -522,36 +512,14 @@ receiver-type gaps cannot be presented as resolved compiler facts. A call for
 which the compiler finds no workspace candidate is an explicit external or
 unknown boundary, not a claim that workspace resolution was truncated.
 
-## External benchmark snapshot
+## External validation policy
 
-The final 2026-08-06 ABI-v62 CVEBench-SAST artifact used isolated copies of
-every vulnerable and fixed repository, disabled analyzer caches between cases,
-and requested uncapped SARIF. All 460 scans exited successfully in 226.69
-seconds with no incomplete analysis: vulnerable-scan latency was 0.496 seconds
-mean, 0.621 seconds p95, and 0.745 seconds maximum. Its verified report records
-229/230 primary detections, 99.13% file localization, 98.70% line localization,
-100% sanitizer recognition, 0 duplicate findings, 92.71% precision, 100%
-precision excluding off-chain findings, 100% fix validation, zero decoy trips,
-zero false positives per kLOC, and a 4.9565 mean score. The ABI-v62 run restores
-both TypeScript inline-callback regressions to full 5.0 source/sink/flow matches
-while every fixed snapshot remains clean.
-
-The sole empty vulnerable scan is the documented `XSSFWorkbook` case: the
-benchmark labels normal spreadsheet construction as an XXE sink even though
-that API does not parse attacker-controlled XML. Bonsai intentionally does not
-add a false sink to make that invalid case pass. The TypeScript
-`fast-xml-parser` case is reported as its actual configuration hazard
-(entity-expansion denial of service, CWE-776); the rule does not falsely claim
-that this library resolves external `SYSTEM` entities.
-
-The benchmark scores Python `os.path.join` as the planted path-traversal sink
-even when Bonsai reports the downstream `FileResponse` emission sink; that
-location mismatch does not change the detected source-to-filesystem flow.
-
-Benchmark metrics are evidence about the checked corpus, not a substitute for
-the 20-language adapter/rule conformance gates. Dataset corrections must be
-versioned and rescored separately; they must never be encoded as shared-engine
-API guesses.
+External benchmark metrics are isolated validation evidence, not product
+documentation or release logic. Dataset corrections must be versioned and
+rescored separately; case identities and expected answers must never be
+encoded as shared-engine API guesses. The release gate relies on checked-in
+language conformance, positive/negative security fixtures, complete-analysis
+contracts, and production-scale resource tests.
 
 The recorded OWASP Benchmark v1.2 Java snapshot had an overall score of
 54.04, with LDAP TPR/FPR 66.67%/0.00%, XPath 66.67%/10.00%, and SQL injection

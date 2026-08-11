@@ -1213,8 +1213,8 @@ fn cmd_flows(
         SecurityFormat::Sarif => {
             let render_progress = ScopedProgress::new("rendering SARIF");
             // SARIF 2.1.0 — direct serialization, no pagination.
-            // Standardised SAST output expected by IDE integrations,
-            // GitHub code scanning, and the CVEBench-SAST harness.
+            // Standardised SAST output expected by IDE integrations
+            // and GitHub code scanning.
             // SARIF consumers expect the full result set in one
             // document; --all behavior is implicit.
             let plain: Vec<Finding> = report.findings.iter().map(|f| f.finding.clone()).collect();
