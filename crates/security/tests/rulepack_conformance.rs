@@ -663,6 +663,23 @@ fn xssfworkbook_input_stream_is_not_misclassified_as_an_xxe_sink() {
 }
 
 #[test]
+fn lxml_parser_construction_is_not_misclassified_as_xml_consumption() {
+    let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
+    let rule = pack
+        .find_rule_by_id("python.xxe.lxml_xmlparser")
+        .expect("lxml XMLParser rule");
+    assert!(
+        !rule.enabled,
+        "constructing a configured or unused XMLParser must not be reported as an XXE sink"
+    );
+    assert!(
+        rule.description.contains("not an XML-consumption boundary")
+            && rule.description.contains("parse/fromstring"),
+        "the disabled rule must preserve the flow-aware replacement rationale"
+    );
+}
+
+#[test]
 fn go_http_error_requires_exception_shaped_detail_and_is_medium_severity() {
     let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
     let rule = pack

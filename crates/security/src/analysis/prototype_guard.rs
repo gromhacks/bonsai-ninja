@@ -490,7 +490,7 @@ struct SafeArms {
 fn branch_safe_arms(branch_span: Span, context: &DynamicKeyGuardContext<'_>) -> Option<SafeArms> {
     let fact = branch_condition_fact_for_span(&context.file_index.branch_conditions, branch_span)?;
     let expression = fact.expression.as_ref()?;
-    let membership_atoms = exact_membership_atom_spans(fact, expression, context);
+    let membership_atoms = exact_membership_atom_values(fact, expression, context);
     let rejected = &context.semantics.rejected_exact_values;
     if rejected.is_empty() {
         return None;
@@ -505,11 +505,11 @@ fn branch_safe_arms(branch_span: Span, context: &DynamicKeyGuardContext<'_>) -> 
     })
 }
 
-fn exact_membership_atom_spans(
+fn exact_membership_atom_values(
     fact: &BranchConditionFact,
     expression: &ConditionExpressionFact,
     context: &DynamicKeyGuardContext<'_>,
-) -> AHashSet<Span> {
+) -> AHashMap<Span, AHashSet<String>> {
     let mut calls = Vec::new();
     collect_calls_in_span(context.root_events, fact.condition_span, &mut calls);
     calls
@@ -534,10 +534,8 @@ fn exact_membership_atom_spans(
                 return None;
             }
             let collection = receiver.as_deref().and_then(clean_overwrite_target_key)?;
-            if !collection_is_exact_denylist(&collection, fact.branch_span, context) {
-                return None;
-            }
-            condition_atom_containing(expression, *span)
+            let values = collection_exact_literal_values(&collection, fact.branch_span, context)?;
+            condition_atom_containing(expression, *span).map(|atom| (atom, values.into_iter().collect()))
         })
         .collect()
 }
@@ -584,11 +582,11 @@ fn call_arg_mentions_key(arg: &bonsai_lang_api::CallArg, key_variables: &AHashSe
         .any(|name| key_variables.contains(&name))
 }
 
-fn collection_is_exact_denylist(
+fn collection_exact_literal_values(
     collection: &str,
     before: Span,
     context: &DynamicKeyGuardContext<'_>,
-) -> bool {
+) -> Option<Vec<String>> {
     context
         .file_index
         .assignment_values
@@ -603,16 +601,22 @@ fn collection_is_exact_denylist(
                     == Some(collection)
         })
         .next_back()
-        .is_some_and(|assignment| {
+        .filter(|assignment| {
             assignment.direct_call_name.as_deref().is_some_and(|callee| {
                 rule_target_matches_call(callee, &[], &context.semantics.collection_constructor)
-            }) && context.file_index.call_argument_values.iter().any(|argument| {
-                argument.argument_index == context.semantics.collection_values_arg_index
-                    && span_contains(assignment.value_span, argument.call_span)
-                    && exact_literal_values_for_argument(context.file_index, argument).is_some_and(|values| {
-                        exact_string_sets_equal(&values, &context.semantics.rejected_exact_values)
-                    })
             })
+        })
+        .and_then(|assignment| {
+            context
+                .file_index
+                .call_argument_values
+                .iter()
+                .find_map(|argument| {
+                    (argument.argument_index == context.semantics.collection_values_arg_index
+                        && span_contains(assignment.value_span, argument.call_span))
+                    .then(|| exact_literal_values_for_argument(context.file_index, argument))
+                    .flatten()
+                })
         })
 }
 
@@ -688,15 +692,17 @@ fn evaluate_condition(
     expression: &ConditionExpressionFact,
     rejected_value: &str,
     key_variables: &AHashSet<String>,
-    membership_atoms: &AHashSet<Span>,
+    membership_atoms: &AHashMap<Span, AHashSet<String>>,
 ) -> TruthValue {
     match expression {
         ConditionExpressionFact::Atom { span } => {
-            if membership_atoms.contains(span) {
-                TruthValue::True
-            } else {
-                TruthValue::Unknown
-            }
+            membership_atoms.get(span).map_or(TruthValue::Unknown, |values| {
+                if values.contains(rejected_value) {
+                    TruthValue::True
+                } else {
+                    TruthValue::False
+                }
+            })
         }
         ConditionExpressionFact::Truthy { .. } => TruthValue::Unknown,
         ConditionExpressionFact::Not { operand, .. } => invert_truth(evaluate_condition(
@@ -867,7 +873,7 @@ mod tests {
                 .collect(),
         };
         let keys = AHashSet::from_iter(["key".to_string()]);
-        let atoms = AHashSet::new();
+        let atoms = AHashMap::new();
 
         assert!(rejected
             .iter()
@@ -887,11 +893,33 @@ mod tests {
             ],
         };
         let keys = AHashSet::from_iter(["key".to_string()]);
-        let atoms = AHashSet::from_iter([membership_span]);
+        let atoms = AHashMap::from_iter([(membership_span, AHashSet::from_iter(["__proto__".to_string()]))]);
 
         assert_eq!(
             evaluate_condition(&expression, "__proto__", &keys, &atoms),
             TruthValue::Unknown
+        );
+    }
+
+    #[test]
+    fn exact_membership_atom_evaluates_finite_allowlist_against_rejected_value() {
+        let membership_span = span(1, 2);
+        let expression = ConditionExpressionFact::Atom {
+            span: membership_span,
+        };
+        let keys = AHashSet::from_iter(["key".to_string()]);
+        let atoms = AHashMap::from_iter([(
+            membership_span,
+            AHashSet::from_iter(["display_name".to_string(), "locale".to_string()]),
+        )]);
+
+        assert_eq!(
+            evaluate_condition(&expression, "__proto__", &keys, &atoms),
+            TruthValue::False
+        );
+        assert_eq!(
+            evaluate_condition(&expression, "display_name", &keys, &atoms),
+            TruthValue::True
         );
     }
 }

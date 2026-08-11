@@ -4017,6 +4017,154 @@ function spread(defaults) {
 }
 
 #[test]
+fn typescript_fast_xml_parser_requires_tainted_consumption_and_reports_configuration() {
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack loads");
+    let vulnerable = workspace(&[
+        (
+            "/app/package.json",
+            r#"{"dependencies":{"express":"latest","fast-xml-parser":"latest"}}"#,
+        ),
+        (
+            "/app/parser.ts",
+            r#"import { XMLParser } from "fast-xml-parser";
+
+const parser = new XMLParser({ processEntities: true });
+
+export function parseFeed(xml: string): unknown {
+  return parser.parse(xml);
+}
+"#,
+        ),
+        (
+            "/app/controller.ts",
+            r#"import express from "express";
+import { parseFeed } from "./parser";
+
+export function handler(req: express.Request): unknown {
+  return parseFeed(req.body.xml);
+}
+"#,
+        ),
+    ]);
+    let report =
+        run_taint_analysis(&vulnerable, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.finding.sink.rule_id == "typescript.xxe.fast_xml_parser_entities_enabled")
+        .unwrap_or_else(|| panic!("missing configured entity-expansion flow: {:#?}", report.findings));
+    assert!(
+        finding.finding.source.file.ends_with("controller.ts"),
+        "{finding:#?}"
+    );
+    assert!(finding.finding.sink.file.ends_with("parser.ts"), "{finding:#?}");
+    assert_eq!(finding.finding.sink.line, 3, "{finding:#?}");
+    assert_eq!(finding.finding.sink.text, "XMLParser", "{finding:#?}");
+    assert!(
+        !finding.finding.taint_path.is_empty(),
+        "the configured receiver finding must retain the source-to-parse path: {finding:#?}"
+    );
+
+    let safe = workspace(&[
+        (
+            "/app/package.json",
+            r#"{"dependencies":{"express":"latest","fast-xml-parser":"latest"}}"#,
+        ),
+        (
+            "/app/app.ts",
+            r#"import express from "express";
+import { XMLParser } from "fast-xml-parser";
+
+const safe = new XMLParser({ processEntities: false });
+const unused = new XMLParser({ processEntities: true });
+
+function siblingScope(): XMLParser {
+  const safe = new XMLParser({ processEntities: true });
+  return safe;
+}
+
+export function handler(req: express.Request): unknown {
+  return safe.parse(req.body.xml);
+}
+"#,
+        ),
+    ]);
+    let safe_report =
+        run_taint_analysis(&safe, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        safe_report.findings.iter().all(|finding| {
+            finding.finding.sink.rule_id != "typescript.xxe.fast_xml_parser_entities_enabled"
+        }),
+        "safe consumption and unused dangerous configuration must stay quiet: {:#?}",
+        safe_report.findings
+    );
+
+    let shadowed_factory = workspace(&[
+        (
+            "/app/package.json",
+            r#"{"dependencies":{"express":"latest","fast-xml-parser":"latest"}}"#,
+        ),
+        (
+            "/app/app.ts",
+            r#"import express from "express";
+import { XMLParser as ExternalXMLParser } from "fast-xml-parser";
+
+class XMLParser {
+  constructor(_configuration: { processEntities: boolean }) {}
+  parse(xml: string): string { return xml; }
+}
+
+const parser = new XMLParser({ processEntities: true });
+
+export function handler(req: express.Request): unknown {
+  return parser.parse(req.body.xml);
+}
+
+void ExternalXMLParser;
+"#,
+        ),
+    ]);
+    let shadowed_report = run_taint_analysis(&shadowed_factory, &pack, TaintAnalysisOptions::default())
+        .expect("taint analysis");
+    assert!(
+        shadowed_report.findings.iter().all(|finding| {
+            finding.finding.sink.rule_id != "typescript.xxe.fast_xml_parser_entities_enabled"
+        }),
+        "a workspace-local factory must shadow an imported external spelling: {:#?}",
+        shadowed_report.findings
+    );
+
+    let renamed_import = workspace(&[
+        (
+            "/app/package.json",
+            r#"{"dependencies":{"express":"latest","fast-xml-parser":"latest"}}"#,
+        ),
+        (
+            "/app/app.ts",
+            r#"import express from "express";
+import { XMLParser as EntityParser } from "fast-xml-parser";
+
+const parser = new EntityParser({ processEntities: true });
+
+export function handler(req: express.Request): unknown {
+  return parser.parse(req.body.xml);
+}
+"#,
+        ),
+    ]);
+    let renamed_report =
+        run_taint_analysis(&renamed_import, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        renamed_report.findings.iter().any(|finding| {
+            finding.finding.sink.rule_id == "typescript.xxe.fast_xml_parser_entities_enabled"
+                && finding.finding.sink.text == "EntityParser"
+        }),
+        "renamed compiler imports must retain their external factory identity: {:#?}",
+        renamed_report.findings
+    );
+}
+
+#[test]
 fn receiver_configuration_requires_unconditional_complete_constructor_state() {
     let mut pack = constrained_call_sink_rulepack("java", "source", "fromXML");
     let sink = pack
@@ -5368,6 +5516,84 @@ func missingRedirect() {
             .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.url_network_guard"),
         "{:#?}",
         guarded.finding.sanitizers_seen
+    );
+}
+
+#[test]
+fn go_url_reconstruction_selects_the_guarded_value_from_a_multi_result_parse() {
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack loads");
+    let ws = workspace(&[(
+        "/app/app.go",
+        r#"
+package app
+
+import (
+    "fmt"
+    "net/http"
+    "net/url"
+)
+
+var allowedHosts = map[string]bool{
+    "api.example.com": true,
+    "cdn.example.com": true,
+}
+
+func fetch(raw string) error {
+    u, err := url.Parse(raw)
+    if err != nil {
+        return err
+    }
+    if u.Scheme != "https" || !allowedHosts[u.Hostname()] {
+        return fmt.Errorf("host not allowed")
+    }
+    safe := "https://" + u.Hostname() + u.EscapedPath()
+    client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+        return http.ErrUseLastResponse
+    }}
+    _, err = client.Get(safe)
+    return err
+}
+
+func handler(r *http.Request) error {
+    return fetch(r.URL.Query().Get("url"))
+}
+"#,
+    )]);
+
+    let default_report =
+        run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        default_report
+            .findings
+            .iter()
+            .all(|finding| finding.finding.sink.rule_id != "go.ssrf.http_client_get"),
+        "a compiler-proven allowlist reconstruction must be hidden by default: {:#?}",
+        default_report.findings
+    );
+
+    let explicit_report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    let finding = explicit_report
+        .findings
+        .iter()
+        .find(|finding| finding.finding.sink.rule_id == "go.ssrf.http_client_get")
+        .expect("sanitized client.Get finding");
+    assert_eq!(finding.finding.status, FindingStatus::Sanitized, "{finding:#?}");
+    assert!(
+        finding
+            .finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| { sanitizer.rule_id == "engine.sanitizer.url_reconstruction_guard" }),
+        "the proof must retain reconstruction evidence: {:#?}",
+        finding.finding.sanitizers_seen
     );
 }
 

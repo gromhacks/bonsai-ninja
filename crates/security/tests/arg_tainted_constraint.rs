@@ -606,7 +606,7 @@ def handler(user_input):
 }
 
 #[test]
-fn matcher_policy_fingerprint_was_bumped_for_arg_tainted() {
+fn matcher_policy_fingerprint_matches_current_semantics() {
     // Bumped 0x0011 → 0x0012 when the matcher gained
     // arg_lt/arg_le/arg_gt/arg_ge constraints (P3 — constants tracking).
     // Bumped 0x0012 → 0x0013 when the matcher gained
@@ -668,9 +668,11 @@ fn matcher_policy_fingerprint_was_bumped_for_arg_tainted() {
     // adapter receiver types without collapsing fluent call receivers, and
     // typed guard joins gained exact configured aggregate/substitution
     // semantics.
+    // Bumped 0x0038 → 0x0039 when configured-receiver factory fields and
+    // exact finite-collection membership began changing matched rule sites.
     assert_eq!(
         bonsai_security::MATCHER_POLICY_FINGERPRINT,
-        0x4d41_5443_4845_525f_504f_4c49_4359_0038_u128
+        0x4d41_5443_4845_525f_504f_4c49_4359_0039_u128
     );
 }
 

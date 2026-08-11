@@ -32,6 +32,9 @@ use std::sync::Arc;
 /// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
 /// or the object validation contract changes in a way that can alter compiler
 /// facts.
+// v84: ECMAScript adapters mark simple `const name = value` places immutable
+// from exact lexical-declaration syntax. Cached v83 objects leave those
+// places mutable/unknown and cannot support configured-receiver proofs.
 // v83: the independently decodable syntax header retains exact
 // adapter-lowered return targets and their exact AST spans so broad rule
 // planning can reject impossible files without decoding bodies. Cached v82
@@ -211,7 +214,7 @@ use std::sync::Arc;
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 83;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 84;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;

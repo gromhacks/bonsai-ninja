@@ -4656,20 +4656,6 @@ fn compiler_proven_url_reconstruction_guard(
         };
         *return_span
     };
-    let parser_assignment = helper_assignments.iter().rev().find(|assignment| {
-        assignment.span.start < output_span.start
-            && assignment.source_call.is_some_and(|call| {
-                rule_target_matches_call(call, &[], &guard.parser)
-                    && assignment
-                        .source_call_args
-                        .first()
-                        .and_then(|argument| clean_overwrite_target_key(argument))
-                        .as_deref()
-                        == Some(input.as_str())
-            })
-    })?;
-    let parsed = clean_overwrite_target_key(parser_assignment.target)?;
-
     let mut helper_calls = Vec::new();
     collect_structured_calls(&helper_decl.flow_events, &mut helper_calls);
     let mut helper_file_calls = Vec::new();
@@ -4678,26 +4664,48 @@ fn compiler_proven_url_reconstruction_guard(
     }
     let mut branches = Vec::new();
     collect_all_structured_branches(&helper_decl.flow_events, &mut branches);
-    let scheme_guard = branches
+    let parser_candidates: Vec<_> = helper_assignments
         .iter()
-        .filter(|branch| {
-            parser_assignment.span.start < branch.span.start
-                && branch.span.start < output_span.start
-                && branch_arm_abruptly_exits(branch.then_events)
-        })
-        .find(|branch| {
-            branch_condition_fact_for_span(&helper_file_index.branch_conditions, branch.span)
-                .and_then(|fact| fact.expression.as_ref())
-                .is_some_and(|expression| {
-                    url_scheme_rejection_is_exact(
-                        expression,
-                        &parsed,
-                        &guard.scheme,
-                        &helper_calls,
-                        &helper_file_index,
-                    )
+        .filter(|assignment| {
+            assignment.span.start < output_span.start
+                && assignment.source_call.is_some_and(|call| {
+                    rule_target_matches_call(call, &[], &guard.parser)
+                        && assignment
+                            .source_call_args
+                            .first()
+                            .and_then(|argument| clean_overwrite_target_key(argument))
+                            .as_deref()
+                            == Some(input.as_str())
                 })
-        })?;
+        })
+        .filter_map(|assignment| {
+            let parsed = clean_overwrite_target_key(assignment.target)?;
+            let scheme_guard = branches
+                .iter()
+                .filter(|branch| {
+                    assignment.span.start < branch.span.start
+                        && branch.span.start < output_span.start
+                        && branch_arm_abruptly_exits(branch.then_events)
+                })
+                .find(|branch| {
+                    branch_condition_fact_for_span(&helper_file_index.branch_conditions, branch.span)
+                        .and_then(|fact| fact.expression.as_ref())
+                        .is_some_and(|expression| {
+                            url_scheme_rejection_is_exact(
+                                expression,
+                                &parsed,
+                                &guard.scheme,
+                                &helper_calls,
+                                &helper_file_index,
+                            )
+                        })
+                })?;
+            Some((assignment, parsed, scheme_guard))
+        })
+        .collect();
+    let [(parser_assignment, parsed, scheme_guard)] = parser_candidates.as_slice() else {
+        return None;
+    };
     let _host_guard = branches
         .iter()
         .filter(|branch| {
@@ -4709,7 +4717,7 @@ fn compiler_proven_url_reconstruction_guard(
             branch_condition_fact_for_span(&helper_file_index.branch_conditions, branch.span)
                 .and_then(|fact| fact.expression.as_ref())
                 .and_then(|expression| {
-                    url_rejected_host_collection(expression, &parsed, &guard.host_allowlist, &helper_calls)
+                    url_rejected_host_collection(expression, parsed, &guard.host_allowlist, &helper_calls)
                 })
                 .is_some_and(|collection| {
                     url_collection_is_static(
@@ -4727,7 +4735,7 @@ fn compiler_proven_url_reconstruction_guard(
             || span_contains(fact.container_span, output_span)
             || span_contains(output_span, fact.container_span)
     })?;
-    if !url_reconstruction_composition_is_exact(composition, &parsed, guard, &helper_calls) {
+    if !url_reconstruction_composition_is_exact(composition, parsed, guard, &helper_calls) {
         return None;
     }
     let mut immutable_places = vec![parsed.clone()];

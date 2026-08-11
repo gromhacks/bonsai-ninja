@@ -15,6 +15,9 @@
 /// per `docs/contributing/design-patterns.mdx::Semantic Resolution Always`),
 /// or when IDG/taint propagation semantics change enough to affect
 /// source-to-sink reachability.
+// v57: rules can require exact fields in a configured receiver's factory
+// argument, and prototype guards prove membership against the collection's
+// exact literal values rather than treating every membership test alike.
 // v56: regex callees consume adapter-proven declared receiver types without
 // collapsing fluent call receivers, nested receiver-call operands retain
 // their input dependencies, and typed guard joins compare exact aggregate
@@ -22,5 +25,5 @@
 // v54: typed receiver evidence is authoritative for receiver-constrained
 // rules, and qualified/import candidates use structural compiler names rather
 // than a shared source-separator vocabulary.
-pub const MATCHER_POLICY_FINGERPRINT: u128 = 0x4d41_5443_4845_525f_504f_4c49_4359_0038_u128;
+pub const MATCHER_POLICY_FINGERPRINT: u128 = 0x4d41_5443_4845_525f_504f_4c49_4359_0039_u128;
 const _: () = assert!(MATCHER_POLICY_FINGERPRINT != 0);

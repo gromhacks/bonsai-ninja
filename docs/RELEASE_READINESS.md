@@ -28,7 +28,7 @@ The analyzer is one compiler-style pipeline:
 
 ## Current validation
 
-Validated through 2026-08-10 (dated measurements below retain their run date):
+Validated through 2026-08-11 (dated measurements below retain their run date):
 
 - A direct release-binary audit exercised every documented root, browse,
   navigation, inspect, trace, slice, stable-ID, debug-dump, cache, export, and
@@ -46,7 +46,18 @@ Validated through 2026-08-10 (dated measurements below retain their run date):
   release-optimized Elasticsearch target. It also
   passed strict all-target release Clippy, private-item release rustdoc with
   warnings denied, formatting, diff hygiene, and direct deep rulepack replay
-  of all 10,047 enabled examples from 7,130 rules with zero errors or warnings.
+  of all 10,044 enabled examples from 7,130 rules with zero errors or warnings.
+
+- The 2026-08-11 CVEBench-SAST regression run executed 458 fresh release-
+  binary scans across 229 vulnerable/fixed pairs in 211.50 seconds. Every
+  vulnerable case scored 5.0 and every repaired snapshot was clean:
+  detection, file, line, source, sink, flow, sanitizer recognition, and fix
+  validation were all 100%; decoy trips and false positives per kLOC were
+  zero; mean score was 5.00. The regression set pins hardened lxml parsers,
+  finite TypeScript allowlists, Go multi-result URL reconstruction, and the
+  cross-file fast-xml-parser configured-receiver flow. Its compiler-object
+  ABI is v84 and matcher policy is v57, so older syntax or match sidecars are
+  rejected before reuse.
 
 - The ABI-v64 release candidate passed `cargo check --release --workspace
   --all-targets --locked`, strict release all-target Clippy with warnings
@@ -58,7 +69,7 @@ Validated through 2026-08-10 (dated measurements below retain their run date):
   the five-scenario Elasticsearch SLO gate. The standalone adapter `FlowEvent`
   audit also passed after compiling its locked debug harness from a cold cache.
 - The release-binary command matrix passed 1,280 command/switch cases across
-  all 20 languages. Rulepack validation replayed 10,047 enabled examples from
+  all 20 languages. Rulepack validation replayed 10,044 enabled examples from
   7,130 rules with zero misses, errors, or warnings. Self-security completed
   with no incomplete reasons or production-threshold findings; SARIF 2.1.0,
   HTML, JSON, and NetworkX output smokes parsed successfully.
@@ -212,10 +223,10 @@ The current deep rulepack gate is clean:
 | Measure | Result |
 |---|---:|
 | Rules | 7,130 |
-| Enabled rules | 5,990 |
-| Disabled rules | 1,140 |
-| Match examples | 10,485 |
-| Enabled match examples | 10,047 |
+| Enabled rules | 5,989 |
+| Disabled rules | 1,141 |
+| Match examples | 10,483 |
+| Enabled match examples | 10,044 |
 | Taint-replay misses | 0 |
 | Errors | 0 |
 | Warnings | 0 |
@@ -262,19 +273,20 @@ seconds with 35,110,912 bytes maximum RSS.
 ## Elasticsearch scale result
 
 The current release pipeline is measured against the sibling 30,055-source
-Elasticsearch checkout. The 2026-08-10 ABI-v83 release gate passed 5/5 in
-233.57 seconds under a 3 GiB scheduling budget. Its one-time exact
-compiler-object/IDG generation completed in 1,618.72 seconds and immediate
-fresh-process reuse in 2.49 seconds. The final warm gate measured fresh-cache
-production taint at 29.42 seconds, warm production taint at 28.31 seconds,
-default inspect at 7.66 seconds, and exact raw-taint inspect at 27.60 seconds.
-Navigation timings were tree 0.03 seconds, search 4.19, definitions 13.65,
-imports 7.69, classes 7.93, entrypoints 28.36, calls 3.69, arguments 3.64,
-and scoped `read-file` 1.37. Source, high-severity sink, sanitizer, and
-dependency inventories completed in 3.95, 24.01, 21.13, and 12.08 seconds.
+Elasticsearch checkout. The 2026-08-11 ABI-v84 release gate passed 5/5 in
+225.16 seconds under a 3 GiB scheduling budget. Its one-time migration gate,
+including exact compiler-object/IDG generation and all five checks, completed
+in 1,802.20 seconds; subsequent semantic readiness and immediate fresh-process
+reuse took 5.20 and 2.36 seconds. The final warm gate measured fresh-cache
+production taint at 31.12 seconds, warm production taint at 26.66 seconds,
+default inspect at 7.50 seconds, and exact raw-taint inspect at 26.31 seconds.
+Navigation timings were tree 0.03 seconds, search 4.15, definitions 13.20,
+imports 7.18, classes 7.65, entrypoints 27.52, calls 3.42, arguments 3.38,
+and scoped `read-file` 1.35. Source, high-severity sink, sanitizer, and
+dependency inventories completed in 3.90, 23.46, 20.49, and 10.23 seconds.
 The high-severity sink inventory returned the same exact 6,866 matches before
 and after its matcher optimization; its end-to-end latency fell from about 52
-seconds to 24.01 seconds because each surviving rule batch now derives only
+seconds to 23.46 seconds because each surviving rule batch now derives only
 the compiler-secondary views it can consult. Header and body concurrency is
 source-weighted and changes scheduling only. Every enforced SLO passed with
 no cap on files, rules, graph depth, fixed-point work, or results. This is the

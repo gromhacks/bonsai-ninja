@@ -88,7 +88,9 @@
   description: "lxml.etree.fromstring."
 
 - id: python.xxe.lxml_xmlparser
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: python
   tag: xxe
   category: source-independent
@@ -109,7 +111,7 @@
 
       def example(user_input):
           return etree.XMLParser(user_input)
-  description: "new etree.XMLParser - flag if resolve_entities/load_dtd default."
+  description: "Disabled - constructing an lxml XMLParser is not an XML-consumption boundary. The flow-aware etree.parse/fromstring rules model tainted input and exact hardened parser options without reporting safe or unused parser objects."
 
 - id: python.xxe.etree_fromstring
   enabled: true

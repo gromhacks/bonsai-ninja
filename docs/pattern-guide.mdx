@@ -249,8 +249,11 @@ flows from a source.
 
 Do not use `arg_tainted` for source-independent configuration findings
 such as template autoescape disabled, Angular resource whitelist wildcards,
-or parser entity-processing flags. Those rules are local API/config misuse
-patterns, not source-to-sink claims. `match.kind: return` rules also do not
+or an unused parser configuration. Those rules are local API/config misuse
+patterns, not source-to-sink claims. A configuration that is dangerous only
+when attacker-controlled data reaches a later receiver call should use
+`arg_tainted` on that call plus `receiver_factory_argument_fields_equal`, as
+described below. `match.kind: return` rules also do not
 have call arguments; their taint gate is return-expression reachability.
 Their `target` is optional: omit it to match any compiler-lowered return
 expression, or provide `name`/`regex` to narrow the returned value. Do not use
@@ -267,6 +270,36 @@ Use this when the vulnerable operand is the call receiver rather than a
 syntactic argument. Examples include Scala `cmd.!` and fluent APIs where the
 dangerous value sits to the left of the method call. Do not model these as `arg_tainted`;
 zero-argument receiver calls have no argument slot to prove.
+
+### `receiver_factory_argument_fields_equal`
+
+Use this with a `call` sink when a tainted operand becomes dangerous only on
+a receiver created by a particular exact configuration:
+
+```yaml
+imports: [fast-xml-parser]
+constraints:
+  - arg_tainted: { index: 0 }
+  - receiver_factory_argument_fields_equal:
+      factory: { name: XMLParser }
+      configuration_argument_index: 0
+      required_fields:
+        - path: [processEntities]
+          value: { kind: boolean, value: true }
+```
+
+The adapter supplies the immutable assignment, direct factory call, complete
+spread-free aggregate, exact typed fields, and spans. The rule supplies every
+API name, argument role, field path, and security-sensitive value. The shared
+matcher only joins those facts; it does not inspect source text or know the
+provider. Missing, mutable, conflicting, spread, reassigned, or ambiguous
+state fails closed. Matching and taint closure stay anchored at the consumer
+call, while the finding is attributed to the compiler-proven factory
+configuration that made that call dangerous. Declare `imports` when the
+factory is external: the matcher then requires the factory spelling (including
+renamed and namespace forms) to resolve through that exact compiler import
+binding. A same-named local class/function and an assignment in a sibling
+lexical scope cannot satisfy the constraint.
 
 ### `any_arg_tainted`
 

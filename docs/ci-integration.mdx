@@ -126,13 +126,14 @@ seconds. The broad inspect result retained all 12,233 entry closures and
 target ownership now avoid redundant header/relevance lookups without changing
 the IDG fixed point.
 
-The current 2026-08-10 ABI-v83 release pass completed all five tests in
-233.57 seconds under the enforced 3 GiB scheduler. Exact generation after the
-ABI change took 1,618.72 seconds once and immediate fresh-process reuse took
-2.49 seconds. The warm test pass measured default/exact raw-taint inspect at
-7.66/27.60 seconds, fresh-cache/warm production taint at 29.42/28.31 seconds,
-and source/sink/sanitizer/dependency inventory at
-3.95/24.01/21.13/12.08 seconds. The sink matcher retained byte-identical
+The current 2026-08-11 ABI-v84 release pass completed all five tests in
+225.16 seconds under the enforced 3 GiB scheduler. The one-time migration gate
+that published the exact generation took 1,802.20 seconds, while subsequent
+semantic readiness and immediate fresh-process reuse took 5.20/2.36 seconds.
+The warm test pass measured default/exact raw-taint inspect at 7.50/26.31
+seconds, fresh-cache/warm production taint at 31.12/26.66 seconds, and
+source/sink/sanitizer/dependency inventory at 3.90/23.46/20.49/10.23 seconds.
+The sink matcher retained byte-identical
 output while demand-projecting optional compiler-derived facts and running
 header/body work behind source-weighted memory permits. All query and
 inventory SLOs passed; the scheduler did not cap semantic work.

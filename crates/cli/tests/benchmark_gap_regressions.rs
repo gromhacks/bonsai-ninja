@@ -867,6 +867,36 @@ function handler(req) {
 }
 
 #[test]
+fn typescript_proto_pollution_finite_allowlist_blocks_dynamic_write() {
+    let ws = temp_workspace("ts-proto-allowlisted-write");
+    write_file(&ws, "package.json", r#"{"dependencies":{"express":"latest"}}"#);
+    write_file(
+        &ws,
+        "app.ts",
+        r#"import express from "express";
+
+const ALLOWED = new Set(["display_name", "avatar_url", "locale"]);
+
+function handler(req: express.Request) {
+  const target: Record<string, unknown> = {};
+  for (const key of Object.keys(req.body ?? {})) {
+    if (!ALLOWED.has(key)) continue;
+    target[key] = req.body[key];
+  }
+  return target;
+}
+"#,
+    );
+
+    let rows = run_taint_json(
+        &ws,
+        "^typescript\\.source\\.express_req_body$",
+        "^typescript\\.proto_pollution\\.recursive_merge$",
+    );
+    assert_no_finding(&rows);
+}
+
+#[test]
 fn javascript_graphql_args_arbitrary_field_reaches_cross_file_sql_sink() {
     let ws = temp_workspace("js-graphql-q");
     write_file(

@@ -266,6 +266,12 @@ exact, serializable summaries to `DeclIndex`:
   argument or return text. The same adapter-owned classifier serves all three
   surfaces, and an unclassified carrier-free shape remains `Unknown` rather
   than being promoted to a literal;
+- `AssignmentValueFact::target_is_immutable` only when the owning grammar
+  proves an immutable binding or field declaration. For ECMAScript this means
+  a simple identifier declarator in an actual `const` lexical declaration;
+  `let`, `var`, destructuring, and assignment expressions remain false. A
+  consumer carrying configured receiver state must still reject any later
+  whole-place or field write before use;
 - `CallArgumentValueFact::inline_callback_params` for a complete inline
   callback argument, derived from the callback's parsed parameter/pattern
   nodes. The fact records syntax only; rule data decides whether a callback
