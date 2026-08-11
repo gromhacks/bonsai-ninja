@@ -375,7 +375,8 @@ For CI artifacts:
 ```shell
 ./target/release/bonsai-ninja security <workspace> taint-analysis \
   --profile production --format sarif \
-  --no-color --no-progress > findings.sarif.json
+  --all --output-path findings.sarif.json \
+  --no-color --no-progress
 ```
 
 ## Rulepack Work
