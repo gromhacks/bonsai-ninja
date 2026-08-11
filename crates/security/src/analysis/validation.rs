@@ -22,7 +22,7 @@ pub fn validate_pack(
     }
 
     let rules = select_pack_rules(pack, options);
-    let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
+    let rulepack_typing = crate::matcher::build_rulepack_typing(&pack.all_rules());
     let mut issues = Vec::new();
     let mut example_count = 0usize;
     let mut enabled_example_count = 0usize;
@@ -214,7 +214,7 @@ pub fn validate_pack(
             let match_texts = if skip_taint_example {
                 Vec::new()
             } else {
-                match_example_owner_texts(pack, rule, &ws, &factory_returns)
+                match_example_owner_texts(pack, rule, &ws, &rulepack_typing)
             };
             if example.expect_no_match {
                 if skip_taint_example {
@@ -335,7 +335,7 @@ pub fn validate_pack(
         let peer_key = (owner.language.clone(), owner.kind, rule_match_target_key(owner));
         let peers = peer_groups.get(&peer_key).cloned().unwrap_or_default();
         for hit in
-            crate::matcher::match_rules_against_facts_with_factory(&prepared.ws, &peers, &factory_returns)
+            crate::matcher::match_rules_against_facts_with_factory(&prepared.ws, &peers, &rulepack_typing)
         {
             if hit.rule_id == owner.id || !id_seen.contains(hit.rule_id.as_str()) {
                 continue;
@@ -378,7 +378,7 @@ fn match_example_owner_texts(
     pack: &Rulepack,
     rule: &Rule,
     ws: &Workspace,
-    factory: &Arc<crate::matcher::FactoryReturns>,
+    factory: &Arc<crate::matcher::RulepackTyping>,
 ) -> Vec<String> {
     if rule.kind == RuleKind::Sink && rule_has_taint_dependent_constraint(rule) {
         return match_arg_tainted_example_owner_texts(pack, rule, ws);
@@ -808,6 +808,19 @@ fn validate_rule_metadata(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
             "source rule uses only arg_tainted, which is redundant with normal source taint",
         );
     }
+    if rule.kind != RuleKind::Typing
+        && (rule.match_spec.kind == MatchKind::Type
+            || !rule.callback_param_types.is_empty()
+            || rule.callback_arg_index.is_some())
+    {
+        push_validation_issue(
+            issues,
+            "error",
+            "typing-fields-outside-typing-rule",
+            Some(rule),
+            "match.kind type, callback_param_types, and callback_arg_index are valid only in typing rules",
+        );
+    }
     if rule.enabled {
         match rule.kind {
             RuleKind::Source => {
@@ -862,15 +875,45 @@ fn validate_rule_metadata(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
                 }
             }
             // Typing rules carry no tag/severity/trust/cwe. They provide a
-            // factory return type and/or an external library transfer summary.
+            // factory return type, callback parameter types, an external
+            // library transfer summary, and/or a lifecycle transition.
             RuleKind::Typing => {
-                if rule.returns_type.is_none() && rule.taint_semantics.is_none() {
+                if rule.returns_type.is_none()
+                    && rule.callback_param_types.is_empty()
+                    && rule.taint_semantics.is_none()
+                    && rule.lifecycle_transition.is_none()
+                {
                     push_validation_issue(
                         issues,
                         "error",
-                        "missing-returns-type",
+                        "missing-typing-semantics",
                         Some(rule),
-                        "enabled typing rule must declare returns_type or taint_semantics",
+                        "enabled typing rule must declare returns_type, callback_param_types, taint_semantics, or lifecycle_transition",
+                    );
+                }
+                if !rule.callback_param_types.is_empty() {
+                    let invalid_shape = rule.callback_param_types.iter().any(Vec::is_empty)
+                        || match rule.match_spec.kind {
+                            MatchKind::Call => rule.callback_arg_index.is_none(),
+                            MatchKind::Type => rule.callback_arg_index.is_some(),
+                            _ => true,
+                        };
+                    if invalid_shape {
+                        push_validation_issue(
+                            issues,
+                            "error",
+                            "invalid-callback-param-types",
+                            Some(rule),
+                            "callback_param_types requires match.kind call plus callback_arg_index, or match.kind type without callback_arg_index; every parameter needs at least one type alias",
+                        );
+                    }
+                } else if rule.callback_arg_index.is_some() {
+                    push_validation_issue(
+                        issues,
+                        "error",
+                        "orphan-callback-arg-index",
+                        Some(rule),
+                        "callback_arg_index requires callback_param_types",
                     );
                 }
             }
@@ -2399,7 +2442,7 @@ fn hardcoded_lowercase_receiver_token(token: &str) -> bool {
 fn rule_match_target_key(rule: &Rule) -> String {
     let target = match rule.match_spec.kind {
         MatchKind::Call | MatchKind::New | MatchKind::Missing => rule.match_spec.callee.as_ref(),
-        MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param => {
+        MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param | MatchKind::Type => {
             rule.match_spec.target.as_ref()
         }
     };

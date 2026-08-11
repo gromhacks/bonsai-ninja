@@ -11,6 +11,7 @@ fn return_event(start: u32) -> FlowEvent {
         span: span(start),
         value_text: None,
         value_name: None,
+        value_kind: None,
         value_flow: Default::default(),
     }
 }

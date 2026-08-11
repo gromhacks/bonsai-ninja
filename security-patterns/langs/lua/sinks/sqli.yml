@@ -27,7 +27,7 @@
       function example(conn, name)
         conn:execute("SELECT id FROM users WHERE name = '" .. name .. "'")
       end
-    expect_match_text: ['conn:execute']
+    expect_match_text: ['conn.execute']
   - name: literal sql negative
     code: |
       local _luasql = require("luasql")

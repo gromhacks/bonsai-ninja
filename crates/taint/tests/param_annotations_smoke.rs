@@ -1,5 +1,5 @@
 //! P0.5: param_annotations is populated by the kit's
-//! `extract_param_annotations` for Java/Kotlin/C# patterns
+//! `extract_param_annotations` for Java/Kotlin/C#/TypeScript patterns
 //! (`formal_parameter > modifiers > marker_annotation / annotation` and
 //! `parameter > attribute_list > attribute`). Audit-script literal-
 //! string match was the only gap; this test asserts the field is
@@ -87,5 +87,24 @@ class Controller {
     assert!(
         anns.iter().any(|a| a.iter().any(|n| n == "FromBody")),
         "C# [FromBody] must populate param_annotations; got {anns:?}"
+    );
+}
+
+#[test]
+fn typescript_body_decorator_populates_exact_parameter_slot() {
+    let src = "
+class Controller {
+    create(@Body() payload: string, plain: string) { return payload; }
+}
+";
+    let db = ws(
+        Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new()),
+        &[("controller.ts", src)],
+    );
+    let anns = first_decl_with_annotations(&db);
+    assert_eq!(
+        anns,
+        vec![vec!["Body".to_string()], Vec::new()],
+        "TypeScript @Body() must annotate only the decorated parameter"
     );
 }

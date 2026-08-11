@@ -42,7 +42,8 @@ under `<workspace>/.bonsai/rules/` and are not analysis caches.
 
 Treat the analyzer as a compiler pipeline. Each language adapter owns its
 Tree-sitter grammar, source-syntax recognition, declaration/import lowering,
-and `FlowEvent`/capability facts. Shared analysis consumes that typed IR; do
+literal/value node inventories, and `FlowEvent`/capability facts. Shared
+analysis consumes that typed IR; do
 not add language-id branches, cross-language token inventories, or API-name
 guesses to shared crates. Library/package/framework identities and every
 security-sensitive value belong in `security-patterns/langs/<lang>`, not in
@@ -57,22 +58,33 @@ and must report truncation explicitly.
 `index --semantic` first publishes an immutable content-addressed generation
 of per-file compiler objects. Each object is exact adapter-lowered IR plus
 diagnostics, validated by path, adapter, frontend ABI, and SHA-256 source
-content. Import indexes and compact syntax-target facts (calls, assignment
-aliases, factory assignments, and receiver/type evidence) are
+content. Import indexes, direct-call receiver-field initializer linkage, and
+compact syntax-target facts (calls, assignment aliases, factory assignments,
+inline callbacks, exact assignment/return/call-argument value shapes, typed callables, and
+receiver/type evidence) are
 integrity-checked compiler headers inside the same generation and must remain
 independently decodable from declaration/flow bodies. Broad rule planning
 filters raw source anchors, exact import/package headers, and exact syntax
 targets in that order before decoding a surviving body. Later phases stream
 those objects; they must not reparse source or invent a parallel lowering
-path. Every derived semantic pipeline identity includes the compiler-object
-frontend ABI; a lowering change invalidates older callgraph/IDG sidecars even
-when source bytes are unchanged, and root-only validators reconstruct the same
-identity as a full workspace open. Persisted IDG construction lowers transfer facts once, spools typed
+path. Rulepack return typing retains its declared imports; exact workspace
+values and ordinary functions shadow external `kind: new` models, and mixed
+or ambiguous callable identities fail closed. Every derived semantic pipeline
+identity includes the compiler-object frontend ABI; a lowering change
+invalidates older callgraph/IDG sidecars even when source bytes are unchanged,
+and root-only validators reconstruct the same identity as a full workspace
+open. Persisted IDG construction lowers transfer facts once, spools typed
 stitch records/node maps, and replays them per segment. Memory scheduling may
 weight or serialize units, but must never cap semantic work. After the
 isolated workers finish, the parent validates that every sidecar describes one
 current workspace snapshot and reruns the exact sequence if a file changed
 between phases.
+
+When a rulepack-only external type is required for receiver-state transfer,
+compile the complete rule match to exact AST call spans before IDG
+construction. Include those spans in the transfer fingerprint and graph cache
+identity. The IDG may consume that typed span evidence, but must not interpret
+the provider, type, or method name itself.
 Semantic prewarm also persists the compact function/node directories and
 default semantic contextual fixed point derived from that exact graph. Warm
 open validates the query accelerator and must not decode every IDG segment to
@@ -144,9 +156,14 @@ already-proven non-deferred plans. Raw workspace reads may overlap in
 memory-weighted windows, but VFS publication remains in canonical path order.
 Raw-anchor candidate tests run on that bounded pool as read-only planning;
 never rescan every file/rule pair serially while the worker pool is idle.
-Broad matcher bodies run in one continuous pool sized against the largest
-actual source units that may overlap; do not reintroduce per-CPU-batch
-barriers.
+Broad matcher headers and bodies run as continuous CPU worklists behind
+source-size-weighted memory permits; small units may overlap while a large
+unit consumes more of the same scheduling budget. Derive only the secondary
+matcher views demanded by each surviving rule batch (for example decorators,
+must-alias closure, runtime narrowing, or lifecycle state), and include that
+projection in the derived-fact cache identity. This changes recomputation
+only: the compiler object remains complete. Do not reintroduce per-CPU-batch
+barriers or eagerly derive every optional view for every candidate body.
 
 Performance gates measure completed exact work; they never terminate, skip, or
 cap analysis. When query/cache/engine code changes, build release and run
@@ -155,6 +172,13 @@ cap analysis. When query/cache/engine code changes, build release and run
 `BONSAI_ELASTICSEARCH_ROOT`). The gate enforces warm semantic reuse and
 navigation/inspect/security SLOs under a 3 GiB scheduling budget. Update the
 measured baseline only for an intentional, reviewed architecture change.
+Run exhaustive correctness with the compact test profile (`cargo test
+--workspace`), not `cargo test --release --workspace`: ThinLTO-linking every
+integration target duplicates the complete language graph and is not a valid
+runtime-performance measurement. `scripts/audit-build-artifacts.sh` enforces
+the 32 GiB generated-artifact budget; use `cargo clean` when accumulated local
+generations exceed it. Release optimization remains required for the CLI build
+and the named Elasticsearch SLO target.
 
 Always treat pagination as correctness. If output says more pages exist,
 continue with `--page 2`, `--page next`, or the printed `P:...` cursor

@@ -8,7 +8,8 @@ loads every rule, and emits a per-(lang, category) report covering:
   - rule-id family coverage vs the canonical 17 sink families
   - match-shape distribution (call/new/read/write/...)
   - matcher-precision distribution (attribute-chain / regex / bare name / ...)
-  - rules that look fragile (bare verb names, missing package/import scoping)
+  - rules that look fragile (bare verb names without package/import or
+    compiler-proven type scoping)
   - missing canonical families per lang
   - per-tag and per-severity rollups
   - duplicate ids, duplicate enabled match shapes, and cross-family API
@@ -435,7 +436,7 @@ def classify_precision(rule: dict) -> str:
 
 
 def is_fragile(rule: dict) -> tuple[bool, str | None]:
-    """Identify rules that risk over-matching: bare verb name, no package scope."""
+    """Identify bare verbs without package or compiler-proven type scope."""
     if rule.get("_parse_error") or rule.get("_shape_error"):
         return False, None
     if rule.get("enabled") is False:
@@ -455,12 +456,24 @@ def is_fragile(rule: dict) -> tuple[bool, str | None]:
         return False, None
     if str(rule.get("id") or "") in REVIEWED_BARE_NAME_RULES:
         return False, None
-    has_scope = any(
+    has_declared_scope = any(
         rule.get(k) for k in ("packages", "imports", "frameworks", "namespace")
     )
-    if has_scope:
+    constraints = rule.get("constraints") or []
+    has_typed_scope = isinstance(constraints, list) and any(
+        isinstance(constraint, dict)
+        and any(
+            key in constraint
+            for key in ("receiver_type_in", "param_in_class", "receiver_in_class")
+        )
+        for constraint in constraints
+    )
+    if has_declared_scope or has_typed_scope:
         return False, None
-    return True, f"bare-name '{bare}' without packages/imports/frameworks scope"
+    return True, (
+        f"bare-name '{bare}' without package/import/framework or "
+        "compiler-proven type scope"
+    )
 
 
 def load_category_rules(base: Path) -> tuple[list[Path], list[dict], list[dict]]:

@@ -49,6 +49,7 @@ fn empty_decl(symbol: u32, file: u32, name: &str) -> Decl {
         bases: Vec::new(),
         receiver_param_index: None,
         receiver_field_writes: Vec::new(),
+        receiver_field_initializers: Vec::new(),
         implicit_receiver_names: Vec::new(),
         receiver_state_sources: Vec::new(),
         return_type: None,
@@ -218,6 +219,7 @@ fn streamed_transfer_bodies_match_fully_resident_idg() {
     let mut function = empty_decl(0, file.raw(), "identity");
     function.params = vec!["input".to_string()];
     function.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(file.raw(), 20, 30),
         value_text: Some("input".to_string()),
         value_name: Some("input".to_string()),
@@ -347,6 +349,7 @@ fn two_files_with_call_creates_cross_file_edges_when_callgraph_resolves() {
     let mut g = empty_decl(2, 1, "g");
     g.params = vec!["arg".to_string()];
     g.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(1, 50, 60),
         value_name: Some("arg".to_string()),
         value_text: None,
@@ -1095,6 +1098,7 @@ fn repeated_calls_to_same_callee_do_not_duplicate_candidates_per_site() {
     let mut g = empty_decl(2, 1, "g");
     g.params = vec!["arg".to_string()];
     g.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(1, 50, 60),
         value_name: Some("arg".to_string()),
         value_text: None,
@@ -1145,6 +1149,7 @@ fn same_method_name_on_different_receiver_types_stitches_by_exact_site() {
     run_a.parent = Some(SymbolId::new(2));
     run_a.params = vec!["arg".to_string()];
     run_a.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(1, 50, 60),
         value_name: Some("arg".to_string()),
         value_text: None,
@@ -1158,6 +1163,7 @@ fn same_method_name_on_different_receiver_types_stitches_by_exact_site() {
     run_b.parent = Some(SymbolId::new(4));
     run_b.params = vec!["arg".to_string()];
     run_b.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(2, 50, 60),
         value_name: Some("arg".to_string()),
         value_text: None,

@@ -3,17 +3,60 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_kinds, first_named_child_of_kind, language_from_pack, named_child_call_args_with_handler,
-        node_text, parse_with, span_of,
+        call_arg_from_node_with_handler, collect_kinds, first_named_child_of_kind, language_from_pack,
+        named_child_call_args_with_handler, node_text, parse_with, pattern_binding_sites_from_arms, span_of,
     },
-    AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent, GrammarHandler,
-    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref,
-    RefKind, SyntaxSpecialForm, EMPTY_HANDLER,
+    AdapterContext, AdapterError, CallArg, CallKind, CallTargetExtraction, DeclIndex, DeclKind, FlowEvent,
+    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    ModulePath, PatternBindingSite, Ref, RefKind, EMPTY_HANDLER,
 };
 use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("ruby");
 const PACK_NAME: &str = "ruby";
+
+fn ruby_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    if !matches!(node.kind(), "call" | "method_call") {
+        return None;
+    }
+    let target = node.child_by_field_name("method")?;
+    let member = node_text(&target, src).trim();
+    if member.is_empty() {
+        return None;
+    }
+    let full_text = node.child_by_field_name("receiver").map_or_else(
+        || member.to_string(),
+        |receiver| format!("{}.{}", node_text(&receiver, src).trim(), member),
+    );
+    Some(CallTargetExtraction {
+        node: target,
+        full_text,
+    })
+}
+
+/// Ruby keyword arguments are `pair` nodes in the argument list. Preserve
+/// their grammar-declared key/value roles so generic constraints can address
+/// the named argument without parsing Ruby source text.
+fn ruby_named_argument<'tree>(node: Node<'tree>, src: &[u8]) -> Option<(String, Node<'tree>)> {
+    if node.kind() != "pair" {
+        return None;
+    }
+    let key = node.child_by_field_name("key")?;
+    let value = node.child_by_field_name("value")?;
+    let name = node_text(&key, src)
+        .trim()
+        .trim_start_matches(':')
+        .trim_end_matches(':')
+        .trim();
+    (!name.is_empty()).then(|| (name.to_string(), value))
+}
+
+fn ruby_pattern_bindings(node: Node<'_>) -> Vec<PatternBindingSite<'_>> {
+    if node.kind() != "case_match" {
+        return Vec::new();
+    }
+    pattern_binding_sites_from_arms(node, &["value"], &["in_clause"], &["pattern"], &[])
+}
 
 fn extract_ruby_callable_reference(node: Node<'_>, src: &[u8]) -> Option<String> {
     if !matches!(node.kind(), "call" | "method_call") {
@@ -45,7 +88,63 @@ fn extract_ruby_callable_reference(node: Node<'_>, src: &[u8]) -> Option<String>
             .all(|(index, ch)| ch == '_' || ch.is_alphanumeric() && (index > 0 || !ch.is_numeric())))
     .then(|| name.to_string())
 }
+
+fn ruby_inline_closure_uses_yield(call: Node<'_>, block: Node<'_>, _src: &[u8]) -> bool {
+    call.kind() == "call" && matches!(block.kind(), "block" | "do_block")
+}
 const BASE_HANDLER: GrammarHandler = GrammarHandler {
+    expression_value_kind_extractor: None,
+    literal_value_kinds: &["nil", "integer", "float", "true", "false"],
+    string_literal_kinds: &["string", "chained_string", "heredoc_body"],
+    comment_kinds: &["comment"],
+    parameter_container_kinds: &["method_parameters"],
+    parameter_kinds: &[
+        "identifier",
+        "optional_parameter",
+        "keyword_parameter",
+        "splat_parameter",
+        "hash_splat_parameter",
+        "block_parameter",
+    ],
+    variadic_parameter_kinds: &["splat_parameter"],
+    binding_identifier_kinds: &[
+        "identifier",
+        "constant",
+        "instance_variable",
+        "class_variable",
+        "global_variable",
+    ],
+    non_binding_pattern_kinds: &[
+        "variable_reference_pattern",
+        "reference_pattern",
+        "pin_pattern",
+        "pin",
+    ],
+    non_binding_pattern_field_names: &["type", "key", "class", "guard"],
+    binding_name_extractor: Some(ruby_binding_name),
+    pattern_binding_extractor: Some(ruby_pattern_bindings),
+    identifier_kinds: &[
+        "identifier",
+        "constant",
+        "instance_variable",
+        "class_variable",
+        "global_variable",
+    ],
+    aggregate_pattern_kinds: &["left_assignment_list", "array_pattern", "list_pattern"],
+    named_aggregate_kinds: &["hash"],
+    positional_aggregate_kinds: &["array"],
+    aggregate_pair_kinds: &["pair", "keyword_pattern"],
+    aggregate_key_field_names: &["key"],
+    aggregate_value_field_names: &["value"],
+    shorthand_field_kinds: &["keyword_pattern"],
+    static_field_name_kinds: &["identifier", "constant"],
+    spread_kinds: &["splat_argument", "hash_splat_argument"],
+    spread_value_field_names: &["value"],
+    lambda_value_container_kinds: &["hash", "pair", "array"],
+    transparent_call_wrapper_kinds: &["call", "parenthesized_statements"],
+    single_expression_group_kinds: &["expression_list"],
+    inline_closure_kinds: &["block", "do_block"],
+    inline_closure_yield_extractor: Some(ruby_inline_closure_uses_yield),
     fn_kinds: &["method", "singleton_method"],
     class_kinds: &["class", "module"],
     class_decl_kinds: &[("class", DeclKind::Class), ("module", DeclKind::Module)],
@@ -58,7 +157,16 @@ const BASE_HANDLER: GrammarHandler = GrammarHandler {
         "case",
         "case_match",
     ],
-    for_kinds: &["for"],
+    branch_then_field_names: &["consequence", "body"],
+    branch_else_field_names: &["alternative"],
+    branch_condition_field_names: &["condition", "value"],
+    loop_body_field_names: &["body"],
+    loop_body_kinds: &["body_statement", "then"],
+    branch_arm_kinds: &["then", "else", "body_statement", "when"],
+    additional_alternative_kinds: &["elsif", "else"],
+    for_kinds: &[],
+    foreach_kinds: &["for"],
+    foreach_binding_extractor: Some(ruby_foreach_binding),
     while_kinds: &["while", "until"],
     return_kinds: &["return"],
     lambda_kinds: &["lambda", "do_block"],
@@ -71,7 +179,10 @@ const BASE_HANDLER: GrammarHandler = GrammarHandler {
     // loop-continue edge. Ruby's rescue-only `retry` has no equivalent in the
     // current neutral IR and is intentionally not mislabeled as loop control.
     continue_kinds: &["next", "redo"],
+    control_label_field_names: &[],
     yield_kinds: &["yield"],
+    yield_value_field_names: &["argument", "arguments"],
+    try_body_field_names: &["body"],
     implicit_receiver_names: &["self", "super"],
     implicit_receiver_prefixes: &["@"],
     ..EMPTY_HANDLER
@@ -89,18 +200,173 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // shared lowering has no cross-language fallback. The compound arm in
     // the kit then re-adds the LHS as a source operand (read-modify-write).
     assignment_kinds: &["assignment", "operator_assignment"],
+    assignment_place_extractor: Some(ruby_assignment_place),
+    compound_assignment_kinds: &["operator_assignment"],
+    compound_assignment_operators: &["+=", "-=", "*=", "/=", "%=", "**=", "&&=", "||="],
     call_kinds: &["call", "method_call"],
+    call_callee_field_names: &["method"],
+    call_receiver_field_names: &["receiver"],
+    call_member_field_names: &["method"],
+    call_target_extractor: Some(ruby_call_target),
+    call_argument_field_names: &["arguments"],
+    call_argument_container_kinds: &["argument_list"],
+    named_argument_extractor: Some(ruby_named_argument),
+    lambda_body_field_names: &["body"],
+    lambda_body_kinds: &["block", "do_block"],
     pseudo_call_extractor: Some(extract_ruby_pseudo_call),
-    syntax_event_extractor: None,
+    syntax_event_extractor: Some(extract_ruby_syntax_event),
     argument_passing_mode_extractor: None,
     call_ref_kinds: &["call", "method_call"],
     subscript_expression_kinds: &["element_reference"],
+    subscript_base_field_names: &["object"],
+    subscript_index_field_names: &["index"],
+    static_subscript_key_extractor: Some(ruby_static_subscript_key),
+    computed_subscript_extractor: Some(ruby_element_subscript),
     global_variable_kinds: &["global_variable"],
+    reference_name_extractor: Some(ruby_reference_name),
     subscript_base_call_refs: true,
     callable_reference_extractor: Some(extract_ruby_callable_reference),
-    special_forms: &[SyntaxSpecialForm::BlockLoopCall],
+    special_forms: &[],
     ..BASE_HANDLER
 };
+
+fn extract_ruby_syntax_event(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<FlowEvent> {
+    if node.kind() != "binary" {
+        return None;
+    }
+    let left = node.child_by_field_name("left")?;
+    let right = node.child_by_field_name("right")?;
+    let operator = std::str::from_utf8(&src[left.end_byte()..right.start_byte()])
+        .ok()?
+        .trim();
+    if operator != "<<" {
+        return None;
+    }
+    let target = call_arg_from_node_with_handler(left, file, src, None, handler)?.place?;
+    let source = call_arg_from_node_with_handler(right, file, src, None, handler)?;
+    let mut source_names = source.source_names;
+    if let Some(place) = source.place.as_ref() {
+        if !source_names.iter().any(|existing| existing == place) {
+            source_names.push(place.clone());
+        }
+    }
+    source_names.retain(|name| name != &target);
+    source_names.push(target.clone());
+    source_names.sort();
+    source_names.dedup();
+    Some(FlowEvent::Assign {
+        span: span_of(file, &node),
+        target,
+        source_name: source.place,
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names,
+        declares_new_binding: false,
+        value_kind: None,
+    })
+}
+
+fn ruby_element_subscript(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    if node.kind() != "element_reference" {
+        return None;
+    }
+    let object = node.child_by_field_name("object")?;
+    let mut cursor = node.walk();
+    let key = node
+        .named_children(&mut cursor)
+        .find(|child| child.id() != object.id())?;
+    Some((object, key))
+}
+
+fn ruby_static_subscript_key(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() == "string" {
+        let mut cursor = node.walk();
+        let parts: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
+        let [content] = parts.as_slice() else {
+            return None;
+        };
+        if content.kind() != "string_content" {
+            return None;
+        }
+        let key = node_text(content, src).trim();
+        return (!key.is_empty()).then(|| key.to_string());
+    }
+    if matches!(node.kind(), "simple_symbol" | "symbol" | "symbol_literal") {
+        let key = node_text(&node, src).trim().trim_start_matches(':');
+        return (!key.is_empty()).then(|| key.to_string());
+    }
+    None
+}
+
+fn ruby_reference_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let raw = node_text(&node, src).trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if node.kind() == "instance_variable" {
+        return Some(normalize_ruby_instance_variable_text(raw));
+    }
+    Some(raw.to_string())
+}
+
+fn ruby_binding_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let raw = node_text(&node, src).trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if node.kind() == "instance_variable" {
+        return Some(normalize_ruby_instance_variable_text(raw));
+    }
+    Some(raw.to_string())
+}
+
+/// Ruby represents a writable property target (`object.property = value`)
+/// with the same `call` node used for a zero-argument reader. The enclosing
+/// assignment is the syntax proof that this particular node denotes a place,
+/// so expose it only through the assignment-scoped adapter capability.
+fn ruby_assignment_place(node: Node<'_>, src: &[u8]) -> Option<String> {
+    fn base_place(node: Node<'_>, src: &[u8]) -> Option<String> {
+        if matches!(
+            node.kind(),
+            "identifier" | "constant" | "instance_variable" | "class_variable" | "global_variable"
+        ) {
+            return ruby_reference_name(node, src);
+        }
+        ruby_assignment_place(node, src)
+    }
+
+    if !matches!(node.kind(), "call" | "method_call") || node.child_by_field_name("arguments").is_some() {
+        return None;
+    }
+    let receiver = node.child_by_field_name("receiver")?;
+    let method = node.child_by_field_name("method")?;
+    if method.kind() != "identifier" {
+        return None;
+    }
+    let receiver = base_place(receiver, src)?;
+    let method = node_text(&method, src).trim();
+    (!receiver.is_empty() && !method.is_empty()).then(|| format!("{receiver}.{method}"))
+}
+
+fn ruby_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    if node.kind() != "for" {
+        return None;
+    }
+    let binding = node
+        .child_by_field_name("pattern")
+        .or_else(|| node.child_by_field_name("left"))
+        .or_else(|| node.named_child(0))?;
+    let iterable = node
+        .child_by_field_name("value")
+        .or_else(|| node.child_by_field_name("right"))
+        .or_else(|| node.named_child(1))?;
+    Some((binding, iterable))
+}
 
 fn extract_ruby_pseudo_call(
     node: Node<'_>,
@@ -224,31 +490,6 @@ impl LanguageAdapter for RubyAdapter {
             }
             bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
             apply_ruby_class_semantic_identity(&mut idx);
-            // Recognised Ruby lifecycle transitions. Method-style
-            // `close` for files / sockets, `unlink` / `dispose` for
-            // freed resources, `cancel` for async work.
-            const RUBY_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-                bonsai_lang_api::LifecycleTransition {
-                    call_match: "close",
-                    transition: "closed",
-                    arg_index: 0,
-                },
-                bonsai_lang_api::LifecycleTransition {
-                    call_match: "unlink",
-                    transition: "freed",
-                    arg_index: 0,
-                },
-                bonsai_lang_api::LifecycleTransition {
-                    call_match: "dispose",
-                    transition: "freed",
-                    arg_index: 0,
-                },
-                bonsai_lang_api::LifecycleTransition {
-                    call_match: "cancel",
-                    transition: "cancelled",
-                    arg_index: 0,
-                },
-            ];
             for decl in &mut idx.defs {
                 // Paren-less method calls in value position (`cmd =
                 // get_input`, `v = gets`) parse as bare identifier
@@ -261,7 +502,15 @@ impl LanguageAdapter for RubyAdapter {
                 // end` is a call to `gets`, not an identifier read.
                 inject_ruby_bare_tail_return_calls(decl, &block_param_names);
                 bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
-                bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, RUBY_LIFECYCLE_TRANSITIONS);
+            }
+            if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+                inject_ruby_unbound_receiver_calls(
+                    &mut idx,
+                    &tree,
+                    file,
+                    snapshot.text.as_bytes(),
+                    &block_param_names,
+                );
             }
             // Lift `@field = ParamType` writes captured during decl
             // collection into per-method `type_aliases`, so the
@@ -336,30 +585,6 @@ impl LanguageAdapter for RubyAdapter {
                     | bonsai_lang_api::FlowEvent::Await { .. }
             )
         });
-        // Recognised Ruby lifecycle transitions. Same set used for
-        // pure-Ruby files; applied to ERB module-level decls below.
-        const RUBY_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "close",
-                transition: "closed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "unlink",
-                transition: "freed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "dispose",
-                transition: "freed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "cancel",
-                transition: "cancelled",
-                arg_index: 0,
-            },
-        ];
         let mut defs = if has_actionable_event {
             let module_span = span_of(file, &root);
             let param_annotations = vec![Vec::new(); erb_implicit_inputs.len()];
@@ -390,6 +615,7 @@ impl LanguageAdapter for RubyAdapter {
                 bases: Vec::new(),
                 receiver_param_index: None,
                 receiver_field_writes: Vec::new(),
+                receiver_field_initializers: Vec::new(),
                 implicit_receiver_names: Vec::new(),
                 receiver_state_sources: Vec::new(),
                 return_type: None,
@@ -404,16 +630,17 @@ impl LanguageAdapter for RubyAdapter {
             rewrite_ruby_bareword_call_result_assigns(decl, &block_param_names);
             inject_ruby_bare_tail_return_calls(decl, &block_param_names);
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, RUBY_LIFECYCLE_TRANSITIONS);
         }
         let mut refs = bonsai_lang_api::kit::extract_call_refs(&tree, file, src, &HANDLER);
-        refs.extend(bonsai_lang_api::kit::extract_decorators(&tree, file, src));
+        refs.extend(bonsai_lang_api::kit::extract_decorators(
+            &tree, file, src, &HANDLER,
+        ));
         refs.extend(bonsai_lang_api::kit::extract_read_write_refs(
             &tree, file, src, &HANDLER,
         ));
         refs.extend(extract_ruby_static_element_key_refs(&tree, src, file));
-        let strings = bonsai_lang_api::kit::extract_string_literals(&tree, file, src);
-        let comments = bonsai_lang_api::kit::extract_comments(&tree, file, src);
+        let strings = bonsai_lang_api::kit::extract_string_literals(&tree, file, src, &HANDLER);
+        let comments = bonsai_lang_api::kit::extract_comments(&tree, file, src, &HANDLER);
         let assignment_values =
             bonsai_lang_api::kit::extract_assignment_value_facts(&tree, file, &HANDLER, src);
         let call_receivers = bonsai_lang_api::kit::extract_call_receiver_facts(&tree, file, &HANDLER, src);
@@ -543,10 +770,19 @@ fn inject_ruby_super_call_events(events: &mut Vec<FlowEvent>, method_name: &str)
 }
 
 fn ruby_return_is_bare_super(event: &FlowEvent) -> bool {
-    let FlowEvent::Return { value_flow, .. } = event else {
+    let FlowEvent::Return {
+        value_name,
+        value_text,
+        value_flow,
+        ..
+    } = event
+    else {
         return false;
     };
     value_flow.place.as_deref() == Some("super")
+        || (value_name.as_deref() == Some("super")
+            && value_text.as_deref().is_some_and(|text| text.trim() == "super")
+            && value_flow.call_sites.is_empty())
 }
 
 fn ruby_raise_throw_event(event: &FlowEvent) -> Option<FlowEvent> {
@@ -796,9 +1032,9 @@ fn enrich_ruby_instance_variable_call_arg(arg: &mut CallArg) {
     }
     if !arg.source_names.iter().any(|source| source == &place) {
         arg.source_names.push(place);
-        arg.source_names.sort();
-        arg.source_names.dedup();
     }
+    arg.source_names.sort();
+    arg.source_names.dedup();
 }
 
 fn ruby_normalized_instance_variable_place(text: &str) -> Option<String> {
@@ -853,7 +1089,11 @@ fn normalize_ruby_instance_variable_text(text: &str) -> String {
         }
 
         match chars.peek().copied() {
-            Some('@') => out.push(ch),
+            Some('@') => {
+                out.push(ch);
+                out.push('@');
+                chars.next();
+            }
             Some(next) if next == '_' || next.is_ascii_alphabetic() => {
                 out.push_str("self.");
                 while let Some(part) = chars.peek().copied() {
@@ -1360,6 +1600,81 @@ fn collect_ruby_block_param_names(tree: &Tree, src: &[u8]) -> std::collections::
         collect_ruby_param_identifiers(params, src, &mut names);
     }
     names
+}
+
+/// Ruby's parser represents `read_input.to_s` with `read_input` as an
+/// identifier receiver. Ruby itself resolves that identifier as a local only
+/// when the enclosing scope binds it; otherwise it is an implicit-receiver,
+/// zero-argument method call whose result becomes the receiver of `to_s`.
+/// Materialize that compiler relation as `CallRet(read_input) -> read_input`
+/// so nested source calls and ordinary user methods are visible without
+/// guessing names in shared analysis.
+fn inject_ruby_unbound_receiver_calls(
+    index: &mut DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+    block_param_names: &std::collections::BTreeSet<String>,
+) {
+    let mut candidates = Vec::new();
+    for call in collect_kinds(tree, &["call", "method_call"]) {
+        let Some(receiver) = call.child_by_field_name("receiver") else {
+            continue;
+        };
+        if receiver.kind() != "identifier" || call.child_by_field_name("method").is_none() {
+            continue;
+        }
+        let name = node_text(&receiver, src).trim();
+        if ruby_bare_method_candidate(name) {
+            candidates.push((span_of(file, &receiver), name.to_string()));
+        }
+    }
+
+    for (span, name) in candidates {
+        let Some(decl) = index
+            .defs
+            .iter_mut()
+            .filter(|decl| {
+                matches!(
+                    decl.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) && decl_span_contains(decl, span)
+            })
+            .min_by_key(|decl| decl.span.end.saturating_sub(decl.span.start))
+        else {
+            continue;
+        };
+        let mut locals = ruby_local_bindings_for_decl(decl);
+        locals.extend(block_param_names.iter().cloned());
+        if locals.contains(name.as_str()) {
+            continue;
+        }
+
+        let call = FlowEvent::Call {
+            span,
+            name: name.clone(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        };
+        let result = FlowEvent::Assign {
+            span,
+            target: name.clone(),
+            source_name: None,
+            source_call: Some(name),
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        };
+        if !decl.flow_events.iter().any(|event| event == &call) {
+            decl.flow_events.push(call);
+            decl.flow_events.push(result);
+            decl.flow_events
+                .sort_by_key(|event| (event.span().start, event.span().end));
+        }
+    }
 }
 
 fn collect_ruby_param_identifiers(

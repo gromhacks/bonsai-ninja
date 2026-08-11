@@ -3,11 +3,35 @@ use bonsai_common::FileId;
 use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite, FlowEvent,
-    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    ModifierVocabulary, TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
+    AdapterContext, AdapterError, CallArg, CallKind, CallTargetExtraction, DeclIndex, DeclKind, FieldWrite,
+    FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
+    LanguageId, ModifierVocabulary, TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
 };
 use tree_sitter::Node;
+
+fn typescript_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    let target = match node.kind() {
+        "call_expression" => node.child_by_field_name("function")?,
+        "new_expression" => node.child_by_field_name("constructor")?,
+        _ => return None,
+    };
+    let full_text = node_text(&target, src).trim();
+    (!full_text.is_empty()).then_some(CallTargetExtraction {
+        node: target,
+        full_text: full_text.to_string(),
+    })
+}
+
+fn typescript_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    (node.kind() == "for_in_statement")
+        .then(|| {
+            Some((
+                node.child_by_field_name("left")?,
+                node.child_by_field_name("right")?,
+            ))
+        })
+        .flatten()
+}
 
 const TYPESCRIPT_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
     fn_kinds: &["function_declaration", "method_definition", "method_signature"],
@@ -54,6 +78,47 @@ fn grammar_pack_for_file(file: FileId, ctx: &AdapterContext<'_>) -> &'static str
         .map_or(PACK_NAME, |_| TSX_PACK_NAME)
 }
 const HANDLER: GrammarHandler = GrammarHandler {
+    expression_value_kind_extractor: None,
+    literal_value_kinds: &["null", "number", "true", "false"],
+    string_literal_kinds: &["string", "template_string"],
+    comment_kinds: &["comment", "hash_bang_line"],
+    doc_comment_prefixes: &["/**"],
+    decorator_kinds: &["decorator"],
+    parameter_container_kinds: &["formal_parameters"],
+    parameter_kinds: &["identifier", "required_parameter", "optional_parameter"],
+    parameter_modifier_kinds: &["decorator"],
+    parameter_annotation_kinds: &["decorator"],
+    variadic_parameter_kinds: &["rest_pattern", "rest_parameter"],
+    destructured_parameter_kinds: &["object_pattern", "array_pattern", "object_type"],
+    binding_identifier_kinds: &["identifier", "shorthand_property_identifier_pattern"],
+    binding_lhs_pattern_kinds: &["assignment_pattern"],
+    binding_pattern_field_names: &["left"],
+    non_binding_pattern_field_names: &["type", "key", "property"],
+    identifier_kinds: &["identifier", "shorthand_property_identifier", "this", "super"],
+    aggregate_pattern_kinds: &["array_pattern", "object_pattern"],
+    named_aggregate_kinds: &["object"],
+    positional_aggregate_kinds: &["array"],
+    aggregate_pair_kinds: &["pair", "pair_pattern"],
+    aggregate_key_field_names: &["key"],
+    aggregate_value_field_names: &["value"],
+    static_field_name_kinds: &["identifier", "property_identifier"],
+    shorthand_field_kinds: &["shorthand_property_identifier"],
+    spread_kinds: &["spread_element"],
+    spread_value_field_names: &["argument"],
+    lambda_value_container_kinds: &["object", "pair", "array", "object_type"],
+    transparent_call_wrapper_kinds: &[
+        "member_expression",
+        "property_access_expression",
+        "parenthesized_expression",
+        "await_expression",
+        "as_expression",
+        "satisfies_expression",
+        "non_null_expression",
+        "type_assertion",
+    ],
+    single_expression_group_kinds: &["expressions"],
+    assignment_target_wrapper_kinds: &["variable_declarator"],
+    binding_declaration_keyword_spellings: &["var", "let", "const"],
     fn_kinds: &[
         "function_declaration",
         "method_definition",
@@ -62,16 +127,33 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "generator_function",
     ],
     call_kinds: &["call_expression", "new_expression"],
+    constructor_call_kinds: &["new_expression"],
+    call_callee_field_names: &["function", "constructor"],
+    constructor_type_field_names: &["constructor"],
+    call_target_extractor: Some(typescript_call_target),
+    call_argument_field_names: &["arguments"],
+    call_argument_container_kinds: &["arguments"],
+    argument_wrapper_kinds: &["pair"],
+    argument_name_field_names: &["key"],
+    argument_value_field_names: &["value"],
+    transparent_expression_wrapper_kinds: &["parenthesized_expression"],
+    lambda_body_field_names: &["body"],
     pseudo_call_extractor: Some(extract_ecmascript_pseudo_call),
     syntax_event_extractor: None,
     argument_passing_mode_extractor: None,
     call_ref_kinds: &["call_expression", "new_expression"],
     member_expression_kinds: &["member_expression", "property_access_expression"],
     subscript_expression_kinds: &["subscript_expression"],
+    member_base_field_names: &["object", "expression"],
+    member_name_field_names: &["property", "name"],
+    subscript_base_field_names: &["object", "expression"],
+    subscript_index_field_names: &["index", "argument"],
+    static_subscript_key_extractor: Some(bonsai_lang_javascript::ecmascript_static_subscript_key),
     constructor_names: &["constructor"],
     runtime_type_guard_operators: &["instanceof"],
     runtime_typeof_operators: &["typeof"],
     runtime_type_equality_operators: &["==", "==="],
+    runtime_type_wrapper_kinds: &["parenthesized_expression"],
     value_free_unary_operators: &["typeof"],
     // TypeScript exposes `abstract class Foo` under
     // `abstract_class_declaration`; without the exact adapter entry,
@@ -98,8 +180,20 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "interface_declaration",
     ],
     if_kinds: &["if_statement", "switch_statement"],
+    branch_then_field_names: &["consequence", "body"],
+    branch_else_field_names: &["alternative"],
+    branch_condition_field_names: &["condition", "value"],
+    loop_body_field_names: &["body"],
+    loop_body_kinds: &["statement_block", "expression_statement"],
+    branch_arm_kinds: &[
+        "statement_block",
+        "expression_statement",
+        "switch_case",
+        "switch_default",
+    ],
     for_kinds: &["for_statement"],
     foreach_kinds: &["for_in_statement"],
+    foreach_binding_extractor: Some(typescript_foreach_binding),
     while_kinds: &["while_statement"],
     do_kinds: &["do_statement"],
     assignment_kinds: &[
@@ -107,6 +201,10 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "augmented_assignment_expression",
         "variable_declarator",
         "variable_declaration",
+    ],
+    compound_assignment_kinds: &["augmented_assignment_expression"],
+    compound_assignment_operators: &[
+        "+=", "-=", "*=", "/=", "%=", "**=", "<<=", ">>=", ">>>=", "&=", "^=", "|=", "&&=", "||=", "??=",
     ],
     return_kinds: &["return_statement"],
     throw_kinds: &["throw_statement"],
@@ -116,9 +214,13 @@ const HANDLER: GrammarHandler = GrammarHandler {
     finally_kinds: &["finally_clause"],
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
+    control_label_field_names: &["label"],
     yield_kinds: &["yield_expression"],
+    yield_value_field_names: &["argument"],
     await_kinds: &["await_expression"],
     using_kinds: &["with_statement"],
+    using_body_field_names: &["body"],
+    try_body_field_names: &["body"],
     implicit_receiver_names: &["this"],
     ..EMPTY_HANDLER
 };
@@ -257,14 +359,8 @@ impl LanguageAdapter for TypeScriptAdapter {
             apply_javascript_getter_property_sources(&mut decl_index, &tree, src, file);
             inject_typescript_graphql_root_resolver_calls(&mut decl_index, &tree, src, file);
         }
-        // Recognised TypeScript lifecycle transitions — same call
-        // names as JavaScript since TS shares the JS runtime surface.
         for decl in &mut decl_index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
-            bonsai_lang_api::inject_lifecycle_events(
-                &mut decl.flow_events,
-                bonsai_lang_javascript::ECMASCRIPT_LIFECYCLE_TRANSITIONS,
-            );
         }
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
@@ -273,7 +369,7 @@ impl LanguageAdapter for TypeScriptAdapter {
         // per-call walk over sibling decls.
         // Local constructor-result receiver typing
         // (`const c = new Foo()` → `c: Foo`); see the JS adapter for the
-        // rationale. TypeScript shares the JS naming convention.
+        // exact CST/declaration-evidence contract.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut decl_index);
         bonsai_lang_api::apply_class_field_type_aliases(&mut decl_index);
         bonsai_lang_api::apply_call_receiver_types(&mut decl_index);
@@ -868,9 +964,8 @@ fn is_class_like(kind: DeclKind) -> bool {
 /// `c.method(tainted)` resolves `receiver_type_in: [Foo]` / `[Foo, m]`.
 ///
 /// Keyed by the enclosing function declaration's span (matching how
-/// `collect_param_type_aliases` keys), and restricted to PascalCase
-/// (class-like) types — the only shape receiver-type rules key on —
-/// mirroring the C#/Java cast extractors.
+/// `collect_param_type_aliases` keys). The cast's type node is authoritative;
+/// capitalization is only a style convention and must not filter facts.
 fn collect_typescript_cast_aliases(
     tree: &Tree,
     file: FileId,
@@ -901,16 +996,6 @@ fn collect_typescript_cast_aliases(
                 work.push(child);
             }
         }
-        // Only PascalCase class-like types — `string`/`any`/`number` etc.
-        // are useless for receiver-type matching and aliasing a local to
-        // them would disturb clean-overwrite / callable-binding resolution.
-        aliases.retain(|alias| {
-            alias
-                .type_name
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_uppercase())
-        });
         if !aliases.is_empty() {
             out.insert(span_of(file, &fn_node), aliases);
         }

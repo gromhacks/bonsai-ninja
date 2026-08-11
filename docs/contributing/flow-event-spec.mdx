@@ -63,23 +63,42 @@ Adapter obligations:
   post-pass fills it. Adapters that want to short-circuit (e.g. when
   the callee class is unambiguous from the syntax) may pre-populate
   it — the kit pass is idempotent.
-- `call_kind::Constructor` is structural: `CallKind::Constructor` for
-  `new Foo(...)` / `Foo::new(...)` / `Foo()` (Python `__init__` is
-  matched by `effective_constructor_method_names()`, not by name in
-  the engine).
+- `call_kind::Constructor` is structural: adapters emit it for grammar-proven
+  construction such as `new Foo(...)` or an adapter-declared constructor
+  method. When a language uses an ambiguous bare-call CST for `Foo()`, the
+  callgraph refines it only after exact class/constructor resolution. Neither
+  capitalization nor a shared constructor-name inventory is evidence.
+- Constructor delegation is also structural. An adapter emits the exact
+  constructor event from its CST (`this(...)`, `super(...)`, or the
+  language's equivalent); shared callgraph resolution selects the enclosing
+  class or its declared bases from symbol headers rather than recognizing
+  those source tokens itself.
 - `args[i].value_text` is retained for rendering only. `name` preserves an
   adapter-decoded keyword name, while `place`, `source_names`,
   `passing_mode`, and the file's `CallArgumentValueFact` table carry semantic
-  value shape. Inline callback parameter bindings are stored on that compiler
-  fact from parsed parameter/pattern nodes. Shared analysis must never recover
-  argument or callback semantics by tokenizing `value_text` or slicing the
-  source with `Span`.
+  value shape. `CallArgumentValueFact::value_kind` is the adapter's exact AST
+  classification for the complete argument; it is the only generic evidence
+  that a clean-output value is a literal. Inline callback parameter bindings
+  are stored on that compiler fact from parsed parameter/pattern nodes. Shared
+  analysis must never recover argument or callback semantics by tokenizing
+  `value_text`, guessing from capitalization, or slicing source with `Span`.
 - `args[i].passing_mode` is emitted by the active adapter. `WriteBack` means
   the callee may update the caller-owned place and enables the IDG's outbound
   parameter stitch. The shared kit and taint engine do not recognize
   language-specific address/ref/out tokens; unsupported languages emit
   `Value`, and each supported adapter carries positive and negative
   conformance fixtures.
+- Literal keywords and string/character node kinds are adapter-owned grammar
+  facts. They drive addressable-place suppression and string inventory
+  directly; shared lowering has no cross-language literal token table.
+  Identifier-shaped values such as JavaScript `undefined` remain dynamic
+  unless that language adapter can prove literal semantics.
+
+Direct constructor-owned receiver-field call assignments additionally appear
+in `Decl::receiver_field_initializers`. This compact linkage fact stores the
+adapter-normalized target and parsed call identity so cross-file linking can
+resolve the constructed field type without retaining or reparsing the body.
+It is not a second flow event and never types an unresolved or ambiguous call.
 
 ### `Branch`
 
@@ -173,10 +192,10 @@ Adapter obligations:
   `our`, `local`, Python first-assignment in scope, etc.). It is
   `false` for re-assignments. This drives Phase-2 scope-aware
   bindings — incorrect values cause spurious cross-scope taint.
-- `value_kind` is `None` for adapters that have not opted into
-  Phase-5 classification; the engine then conservatively treats the
-  RHS as `Compound`. Once set, the engine uses it to short-circuit
-  name-bridging for `Literal` RHS.
+- The owning adapter classifies complete parsed values for assignments,
+  returns, and call arguments through one expression-value contract. A
+  synthetic or unsupported carrier-free shape becomes `Unknown`, never
+  `Literal`; clean-overwrite therefore fails closed.
 
 Multiple sibling assignments in a single source-level statement
 (`a, b = f()`) emit one `Assign` per LHS target. Destructuring with
@@ -208,29 +227,33 @@ field-sensitive compiler fact used by IDG transfer and export.
 ```text
 Return {
   span,
-  value_text: Option<String>,   // verbatim return-expression text
+  value_kind: Option<AssignValueKind>, // adapter-owned complete-expression shape
+  value_text: Option<String>,   // rendering only
   value_name: Option<String>,   // single bare identifier returned
+  value_flow: ExpressionFlow,   // AST-derived places, carriers, calls, aggregates
 }
 ```
 
 Adapter obligations:
 
 - A bare-name return (`return x`): `value_name = Some("x")`,
-  `value_text = Some("x")`.
+  `value_flow.place = Some("x")` and `value_kind = Some(Compound)`.
 - A call-expression return (`return f(x)`): `value_name = None`,
-  `value_text = Some("f(x)")`.
+  `value_flow.call_sites` contains the exact call and `value_kind` is
+  `Some(CallResult)` when classified at the return node.
 - A compound return (`return x + y`): `value_name = None`,
-  `value_text = Some("x + y")`.
-- A void / bare `return;`: both `None`.
+  `value_flow.source_names = ["x", "y"]`.
+- A literal return (`return 7`): `value_kind = Some(Literal)` and no value
+  carriers.
+- A void / bare `return;`: no value kind, name, or flow carriers.
 - A template-literal return (``return `${x}` ``): `value_name =
   Some("x")` when the template wraps exactly one identifier with no
   static prefix/suffix that would make the value a derivation rather
   than a pass-through.
 
-The interprocedural pass reads `value_name` first (precise pass-through)
-and `value_text` second (compound transit summary). Adapters that
-populate `value_text` but not `value_name` give up Phase-1 precision
-on return-value taint.
+The interprocedural pass consumes `value_flow` and `value_name`; clean-return
+proofs also consume `value_kind`. `value_text` is never reparsed for semantic
+carriers.
 
 ### `Throw`
 
@@ -298,13 +321,21 @@ labeled loops, Rust loop labels, Swift labeled `continue`).
 ### `Yield`
 
 ```text
-Yield { span, value_text: Option<String> }
+Yield {
+  span,
+  value_text: Option<String>,
+  value_flow: ExpressionFlow
+}
 ```
 
-`yield`, `yield from`, `yield return`. Suspend-and-emit edges with
-the yielded expression as verbatim text. The interprocedural pass
-treats yields as no-ops by default; consumers that want generator
-semantics (Phase 7) read the value_text directly.
+`yield`, `yield from`, `yield return`. `value_text` is presentation evidence;
+semantic transfer comes from the adapter-lowered `value_flow`. The IDG lowers
+that expression to the callable's `Yield` endpoint and stitches it to an exact
+`YieldResult` binding at each resolved call site. When an adapter proves an
+inline callback/yield binding but the external callee has no workspace body,
+the call's compiler-proven receiver and explicit arguments reach that binding
+at narrowed precision. Shared analysis never selects this behavior from an API
+or language spelling.
 
 ### `Await`
 

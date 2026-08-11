@@ -1,0 +1,82 @@
+- id: python.typing.lifecycle_closed_receiver
+  enabled: true
+  language: python
+  match:
+    kind: call
+    callee:
+      regex: '(?:^|\.)(?:close|shutdown)$'
+  lifecycle_transition:
+    state: closed
+    binding: { kind: receiver }
+  match_examples:
+  - name: close changes the receiver state
+    code: "def f(resource):\n    resource.close()"
+    expect_match_text: [resource.close]
+  description: "Python close/shutdown moves the receiver to closed. Typing-only; never a finding."
+
+- id: python.typing.lifecycle_cancelled_receiver
+  enabled: true
+  language: python
+  match: { kind: call, callee: { name: cancel } }
+  lifecycle_transition:
+    state: cancelled
+    binding: { kind: receiver }
+  match_examples:
+  - name: cancel changes the receiver state
+    code: "def f(task):\n    task.cancel()"
+    expect_match_text: [task.cancel]
+  description: "Python cancel moves the receiver to cancelled. Typing-only; never a finding."
+
+- id: python.typing.lifecycle_unlocked_receiver
+  enabled: true
+  language: python
+  match: { kind: call, callee: { name: release } }
+  lifecycle_transition:
+    state: unlocked
+    binding: { kind: receiver }
+  match_examples:
+  - name: release changes the receiver state
+    code: "def f(lock):\n    lock.release()"
+    expect_match_text: [lock.release]
+  description: "Python release moves the receiver to unlocked. Typing-only; never a finding."
+
+- id: python.typing.lifecycle_destroyed_receiver
+  enabled: true
+  language: python
+  match: { kind: call, callee: { name: destroy } }
+  lifecycle_transition:
+    state: freed
+    binding: { kind: receiver }
+  match_examples:
+  - name: destroy changes the receiver state
+    code: "def f(resource):\n    resource.destroy()"
+    expect_match_text: [resource.destroy]
+  description: "Python destroy moves the receiver to freed. Typing-only; never a finding."
+
+- id: python.typing.lifecycle_os_closed_argument
+  enabled: true
+  language: python
+  imports: [os]
+  match: { kind: call, callee: { attribute: [os, close] } }
+  lifecycle_transition:
+    state: closed
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: os close changes the descriptor state
+    code: "import os\ndef f(fd):\n    os.close(fd)"
+    expect_match_text: [os.close]
+  description: "os.close moves argument zero to closed. Typing-only; never a finding."
+
+- id: python.typing.lifecycle_os_freed_argument
+  enabled: true
+  language: python
+  imports: [os]
+  match: { kind: call, callee: { attribute: [os, unlink] } }
+  lifecycle_transition:
+    state: freed
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: os unlink changes the path state
+    code: "import os\ndef f(path):\n    os.unlink(path)"
+    expect_match_text: [os.unlink]
+  description: "os.unlink moves argument zero to freed. Typing-only; never a finding."

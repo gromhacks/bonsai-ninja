@@ -2,11 +2,11 @@
 
 use super::{
     call_result_passthroughs_from_rulepack_for_languages,
-    clean_output_overwrites_from_rulepack_for_languages, compose_idg_seed_nodes, find_call_event_at,
-    finish_taint_cache_write_through, func_id_for_match, idg_call_result_passthrough_specs,
-    idg_transfer_options_from_rulepack_shapes, mpsc, output_arg_flows_from_rulepack_for_languages,
-    output_arg_names_for_match, receiver_state_propagations_from_rulepack_for_languages,
-    rule_match_kind_is_param, seed_idg_service_for_rulepack_for_files, source_anchor_for_rule_match,
+    clean_output_overwrites_from_rulepack_for_languages, compiled_receiver_state_propagations_for_languages,
+    compose_idg_seed_nodes, find_call_event_at, finish_taint_cache_write_through, func_id_for_match,
+    idg_call_result_passthrough_specs, idg_transfer_options_from_rulepack_shapes, mpsc,
+    output_arg_flows_from_rulepack_for_languages, output_arg_names_for_match, rule_match_kind_is_param,
+    seed_idg_service_for_rulepack_for_files, source_anchor_for_rule_match,
     source_callback_args_from_rulepack_for_languages, source_output_args_from_rulepack_for_languages,
     source_seed_set, span_contains, spans_overlap, spans_share_enclosing_loop, symbolic_field_languages,
     taint_cache, AHashMap, AHashSet, AnalysisProgress, Arc, CleanOverwritePolicy, DeclKind, Duration, FileId,
@@ -69,7 +69,7 @@ pub(super) struct ChainAnalysisRequest<'a, F> {
     pub(super) pack: &'a Rulepack,
     pub(super) max_precision: Option<Precision>,
     pub(super) taint_graph_resident_cache_entries: Option<usize>,
-    pub(super) factory_returns: &'a crate::matcher::FactoryReturns,
+    pub(super) rulepack_typing: &'a Arc<crate::matcher::RulepackTyping>,
     pub(super) on_progress: &'a mut F,
 }
 
@@ -313,6 +313,7 @@ where
         request.ws,
         request.pack,
         request.transfer_languages,
+        &request.config.receiver_state_propagations,
         request.files,
         request.funcs,
         request.call_graph,
@@ -655,17 +656,28 @@ fn plan_semantic_scope(request: SemanticScopeRequest<'_>) -> SemanticScopePlan {
     }
 }
 
-fn build_transfer_plan(
-    pack: &Rulepack,
-    source_hits: &[RuleMatch],
-    sinks: &[RuleMatch],
-    sanitizers: &[RuleMatch],
+struct TransferPlanRequest<'a> {
+    source_hits: &'a [RuleMatch],
+    sinks: &'a [RuleMatch],
+    sanitizers: &'a [RuleMatch],
     max_precision: Option<Precision>,
-) -> TransferPlan {
-    let languages: AHashSet<String> = source_hits
+    rulepack_typing: &'a Arc<crate::matcher::RulepackTyping>,
+}
+
+fn build_transfer_plan<F>(
+    ws: &Workspace,
+    pack: &Rulepack,
+    request: TransferPlanRequest<'_>,
+    mut on_file_done: F,
+) -> TransferPlan
+where
+    F: FnMut(),
+{
+    let languages: AHashSet<String> = request
+        .source_hits
         .iter()
-        .chain(sinks)
-        .chain(sanitizers)
+        .chain(request.sinks)
+        .chain(request.sanitizers)
         .map(|rule_match| rule_match.language.clone())
         .collect();
     let config = InterTaintConfig {
@@ -674,10 +686,15 @@ fn build_transfer_plan(
         source_callback_args: source_callback_args_from_rulepack_for_languages(pack, &languages),
         call_result_passthroughs: call_result_passthroughs_from_rulepack_for_languages(pack, &languages),
         output_arg_flows: output_arg_flows_from_rulepack_for_languages(pack, &languages),
-        receiver_state_propagations: receiver_state_propagations_from_rulepack_for_languages(
-            pack, &languages,
+        receiver_state_propagations: compiled_receiver_state_propagations_for_languages(
+            ws,
+            pack,
+            &languages,
+            request.rulepack_typing,
+            None,
+            &mut on_file_done,
         ),
-        max_edge_precision: max_precision,
+        max_edge_precision: request.max_precision,
     };
     TransferPlan { languages, config }
 }
@@ -694,7 +711,7 @@ pub(super) struct SourceGroupExecutor<'a> {
     pub(super) sink_by_func: &'a AHashMap<FuncId, Vec<&'a RuleMatch>>,
     pub(super) san_by_func: &'a AHashMap<FuncId, Vec<&'a RuleMatch>>,
     pub(super) clean_overwrite_policy: CleanOverwritePolicy<'a>,
-    pub(super) factory_returns: &'a crate::matcher::FactoryReturns,
+    pub(super) rulepack_typing: &'a crate::matcher::RulepackTyping,
     pub(super) receiver_base_map_cell: &'a OnceLock<AHashMap<String, Vec<String>>>,
     pub(super) sink_target_nodes: Option<&'a SinkTargetNodes>,
     pub(super) sink_target_nodes_for_graph: Option<&'a [bonsai_idg::WsNodeId]>,
@@ -851,7 +868,7 @@ where
         pack,
         max_precision,
         taint_graph_resident_cache_entries,
-        factory_returns,
+        rulepack_typing,
         on_progress,
     } = request;
     if source_hits.is_empty() || sinks.is_empty() {
@@ -903,10 +920,26 @@ where
         groups: source_groups,
     } = plan_source_work(ws, global.as_ref(), pack, source_hits);
     let source_group_count = source_groups.len();
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "compiling transfer sites",
+        total: ws.vfs().all_files().len() as u64,
+    });
     let TransferPlan {
         languages: transfer_languages,
         config,
-    } = build_transfer_plan(pack, source_hits, sinks, sanitizers, max_precision);
+    } = build_transfer_plan(
+        ws,
+        pack,
+        TransferPlanRequest {
+            source_hits,
+            sinks,
+            sanitizers,
+            max_precision,
+            rulepack_typing,
+        },
+        || on_progress(AnalysisProgress::PhaseTicked),
+    );
+    on_progress(AnalysisProgress::PhaseFinished);
     // IDG closures already follow `callee.Return -> caller.CallRet`
     // edges and then continue through caller-side flow. The legacy
     // engine needed a separate "source reaches return" prepass to
@@ -1114,7 +1147,7 @@ where
         sink_by_func: &sink_by_func,
         san_by_func: &san_by_func,
         clean_overwrite_policy,
-        factory_returns,
+        rulepack_typing,
         receiver_base_map_cell: &receiver_base_map_cell,
         sink_target_nodes: sink_target_nodes.as_ref(),
         sink_target_nodes_for_graph,

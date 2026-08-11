@@ -285,8 +285,17 @@ impl TransferOptions {
                 ))
         });
         self.output_arg_flows.dedup();
-        self.receiver_state_propagations
-            .sort_by(|a, b| (&a.method, &a.receiver_type).cmp(&(&b.method, &b.receiver_type)));
+        for spec in &mut self.receiver_state_propagations {
+            spec.resolved_call_sites.sort();
+            spec.resolved_call_sites.dedup();
+        }
+        self.receiver_state_propagations.sort_by(|a, b| {
+            (&a.method, &a.receiver_type, &a.resolved_call_sites).cmp(&(
+                &b.method,
+                &b.receiver_type,
+                &b.resolved_call_sites,
+            ))
+        });
         self.receiver_state_propagations.dedup();
         self.symbolic_field_languages.sort();
         self.symbolic_field_languages.dedup();
@@ -312,7 +321,7 @@ impl TransferOptions {
 
         let options = self.clone().canonicalized();
         let mut hasher = StableHasher::new();
-        absorb_str(&mut hasher, "bonsai-idg-transfer-options-v14");
+        absorb_str(&mut hasher, "bonsai-idg-transfer-options-v15");
         absorb_u64(&mut hasher, u64::from(options.include_diagnostic_field_flows));
         absorb_u64(
             &mut hasher,
@@ -388,6 +397,12 @@ impl TransferOptions {
             absorb_str(&mut hasher, "receiver-state-propagation");
             absorb_str(&mut hasher, &spec.method);
             absorb_str(&mut hasher, spec.receiver_type.as_deref().unwrap_or_default());
+            absorb_u64(&mut hasher, spec.resolved_call_sites.len() as u64);
+            for span in &spec.resolved_call_sites {
+                absorb_u64(&mut hasher, span.file.raw() as u64);
+                absorb_u64(&mut hasher, span.start);
+                absorb_u64(&mut hasher, span.end);
+            }
         }
         hasher.finish()
     }
@@ -462,6 +477,12 @@ pub struct ReceiverStatePropagationSpec {
     pub method: String,
     /// Optional adapter-derived receiver type required by the summary.
     pub receiver_type: Option<String>,
+    /// Exact compiler call sites that matched the owning rule after applying
+    /// rulepack-declared type models. This lets a CST-ambiguous external type
+    /// participate without copying provider names into adapters or the IDG.
+    /// Adapter-emitted receiver types remain the primary proof; these sites
+    /// are a precise rule-compilation overlay for otherwise untyped syntax.
+    pub resolved_call_sites: Vec<Span>,
 }
 
 /// Build-scoped, immutable indexes for declarative transfer matchers.
@@ -1104,6 +1125,7 @@ pub(crate) fn transfer_function_for_with_compiled_options_and_syntax_facts(
         field_precise_source_projections,
         yield_callback_names: collect_yield_callback_names(&decl.flow_events),
         pending_expression_calls: Vec::new(),
+        prebound_assignment_receivers: ahash::AHashSet::default(),
         assignment_values,
         call_receivers,
         call_argument_values,
@@ -1759,6 +1781,12 @@ struct TransferCtx<'a> {
     /// each result. Resolved after all Call events have been lowered so event
     /// order cannot affect dataflow.
     pending_expression_calls: Vec<PendingExpressionCall>,
+    /// Direct method receivers evaluated by a call-result assignment before
+    /// that assignment commits its target writer. The generic adapter walker
+    /// emits `target = target.method()` as Assign followed by Call even though
+    /// source-language evaluation reads the receiver first. The exact sibling
+    /// call span is the compiler join key; no method spelling is interpreted.
+    prebound_assignment_receivers: ahash::AHashSet<Span>,
     /// Exact Tree-sitter assignment/RHS relationships for this file. The
     /// facts are sorted by assignment span, so lookups remain logarithmic and
     /// do not turn transfer into an assignments-squared pass on large files.
@@ -2043,6 +2071,7 @@ impl<'a> TransferCtx<'a> {
 struct AssignCallSiteHint {
     site_span: Span,
     sibling_call_event: bool,
+    prebind_target_receiver: bool,
 }
 
 fn collect_field_precise_container_assigns(events: &[FlowEvent]) -> ahash::AHashSet<(Span, String)> {
@@ -2910,6 +2939,7 @@ fn copy_expression_descendants_to_special_base(
 fn assign_call_site_hint(events: &[FlowEvent], index: usize) -> Option<AssignCallSiteHint> {
     let FlowEvent::Assign {
         span: assign_span,
+        target,
         source_name,
         source_call,
         source_names,
@@ -2948,6 +2978,9 @@ fn assign_call_site_hint(events: &[FlowEvent], index: usize) -> Option<AssignCal
             return Some(AssignCallSiteHint {
                 site_span: *call_span,
                 sibling_call_event: true,
+                // A preceding call was already lowered against the
+                // pre-assignment writer state.
+                prebind_target_receiver: false,
             });
         }
     }
@@ -2959,6 +2992,8 @@ fn assign_call_site_hint(events: &[FlowEvent], index: usize) -> Option<AssignCal
         let FlowEvent::Call {
             span: call_span,
             name,
+            receiver,
+            call_kind,
             ..
         } = sibling
         else {
@@ -2972,6 +3007,8 @@ fn assign_call_site_hint(events: &[FlowEvent], index: usize) -> Option<AssignCal
             return Some(AssignCallSiteHint {
                 site_span: *call_span,
                 sibling_call_event: true,
+                prebind_target_receiver: matches!(call_kind, CallKind::Method)
+                    && receiver.as_deref().map(str::trim) == Some(target.trim()),
             });
         }
     }
@@ -3280,13 +3317,21 @@ fn walk_assign(
             .get(&(span, target.to_string()))
             .cloned()
     };
-    let source_filter = SemanticSourceFilter::from_sources(
-        source_name,
-        source_names,
-        &ctx.method_receiver_projections,
-        exact_projections.as_ref(),
-        &ctx.method_selector_fields,
-    );
+    let source_filter = if matches!(value_kind, Some(bonsai_lang_api::AssignValueKind::Destructure)) {
+        // Pattern/destructuring lowering intentionally carries both the exact
+        // projected source and its whole discriminant. The base is a real
+        // semantic input here, not incidental syntax attached to a field
+        // projection, so it must survive structural-base filtering.
+        SemanticSourceFilter::default()
+    } else {
+        SemanticSourceFilter::from_sources(
+            source_name,
+            source_names,
+            &ctx.method_receiver_projections,
+            exact_projections.as_ref(),
+            &ctx.method_selector_fields,
+        )
+    };
     if !suppress_direct_rhs_inputs {
         if let Some(src) = source_name {
             if !src.is_empty()
@@ -3446,6 +3491,27 @@ fn walk_assign(
     // overwrite `last_writer[target]` now. Self-assigns (`x = x`)
     // therefore see the prior `x` on the RHS and still update to
     // a fresh writer node post-assign.
+    if let Some(hint) = source_call_site_hint.filter(|hint| hint.prebind_target_receiver) {
+        let receiver_is_namespace = call_receiver_fact_for_span(ctx.call_receivers, hint.site_span)
+            .is_some_and(|fact| matches!(fact.role, bonsai_lang_api::CallReceiverRole::Namespace));
+        if !receiver_is_namespace {
+            let receiver_arg = ctx.intern_node(Place::CallArg {
+                site: CallSiteId(hint.site_span),
+                idx: u32::MAX,
+            });
+            ctx.bridge_read(
+                target,
+                receiver_arg,
+                crate::edge::EdgeMeta {
+                    precision: Precision::Exact,
+                    kind: IdgEdgeKind::IntraRead,
+                    call_kind: bonsai_callgraph::EdgeKind::Direct,
+                    via_span: hint.site_span,
+                },
+            );
+            ctx.prebound_assignment_receivers.insert(hint.site_span);
+        }
+    }
     ctx.commit_writer(target, write_node);
 }
 
@@ -3686,6 +3752,7 @@ fn walk_call(
     let mut receiver_arg_node = None;
     let mut receiver_storage_base = None;
     if matches!(call_kind, CallKind::Method) {
+        let receiver_was_prebound = ctx.prebound_assignment_receivers.remove(&span);
         let receiver_fact = call_receiver_fact_for_span(ctx.call_receivers, span);
         let receiver_is_namespace = receiver_fact
             .is_some_and(|fact| matches!(fact.role, bonsai_lang_api::CallReceiverRole::Namespace));
@@ -3706,7 +3773,13 @@ fn walk_call(
             // indices the call may have.
             let recv_slot = ctx.intern_node(Place::CallArg { site, idx: u32::MAX });
             receiver_arg_node = Some(recv_slot);
-            if let Some(flow) = receiver_flow.as_ref() {
+            if receiver_was_prebound {
+                receiver_storage_base = receiver_flow.as_ref().and_then(|flow| {
+                    flow.place.as_ref().and_then(|place| {
+                        (!receiver_name_matches(place, &ctx.out.receiver_names)).then(|| place.clone())
+                    })
+                });
+            } else if let Some(flow) = receiver_flow.as_ref() {
                 emit_expression_scalar_to_node(flow, recv_slot, recv_meta, ctx);
                 if !flow.call_sites.is_empty() {
                     let base = format!(
@@ -3906,7 +3979,7 @@ fn apply_source_output_arg_writes(
             continue;
         };
         let output = output.trim();
-        if output.is_empty() || quoted_literal_text(output) {
+        if output.is_empty() {
             continue;
         }
         let (write_node, _) = build_target_node(output, span, ctx);
@@ -3939,7 +4012,7 @@ fn apply_output_arg_flow_call(
             continue;
         };
         let output = output.trim();
-        if output.is_empty() || quoted_literal_text(output) {
+        if output.is_empty() {
             continue;
         }
         let (write_node, _) = build_target_node(output, span, ctx);
@@ -3983,10 +4056,11 @@ fn apply_receiver_state_propagation_call(
         .into_iter()
         .filter_map(|index| ctx.options.receiver_state_propagations.get(index))
         .any(|shape| {
-            shape
-                .receiver_type
-                .as_deref()
-                .is_none_or(|expected| receiver_name_matches(expected, receiver_types))
+            shape.resolved_call_sites.binary_search(&span).is_ok()
+                || shape
+                    .receiver_type
+                    .as_deref()
+                    .is_none_or(|expected| receiver_name_matches(expected, receiver_types))
         });
     if !matches || args.is_empty() {
         return;
@@ -4097,7 +4171,7 @@ fn apply_clean_output_overwrite_call(
         return;
     };
     let output = output.trim();
-    if output.is_empty() || quoted_literal_text(output) {
+    if output.is_empty() {
         return;
     }
     let (write_node, _) = build_target_node(output, span, ctx);
@@ -4298,14 +4372,6 @@ fn normalise_callee_text(text: &str) -> String {
 
 fn short_tail(text: &str) -> &str {
     bonsai_common::short_qualified_tail(text)
-}
-
-fn quoted_literal_text(text: &str) -> bool {
-    let trimmed = text.trim();
-    trimmed.len() >= 2
-        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
-            || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-            || (trimmed.starts_with('`') && trimmed.ends_with('`')))
 }
 
 fn call_arg_place_name(arg: &CallArg) -> String {

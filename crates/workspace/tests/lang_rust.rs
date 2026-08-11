@@ -56,7 +56,9 @@ fn if_expression() {
 #[test]
 fn for_expression() {
     let w = make("fn f() { for i in 0..10 { g(i); } }");
-    assert!(has_loop_of(&w, "f", LoopKind::For));
+    // Rust `for pattern in iterable` is a foreach binding construct, not a
+    // C-style initializer/condition/update loop.
+    assert!(has_loop_of(&w, "f", LoopKind::ForEach));
 }
 
 #[test]

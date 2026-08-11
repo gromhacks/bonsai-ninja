@@ -828,7 +828,7 @@ function handler(req) {
         &[
             "javascript.source.express_req_body",
             "javascript.proto_pollution.recursive_merge",
-            "target.key",
+            "target.*",
         ],
     );
 }

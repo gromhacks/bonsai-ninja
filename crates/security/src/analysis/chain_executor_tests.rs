@@ -22,6 +22,7 @@ fn call(span: Span) -> TaintedCall {
         call_span: span,
         tainted_args: Vec::new(),
         tainted_receiver: None,
+        tainted_receiver_source_names: Vec::new(),
         kind: bonsai_taint::TaintedCallKind::Call,
     }
 }

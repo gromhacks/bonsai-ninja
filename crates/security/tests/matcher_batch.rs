@@ -104,6 +104,19 @@ fn kotlin_ws(source: &str) -> Workspace {
     ws
 }
 
+fn kotlin_ws_files(files: &[(&str, &str)]) -> Workspace {
+    let registry = bonsai_adapters::all_languages_registry();
+    let ws = Workspace::new(registry);
+    for (path, source) in files {
+        ws.vfs().write((*path).to_string(), Arc::<str>::from(*source));
+    }
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
 fn objc_ws(source: &str) -> Workspace {
     let registry = bonsai_adapters::all_languages_registry();
     let ws = Workspace::new(registry);
@@ -263,7 +276,10 @@ fn base_rule(id: &str, kind: RuleKind, match_kind: MatchKind) -> Rule {
         },
         analysis_semantics: None,
         taint_semantics: None,
+        lifecycle_transition: None,
         returns_type: None,
+        callback_param_types: Vec::new(),
+        callback_arg_index: None,
         constraints: RuleConstraint::default(),
         match_examples: Vec::new(),
         description: "test rule".to_string(),
@@ -402,6 +418,177 @@ class Handlers(private val conn: Connection) {
         hits.len(),
         1,
         "constructor-property receiver type should satisfy package-gated chained JDBC rule: {hits:?}"
+    );
+}
+
+fn kotlin_external_constructor_typing_rules(
+    constructor_name: &str,
+    required_imports: &[&str],
+) -> (Rule, Rule) {
+    let mut typing = base_rule(
+        "kotlin.test.external_constructor_type",
+        RuleKind::Typing,
+        MatchKind::New,
+    );
+    typing.language = "kotlin".to_string();
+    typing.severity = None;
+    typing.tag = None;
+    typing.returns_type = Some(constructor_name.to_string());
+    typing.imports = required_imports
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect();
+    typing.match_spec.callee = Some(RuleTarget {
+        name: Some(constructor_name.to_string()),
+        ..Default::default()
+    });
+
+    let sink = call_attr_rule_for_language(
+        "kotlin.test.typed_receiver_start",
+        "kotlin",
+        &[constructor_name, "start"],
+    );
+    (typing, sink)
+}
+
+#[test]
+fn rulepack_constructor_typing_yields_to_exact_workspace_function() {
+    let ws = kotlin_ws(
+        r#"
+class LocalBuilder { fun start() {} }
+fun ProcessBuilder(): LocalBuilder = LocalBuilder()
+fun example() {
+    val builder = ProcessBuilder()
+    builder.start()
+}
+"#,
+    );
+    let (typing, sink) = kotlin_external_constructor_typing_rules("ProcessBuilder", &[]);
+
+    let hits = match_rules_against_facts(&ws, &[&typing, &sink]);
+    assert!(
+        hits.iter()
+            .all(|hit| hit.rule_id != typing.id && hit.rule_id != sink.id),
+        "a declared same-spelled function must shadow external constructor typing: {hits:?}"
+    );
+}
+
+#[test]
+fn rulepack_constructor_typing_accepts_exact_workspace_constructor() {
+    let ws = kotlin_ws(
+        r#"
+class ProcessBuilder {
+    fun start() {}
+}
+fun example() {
+    val builder = ProcessBuilder()
+    builder.start()
+}
+"#,
+    );
+    let (typing, sink) = kotlin_external_constructor_typing_rules("ProcessBuilder", &[]);
+
+    let hits = match_rules_against_facts(&ws, &[&typing, &sink]);
+    assert!(
+        hits.iter().any(|hit| hit.rule_id == typing.id),
+        "an exact workspace constructor should satisfy kind:new: {hits:?}"
+    );
+    assert!(
+        hits.iter().any(|hit| hit.rule_id == sink.id),
+        "an exact workspace constructor should type its assigned receiver: {hits:?}"
+    );
+}
+
+#[test]
+fn rulepack_constructor_typing_yields_to_cross_file_workspace_function() {
+    let ws = kotlin_ws_files(&[
+        (
+            "demo/Builders.kt",
+            r#"
+package demo
+class LocalBuilder { fun start() {} }
+fun ProcessBuilder(): LocalBuilder = LocalBuilder()
+"#,
+        ),
+        (
+            "demo/Use.kt",
+            r#"
+package demo
+fun example() {
+    val builder = ProcessBuilder()
+    builder.start()
+}
+"#,
+        ),
+    ]);
+    let (typing, sink) = kotlin_external_constructor_typing_rules("ProcessBuilder", &[]);
+
+    let hits = match_rules_against_facts(&ws, &[&typing, &sink]);
+    assert!(
+        hits.iter()
+            .all(|hit| hit.rule_id != typing.id && hit.rule_id != sink.id),
+        "an exact same-package function in another file must shadow external constructor typing: {hits:?}"
+    );
+}
+
+#[test]
+fn rulepack_constructor_typing_accepts_unresolved_external_constructor() {
+    let ws = kotlin_ws(
+        r#"
+fun example() {
+    val builder = ProcessBuilder()
+    builder.start()
+}
+"#,
+    );
+    let (typing, sink) = kotlin_external_constructor_typing_rules("ProcessBuilder", &[]);
+
+    let hits = match_rules_against_facts(&ws, &[&typing, &sink]);
+    assert!(
+        hits.iter().any(|hit| hit.rule_id == typing.id),
+        "an unresolved external constructor declared by YAML should satisfy kind:new: {hits:?}"
+    );
+    assert!(
+        hits.iter().any(|hit| hit.rule_id == sink.id),
+        "an unresolved external constructor declared by YAML should type its receiver: {hits:?}"
+    );
+}
+
+#[test]
+fn rulepack_constructor_typing_requires_its_declared_import() {
+    let (typing, mut sink) =
+        kotlin_external_constructor_typing_rules("MimeMessage", &["javax.mail.internet"]);
+    sink.match_spec.callee = Some(RuleTarget {
+        attribute: Some(vec!["MimeMessage".to_string(), "setSubject".to_string()]),
+        ..Default::default()
+    });
+    let without_import = kotlin_ws(
+        r#"
+fun example(session: Any) {
+    val message = MimeMessage(session)
+    message.setSubject("subject")
+}
+"#,
+    );
+    let without_hits = match_rules_against_facts(&without_import, &[&typing, &sink]);
+    assert!(
+        without_hits.iter().all(|hit| hit.rule_id != sink.id),
+        "return typing must not leak into a file without the rule's import: {without_hits:?}"
+    );
+
+    let with_import = kotlin_ws(
+        r#"
+import javax.mail.internet.MimeMessage
+fun example(session: Any) {
+    val message = MimeMessage(session)
+    message.setSubject("subject")
+}
+"#,
+    );
+    let with_hits = match_rules_against_facts(&with_import, &[&typing, &sink]);
+    assert!(
+        with_hits.iter().any(|hit| hit.rule_id == sink.id),
+        "the exact imported provider constructor should type its receiver: {with_hits:?}"
     );
 }
 
@@ -733,6 +920,50 @@ def resolve_with_args(obj, info, args):
     assert_eq!(hits[0].enclosing_fn.as_deref(), Some("resolve_products"));
 }
 
+#[test]
+fn param_rule_regex_never_reinterprets_the_enclosing_declaration_as_a_parameter() {
+    let ws = python_ws(
+        r#"
+import graphene
+
+def resolve_products_by_name(name, info):
+    return name
+"#,
+    );
+    let mut rule = base_rule(
+        "python.test.graphql_field_arg_wrong_position",
+        RuleKind::Source,
+        MatchKind::Param,
+    );
+    rule.language = "python".to_string();
+    rule.packages = vec!["graphene".to_string()];
+    rule.match_spec.target = Some(RuleTarget {
+        regex: Some("^[A-Za-z_][A-Za-z0-9_]*$".to_string()),
+        in_method: vec![
+            "resolve".to_string(),
+            "resolve_field".to_string(),
+            "resolver".to_string(),
+        ],
+        in_method_prefix: vec!["resolve_".to_string()],
+        param_index_in: vec![2],
+        base_name_not_in: vec!["args".to_string(), "kwargs".to_string()],
+        ..Default::default()
+    });
+
+    let hits = match_rule_against_facts(&ws, &rule);
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("Python index");
+    assert!(
+        hits.is_empty(),
+        "a parameter rule must not fall back to the enclosing declaration: {hits:?}; defs={:?}",
+        index
+            .defs
+            .iter()
+            .map(|decl| (&decl.name, &decl.params))
+            .collect::<Vec<_>>()
+    );
+}
+
 fn signature(rows: &[bonsai_security::RuleMatch]) -> BTreeSet<(String, String, u32, String, Option<String>)> {
     rows.iter()
         .map(|m| {
@@ -1004,8 +1235,8 @@ function handler($mysqli) {
 
     let matches = match_rule_against_facts(&ws, &rule);
     assert!(
-        matches.iter().any(|m| m.match_text == "$mysqli->query"),
-        "expected php arrow callee to satisfy attribute rule, got {matches:?}"
+        matches.iter().any(|m| m.match_text == "$mysqli.query"),
+        "expected PHP arrow syntax to lower to one canonical call identity, got {matches:?}"
     );
 }
 
@@ -1123,8 +1354,8 @@ end
 
     let matches = match_rule_against_facts(&ws, &rule);
     assert!(
-        matches.iter().any(|m| m.match_text == "self:render"),
-        "expected Lua colon receiver to satisfy top_level:false, got {matches:?}"
+        matches.iter().any(|m| m.match_text == "self.render"),
+        "expected Lua colon syntax to lower to one canonical call identity, got {matches:?}"
     );
 }
 

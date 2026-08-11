@@ -113,6 +113,16 @@ impl PartialEq for GlobalIndexIdentity {
 
 impl Eq for GlobalIndexIdentity {}
 
+impl std::hash::Hash for GlobalIndexIdentity {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // The identity token itself is retained by every cache key, so the
+        // allocation cannot be released and reused while that key is live.
+        // Pointer identity is therefore a sound process-local hash for the
+        // same immutable compiler-header generation used by `PartialEq`.
+        std::ptr::hash(Arc::as_ptr(&self.0), state);
+    }
+}
+
 /// Compact workspace-wide receiver inheritance facts.
 ///
 /// File-local compiler objects already contain direct receiver types. This
@@ -336,7 +346,7 @@ impl GlobalIndex {
     pub fn insert(&mut self, mut index: DeclIndex) {
         bonsai_lang_api::apply_local_closure_captures(&mut index);
         bonsai_lang_api::apply_call_receiver_types(&mut index);
-        bonsai_lang_api::apply_assign_value_kind(&mut index);
+        bonsai_lang_api::apply_expression_value_kinds(&mut index);
         bonsai_lang_api::apply_assign_call_result_types(&mut index);
         self.insert_preprocessed(index);
     }
@@ -1336,6 +1346,10 @@ fn merge_duplicate_decl(into: &mut Decl, mut duplicate: Decl) {
         into.receiver_param_index = duplicate.receiver_param_index;
     }
     extend_unique(&mut into.receiver_field_writes, duplicate.receiver_field_writes);
+    extend_unique(
+        &mut into.receiver_field_initializers,
+        duplicate.receiver_field_initializers,
+    );
     extend_unique_strings(
         &mut into.implicit_receiver_names,
         duplicate.implicit_receiver_names,

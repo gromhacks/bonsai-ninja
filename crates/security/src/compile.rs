@@ -59,15 +59,15 @@ pub fn compile_rule_to_inspect_args(rule: &Rule) -> CompiledRule {
             // empty. See `crate::finding::attach_sanitizers`.
         }
         RuleKind::Typing => {
-            // Typing rules are not a query either — they feed
-            // factory-return resolution, not inspect/finding output.
+            // Typing rules are not a query either — they feed rulepack-owned
+            // compiler models, not inspect/finding output.
         }
     }
     // Regex-qualifier propagation: a rule whose callee/target is a regex
     // tells the caller to pass `--regex` alongside the needle.
     let target = match rule.match_spec.kind {
         MatchKind::Call | MatchKind::New | MatchKind::Missing => rule.match_spec.callee.as_ref(),
-        MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param => {
+        MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param | MatchKind::Type => {
             rule.match_spec.target.as_ref()
         }
     };
@@ -85,7 +85,7 @@ pub fn compile_rule_to_inspect_args(rule: &Rule) -> CompiledRule {
 fn rule_needle(rule: &Rule) -> Option<String> {
     let target = match rule.match_spec.kind {
         MatchKind::Call | MatchKind::New | MatchKind::Missing => rule.match_spec.callee.as_ref()?,
-        MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param => {
+        MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param | MatchKind::Type => {
             rule.match_spec.target.as_ref()?
         }
     };
@@ -111,6 +111,7 @@ fn kind_to_string(match_kind: MatchKind) -> &'static str {
         MatchKind::Write => "write",
         MatchKind::Return => "return",
         MatchKind::Param => "decl",
+        MatchKind::Type => "type",
         // Missing rules drive the inspect query the same way Call/New do —
         // the matcher then inverts the result (rule fires when the listed
         // callee is ABSENT on a path).

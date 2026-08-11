@@ -1,0 +1,80 @@
+# Non-finding Kotlin/JVM type models. Kotlin's Tree-sitter CST represents a
+# constructor invocation and an ordinary function invocation with the same
+# `call_expression` node. Exact import aliases plus `kind: new` metadata prove
+# external constructor identity; `returns_type` types assigned receivers.
+- id: kotlin.typing.java_io_file_constructor
+  enabled: true
+  language: kotlin
+  imports: [java.io]
+  returns_type: File
+  match:
+    kind: new
+    callee:
+      attribute: [java, io, File]
+  match_examples:
+  - name: imported java File constructor returns File
+    code: |
+      import java.io.File
+      fun example(path: String) {
+        val file = File(path)
+        file.readText()
+      }
+    expect_match_text: [File]
+  description: "An imported java.io.File(...) constructor returns File; typing-only metadata resolves Kotlin File extension calls without capitalization or API knowledge in the adapter."
+
+- id: kotlin.typing.java_lang_processbuilder_constructor
+  enabled: true
+  language: kotlin
+  returns_type: ProcessBuilder
+  match:
+    kind: new
+    callee:
+      name: ProcessBuilder
+  match_examples:
+  - name: Kotlin default-imported ProcessBuilder constructor
+    code: |
+      fun example() {
+        val builder = ProcessBuilder()
+        builder.start()
+      }
+    expect_match_text: [ProcessBuilder]
+  - name: local same-spelled function is not the JVM constructor
+    code: |
+      class LocalBuilder { fun start() {} }
+      fun ProcessBuilder(): LocalBuilder = LocalBuilder()
+      fun example() {
+        val builder = ProcessBuilder()
+        builder.start()
+      }
+    expect_no_match: true
+  description: "Kotlin/JVM default-imports java.lang.ProcessBuilder; type its construction result for receiver-state flow. Exact workspace functions with the same spelling shadow this model. Typing-only; never a finding."
+
+- id: kotlin.typing.javax_mail_mime_message_constructor
+  enabled: true
+  language: kotlin
+  imports: [javax.mail.internet, jakarta.mail.internet]
+  returns_type: MimeMessage
+  match:
+    kind: new
+    callee:
+      attribute: [MimeMessage]
+  match_examples:
+  - name: imported MIME message constructor
+    code: |
+      import javax.mail.Session
+      import javax.mail.internet.MimeMessage
+      fun example(session: Session) {
+        val message = MimeMessage(session)
+        message.setSubject("subject")
+      }
+    expect_match_text: [MimeMessage]
+  - name: unrelated local MimeMessage function
+    code: |
+      class LocalMessage { fun setSubject(value: String) {} }
+      fun MimeMessage(value: String): LocalMessage = LocalMessage()
+      fun example() {
+        val message = MimeMessage("local")
+        message.setSubject("subject")
+      }
+    expect_no_match: true
+  description: "An explicitly imported javax/jakarta MimeMessage(...) constructor returns MimeMessage; typing-only metadata resolves later instance calls without placing provider names in the Kotlin adapter."

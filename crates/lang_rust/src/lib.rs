@@ -3,10 +3,13 @@
 use bonsai_common::FileId;
 use bonsai_lang_api::{
     collect_param_type_aliases, decl_index_from_tree_with_handler,
-    kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, ArgumentPassingMode, CallKind, CapabilityLevel, DeclIndex, DeclKind,
-    FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
-    LanguageCapabilities, LanguageId, TypeAliasVocabulary, Visibility, NO_CONSTRUCTOR_METHOD_NAMES,
+    kit::{
+        collect_kinds, language_from_pack, node_text, parse_with, pattern_binding_sites_from_arms, span_of,
+    },
+    AdapterContext, AdapterError, ArgumentPassingMode, CallKind, CallTargetExtraction, CapabilityLevel,
+    DeclIndex, DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
+    LanguageAdapter, LanguageCapabilities, LanguageId, PatternBindingSite, TypeAliasVocabulary, Visibility,
+    NO_CONSTRUCTOR_METHOD_NAMES,
 };
 
 const RUST_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
@@ -20,74 +23,144 @@ const RUST_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
 };
 use tree_sitter::{Language, Node, Tree};
 
+fn rust_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    (node.kind() == "for_expression")
+        .then(|| {
+            Some((
+                node.child_by_field_name("pattern")?,
+                node.child_by_field_name("value")?,
+            ))
+        })
+        .flatten()
+}
+
+fn rust_pattern_bindings(node: Node<'_>) -> Vec<PatternBindingSite<'_>> {
+    let mut sites = if node.kind() == "match_expression" {
+        pattern_binding_sites_from_arms(node, &["value"], &["match_arm"], &["pattern"], &[])
+    } else {
+        Vec::new()
+    };
+
+    if matches!(node.kind(), "if_expression" | "while_expression") {
+        let Some(condition) = node.child_by_field_name("condition") else {
+            return sites;
+        };
+        let mut stack = vec![condition];
+        while let Some(current) = stack.pop() {
+            if current.kind() == "let_condition" {
+                if let (Some(pattern), Some(source)) = (
+                    current.child_by_field_name("pattern"),
+                    current.child_by_field_name("value"),
+                ) {
+                    sites.push(PatternBindingSite {
+                        span_node: current,
+                        pattern,
+                        source,
+                    });
+                }
+                continue;
+            }
+            let mut cursor = current.walk();
+            stack.extend(current.named_children(&mut cursor));
+        }
+    } else if matches!(node.kind(), "if_let_expression" | "while_let_expression") {
+        if let (Some(pattern), Some(source)) = (
+            node.child_by_field_name("pattern"),
+            node.child_by_field_name("value"),
+        ) {
+            sites.push(PatternBindingSite {
+                span_node: node,
+                pattern,
+                source,
+            });
+        }
+    }
+    sites
+}
+
 pub const LANG_ID: LanguageId = LanguageId::new("rust");
 const PACK_NAME: &str = "rust";
 
-/// Rust lifecycle transitions: `drop` and ownership-transfer calls.
-const RUST_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "drop",
-        transition: "freed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "std::mem::drop",
-        transition: "freed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "mem::drop",
-        transition: "freed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "Box::from_raw",
-        transition: "moved",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "Box::into_raw",
-        transition: "moved",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "mem::replace",
-        transition: "moved",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "mem::take",
-        transition: "moved",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "std::mem::replace",
-        transition: "moved",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "std::mem::take",
-        transition: "moved",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "ptr::drop_in_place",
-        transition: "freed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "std::ptr::drop_in_place",
-        transition: "freed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "ManuallyDrop::drop",
-        transition: "freed",
-        arg_index: 0,
-    },
-];
+fn rust_indirect_place_operand(node: Node<'_>) -> Option<Node<'_>> {
+    let operator = match node.kind() {
+        "unary_expression" => "*",
+        "reference_expression" => "&",
+        _ => return None,
+    };
+    let mut cursor = node.walk();
+    if !node.children(&mut cursor).any(|child| child.kind() == operator) {
+        return None;
+    }
+    node.child_by_field_name("value").or_else(|| {
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor).last()
+    })
+}
+
+/// Rust call targets are exact grammar `function`/`macro` nodes. Scoped paths
+/// are namespace/type syntax, not value receivers; preserving the complete
+/// node text lets the later Rust resolution pass classify them without shared
+/// language or provider heuristics.
+fn rust_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    let target = match node.kind() {
+        "call_expression" => node.child_by_field_name("function")?,
+        "macro_invocation" => node.child_by_field_name("macro")?,
+        _ => return None,
+    };
+    let mut full_text = node_text(&target, src).trim().to_string();
+    if node.kind() == "macro_invocation" && !full_text.ends_with('!') {
+        full_text.push('!');
+    }
+    (!full_text.is_empty()).then_some(CallTargetExtraction {
+        node: target,
+        full_text,
+    })
+}
 
 const HANDLER: GrammarHandler = GrammarHandler {
+    expression_value_kind_extractor: None,
+    literal_value_kinds: &[
+        "boolean_literal",
+        "integer_literal",
+        "float_literal",
+        "true",
+        "false",
+    ],
+    string_literal_kinds: &["string_literal", "raw_string_literal", "char_literal"],
+    comment_kinds: &["line_comment", "block_comment"],
+    doc_comment_prefixes: &["///", "//!", "/**"],
+    decorator_kinds: &["attribute_item"],
+    parameter_container_kinds: &["parameters"],
+    parameter_kinds: &["parameter", "self_parameter", "variadic_parameter"],
+    parameter_annotation_kinds: &["attribute_item"],
+    parameter_annotation_name_extractor: None,
+    variadic_parameter_kinds: &["variadic_parameter"],
+    self_parameter_kinds: &["self_parameter"],
+    binding_identifier_kinds: &["identifier", "self"],
+    pattern_binding_extractor: Some(rust_pattern_bindings),
+    non_binding_pattern_field_names: &["type", "path", "constructor", "field"],
+    identifier_kinds: &["identifier", "self"],
+    aggregate_pattern_kinds: &["tuple_pattern", "struct_pattern", "slice_pattern"],
+    named_aggregate_kinds: &["struct_expression"],
+    positional_aggregate_kinds: &["tuple_expression", "array_expression"],
+    aggregate_pair_kinds: &["field_initializer"],
+    aggregate_key_field_names: &["field"],
+    aggregate_value_field_names: &["value"],
+    static_field_name_kinds: &["field_identifier", "identifier"],
+    shorthand_field_kinds: &["shorthand_field_initializer", "shorthand_field_identifier"],
+    spread_kinds: &["base_field_initializer"],
+    spread_value_field_names: &["value"],
+    aggregate_syntax_only_kinds: &["type_identifier"],
+    transparent_call_wrapper_kinds: &[
+        "field_expression",
+        "scoped_identifier",
+        "parenthesized_expression",
+        "try_expression",
+        "await_expression",
+    ],
+    single_expression_group_kinds: &["expression_list"],
+    assignment_target_wrapper_kinds: &["let_declaration"],
+    binding_declaration_keyword_spellings: &["let", "const"],
     nested_type_ownership: true,
     fn_kinds: &["function_item"],
     class_kinds: &["struct_item", "enum_item", "trait_item", "union_item"],
@@ -109,24 +182,42 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // arm flows are lost (audit task #132). `if_let_expression` is the
     // sugar form covered by the same binding extraction path.
     if_kinds: &["if_expression", "match_expression", "if_let_expression"],
-    for_kinds: &["for_expression"],
-    foreach_kinds: &[],
+    branch_then_field_names: &["consequence", "body"],
+    branch_else_field_names: &["alternative"],
+    branch_condition_field_names: &["condition", "value"],
+    loop_body_field_names: &["body"],
+    loop_body_kinds: &["block", "expression_statement"],
+    branch_arm_kinds: &["block", "match_arm"],
+    for_kinds: &[],
+    foreach_kinds: &["for_expression"],
+    foreach_binding_extractor: Some(rust_foreach_binding),
     while_kinds: &["while_expression"],
     do_kinds: &[],
     // Rust's unconditional `loop { }` has no condition or init/update —
     // map to `LoopKind::Loop` rather than misclassifying as DoWhile.
     loop_kinds: &["loop_expression"],
     call_kinds: &["call_expression", "macro_invocation"],
+    call_callee_field_names: &["function", "macro"],
+    call_target_extractor: Some(rust_call_target),
+    call_argument_field_names: &["arguments", "token_tree"],
+    call_argument_container_kinds: &["arguments", "token_tree"],
+    lambda_body_field_names: &["body"],
     argument_passing_mode_extractor: Some(rust_argument_passing_mode),
     call_ref_kinds: &["call_expression", "macro_invocation"],
     member_expression_kinds: &["field_expression", "scoped_identifier"],
     subscript_expression_kinds: &["subscript_expression", "index_expression"],
+    member_base_field_names: &["value", "scope"],
+    member_name_field_names: &["field", "name"],
+    subscript_base_field_names: &["value"],
+    subscript_index_field_names: &["index"],
     call_name_suffix_tokens: &["!"],
     assignment_kinds: &[
         "assignment_expression",
         "compound_assignment_expr",
         "let_declaration",
     ],
+    compound_assignment_kinds: &["compound_assignment_expr"],
+    type_only_declaration_kinds: &["let_declaration"],
     return_kinds: &["return_expression"],
     throw_kinds: &[],
     lambda_kinds: &["closure_expression"],
@@ -138,18 +229,37 @@ const HANDLER: GrammarHandler = GrammarHandler {
     finally_kinds: &[],
     break_kinds: &["break_expression"],
     continue_kinds: &["continue_expression"],
+    control_label_field_names: &["label"],
     yield_kinds: &["yield_expression"],
+    yield_value_field_names: &["value"],
     await_kinds: &["await_expression"],
     defer_kinds: &[],
     using_kinds: &[],
+    try_body_field_names: &["body"],
     special_forms: &[],
     method_receiver_param_index: Some(0),
+    indirect_place_operand_extractor: Some(rust_indirect_place_operand),
+    receiver_presence_extractor: Some(rust_function_has_receiver),
     implicit_receiver_names: &["self"],
     implicit_receiver_prefixes: &[],
     tail_expression_returns: true,
     void_return_type_names: &[],
     ..bonsai_lang_api::EMPTY_HANDLER
 };
+
+/// Rust associated functions share `function_item` syntax with methods, but
+/// only an exact `self_parameter` child establishes a receiver binding.
+fn rust_function_has_receiver(node: Node<'_>, _src: &[u8]) -> bool {
+    node.child_by_field_name("parameters")
+        .map(|parameters| {
+            let mut cursor = parameters.walk();
+            let has_self = parameters
+                .named_children(&mut cursor)
+                .any(|parameter| parameter.kind() == "self_parameter");
+            has_self
+        })
+        .unwrap_or(false)
+}
 
 fn rust_argument_passing_mode(_argument: Node<'_>, value: Node<'_>) -> ArgumentPassingMode {
     if value.kind() == "reference_expression" {
@@ -329,12 +439,8 @@ impl LanguageAdapter for RustAdapter {
             enrich_rust_self_tuple_constructor_returns(&mut idx);
             classify_rust_declared_constructor_calls(&mut idx);
         }
-        // Append `FlowEvent::Lifecycle` for recognised Rust
-        // resource transitions (`drop`, `Box::from_raw`,
-        // `mem::replace`, `mem::take`).
         for decl in &mut idx.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, RUST_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
@@ -468,6 +574,7 @@ fn append_rust_exported_import_decls(idx: &mut DeclIndex, aliases: Vec<RustExpor
             bases: vec![alias.target],
             receiver_param_index: None,
             receiver_field_writes: Vec::new(),
+            receiver_field_initializers: Vec::new(),
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
             return_type: None,

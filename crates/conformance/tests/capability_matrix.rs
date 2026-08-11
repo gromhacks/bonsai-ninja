@@ -35,8 +35,8 @@ fn fixture_for(lang: &str) -> (&'static str, &'static str, &'static [Capability]
         ),
         "typescript" => (
             "app.ts",
-            "const echo = (x: string): string => x;\nclass Repo extends Base {\n  conn: string;\n  constructor(conn: string) { this.conn = conn; }\n  run(items: string[]): void {\n    try {\n      for (const it of items) {\n        if (it) { this.handle(it); }\n      }\n    } catch (e) { return e; }\n  }\n  handle(x: string): string { const y: string = this.transform(x); return y; }\n}\n",
-            &[Capability::ParamAnnotations, Capability::ReceiverParamIndex],
+            "const echo = (x: string): string => x;\nclass Repo extends Base {\n  conn: string;\n  constructor(conn: string) { this.conn = conn; }\n  run(items: string[]): void {\n    try {\n      for (const it of items) {\n        if (it) { this.handle(it); }\n      }\n    } catch (e) { return e; }\n  }\n  handle(@Body() x: string): string { const y: string = this.transform(x); return y; }\n}\n",
+            &[Capability::ReceiverParamIndex],
         ),
         "java" => (
             "App.java",
@@ -45,17 +45,16 @@ fn fixture_for(lang: &str) -> (&'static str, &'static str, &'static [Capability]
         ),
         "csharp" => (
             "App.cs",
-            "namespace App;\nclass App : Base {\n  string conn;\n  public App(string conn) { this.conn = conn; }\n  public void Run(System.Collections.Generic.List<string> items) {\n    try {\n      foreach (var it in items) {\n        if (it != null) { Handle(it); }\n      }\n    } catch (System.Exception e) { return; }\n  }\n  public string Handle(string x) { var y = Transform(x); return y; }\n}\n",
+            "namespace App;\nclass App : Base {\n  string conn;\n  public App(string conn) { this.conn = conn; }\n  public void Run(System.Collections.Generic.List<string> items) {\n    try {\n      foreach (var it in items) {\n        if (it != null) { Handle(it); }\n      }\n    } catch (System.Exception e) { return; }\n  }\n  public string Handle([FromBody] string x) { var y = Transform(x); return y; }\n}\n",
             &[
-                Capability::ParamAnnotations,
                 Capability::ReceiverParamIndex,
                 Capability::ImplicitReturns,
             ],
         ),
         "rust" => (
             "app.rs",
-            "pub struct Repo { conn: String }\nimpl Repo {\n  pub fn new(conn: String) -> Self { Self { conn } }\n  pub fn run(&self, items: Vec<String>) -> Option<String> {\n    for it in items {\n      if !it.is_empty() { self.handle(&it); }\n    }\n    None\n  }\n  pub fn handle(&self, x: &str) -> String { let y: String = self.transform(x); y }\n  fn transform(&self, x: &str) -> String { x.to_string() }\n}\n",
-            &[Capability::ParamAnnotations, Capability::Bases, Capability::TryEvents],
+            "pub struct Repo { conn: String }\nimpl Repo {\n  pub fn new(conn: String) -> Self { Self { conn } }\n  pub fn run(&self, items: Vec<String>) -> Option<String> {\n    for it in items {\n      if !it.is_empty() { self.handle(&it); }\n    }\n    None\n  }\n  pub fn handle(&self, #[from_body] x: &str) -> String { let y: String = self.transform(x); y }\n  fn transform(&self, x: &str) -> String { x.to_string() }\n}\n",
+            &[Capability::Bases, Capability::TryEvents],
         ),
         "go" => (
             "app.go",
@@ -70,22 +69,22 @@ fn fixture_for(lang: &str) -> (&'static str, &'static str, &'static [Capability]
         ),
         "kotlin" => (
             "App.kt",
-            "package app\nopen class Base\nclass Repo(val conn: String) : Base() {\n  fun run(items: List<String>) {\n    try {\n      for (it in items) {\n        if (it.isNotEmpty()) { handle(it) }\n      }\n    } catch (e: Exception) { return }\n  }\n  fun handle(x: String): String { val y: String = transform(x); return y }\n  fun transform(x: String): String = x\n}\n",
-            &[Capability::ParamAnnotations, Capability::ReceiverParamIndex],
+            "package app\nopen class Base\nclass Repo(val conn: String) : Base() {\n  fun run(items: List<String>) {\n    try {\n      for (it in items) {\n        if (it.isNotEmpty()) { handle(it) }\n      }\n    } catch (e: Exception) { return }\n  }\n  fun handle(@RequestParam x: String): String { val y: String = transform(x); return y }\n  fun transform(x: String): String = x\n}\n",
+            &[Capability::ReceiverParamIndex],
         ),
         "scala" => (
             "App.scala",
-            "package app\nclass Base\nclass Repo(val conn: String) extends Base {\n  def run(items: List[String]): Unit = {\n    try {\n      for (it <- items) {\n        if (it.nonEmpty) handle(it)\n      }\n    } catch { case e: Exception => () }\n  }\n  def handle(x: String): String = { val y: String = transform(x); y }\n  def transform(x: String): String = x\n}\n",
-            &[Capability::ParamAnnotations, Capability::ReceiverParamIndex],
+            "package app\nclass Base\nclass Repo(val conn: String) extends Base {\n  def run(items: List[String]): Unit = {\n    try {\n      for (it <- items) {\n        if (it.nonEmpty) handle(it)\n      }\n    } catch { case e: Exception => () }\n  }\n  def handle(@body x: String): String = { val y: String = transform(x); y }\n  def transform(x: String): String = x\n}\n",
+            &[Capability::ReceiverParamIndex],
         ),
         "swift" => (
             "App.swift",
-            "class Base {}\nclass Repo: Base {\n  let conn: String\n  init(_ conn: String) { self.conn = conn }\n  func run(_ items: [String]) {\n    do {\n      for it in items {\n        if !it.isEmpty { handle(it) }\n      }\n    } catch let e {\n      _ = e\n    }\n  }\n  func handle(_ x: String) -> String { let y: String = transform(x); return y }\n  func transform(_ x: String) -> String { x }\n}\n",
-            &[Capability::ParamAnnotations, Capability::ReceiverParamIndex],
+            "class Base {}\nclass Repo: Base {\n  let conn: String\n  init(_ conn: String) { self.conn = conn }\n  func run(_ items: [String]) {\n    do {\n      for it in items {\n        if !it.isEmpty { handle(it) }\n      }\n    } catch let e {\n      _ = e\n    }\n  }\n  func handle(_ x: String, _ callback: @escaping (String) -> String) -> String { let y: String = transform(x); return callback(y) }\n  func transform(_ x: String) -> String { x }\n}\n",
+            &[Capability::ReceiverParamIndex],
         ),
         "ruby" => (
             "app.rb",
-            "class Base\nend\nclass Repo < Base\n  def initialize(conn)\n    @conn = conn\n  end\n\n  def run(items)\n    begin\n      items.each do |it|\n        handle(it) if it\n      end\n    rescue => e\n      return e\n    end\n  end\n\n  def handle(x)\n    y = transform(x)\n    y\n  end\nend\n",
+            "class Base\nend\nclass Repo < Base\n  def initialize(conn)\n    @conn = conn\n  end\n\n  def run(items)\n    begin\n      for it in items\n        handle(it) if it\n      end\n    rescue => e\n      return e\n    end\n  end\n\n  def handle(x)\n    y = transform(x)\n    y\n  end\nend\n",
             &[
                 Capability::ParamAnnotations,
                 Capability::TypeAliases,
@@ -106,9 +105,8 @@ fn fixture_for(lang: &str) -> (&'static str, &'static str, &'static [Capability]
         ),
         "php" => (
             "App.php",
-            "<?php\nclass Base {}\nclass Repo extends Base {\n  private $conn;\n  public function __construct($conn) { $this->conn = $conn; }\n  public function run(array $items) {\n    try {\n      foreach ($items as $it) {\n        if ($it) { $this->handle($it); }\n      }\n    } catch (\\Exception $e) { return $e; }\n  }\n  public function handle($x) {\n    $y = $this->transform($x);\n    return $y;\n  }\n}\n",
+            "<?php\nclass Base {}\nclass Repo extends Base {\n  private $conn;\n  public function __construct($conn) { $this->conn = $conn; }\n  public function run(array $items) {\n    try {\n      foreach ($items as $it) {\n        if ($it) { $this->handle($it); }\n      }\n    } catch (\\Exception $e) { return $e; }\n  }\n  public function handle(#[Body] $x) {\n    $y = $this->transform($x);\n    return $y;\n  }\n}\n",
             &[
-                Capability::ParamAnnotations,
                 Capability::TypeAliases,
                 Capability::ReceiverParamIndex,
                 Capability::ImplicitReturns,
@@ -116,9 +114,8 @@ fn fixture_for(lang: &str) -> (&'static str, &'static str, &'static [Capability]
         ),
         "dart" => (
             "app.dart",
-            "class Base {}\nclass Repo extends Base {\n  String conn;\n  Repo(this.conn);\n  void run(List<String> items) {\n    try {\n      for (final it in items) {\n        if (it.isNotEmpty) { handle(it); }\n      }\n    } catch (e) { return; }\n  }\n  String handle(String x) { final y = transform(x); return y; }\n  String transform(String x) => x;\n}\n",
+            "class Base {}\nclass Repo extends Base {\n  String conn;\n  Repo(this.conn);\n  void run(List<String> items) {\n    try {\n      for (final it in items) {\n        if (it.isNotEmpty) { handle(it); }\n      }\n    } catch (e) { return; }\n  }\n  String handle(@body String x) { final y = transform(x); return y; }\n  String transform(String x) => x;\n}\n",
             &[
-                Capability::ParamAnnotations,
                 Capability::ReceiverParamIndex,
                 Capability::ImplicitReturns,
             ],
@@ -141,14 +138,13 @@ fn fixture_for(lang: &str) -> (&'static str, &'static str, &'static [Capability]
             "App.m",
             "#import <Foundation/Foundation.h>\n\n@interface Repo : NSObject\n@property (strong) NSString *conn;\n- (instancetype)initWithConn:(NSString *)conn;\n- (void)run:(NSArray<NSString *> *)items;\n- (NSString *)handle:(NSString *)x;\n@end\n\n@implementation Repo\n- (instancetype)initWithConn:(NSString *)conn {\n  self = [super init];\n  if (self) {\n    _conn = conn;\n  }\n  return self;\n}\n- (void)run:(NSArray<NSString *> *)items {\n  @try {\n    for (NSString *it in items) {\n      if (it.length > 0) { [self handle:it]; }\n    }\n  } @catch (NSException *e) {\n    return;\n  }\n}\n- (NSString *)handle:(NSString *)x {\n  NSString *y = [self transform:x];\n  return y;\n}\n- (NSString *)transform:(NSString *)x { return x; }\n@end\n",
             &[
-                Capability::ParamAnnotations,
                 Capability::ReceiverParamIndex,
                 Capability::ImplicitReturns,
             ],
         ),
         "elixir" => (
             "app.ex",
-            "defmodule App.Repo do\n  defstruct [:conn]\n\n  def new(conn), do: %__MODULE__{conn: conn}\n\n  def run(items) do\n    try do\n      Enum.each(items, fn it ->\n        if it != nil, do: handle(it)\n      end)\n    rescue\n      e -> {:error, e}\n    end\n  end\n\n  def handle(x) do\n    y = transform(x)\n    y\n  end\n\n  def transform(x), do: x\nend\n",
+            "defmodule App.Repo do\n  defstruct [:conn]\n\n  def new(conn), do: %__MODULE__{conn: conn}\n\n  def run(items) do\n    try do\n      for it <- items do\n        if it != nil, do: handle(it)\n      end\n    rescue\n      e -> {:error, e}\n    end\n  end\n\n  def handle(x) do\n    y = transform(x)\n    y\n  end\n\n  def transform(x), do: x\nend\n",
             &[
                 Capability::ParamAnnotations,
                 Capability::TypeAliases,
@@ -170,6 +166,7 @@ fn fixture_for(lang: &str) -> (&'static str, &'static str, &'static [Capability]
                 Capability::Bases,
                 Capability::ImplicitReceiverNames,
                 Capability::CallReceiverTypes,
+                Capability::LoopEvents,
             ],
         ),
         "c" => (

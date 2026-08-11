@@ -288,6 +288,24 @@ func fetch(raw string) {
         .find(|fact| fact.target.as_deref() == Some("allowedHosts"))
         .expect("static allowlist assignment");
     assert_eq!(allowlist.value_flow.aggregate_fields.len(), 1);
+    assert!(
+        allowlist.value_flow.place.is_none()
+            && allowlist.value_flow.projection.is_none()
+            && allowlist.value_flow.source_names.is_empty()
+            && allowlist.value_flow.call_sites.is_empty()
+            && allowlist.value_flow.spreads.is_empty()
+            && allowlist.value_flow.tuple_items.is_empty()
+            && allowlist.value_flow.aggregate_fields.iter().all(|field| {
+                field.value.place.is_none()
+                    && field.value.projection.is_none()
+                    && field.value.source_names.is_empty()
+                    && field.value.call_sites.is_empty()
+                    && field.value.spreads.is_empty()
+                    && field.value.tuple_items.is_empty()
+                    && field.value.aggregate_fields.is_empty()
+            }),
+        "literal map must not carry a dynamic compiler identity: {allowlist:#?}"
+    );
     let redirect = index
         .assignment_values
         .iter()

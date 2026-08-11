@@ -9,6 +9,38 @@ fn parse_import_specs(src: &str) -> Vec<ImportSpec> {
 }
 
 #[test]
+fn remote_and_local_call_refs_use_exact_callee_nodes_once() {
+    let src = r#"
+-module(user_service).
+get_user(Token) -> auth_service:verify_token(Token).
+update_user(Token) -> verify_token(Token).
+"#;
+    let language = language_from_pack(PACK_NAME).expect("erlang grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set erlang grammar");
+    let tree = parser.parse(src.as_bytes(), None).expect("parse erlang source");
+    let refs = bonsai_lang_api::kit::extract_call_refs(&tree, FileId::new(0), src.as_bytes(), &HANDLER);
+    let names = refs
+        .iter()
+        .map(|reference| reference.name.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| **name == "auth_service:verify_token")
+            .count(),
+        1,
+        "{names:?}"
+    );
+    assert!(names.contains(&"verify_token"), "{names:?}");
+    assert!(
+        !names.iter().any(|name| matches!(*name, "Token" | "UserId")),
+        "{names:?}"
+    );
+}
+
+#[test]
 fn import_attribute_emits_local_member_bindings() {
     let imports = parse_import_specs("-import(util, [helper/1, other/2]).\n");
 
@@ -188,6 +220,7 @@ fn list_cons_param_pattern_emits_entry_bindings() {
         bases: Vec::new(),
         receiver_param_index: None,
         receiver_field_writes: Vec::new(),
+        receiver_field_initializers: Vec::new(),
         implicit_receiver_names: Vec::new(),
         receiver_state_sources: Vec::new(),
         return_type: None,
@@ -210,50 +243,6 @@ fn list_cons_param_pattern_emits_entry_bindings() {
         .collect::<Vec<_>>();
     assert!(bindings.contains(&("Token", "_Arg0")), "{bindings:?}");
     assert!(bindings.contains(&("Rest", "_Arg0")), "{bindings:?}");
-}
-
-#[test]
-fn collection_transform_assignments_expose_collection_sources() {
-    let span = bonsai_common::Span::new(FileId::new(0), 0, 1);
-    let mut events = vec![
-        FlowEvent::Assign {
-            span,
-            target: "Stripped".to_string(),
-            source_name: None,
-            source_call: Some("lists:map".to_string()),
-            source_call_args: vec!["fun string:strip/1".to_string(), "RawTokens".to_string()],
-            source_names: Vec::new(),
-            declares_new_binding: true,
-            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
-        },
-        FlowEvent::Assign {
-            span,
-            target: "Joined".to_string(),
-            source_name: None,
-            source_call: Some("lists:foldl".to_string()),
-            source_call_args: vec![
-                "fun(Tok, Acc) -> Acc ++ Tok end".to_string(),
-                "\"\"".to_string(),
-                "Tokens".to_string(),
-            ],
-            source_names: Vec::new(),
-            declares_new_binding: true,
-            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
-        },
-    ];
-
-    normalize_erlang_access_events(&mut events, "", &AssignmentValueIndex::default());
-    bonsai_lang_api::normalize_call_result_assignment_sources(&mut events);
-    augment_erlang_collection_transform_flow_events(&mut events);
-
-    assert!(matches!(
-        &events[0],
-        FlowEvent::Assign { source_names, .. } if source_names == &vec!["RawTokens".to_string()]
-    ));
-    assert!(matches!(
-        &events[1],
-        FlowEvent::Assign { source_names, .. } if source_names == &vec!["Tokens".to_string()]
-    ));
 }
 
 #[test]

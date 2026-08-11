@@ -302,7 +302,7 @@
       function example(stmt, id)
         stmt:bind_values(id)
       end
-    expect_match_text: [stmt:bind_values]
+    expect_match_text: [stmt.bind_values]
   description: "prepared statement bind_values(...) - binds values to SQL placeholders."
 
 - id: lua.sanitizer.gsub_char_allowlist
@@ -354,7 +354,7 @@
       function example(pg, value)
         pg:escape_literal(value)
       end
-    expect_match_text: ["pg:escape_literal"]
+    expect_match_text: ["pg.escape_literal"]
   - name: lua.sanitizer.pgmoon_escape_literal negative constraint boundary
     code: "local _pgmoon = require(\"pgmoon\")\nfunction example(pg)\n  pg:escape_literal()\nend\n"
     expect_no_match: true
@@ -378,7 +378,7 @@
       function example(pg, col)
         pg:escape_identifier(col)
       end
-    expect_match_text: ["pg:escape_identifier"]
+    expect_match_text: ["pg.escape_identifier"]
   - name: lua.sanitizer.pgmoon_escape_identifier negative constraint boundary
     code: "local _pgmoon = require(\"pgmoon\")\nfunction example(pg)\n  pg:escape_identifier()\nend\n"
     expect_no_match: true
@@ -406,7 +406,7 @@
       function example(jwt)
         jwt:set_alg_whitelist({ RS256 = 1 })
       end
-    expect_match_text: ["jwt:set_alg_whitelist"]
+    expect_match_text: ["jwt.set_alg_whitelist"]
   - name: lua.sanitizer.resty_jwt_set_alg_whitelist negative constraint boundary
     code: "local _lua_resty_jwt = require(\"lua-resty-jwt\")\nfunction example(jwt)\n  jwt:set_alg_whitelist()\nend\n"
     expect_no_match: true

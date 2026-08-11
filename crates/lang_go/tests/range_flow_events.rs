@@ -173,6 +173,51 @@ func entry(cmd string, tokens []string) {
 }
 
 #[test]
+fn range_value_sources_follow_go_syntax_not_identifier_capitalization() {
+    let db = db_with(
+        r#"
+package main
+
+type Thing struct { name string }
+
+func entry(Input []Thing, item Thing) {
+    for _, value := range Input {
+        use(value)
+    }
+    for _, value := range []Thing{item} {
+        use(value)
+    }
+}
+"#,
+    );
+    let global = db.global_index();
+    let decl = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "entry")
+        .expect("entry declaration");
+    let mut assigns = Vec::new();
+    collect_assigns(&decl.flow_events, &mut assigns);
+
+    assert!(
+        assigns.iter().any(|(target, source_name, _, source_names)| {
+            target == "value"
+                && (source_name.as_deref() == Some("Input")
+                    || source_names.iter().any(|name| name == "Input"))
+        }),
+        "an exported-style local binding remains an exact value source: {assigns:?}"
+    );
+    assert!(
+        assigns.iter().any(|(target, _, _, source_names)| {
+            target == "value"
+                && source_names.iter().any(|name| name == "item")
+                && source_names.iter().all(|name| name != "Thing")
+        }),
+        "a composite literal contributes its value expression, never its type name: {assigns:?}"
+    );
+}
+
+#[test]
 fn dynamic_lookup_key_selects_but_does_not_taint_stored_value() {
     let db = db_with(
         r#"

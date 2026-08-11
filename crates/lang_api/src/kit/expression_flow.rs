@@ -7,10 +7,7 @@ use crate::{ExpressionField, ExpressionFlow, ExpressionProjection};
 
 #[cfg(test)]
 use super::GENERIC_HANDLER;
-use super::{
-    argument_place, extract_rhs_expr_operands, looks_like_identifier, looks_like_literal_value, node_text,
-    span_of, GrammarHandler,
-};
+use super::{argument_place, extract_rhs_expr_operands, node_text, span_of, GrammarHandler};
 
 /// Lower one parsed value expression into compiler-owned flow facts.
 #[must_use]
@@ -27,10 +24,10 @@ pub fn expression_flow_from_node_with_handler(
     src: &[u8],
     handler: &GrammarHandler,
 ) -> ExpressionFlow {
-    let place = argument_place(&node, src);
+    let place = argument_place(&node, src, handler);
     let projection = place
         .as_deref()
-        .filter(|_| projection_is_static(&node, src))
+        .filter(|place| projection_is_static(place))
         .and_then(ExpressionProjection::from_adapter_place);
     let mut flow = ExpressionFlow {
         place,
@@ -40,7 +37,7 @@ pub fn expression_flow_from_node_with_handler(
         ..ExpressionFlow::default()
     };
 
-    if is_nested_aggregate(node.kind()) {
+    if is_nested_aggregate(node.kind(), handler) {
         let mut fields = Vec::new();
         let mut spreads = Vec::new();
         collect_aggregate_members(node, node, file, src, handler, &mut fields, &mut spreads);
@@ -57,19 +54,19 @@ pub fn expression_flow_from_node_with_handler(
         }
     }
 
-    if is_positional_aggregate(node.kind()) {
+    if is_positional_aggregate(node.kind(), handler) {
         let mut items = Vec::new();
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            if is_spread_node(child.kind()) {
-                if let Some(value) = spread_value_node(child) {
+            if is_spread_node(child.kind(), handler) {
+                if let Some(value) = spread_value_node(child, handler) {
                     flow.spreads
                         .push(expression_flow_from_node_with_handler(value, file, src, handler));
                 }
                 continue;
             }
-            let value = aggregate_value_node(child).unwrap_or(child);
-            if !is_syntax_only_tuple_child(value.kind()) {
+            let value = aggregate_value_node(child, handler).unwrap_or(child);
+            if !is_syntax_only_tuple_child(value.kind(), handler) {
                 items.push(expression_flow_from_node_with_handler(value, file, src, handler));
             }
         }
@@ -99,11 +96,11 @@ pub(super) fn positional_expression_flow_from_node(
     let mut spreads = Vec::new();
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        if is_spread_node(child.kind()) {
-            if let Some(value) = spread_value_node(child) {
+        if is_spread_node(child.kind(), handler) {
+            if let Some(value) = spread_value_node(child, handler) {
                 spreads.push(expression_flow_from_node_with_handler(value, file, src, handler));
             }
-        } else if !is_syntax_only_tuple_child(child.kind()) {
+        } else if !is_syntax_only_tuple_child(child.kind(), handler) {
             tuple_items.push(expression_flow_from_node_with_handler(child, file, src, handler));
         }
     }
@@ -152,6 +149,12 @@ fn contains_call(node: Node<'_>, handler: &GrammarHandler) -> bool {
     if handler.is_call(node.kind()) {
         return true;
     }
+    if handler
+        .expression_call_span_extractor
+        .is_some_and(|extract| !extract(node).is_empty())
+    {
+        return true;
+    }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if contains_call(child, handler) {
@@ -163,6 +166,13 @@ fn contains_call(node: Node<'_>, handler: &GrammarHandler) -> bool {
 
 pub(super) fn expression_call_spans(node: Node<'_>, file: FileId, handler: &GrammarHandler) -> Vec<Span> {
     fn collect(node: Node<'_>, file: FileId, handler: &GrammarHandler, out: &mut Vec<Span>) {
+        if let Some(extract) = handler.expression_call_span_extractor {
+            out.extend(
+                extract(node)
+                    .into_iter()
+                    .map(|(start, end)| Span::new(file, start as u64, end as u64)),
+            );
+        }
         if handler.is_call(node.kind()) {
             out.push(span_of(file, &node));
             return;
@@ -188,17 +198,21 @@ fn collect_aggregate_members(
     fields: &mut Vec<ExpressionField>,
     spreads: &mut Vec<ExpressionFlow>,
 ) {
-    if node.id() != root.id() && is_nested_aggregate(node.kind()) {
+    if node.id() != root.id() && is_nested_aggregate(node.kind(), handler) {
         return;
     }
-    if is_spread_node(node.kind()) {
-        if let Some(value) = spread_value_node(node) {
+    if is_spread_node(node.kind(), handler) {
+        if let Some(value) = spread_value_node(node, handler) {
             spreads.push(expression_flow_from_node_with_handler(value, file, src, handler));
         }
         return;
     }
-    if let Some((key, value)) = field_pair_nodes(node) {
-        if let Some(name) = static_field_name(key, src) {
+    let pairs = field_pair_nodes(node, handler);
+    if !pairs.is_empty() {
+        for (key, value) in pairs {
+            let Some(name) = static_field_name(key, src, handler) else {
+                continue;
+            };
             fields.push(ExpressionField {
                 name,
                 value_span: Some(span_of(file, &value)),
@@ -207,13 +221,24 @@ fn collect_aggregate_members(
         }
         return;
     }
-    if is_shorthand_field(node.kind()) {
-        let name = node_text(&node, src).trim();
-        if !name.is_empty() {
+    if handler.shorthand_field_kinds.contains(&node.kind()) {
+        if let Some(name) = static_field_name(node, src, handler) {
+            let value_node = {
+                let mut cursor = node.walk();
+                let mut values = node
+                    .named_children(&mut cursor)
+                    .filter(|child| handler.static_field_name_kinds.contains(&child.kind()));
+                let first = values.next();
+                if values.next().is_none() {
+                    first
+                } else {
+                    None
+                }
+            };
             fields.push(ExpressionField {
-                name: name.to_string(),
-                value_span: Some(span_of(file, &node)),
-                value: expression_flow_from_node_with_handler(node, file, src, handler),
+                name,
+                value_span: Some(span_of(file, &value_node.unwrap_or(node))),
+                value: expression_flow_from_node_with_handler(value_node.unwrap_or(node), file, src, handler),
             });
         }
         return;
@@ -224,77 +249,91 @@ fn collect_aggregate_members(
     }
 }
 
-fn field_pair_nodes(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
-    if matches!(node.kind(), "dictionary_pair" | "array_element_initializer") {
+pub(super) fn field_pair_nodes<'tree>(
+    node: Node<'tree>,
+    handler: &GrammarHandler,
+) -> Vec<(Node<'tree>, Node<'tree>)> {
+    if let Some(pairs) = handler
+        .aggregate_pair_extractor
+        .map(|extract| extract(node))
+        .filter(|pairs| !pairs.is_empty())
+    {
+        return pairs;
+    }
+    if handler.two_child_aggregate_pair_kinds.contains(&node.kind()) {
         let mut cursor = node.walk();
         let children: Vec<_> = node.named_children(&mut cursor).collect();
         if children.len() == 2 {
-            return Some((children[0], children[1]));
+            return vec![(children[0], children[1])];
+        }
+        return Vec::new();
+    }
+    if !handler.aggregate_pair_kinds.contains(&node.kind()) {
+        return Vec::new();
+    }
+    let mut pairs = Vec::new();
+    let mut pending_key = None;
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.is_named() {
+                if cursor
+                    .field_name()
+                    .is_some_and(|field| handler.aggregate_key_field_names.contains(&field))
+                {
+                    pending_key = Some(child);
+                } else if cursor
+                    .field_name()
+                    .is_some_and(|field| handler.aggregate_value_field_names.contains(&field))
+                {
+                    if let Some(key) = pending_key.take().filter(|key| key.id() != child.id()) {
+                        pairs.push((key, child));
+                    }
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
         }
     }
-    let value = node
-        .child_by_field_name("value")
-        .or_else(|| node.child_by_field_name("expression"))
-        .or_else(|| node.child_by_field_name("right"))
-        .or_else(|| node.child_by_field_name("initializer"))?;
-    let key = node
-        .child_by_field_name("key")
-        .or_else(|| node.child_by_field_name("name"))
-        .or_else(|| node.child_by_field_name("field"))
-        .or_else(|| node.child_by_field_name("left"))?;
-    (key.id() != value.id()).then_some((key, value))
+    pairs
 }
 
-pub(super) fn static_field_name(node: Node<'_>, src: &[u8]) -> Option<String> {
-    let kind = node.kind();
-    if !looks_like_identifier(kind)
-        && !kind.contains("string")
-        && !kind.contains("symbol")
-        && !kind.contains("number")
-        && !kind.contains("integer")
-        && !matches!(
-            kind,
-            "property_identifier" | "field_identifier" | "hash_key_symbol"
-        )
+pub(super) fn static_field_name(node: Node<'_>, src: &[u8], handler: &GrammarHandler) -> Option<String> {
+    if let Some(name) = handler
+        .static_subscript_key_extractor
+        .and_then(|extract| extract(node, src))
     {
-        return None;
+        return Some(name);
     }
-    if looks_like_literal_value(kind, node_text(&node, src))
-        && !["string", "symbol", "number", "integer"]
-            .iter()
-            .any(|class| kind.contains(class))
-    {
-        return None;
+    if !handler.static_field_name_kinds.contains(&node.kind()) {
+        let mut cursor = node.walk();
+        let mut static_children = node
+            .named_children(&mut cursor)
+            .filter(|child| handler.static_field_name_kinds.contains(&child.kind()));
+        let child = static_children.next()?;
+        if static_children.next().is_some() {
+            return None;
+        }
+        return static_field_name(child, src, handler);
     }
-    let name = node_text(&node, src)
-        .trim()
-        .trim_start_matches(['.', ':'])
-        .trim_end_matches(':')
-        .trim_matches(['\'', '"'])
-        .to_string();
+    let name = handler
+        .reference_name_extractor
+        .and_then(|extract| extract(node, src))
+        .unwrap_or_else(|| node_text(&node, src).trim().to_string());
     (!name.is_empty()).then_some(name)
 }
 
-fn is_shorthand_field(kind: &str) -> bool {
-    matches!(
-        kind,
-        "shorthand_property_identifier"
-            | "shorthand_property_identifier_pattern"
-            | "shorthand_field_initializer"
-            | "field_identifier"
-    )
+fn is_spread_node(kind: &str, handler: &GrammarHandler) -> bool {
+    handler.spread_kinds.contains(&kind)
 }
 
-fn is_spread_node(kind: &str) -> bool {
-    kind.contains("spread") || kind.contains("splat") || kind == "base_field_initializer"
-}
-
-fn spread_value_node(node: Node<'_>) -> Option<Node<'_>> {
-    let field_value = node
-        .child_by_field_name("argument")
-        .or_else(|| node.child_by_field_name("value"))
-        .or_else(|| node.child_by_field_name("expression"))
-        .or_else(|| node.child_by_field_name("base"));
+fn spread_value_node<'tree>(node: Node<'tree>, handler: &GrammarHandler) -> Option<Node<'tree>> {
+    let field_value = handler
+        .spread_value_field_names
+        .iter()
+        .find_map(|field| node.child_by_field_name(field));
     if field_value.is_some() {
         return field_value;
     }
@@ -303,15 +342,15 @@ fn spread_value_node(node: Node<'_>) -> Option<Node<'_>> {
     children.next()
 }
 
-fn aggregate_value_node(node: Node<'_>) -> Option<Node<'_>> {
-    let field_value = node
-        .child_by_field_name("value")
-        .or_else(|| node.child_by_field_name("expression"))
-        .or_else(|| node.child_by_field_name("element"));
+fn aggregate_value_node<'tree>(node: Node<'tree>, handler: &GrammarHandler) -> Option<Node<'tree>> {
+    let field_value = handler
+        .aggregate_value_field_names
+        .iter()
+        .find_map(|field| node.child_by_field_name(field));
     if field_value.is_some() {
         return field_value;
     }
-    if node.kind() == "array_element_initializer" {
+    if handler.two_child_aggregate_pair_kinds.contains(&node.kind()) {
         let mut cursor = node.walk();
         let mut children = node.named_children(&mut cursor);
         return children.next();
@@ -319,22 +358,8 @@ fn aggregate_value_node(node: Node<'_>) -> Option<Node<'_>> {
     None
 }
 
-fn is_nested_aggregate(kind: &str) -> bool {
-    matches!(
-        kind,
-        "object"
-            | "object_literal"
-            | "dictionary"
-            | "dictionary_literal"
-            | "hash"
-            | "map"
-            | "map_literal"
-            | "set_or_map_literal"
-            | "struct_expression"
-            | "initializer_list"
-            | "array_creation_expression"
-            | "table_constructor"
-    )
+fn is_nested_aggregate(kind: &str, handler: &GrammarHandler) -> bool {
+    handler.named_aggregate_kinds.contains(&kind)
 }
 
 /// Decode exact scalar fields from a structurally complete, spread-free
@@ -349,49 +374,75 @@ fn is_nested_aggregate(kind: &str) -> bool {
 pub(super) fn exact_static_aggregate_fields(
     node: Node<'_>,
     src: &[u8],
+    handler: &GrammarHandler,
     decode: fn(Node<'_>, &[u8]) -> Option<crate::StaticScalarValue>,
 ) -> Option<Vec<crate::StaticAggregateFieldValue>> {
     fn collect(
         node: Node<'_>,
         src: &[u8],
+        handler: &GrammarHandler,
         decode: fn(Node<'_>, &[u8]) -> Option<crate::StaticScalarValue>,
         path: &mut Vec<String>,
         out: &mut Vec<crate::StaticAggregateFieldValue>,
         seen: &mut std::collections::HashSet<Vec<String>>,
     ) -> Option<()> {
-        if !is_nested_aggregate(node.kind()) {
+        if !is_nested_aggregate(node.kind(), handler) {
             return None;
         }
         let mut saw_field = false;
+        let direct_pairs = field_pair_nodes(node, handler);
+        if !direct_pairs.is_empty() {
+            for (key, value) in direct_pairs {
+                let name = static_field_name(key, src, handler)?;
+                saw_field = true;
+                path.push(name);
+                if !seen.insert(path.clone()) {
+                    return None;
+                }
+                if is_nested_aggregate(value.kind(), handler) {
+                    collect(value, src, handler, decode, path, out, seen)?;
+                } else if let Some(value) = decode(value, src) {
+                    out.push(crate::StaticAggregateFieldValue {
+                        path: path.clone(),
+                        value,
+                    });
+                }
+                path.pop();
+            }
+            return saw_field.then_some(());
+        }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            if is_spread_node(child.kind()) {
+            if is_spread_node(child.kind(), handler) {
                 return None;
             }
-            let Some((key, value)) = field_pair_nodes(child) else {
+            let pairs = field_pair_nodes(child, handler);
+            if pairs.is_empty() {
                 // Comments and grammar-owned punctuation are not named
                 // members. Any other named aggregate child is unsupported
                 // and therefore cannot prove a complete configuration.
-                if child.kind() != "comment" {
+                if !handler.comment_kinds.contains(&child.kind()) {
                     return None;
                 }
                 continue;
-            };
-            let name = static_field_name(key, src)?;
-            saw_field = true;
-            path.push(name);
-            if !seen.insert(path.clone()) {
-                return None;
             }
-            if is_nested_aggregate(value.kind()) {
-                collect(value, src, decode, path, out, seen)?;
-            } else if let Some(value) = decode(value, src) {
-                out.push(crate::StaticAggregateFieldValue {
-                    path: path.clone(),
-                    value,
-                });
+            for (key, value) in pairs {
+                let name = static_field_name(key, src, handler)?;
+                saw_field = true;
+                path.push(name);
+                if !seen.insert(path.clone()) {
+                    return None;
+                }
+                if is_nested_aggregate(value.kind(), handler) {
+                    collect(value, src, handler, decode, path, out, seen)?;
+                } else if let Some(value) = decode(value, src) {
+                    out.push(crate::StaticAggregateFieldValue {
+                        path: path.clone(),
+                        value,
+                    });
+                }
+                path.pop();
             }
-            path.pop();
         }
         saw_field.then_some(())
     }
@@ -400,6 +451,7 @@ pub(super) fn exact_static_aggregate_fields(
     collect(
         node,
         src,
+        handler,
         decode,
         &mut Vec::new(),
         &mut out,
@@ -415,90 +467,35 @@ pub(super) fn exact_static_aggregate_fields(
 pub(super) fn exact_static_sequence_values(
     node: Node<'_>,
     src: &[u8],
+    handler: &GrammarHandler,
     decode: fn(Node<'_>, &[u8]) -> Option<crate::StaticScalarValue>,
 ) -> Option<Vec<Option<crate::StaticScalarValue>>> {
-    if !is_positional_aggregate(node.kind()) {
+    if !is_positional_aggregate(node.kind(), handler) {
         return None;
     }
     let mut values = Vec::new();
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        if is_spread_node(child.kind()) {
+        if is_spread_node(child.kind(), handler) {
             return None;
         }
-        if is_syntax_only_tuple_child(child.kind()) {
+        if is_syntax_only_tuple_child(child.kind(), handler) {
             continue;
         }
-        let value = aggregate_value_node(child).unwrap_or(child);
+        let value = aggregate_value_node(child, handler).unwrap_or(child);
         values.push(decode(value, src));
     }
     (!values.is_empty()).then_some(values)
 }
 
-fn is_positional_aggregate(kind: &str) -> bool {
-    matches!(
-        kind,
-        "tuple"
-            | "tuple_expression"
-            | "tuple_literal"
-            | "set"
-            | "set_literal"
-            | "list"
-            | "list_literal"
-            | "array"
-            | "array_literal"
-            | "array_expression"
-            | "array_initializer"
-            | "initializer_list"
-            | "array_creation_expression"
-    )
+fn is_positional_aggregate(kind: &str, handler: &GrammarHandler) -> bool {
+    handler.positional_aggregate_kinds.contains(&kind)
 }
 
-fn is_syntax_only_tuple_child(kind: &str) -> bool {
-    kind.contains("type") || matches!(kind, "comment" | "label")
+fn is_syntax_only_tuple_child(kind: &str, handler: &GrammarHandler) -> bool {
+    handler.aggregate_syntax_only_kinds.contains(&kind) || handler.comment_kinds.contains(&kind)
 }
 
-fn projection_is_static(node: &Node<'_>, src: &[u8]) -> bool {
-    let text = node_text(node, src);
-    if !text.contains('[') {
-        return true;
-    }
-    let mut stack = vec![*node];
-    let mut saw_subscript = false;
-    while let Some(current) = stack.pop() {
-        if current.kind().contains("subscript")
-            || current.kind().contains("index")
-            || current.kind().contains("element_access")
-        {
-            saw_subscript = true;
-            let Some(index) = current
-                .child_by_field_name("index")
-                .or_else(|| current.child_by_field_name("subscript"))
-                .or_else(|| current.child_by_field_name("argument"))
-                .or_else(|| {
-                    // PHP and a few other grammars keep the subscript key as
-                    // the second named CST child without assigning a field
-                    // id. The child order is still grammar structure: base,
-                    // then key. Consume that parsed relationship rather than
-                    // rejecting a statically named projection.
-                    let mut cursor = current.walk();
-                    let index = current.named_children(&mut cursor).nth(1);
-                    index
-                })
-            else {
-                return false;
-            };
-            let kind = index.kind();
-            if !kind.contains("string")
-                && !kind.contains("symbol")
-                && !kind.contains("number")
-                && !kind.contains("integer")
-            {
-                return false;
-            }
-        }
-        let mut cursor = current.walk();
-        stack.extend(current.named_children(&mut cursor));
-    }
-    saw_subscript
+fn projection_is_static(place: &str) -> bool {
+    !bonsai_common::qualified_name_segments(place).contains(&"*")
 }

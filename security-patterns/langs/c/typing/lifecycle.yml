@@ -1,0 +1,49 @@
+# External lifecycle transfers. These are non-finding compiler models: the C
+# adapter emits calls and argument places; this rule data assigns API meaning.
+- id: c.typing.lifecycle_freed_argument
+  enabled: true
+  language: c
+  match:
+    kind: call
+    callee:
+      regex: '^(?:free|cfree|munmap|shmdt)$'
+  lifecycle_transition:
+    state: freed
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: free changes the pointer state
+    code: 'void f(void *p) { free(p); }'
+    expect_match_text: [free]
+  description: "C deallocation functions move argument zero to the freed lifecycle state. Typing-only; never a finding."
+
+- id: c.typing.lifecycle_closed_argument
+  enabled: true
+  language: c
+  match:
+    kind: call
+    callee:
+      regex: '^(?:fclose|pclose|close|closedir|fcloseall)$'
+  lifecycle_transition:
+    state: closed
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: fclose changes the stream state
+    code: 'void f(FILE *stream) { fclose(stream); }'
+    expect_match_text: [fclose]
+  description: "C close functions move argument zero to the closed lifecycle state. Typing-only; never a finding."
+
+- id: c.typing.lifecycle_unlocked_argument
+  enabled: true
+  language: c
+  match:
+    kind: call
+    callee:
+      regex: '^pthread_(?:mutex|rwlock|spin)_unlock$'
+  lifecycle_transition:
+    state: unlocked
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: pthread unlock changes the lock state
+    code: 'void f(pthread_mutex_t *m) { pthread_mutex_unlock(m); }'
+    expect_match_text: [pthread_mutex_unlock]
+  description: "POSIX unlock functions move argument zero to the unlocked lifecycle state. Typing-only; never a finding."

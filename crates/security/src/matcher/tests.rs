@@ -214,8 +214,11 @@ description: Endpoint proof fixture.
         tainted_args: vec![bonsai_taint::TaintedArgAtCall {
             index: 1,
             value_text: "query".to_string(),
+            place: Some("query".to_string()),
+            source_names: vec!["query".to_string()],
         }],
         tainted_receiver: None,
+        tainted_receiver_source_names: Vec::new(),
         kind: TaintedCallKind::Call,
     };
     let calls = [call];
@@ -236,6 +239,8 @@ description: Endpoint proof fixture.
         tainted_args: vec![bonsai_taint::TaintedArgAtCall {
             index: 0,
             value_text: "safe".to_string(),
+            place: Some("safe".to_string()),
+            source_names: vec!["safe".to_string()],
         }],
         ..calls[0].clone()
     };
@@ -292,8 +297,11 @@ description: Keyword endpoint fixture.
         tainted_args: vec![bonsai_taint::TaintedArgAtCall {
             index: 0,
             value_text: "payload".to_string(),
+            place: Some("payload".to_string()),
+            source_names: vec!["payload".to_string()],
         }],
         tainted_receiver: None,
+        tainted_receiver_source_names: Vec::new(),
         kind: TaintedCallKind::Call,
     };
     let calls = [call];
@@ -448,22 +456,133 @@ fn transient_decl_match_facts_survive_syntax_release() {
         "controllers/handler.js",
         "function handle(req, res) { return res.send(req.body); }\n",
     );
-    let factory = empty_factory_returns();
+    let factory = empty_rulepack_typing();
 
-    let first =
-        decl_match_facts_for_retention(&ws, file, None, factory.as_ref(), FactRetention::Transient, None);
+    let first = decl_match_facts_for_retention(
+        &ws,
+        file,
+        None,
+        DeclMatchFactsRequest {
+            factory: factory.as_ref(),
+            requirements: DeclFactRequirements::default(),
+            retention: FactRetention::Transient,
+            compiler_imports: None,
+            global_headers: None,
+        },
+    );
     assert!(
         !first.by_decl_span.is_empty(),
         "adapter lowering should produce matcher facts"
     );
     ws.db().release_syntax(file);
-    let second =
-        decl_match_facts_for_retention(&ws, file, None, factory.as_ref(), FactRetention::Transient, None);
+    let second = decl_match_facts_for_retention(
+        &ws,
+        file,
+        None,
+        DeclMatchFactsRequest {
+            factory: factory.as_ref(),
+            requirements: DeclFactRequirements::default(),
+            retention: FactRetention::Transient,
+            compiler_imports: None,
+            global_headers: None,
+        },
+    );
 
     assert!(
         Arc::ptr_eq(&first, &second),
         "exact lowered declaration facts should be reused after the transient syntax tree is evicted"
     );
+}
+
+#[test]
+fn decl_fact_requirements_follow_only_declared_rule_constraints() {
+    let rule = rule_from_yaml(
+        r#"
+id: python.test.projected-facts
+enabled: true
+language: python
+tag: test
+severity: high
+description: Exercises derived matcher fact projection.
+match:
+  kind: call
+  callee: { name: sink }
+constraints:
+  - arg_matches_regex: { index: 0, regex: "unsafe" }
+  - same_receiver_call_count_at_least: 2
+  - enclosing_decorator_in: [route]
+  - must_alias: { source_arg: 0, sink_arg: 1 }
+  - requires_runtime_type: { index: 0, type: str }
+  - requires_state: { index: 0, expected: closed }
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+    let prepared = PreparedRule::new(&rule).expect("rule prepares");
+    let factory = empty_rulepack_typing();
+    let requirements = DeclFactRequirements::for_rules(std::iter::once(&prepared), factory.as_ref());
+
+    for required in [
+        DeclFactRequirements::ASSIGNMENT_TEXTS,
+        DeclFactRequirements::RECEIVER_COUNTS,
+        DeclFactRequirements::DECORATORS,
+        DeclFactRequirements::ALIAS_CHAINS,
+        DeclFactRequirements::RUNTIME_TYPES,
+        DeclFactRequirements::LIFECYCLE,
+    ] {
+        assert!(requirements.contains(required));
+    }
+    assert!(!requirements.contains(DeclFactRequirements::RULEPACK_TYPES));
+}
+
+#[test]
+fn decl_fact_projection_is_part_of_the_exact_cache_identity() {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    let file = ws.vfs().write(
+        "controllers/handler.py",
+        "@route\ndef handle(value):\n    alias = value\n    return sink(alias)\n",
+    );
+    let factory = empty_rulepack_typing();
+    let minimal = decl_match_facts_for_retention(
+        &ws,
+        file,
+        None,
+        DeclMatchFactsRequest {
+            factory: factory.as_ref(),
+            requirements: DeclFactRequirements::default(),
+            retention: FactRetention::Transient,
+            compiler_imports: None,
+            global_headers: None,
+        },
+    );
+    let projected = decl_match_facts_for_retention(
+        &ws,
+        file,
+        None,
+        DeclMatchFactsRequest {
+            factory: factory.as_ref(),
+            requirements: DeclFactRequirements(
+                DeclFactRequirements::ASSIGNMENT_TEXTS
+                    | DeclFactRequirements::DECORATORS
+                    | DeclFactRequirements::ALIAS_CHAINS,
+            ),
+            retention: FactRetention::Transient,
+            compiler_imports: None,
+            global_headers: None,
+        },
+    );
+
+    assert!(
+        !Arc::ptr_eq(&minimal, &projected),
+        "a smaller derived-fact projection must never satisfy a larger request"
+    );
+    assert!(minimal.by_decl_span.values().all(|facts| {
+        facts.assignment_map.is_empty() && facts.decl_decorators.is_empty() && facts.alias_chains.is_empty()
+    }));
+    assert!(projected.by_decl_span.values().any(|facts| {
+        !facts.assignment_map.is_empty()
+            || !facts.decl_decorators.is_empty()
+            || !facts.alias_chains.is_empty()
+    }));
 }
 
 #[test]
@@ -705,7 +824,7 @@ description: impossible target
     let matching = PreparedRule::new(&matching_rule).expect("matching rule prepares");
     let impossible = PreparedRule::new(&impossible_rule).expect("impossible rule prepares");
     let refs = vec![&matching, &impossible];
-    let batch = PreparedRuleBatch::new(&refs, empty_factory_returns());
+    let batch = PreparedRuleBatch::new(&refs, empty_rulepack_typing());
     let syntax = CompilerSyntaxHeader {
         calls: vec![bonsai_lang_api::CompilerCallHeader {
             name: "client.clean".to_string(),
@@ -716,12 +835,64 @@ description: impossible target
         ..Default::default()
     };
 
-    let (filtered, deferred) =
-        batch.filtered_rule_refs_for_syntax_header(refs, &syntax, None, &AHashSet::new(), "python", true);
+    let (filtered, deferred, needs_constructor_resolution) = batch.filtered_rule_refs_for_syntax_header(
+        refs,
+        &syntax,
+        "client.clean(value)",
+        None,
+        "python",
+        true,
+    );
 
     assert!(!deferred);
+    assert!(!needs_constructor_resolution);
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].rule.id, "python.test.clean");
+}
+
+#[test]
+fn compiler_syntax_header_never_changes_type_identifier_case() {
+    let rule = rule_from_yaml(
+        r#"
+id: java.test.client_send
+enabled: true
+language: java
+tag: test
+severity: info
+match:
+  kind: call
+  callee:
+    attribute: [Client, send]
+description: exact receiver type identity
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+    let prepared = PreparedRule::new(&rule).expect("rule prepares");
+    let refs = vec![&prepared];
+    let batch = PreparedRuleBatch::new(&refs, empty_rulepack_typing());
+    let syntax = CompilerSyntaxHeader {
+        calls: vec![bonsai_lang_api::CompilerCallHeader {
+            name: "client.send".to_string(),
+            receiver: Some("client".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+        }],
+        type_aliases: vec![TypeAliasBinding {
+            name: "client".to_string(),
+            type_name: "client".to_string(),
+        }],
+        ..Default::default()
+    };
+
+    let (filtered, deferred, needs_constructor_resolution) =
+        batch.filtered_rule_refs_for_syntax_header(refs, &syntax, "client.send(value)", None, "java", true);
+
+    assert!(!deferred);
+    assert!(!needs_constructor_resolution);
+    assert!(
+        filtered.is_empty(),
+        "a lowercase declared type must not be rewritten to Client"
+    );
 }
 
 #[test]
@@ -743,7 +914,7 @@ description: static import target
     );
     let prepared = PreparedRule::new(&rule).expect("rule prepares");
     let refs = vec![&prepared];
-    let batch = PreparedRuleBatch::new(&refs, empty_factory_returns());
+    let batch = PreparedRuleBatch::new(&refs, empty_rulepack_typing());
     let syntax = CompilerSyntaxHeader {
         calls: vec![bonsai_lang_api::CompilerCallHeader {
             name: "format".to_string(),
@@ -765,16 +936,17 @@ description: static import target
         }],
     };
 
-    let (filtered, deferred) = batch.filtered_rule_refs_for_syntax_header(
+    let (filtered, deferred, needs_constructor_resolution) = batch.filtered_rule_refs_for_syntax_header(
         refs,
         &syntax,
+        "return format(value);",
         Some(&imports),
-        &AHashSet::new(),
         "java",
         true,
     );
 
     assert!(!deferred);
+    assert!(!needs_constructor_resolution);
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].rule.id, "java.test.string_format");
 }
@@ -798,7 +970,7 @@ description: compound receiver with symbolic method
     );
     let prepared = PreparedRule::new(&rule).expect("rule prepares");
     let refs = vec![&prepared];
-    let batch = PreparedRuleBatch::new(&refs, empty_factory_returns());
+    let batch = PreparedRuleBatch::new(&refs, empty_rulepack_typing());
     let syntax = CompilerSyntaxHeader {
         calls: vec![bonsai_lang_api::CompilerCallHeader {
             name: "BCrypt::Password.==".to_string(),
@@ -809,10 +981,17 @@ description: compound receiver with symbolic method
         ..Default::default()
     };
 
-    let (filtered, deferred) =
-        batch.filtered_rule_refs_for_syntax_header(refs, &syntax, None, &AHashSet::new(), "ruby", true);
+    let (filtered, deferred, needs_constructor_resolution) = batch.filtered_rule_refs_for_syntax_header(
+        refs,
+        &syntax,
+        "password == candidate",
+        None,
+        "ruby",
+        true,
+    );
 
     assert!(!deferred);
+    assert!(!needs_constructor_resolution);
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].rule.id, "ruby.test.password_compare");
 }
@@ -836,7 +1015,7 @@ description: inherited target
     );
     let prepared = PreparedRule::new(&rule).expect("rule prepares");
     let refs = vec![&prepared];
-    let batch = PreparedRuleBatch::new(&refs, empty_factory_returns());
+    let batch = PreparedRuleBatch::new(&refs, empty_rulepack_typing());
     let inherited_candidate = CompilerSyntaxHeader {
         calls: vec![bonsai_lang_api::CompilerCallHeader {
             name: "child.run".to_string(),
@@ -847,15 +1026,16 @@ description: inherited target
         ..Default::default()
     };
 
-    let (filtered, deferred) = batch.filtered_rule_refs_for_syntax_header(
+    let (filtered, deferred, needs_constructor_resolution) = batch.filtered_rule_refs_for_syntax_header(
         refs.clone(),
         &inherited_candidate,
+        "child.run(value)",
         None,
-        &AHashSet::new(),
         "java",
         false,
     );
     assert!(filtered.is_empty());
+    assert!(!needs_constructor_resolution);
     assert!(
         deferred,
         "Child.run may become Base.run after exact ancestry expansion"
@@ -870,15 +1050,16 @@ description: inherited target
         }],
         ..Default::default()
     };
-    let (filtered, deferred) = batch.filtered_rule_refs_for_syntax_header(
+    let (filtered, deferred, needs_constructor_resolution) = batch.filtered_rule_refs_for_syntax_header(
         refs,
         &unrelated_method,
+        "child.stop(value)",
         None,
-        &AHashSet::new(),
         "java",
         false,
     );
     assert!(filtered.is_empty());
+    assert!(!needs_constructor_resolution);
     assert!(
         !deferred,
         "receiver ancestry cannot turn an unrelated method name into the rule target"
@@ -887,13 +1068,15 @@ description: inherited target
 
 #[test]
 fn syntax_bound_resource_assignment_uses_rulepack_factory_type() {
-    let mut factory = FactoryReturns::default();
+    let mut factory = RulepackTyping::default();
     factory.by_language.insert(
         "python".to_string(),
         vec![FactoryReturnSpec {
+            kind: MatchKind::Call,
             method: "AsyncClient".to_string(),
             receiver_path: vec!["httpx".to_string()],
             type_name: "AsyncClient".to_string(),
+            required_imports: Vec::new(),
         }],
     );
     let events = vec![FlowEvent::Using {
@@ -916,6 +1099,8 @@ fn syntax_bound_resource_assignment_uses_rulepack_factory_type() {
         &factory,
         "python",
         &std::collections::HashMap::new(),
+        None,
+        None,
     );
 
     assert_eq!(
@@ -924,6 +1109,91 @@ fn syntax_bound_resource_assignment_uses_rulepack_factory_type() {
             name: "client".to_string(),
             type_name: "AsyncClient".to_string(),
         }]
+    );
+}
+
+#[test]
+fn structured_new_metadata_is_exact_and_function_shaped_typing_fails_closed_without_identity() {
+    let constructor_rule = rule_from_yaml(
+        r#"
+id: kotlin.test.lowercase_constructor
+enabled: true
+language: kotlin
+tag: path-traversal
+severity: high
+cwe: [CWE-22]
+match:
+  kind: new
+  callee:
+    attribute: [example, lowercase]
+constraints: []
+match_examples:
+  - code: 'fun f() { example.lowercase() }'
+description: exact external constructor metadata
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+    let return_type_rule = rule_from_yaml(
+        r#"
+id: kotlin.typing.lowercase_constructor
+enabled: true
+language: kotlin
+returns_type: lowercase
+match:
+  kind: new
+  callee:
+    attribute: [example, lowercase]
+constraints: []
+match_examples:
+  - code: 'fun f() { val value = example.lowercase() }'
+description: exact external constructor result type
+"#,
+        crate::rule::RuleKind::Typing,
+    );
+    let constructor_only = build_rulepack_typing(&[&constructor_rule]);
+    let typing = build_rulepack_typing(&[&constructor_rule, &return_type_rule]);
+    let alias_map = std::collections::HashMap::from([(
+        "lowercase".to_string(),
+        AliasTarget::Namespace {
+            module: "example.lowercase".to_string(),
+        },
+    )]);
+
+    assert!(rulepack_constructor_matches_call(
+        &constructor_only,
+        "kotlin",
+        "lowercase",
+        None,
+        &alias_map,
+        None,
+    ));
+    assert!(!rulepack_constructor_matches_call(
+        &typing,
+        "kotlin",
+        "unrelated",
+        None,
+        &alias_map,
+        None,
+    ));
+
+    let events = vec![FlowEvent::Assign {
+        span: span(),
+        target: "value".to_string(),
+        source_name: None,
+        source_call: Some("example.lowercase".to_string()),
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: true,
+        value_kind: None,
+    }];
+    assert!(
+        synth_factory_type_aliases(&events, &[], &constructor_only, "kotlin", &alias_map, None, None,)
+            .is_empty(),
+        "constructor identity alone must not inject a result type"
+    );
+    assert!(
+        synth_factory_type_aliases(&events, &[], &typing, "kotlin", &alias_map, None, None).is_empty(),
+        "a function-shaped CST call must not receive constructor return typing without exact workspace identity"
     );
 }
 
@@ -1140,6 +1410,37 @@ description: Java main args.
         prepared.text_possible_in("public static void main(String[] commandLine) {}", None),
         "the prefilter must follow the Java entry-point signature, not a conventional parameter name"
     );
+}
+
+#[test]
+fn two_part_attribute_prefilter_never_uses_identifier_case_as_type_evidence() {
+    let rule = rule_from_yaml(
+        r#"
+id: java.test.lowercase_receiver_type
+enabled: true
+language: java
+tag: test
+severity: info
+match:
+  kind: call
+  callee:
+    attribute: [lowercase_type, send]
+description: Lowercase user-defined types remain valid compiler identities.
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+    let prepared = PreparedRule::new(&rule).expect("rule prepares");
+
+    assert!(prepared.syntax_target_possible_in_mode(
+        "class App { void run(Transport transport) { transport.send(value); } }",
+        ConstraintMode::Inventory,
+        CallTextPrefilter::Parenthesized,
+    ));
+    assert!(!prepared.syntax_target_possible_in_mode(
+        "class App { void run(Transport transport) { transport.receive(value); } }",
+        ConstraintMode::Inventory,
+        CallTextPrefilter::Parenthesized,
+    ));
 }
 
 #[test]
@@ -1625,13 +1926,80 @@ description: Raw HTML return.
         crate::rule::RuleKind::Sink,
     );
     let prepared = PreparedRule::new(&raw_html_rule).expect("rule prepares");
-    assert!(
-        !prepared.text_possible_in("class Box<T> { List<String> values; }", None),
-        "Java generics must not satisfy the raw-HTML return prefilter"
+    let refs = vec![&prepared];
+    let batch = PreparedRuleBatch::new(&refs, empty_rulepack_typing());
+    let unrelated_source =
+        "/** <div> appears only in documentation. */ class Box<T> { List<String> values() { return values; } }";
+    let unrelated_return_start = unrelated_source.find("return values").expect("return fixture");
+    let unrelated = CompilerSyntaxHeader {
+        returns: vec![bonsai_lang_api::CompilerReturnHeader {
+            span: Span::new(
+                FileId::new(0),
+                unrelated_return_start as u64,
+                (unrelated_return_start + "return values;".len()) as u64,
+            ),
+            value_text: Some("values".to_string()),
+            value_name: Some("values".to_string()),
+        }],
+        ..Default::default()
+    };
+    let (filtered, deferred, needs_constructor_resolution) = batch.filtered_rule_refs_for_syntax_header(
+        refs.clone(),
+        &unrelated,
+        unrelated_source,
+        None,
+        "java",
+        true,
     );
     assert!(
-        prepared.text_possible_in("class App { String f(String n) { return \"<div>\" + n; } }", None),
-        "real HTML tag literals should satisfy the raw-HTML return prefilter"
+        filtered.is_empty(),
+        "Java generics must not force a return-rule body open"
+    );
+    assert!(!deferred);
+    assert!(!needs_constructor_resolution);
+
+    let matching = CompilerSyntaxHeader {
+        returns: vec![bonsai_lang_api::CompilerReturnHeader {
+            span: span(),
+            value_text: Some("\"<div>\" + n".to_string()),
+            value_name: None,
+        }],
+        ..Default::default()
+    };
+    let (filtered, _, _) = batch.filtered_rule_refs_for_syntax_header(
+        refs.clone(),
+        &matching,
+        "class App { String f(String n) { return \"<div>\" + n; } }",
+        None,
+        "java",
+        true,
+    );
+    assert_eq!(
+        filtered.len(),
+        1,
+        "real adapter return targets must survive planning"
+    );
+
+    let normalized = CompilerSyntaxHeader {
+        returns: vec![bonsai_lang_api::CompilerReturnHeader {
+            span: span(),
+            value_text: Some("<div>".to_string()),
+            value_name: None,
+        }],
+        ..Default::default()
+    };
+    let (filtered, _, _) = batch.filtered_rule_refs_for_syntax_header(
+        refs,
+        &normalized,
+        "class Synthetic { String f(); }",
+        None,
+        "java",
+        true,
+    );
+    assert_eq!(
+        filtered.len(),
+        1,
+        "adapter-normalized return values must survive even when their spelling is not raw source text"
     );
 }
 
@@ -1665,6 +2033,7 @@ fn return_flow_reads_strip_call_callee_but_keep_argument_reads() {
     collect_flow_read_sites(
         &[FlowEvent::Return {
             span: span(),
+            value_kind: None,
             value_text: Some("params(input)".to_string()),
             value_name: None,
             value_flow: bonsai_lang_api::ExpressionFlow::from_source_names(vec!["input".to_string()]),
@@ -1680,6 +2049,7 @@ fn return_flow_reads_strip_call_callee_but_keep_argument_reads() {
     collect_flow_read_sites(
         &[FlowEvent::Return {
             span: span(),
+            value_kind: None,
             value_text: Some(r#"render(params["name"])"#.to_string()),
             value_name: None,
             value_flow: bonsai_lang_api::ExpressionFlow::from_source_names(vec![
@@ -1905,6 +2275,7 @@ fn prior_call_static_arguments_use_language_decoded_values() {
         argument_index: index,
         argument_span: Span::new(FileId::new(0), 11 + index as u64, 12 + index as u64),
         direct_call_span: None,
+        value_kind: None,
         inline_callback_params: Vec::new(),
         value_flow: Default::default(),
         static_value: value,
@@ -2035,17 +2406,49 @@ fn receiver_method_call_counts_group_by_receiver_and_method() {
 }
 
 #[test]
-fn arg_value_identifier_fallback_ignores_quoted_literals() {
+fn overlapping_arg_taint_uses_compiler_carriers_not_rendered_text() {
+    let tainted = bonsai_taint::TaintedArgAtCall {
+        index: 0,
+        value_text: "untrusted rendering".to_string(),
+        place: Some("name".to_string()),
+        source_names: vec!["name".to_string()],
+    };
+    let literal = CallArg {
+        span: span(),
+        passing_mode: bonsai_lang_api::ArgumentPassingMode::Value,
+        name: None,
+        value_text: r#""SELECT * FROM users WHERE name = ?""#.to_string(),
+        place: None,
+        source_names: Vec::new(),
+    };
     assert!(
-        !arg_matches_tainted_value(r#""SELECT * FROM users WHERE name = ?""#, "name"),
-        "identifier fallback must not treat words inside string literals as variable references"
+        !arg_matches_tainted_value(&literal, &tainted),
+        "words in rendered literal text are not compiler value carriers"
     );
-    assert!(arg_matches_tainted_value("fmt.Sprintf(query, name)", "name"));
+
+    let compound = CallArg {
+        value_text: "fmt.Sprintf(query, name)".to_string(),
+        source_names: vec!["query".to_string(), "name".to_string()],
+        ..literal
+    };
+    assert!(arg_matches_tainted_value(&compound, &tainted));
+
+    let rendered_only = bonsai_taint::TaintedArgAtCall {
+        value_text: "name".to_string(),
+        place: None,
+        source_names: Vec::new(),
+        ..tainted
+    };
+    assert!(
+        !arg_matches_tainted_value(&compound, &rendered_only),
+        "taint attribution must not recover identities from render-only text"
+    );
 }
 
 fn test_call_fact(callee: &str, origin: CallFactOrigin) -> CallFact {
     CallFact {
         callee: callee.to_string(),
+        receiver: None,
         span: span(),
         args: Vec::new(),
         receiver_types: Vec::new(),

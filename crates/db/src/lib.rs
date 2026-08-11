@@ -560,7 +560,7 @@ impl AnalyzerDb {
             }
             bonsai_lang_api::apply_local_closure_captures(&mut index);
             bonsai_lang_api::apply_constructor_result_type_aliases(&mut index);
-            bonsai_lang_api::apply_assign_value_kind(&mut index);
+            bonsai_lang_api::apply_expression_value_kinds(&mut index);
             bonsai_lang_api::apply_assign_call_result_types(&mut index);
             bonsai_lang_api::apply_call_receiver_types_with_language_syntax(
                 &mut index,

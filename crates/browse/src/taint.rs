@@ -359,6 +359,21 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
         )
     });
     cross_calls.dedup();
+    if bonsai_diagnostics::debug::is_enabled("idg-closure-detail") {
+        for edge in &cross_calls {
+            bonsai_diagnostics::debug_log!(
+                "idg-closure-detail",
+                "dump-taint cross-call caller={} callee={} span={:?} arg={} param={} relation={:?} precision={:?}",
+                edge.caller.raw(),
+                edge.callee.raw(),
+                edge.call_span,
+                edge.arg_idx,
+                edge.param_idx,
+                edge.relation,
+                edge.precision
+            );
+        }
+    }
     let tainted_arg_sites = idg.tainted_call_args_in_reachable_nodes(&closure_nodes);
     let mut records: Vec<TaintRecord> = cross_calls
         .iter()

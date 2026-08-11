@@ -136,7 +136,9 @@
   constraints:
   - arg_matches_regex:
       index: 1
-      regex: 'cost:\s*[0-9]\b'
+      # The adapter exposes Ruby's `cost:` key separately; positional index
+      # one is therefore the exact scalar value, not source-shaped pair text.
+      regex: '^[0-9]\b'
   match_examples:
   - name: bcrypt low cost
     code: |

@@ -107,7 +107,7 @@ Required:
 - `id` - unique per (language, kind).
 - `language` - required in flat layout, optional in canonical layout.
 - `match.kind` - `call`, `new`, `read`, `write`, `return`, `param`, or
-  `missing`.
+  `missing`; typing rules may additionally use `type`.
 - `match.callee` (call/new) or `match.target` (read/write/return/param).
 - `description` - at least 15 chars; explains the API shape and the
   security consequence.
@@ -127,7 +127,16 @@ Sinks also need `cwe` and `severity`. Sources need `trust`.
 | `write` | a container / attribute write (sink side) | `target` |
 | `return` | a function's return expression | `target` |
 | `param` | a declaration's parameter identifier | `target` |
+| `type` | a compiler-declared callable/interface type (typing rules only) | `target` |
 | `missing` | fires when the callee is absent on a path (see the walker section) | `callee` |
+
+Typing models may declare `returns_type`, a callback signature, or transfer
+semantics. Callback signatures use `callback_param_types` in parameter order.
+For `kind: call`, `callback_arg_index` selects the inline callback argument;
+for `kind: type`, the target selects the explicitly declared callable type and
+the argument index must be absent. The compiler contributes exact call,
+argument, parameter, import, and declared-type facts; provider names and
+external types stay in YAML.
 
 **Attribute path** - preferred for `Type.method` calls:
 

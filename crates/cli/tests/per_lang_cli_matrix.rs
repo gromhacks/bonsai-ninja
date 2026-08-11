@@ -412,7 +412,7 @@ pub const LANGS: &[LangExp] = &[
         run_admin_command: "runAdminCommand",
         update_user: "updateUser",
         cmdi_sink: "os.execute",
-        sqli_sink: "db:execute",
+        sqli_sink: "db.execute",
         min_findings_micro: 1,
         min_findings_complex: 1,
         min_complex_decls: 5,
@@ -505,10 +505,13 @@ pub const LANGS: &[LangExp] = &[
         // joins stopped reporting as filesystem sinks and untyped Mako
         // render calls stopped reporting as template-source execution. The
         // real downstream path consumers and Mako Template constructor stay
-        // covered by dedicated positive/negative regression tests. 50 -> 49
-        // after canonical flow-identity dedup removed the final duplicate;
-        // all 13 sink-rule families remain represented by distinct flows.
-        min_findings_complex: 49,
+        // covered by dedicated positive/negative regression tests. 50 -> 47
+        // after canonical flow-identity dedup and exact argument identity
+        // removed three final duplicate/derived rows; all 13 sink-rule
+        // families remain represented by distinct flows. This floor guards
+        // the exact semantic fixture, while focused rule tests guard every
+        // supported positive and negative shape independently.
+        min_findings_complex: 47,
         min_complex_decls: 190,
         refs_populated: true,
         has_classes: false,

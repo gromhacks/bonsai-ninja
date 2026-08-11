@@ -1,0 +1,57 @@
+- id: scala.typing.lifecycle_closed_receiver
+  enabled: true
+  language: scala
+  match:
+    kind: call
+    callee:
+      regex: '(?:^|\.)(?:close|shutdown)$'
+  lifecycle_transition:
+    state: closed
+    binding: { kind: receiver }
+  match_examples:
+  - name: close changes the receiver state
+    code: 'def f(stream: java.io.InputStream): Unit = stream.close()'
+    expect_match_text: [stream.close]
+  description: "Scala/JVM close/shutdown moves the receiver to closed. Typing-only; never a finding."
+
+- id: scala.typing.lifecycle_cancelled_receiver
+  enabled: true
+  language: scala
+  match: { kind: call, callee: { name: cancel } }
+  lifecycle_transition:
+    state: cancelled
+    binding: { kind: receiver }
+  match_examples:
+  - name: cancel changes the receiver state
+    code: 'def f(task: Task): Unit = task.cancel()'
+    expect_match_text: [task.cancel]
+  description: "Scala cancel moves the receiver to cancelled. Typing-only; never a finding."
+
+- id: scala.typing.lifecycle_unlocked_receiver
+  enabled: true
+  language: scala
+  match: { kind: call, callee: { name: unlock } }
+  lifecycle_transition:
+    state: unlocked
+    binding: { kind: receiver }
+  match_examples:
+  - name: unlock changes the receiver state
+    code: 'def f(lock: java.util.concurrent.locks.Lock): Unit = lock.unlock()'
+    expect_match_text: [lock.unlock]
+  description: "Scala unlock moves the receiver to unlocked. Typing-only; never a finding."
+
+- id: scala.typing.lifecycle_released_receiver
+  enabled: true
+  language: scala
+  match:
+    kind: call
+    callee:
+      regex: '(?:^|\.)(?:release|dispose)$'
+  lifecycle_transition:
+    state: freed
+    binding: { kind: receiver }
+  match_examples:
+  - name: dispose changes the receiver state
+    code: 'def f(resource: Resource): Unit = resource.dispose()'
+    expect_match_text: [resource.dispose]
+  description: "Scala release/dispose moves the receiver to freed. Typing-only; never a finding."

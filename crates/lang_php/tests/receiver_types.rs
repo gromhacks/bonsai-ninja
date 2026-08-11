@@ -107,6 +107,32 @@ class Repository extends BaseRepository {
 }
 
 #[test]
+fn parenthesized_inline_constructor_types_member_receiver() {
+    let db = db_with(
+        r#"
+<?php
+class Util { public function helper($value) {} }
+function entry($args) { (new Util())->helper($args); }
+"#,
+    );
+    let global = db.global_index();
+    let entry = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "entry")
+        .expect("entry function should be indexed");
+    let mut calls = Vec::new();
+    collect_calls(&entry.flow_events, &mut calls);
+
+    assert!(
+        calls.iter().any(|(name, receiver_types)| {
+            name.ends_with("helper") && receiver_types.iter().any(|ty| ty == "Util")
+        }),
+        "PHP's adapter-extracted constructor target must type an inline member receiver, got {calls:?}"
+    );
+}
+
+#[test]
 fn class_declaration_records_extends_base() {
     let db = db_with(
         r#"

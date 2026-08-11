@@ -11,6 +11,43 @@ fn conformance_traced() {
     );
 }
 
+#[test]
+fn c_call_arguments_use_ast_value_kinds_not_identifier_spelling() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, AssignValueKind, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_c::CAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("values.c"),
+        "void emit(const char*, const char*, int);\n\
+         void run(const char *USER_VALUE) { emit(\"literal\", USER_VALUE, 42); }\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let index = adapter.extract_declarations(
+        file,
+        &AdapterContext {
+            vfs: &vfs,
+            diagnostics: &diagnostics,
+            tree_provider: None,
+            workspace_root: None,
+        },
+    );
+    let kind = |argument_index| {
+        index
+            .call_argument_values
+            .iter()
+            .find(|fact| fact.argument_index == argument_index)
+            .and_then(|fact| fact.value_kind)
+    };
+
+    assert_eq!(kind(0), Some(AssignValueKind::Literal));
+    assert_eq!(kind(1), None, "ALL_CAPS is still a dynamic parameter");
+    assert_eq!(kind(2), Some(AssignValueKind::Literal));
+}
+
 /// Drift guard for the semantic-identity contract
 /// (`docs/contributing/design-patterns.mdx::Semantic Resolution Always`). The C
 /// adapter must:

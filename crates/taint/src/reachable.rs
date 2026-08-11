@@ -173,6 +173,14 @@ impl EntryTaintGraph {
                 bytes = bytes
                     .saturating_add(estimated_string_capacity_bytes(&arg.value_text))
                     .saturating_add(estimated_string_capacity_bytes(&arg.param_name));
+                if let Some(place) = &arg.place {
+                    bytes = bytes.saturating_add(estimated_string_capacity_bytes(place));
+                }
+                bytes =
+                    bytes.saturating_add(estimated_vec_buffer_bytes::<String>(arg.source_names.capacity()));
+                for source in &arg.source_names {
+                    bytes = bytes.saturating_add(estimated_string_capacity_bytes(source));
+                }
             }
         }
         bytes = bytes.saturating_add(estimated_vec_buffer_bytes::<crate::idg_api::TaintedCall>(
@@ -186,9 +194,23 @@ impl EntryTaintGraph {
                 ));
             for arg in &call.tainted_args {
                 bytes = bytes.saturating_add(estimated_string_capacity_bytes(&arg.value_text));
+                if let Some(place) = &arg.place {
+                    bytes = bytes.saturating_add(estimated_string_capacity_bytes(place));
+                }
+                bytes =
+                    bytes.saturating_add(estimated_vec_buffer_bytes::<String>(arg.source_names.capacity()));
+                for source in &arg.source_names {
+                    bytes = bytes.saturating_add(estimated_string_capacity_bytes(source));
+                }
             }
             if let Some(receiver) = &call.tainted_receiver {
                 bytes = bytes.saturating_add(estimated_string_capacity_bytes(receiver));
+            }
+            bytes = bytes.saturating_add(estimated_vec_buffer_bytes::<String>(
+                call.tainted_receiver_source_names.capacity(),
+            ));
+            for source in &call.tainted_receiver_source_names {
+                bytes = bytes.saturating_add(estimated_string_capacity_bytes(source));
             }
         }
         bytes.max(1)
@@ -2017,6 +2039,21 @@ fn compile_idg_taint_closure(request: TaintClosureCompilationRequest<'_>) -> Tai
     } else {
         close(None, None)
     };
+    if bonsai_diagnostics::debug::is_enabled("idg-closure-detail") {
+        for edge in &evidence.cross_calls {
+            bonsai_diagnostics::debug_log!(
+                "idg-closure-detail",
+                "cross-call caller={} callee={} span={:?} arg={} param={} relation={:?} precision={:?}",
+                edge.caller.raw(),
+                edge.callee.raw(),
+                edge.call_span,
+                edge.arg_idx,
+                edge.param_idx,
+                edge.relation,
+                edge.precision
+            );
+        }
+    }
     TaintClosureCompilation {
         nodes: evidence.nodes,
         cross_calls: evidence.cross_calls,
@@ -2228,6 +2265,16 @@ fn materialize_direct_tainted_calls(
                     .map(|value_text| crate::idg_api::TaintedArgAtCall {
                         index: *arg_index as usize,
                         value_text: value_text.clone(),
+                        place: call_summary
+                            .args_place
+                            .get(*arg_index as usize)
+                            .cloned()
+                            .flatten(),
+                        source_names: call_summary
+                            .args_source_names
+                            .get(*arg_index as usize)
+                            .cloned()
+                            .unwrap_or_default(),
                     })
             })
             .collect();
@@ -2242,6 +2289,11 @@ fn materialize_direct_tainted_calls(
             .receiver
             .as_ref()
             .and_then(|receiver| arg_indices.contains(&u32::MAX).then(|| receiver.clone()));
+        let tainted_receiver_source_names = if tainted_receiver.is_some() {
+            call_summary.receiver_source_names.clone()
+        } else {
+            Vec::new()
+        };
         if tainted_args.is_empty() && tainted_receiver.is_none() {
             continue;
         }
@@ -2253,6 +2305,7 @@ fn materialize_direct_tainted_calls(
                 .unwrap_or(call_span),
             tainted_args,
             tainted_receiver,
+            tainted_receiver_source_names,
             kind: crate::idg_api::TaintedCallKind::Call,
         });
     }
@@ -2286,6 +2339,7 @@ fn materialize_synthetic_tainted_calls(
                 call_span,
                 tainted_args: Vec::new(),
                 tainted_receiver: None,
+                tainted_receiver_source_names: Vec::new(),
                 kind: crate::idg_api::TaintedCallKind::Return,
             });
         }
@@ -2790,6 +2844,8 @@ fn collect_tainted_writes(
             tainted_args.push(crate::idg_api::TaintedArgAtCall {
                 index: tainted_args.len(),
                 value_text: value.clone(),
+                place: Some(value.clone()),
+                source_names: vec![value.clone()],
             });
         }
         if tainted_args.is_empty() {
@@ -2802,6 +2858,7 @@ fn collect_tainted_writes(
             call_span: write.span,
             tainted_args,
             tainted_receiver: None,
+            tainted_receiver_source_names: Vec::new(),
             kind: crate::idg_api::TaintedCallKind::Write,
         });
     }
@@ -3675,7 +3732,7 @@ fn walk_call_events_for_propagation(
                 if !target_spans.contains(span) {
                     continue;
                 }
-                if !receiver_state_matches(propagations, name, receiver_types) {
+                if !receiver_state_matches(propagations, *span, name, receiver_types) {
                     continue;
                 }
                 let Some(receiver_name) = receiver.as_deref().map(str::trim).filter(|r| !r.is_empty()) else {
@@ -3796,6 +3853,7 @@ fn walk_call_events_for_propagation(
 /// agree on which calls participate in receiver inheritance.
 fn receiver_state_matches(
     configured: &[crate::idg_api::ReceiverStatePropagation],
+    observed_span: bonsai_common::Span,
     observed: &str,
     receiver_types: &[String],
 ) -> bool {
@@ -3818,6 +3876,13 @@ fn receiver_state_matches(
         let Some(expected) = shape.receiver_type.as_deref() else {
             return true;
         };
+        // `InterTaintConfig` is public, so callers are not required to
+        // canonicalize exact-site evidence before querying. The IDG transfer
+        // options sort their copy for compact binary searches; this facade
+        // deliberately accepts either ordering.
+        if shape.resolved_call_sites.contains(&observed_span) {
+            return true;
+        }
         let expected_tail = short_member_tail(expected);
         receiver_types.iter().any(|actual| {
             let actual = actual
@@ -4217,30 +4282,10 @@ impl CallEventSummary {
         self.args_place
             .get(index)
             .and_then(|place| place.as_deref())
-            .map(normalise_output_arg_target_text)
+            .map(str::trim)
             .filter(|place| !place.is_empty())
-            .or_else(|| {
-                let text = normalise_output_arg_target_text(self.args_value_text.get(index)?);
-                is_addressable_arg_target(&text).then_some(text)
-            })
+            .map(str::to_string)
     }
-}
-
-fn normalise_output_arg_target_text(text: &str) -> String {
-    normalise_qualified_text(text)
-        .trim_start_matches(bonsai_common::is_name_punctuation)
-        .trim()
-        .to_string()
-}
-
-fn is_addressable_arg_target(text: &str) -> bool {
-    let text = text.trim();
-    !text.is_empty()
-        && !text.starts_with('.')
-        && !text.ends_with('.')
-        && text
-            .chars()
-            .all(|ch| ch == '.' || ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn tainted_args_for_cross_call_edge(
@@ -4277,6 +4322,8 @@ fn tainted_args_for_cross_call_edge(
                     index,
                     value_text: receiver.to_string(),
                     param_name,
+                    place: summary.receiver.clone(),
+                    source_names: summary.receiver_source_names.clone(),
                 }];
             }
         }
@@ -4297,6 +4344,8 @@ fn tainted_args_for_cross_call_edge(
                 index: edge.param_idx as usize,
                 value_text,
                 param_name,
+                place: None,
+                source_names: Vec::new(),
             }];
         }
         return Vec::new();
@@ -4317,6 +4366,14 @@ fn tainted_args_for_cross_call_edge(
         index: edge.arg_idx as usize,
         value_text,
         param_name,
+        place: call_summary
+            .and_then(|summary| summary.args_place.get(edge.arg_idx as usize))
+            .cloned()
+            .flatten(),
+        source_names: call_summary
+            .and_then(|summary| summary.args_source_names.get(edge.arg_idx as usize))
+            .cloned()
+            .unwrap_or_default(),
     }]
 }
 
@@ -4886,20 +4943,12 @@ fn collect_call_event_summaries(
                         call_kind: bonsai_lang_api::CallKind::Function,
                         args_value_text: source_call_args.clone(),
                         args_span: source_call_args.iter().map(|_| *span).collect(),
-                        args_place: source_call_args
-                            .iter()
-                            .map(|arg| is_bare_identifier(arg.trim()).then(|| arg.trim().to_string()))
-                            .collect(),
-                        args_source_names: source_call_args
-                            .iter()
-                            .map(|arg| {
-                                if is_bare_identifier(arg.trim()) {
-                                    vec![arg.trim().to_string()]
-                                } else {
-                                    Vec::new()
-                                }
-                            })
-                            .collect(),
+                        // Assignment-only compatibility events retain
+                        // renderings and arity but carry no compiler value
+                        // identities. A real FlowEvent::Call at this span
+                        // replaces this entry with exact CallArg facts.
+                        args_place: source_call_args.iter().map(|_| None).collect(),
+                        args_source_names: source_call_args.iter().map(|_| Vec::new()).collect(),
                         receiver: None,
                         receiver_source_names: Vec::new(),
                         receiver_types: Vec::new(),

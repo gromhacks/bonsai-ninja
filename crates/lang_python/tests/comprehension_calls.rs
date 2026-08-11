@@ -84,3 +84,45 @@ def search(tree, expr):
         "expected tree.xpath(expr) call from comprehension iterable, got {calls:?}"
     );
 }
+
+#[test]
+fn comprehension_binds_target_from_iterable_without_overwriting_iterable() {
+    let db = db_with(
+        r#"
+def filter_parts(parts):
+    return [p for p in parts if p]
+"#,
+    );
+    let global = db.global_index();
+    let declaration = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "filter_parts")
+        .expect("filter_parts declaration");
+    let assignments = declaration
+        .flow_events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_names,
+                ..
+            } => Some((target.as_str(), source_name.as_deref(), source_names.as_slice())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        assignments.iter().any(|(target, source, sources)| {
+            *target == "p" && *source == Some("parts") && sources.iter().any(|name| name == "parts")
+        }),
+        "the Tree-sitter `left` binding must receive the `right` iterable: {assignments:?}"
+    );
+    assert!(
+        !assignments
+            .iter()
+            .any(|(target, source, _)| *target == "parts" && *source == Some("p")),
+        "a comprehension must not manufacture the reversed overwrite `parts = p`: {assignments:?}"
+    );
+}

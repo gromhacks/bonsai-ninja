@@ -112,6 +112,7 @@ fn using(body: Vec<FlowEvent>) -> FlowEvent {
 fn flow_return() -> FlowEvent {
     FlowEvent::Return {
         span: span(),
+        value_kind: None,
         value_text: None,
         value_name: None,
         value_flow: Default::default(),

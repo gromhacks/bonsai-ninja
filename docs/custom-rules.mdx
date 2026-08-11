@@ -73,3 +73,107 @@ later receiver but source syntax alone does not:
 ```
 
 Typing rules provide resolver evidence only and never produce findings.
+
+For a language whose grammar does not distinguish `Type(...)` from an
+ordinary function call, use an exact `kind: new` target on the security rule.
+The rulepack then supplies constructor identity without a capitalization
+guess. Keep result typing explicit and separate:
+
+```yaml
+- id: mycompany.kotlin.typing_widget
+  enabled: true
+  language: kotlin
+  imports: [com.mycompany]
+  returns_type: Widget
+  match:
+    kind: new
+    callee:
+      attribute: [com, mycompany, Widget]
+  match_examples:
+    - name: imported widget constructor
+      code: |
+        import com.mycompany.Widget
+        fun example() { val widget = Widget() }
+  description: "com.mycompany.Widget constructs a Widget receiver."
+```
+
+`kind: new` proves constructor identity; `returns_type` is what allows the
+assigned local to satisfy later receiver-type rules. Neither behavior depends
+on identifier case. Import/package constraints on the typing rule are part of
+the type proof and are enforced before the model can affect a receiver. When a
+function-shaped call resolves to a workspace value or ordinary function, that
+compiler identity shadows an external `kind: new` model; mixed or ambiguous
+workspace candidates fail closed. Match examples should include both the
+provider-positive case and a same-spelled local-function negative.
+
+The same boundary applies to `taint_receiver_from_args` rules. When a library
+receiver type exists only in typing YAML, bonsai-ninja compiles the complete
+rule match to exact AST call spans before constructing the IDG. Import and
+shadowing constraints therefore remain effective during propagation, while
+the shared taint engine receives no API-name inventory. Add a negative example
+for an unimported or locally shadowed same-spelled call whenever the model
+could otherwise be ambiguous.
+
+## Add External Callback Parameter Types
+
+Use callback typing when source syntax proves the callback relationship but a
+library signature supplies parameter types. Keep the framework call and types
+in YAML; language adapters record only the parsed call argument and callback
+parameter bindings.
+
+For a callback passed at a known call argument:
+
+```yaml
+- id: mycompany.java.typing_route_callback
+  enabled: true
+  language: java
+  imports: [com.mycompany.router]
+  callback_arg_index: 1
+  callback_param_types:
+    - [com.mycompany.router.Request, Request]
+  match:
+    kind: call
+    callee: {name: route}
+  match_examples:
+    - name: route callback
+      code: |
+        import static com.mycompany.router.Routes.route;
+        class App {
+          Object routes(Object predicate) {
+            return route(predicate, request -> request.toString());
+          }
+        }
+      expect_match_text: [route]
+  description: "The route callback receives the framework Request type."
+```
+
+For an explicitly typed functional-interface binding, use typing-only
+`match.kind: type` and omit `callback_arg_index`:
+
+```yaml
+- id: mycompany.java.typing_fetcher_callback
+  enabled: true
+  language: java
+  imports: [com.mycompany.graph]
+  callback_param_types:
+    - [com.mycompany.graph.Environment, Environment]
+  match:
+    kind: type
+    target: {name: Fetcher}
+  match_examples:
+    - name: typed fetcher callback
+      code: |
+        import com.mycompany.graph.Fetcher;
+        class App {
+          void configure() {
+            Fetcher<Object> fetcher = environment -> environment.toString();
+          }
+        }
+      expect_match_text: [Fetcher]
+  description: "Fetcher callbacks receive the framework Environment type."
+```
+
+`callback_param_types` follows callback parameter order. Each inner list is
+the exact qualified/short alias set for one parameter. The loader rejects
+these fields outside `typing/`, rejects missing call argument indices, and
+rejects `kind: type` without a callback signature.

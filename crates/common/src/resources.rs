@@ -4,7 +4,10 @@
 //! parser, lowering, or serialization jobs in flight, but must never reduce
 //! the source-file set, graph scope, fixed-point closure, or rendered facts.
 
-use std::{ops::Range, sync::OnceLock};
+use std::{
+    ops::Range,
+    sync::{Condvar, Mutex, MutexGuard, OnceLock},
+};
 
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
@@ -216,6 +219,98 @@ pub fn syntax_worker_count_for_sources(source_bytes: &[u64], cpu_workers: usize)
     )
 }
 
+/// Continuous memory-weighted admission for exact syntax/compiler work.
+///
+/// Unlike a single worst-case pool width, this gate lets many small units run
+/// together while preventing large units from exceeding the same detected
+/// working-memory envelope. It controls concurrency only: every caller still
+/// submits every unit to its work-stealing pool.
+#[derive(Debug)]
+pub struct SyntaxMemoryPermitPool {
+    capacity_bytes: Option<u64>,
+    used_bytes: Mutex<u64>,
+    available: Condvar,
+}
+
+impl SyntaxMemoryPermitPool {
+    /// Build a gate from the current process resident set and configured or
+    /// detected memory limit.
+    #[must_use]
+    pub fn for_current_process() -> Self {
+        Self::with_capacity(syntax_working_memory_bytes(
+            effective_memory_limit_bytes(),
+            current_process_resident_bytes(),
+        ))
+    }
+
+    fn with_capacity(capacity_bytes: Option<u64>) -> Self {
+        Self {
+            capacity_bytes,
+            used_bytes: Mutex::new(0),
+            available: Condvar::new(),
+        }
+    }
+
+    /// Wait until the exact source unit fits, then retain its permit until the
+    /// returned guard is dropped. An oversize unit consumes the whole budget
+    /// and therefore runs alone rather than being skipped or split.
+    #[must_use]
+    pub fn acquire(&self, source_bytes: u64) -> SyntaxMemoryPermit<'_> {
+        let Some(capacity) = self.capacity_bytes else {
+            return SyntaxMemoryPermit {
+                pool: self,
+                admitted_bytes: 0,
+            };
+        };
+        let admitted_bytes = weighted_compiler_unit_bytes(source_bytes).min(capacity);
+        let mut used = lock_unpoisoned(&self.used_bytes);
+        while *used > 0 && used.saturating_add(admitted_bytes) > capacity {
+            used = wait_unpoisoned(&self.available, used);
+        }
+        *used = used.saturating_add(admitted_bytes);
+        SyntaxMemoryPermit {
+            pool: self,
+            admitted_bytes,
+        }
+    }
+}
+
+/// RAII admission returned by [`SyntaxMemoryPermitPool::acquire`].
+#[derive(Debug)]
+pub struct SyntaxMemoryPermit<'a> {
+    pool: &'a SyntaxMemoryPermitPool,
+    admitted_bytes: u64,
+}
+
+impl Drop for SyntaxMemoryPermit<'_> {
+    fn drop(&mut self) {
+        if self.admitted_bytes == 0 {
+            return;
+        }
+        let mut used = lock_unpoisoned(&self.pool.used_bytes);
+        *used = used.saturating_sub(self.admitted_bytes);
+        self.pool.available.notify_all();
+    }
+}
+
+fn syntax_working_memory_bytes(limit: Option<u64>, resident_bytes: Option<u64>) -> Option<u64> {
+    limit.map(|limit| {
+        let headroom = WEIGHTED_SYNTAX_HEADROOM_BYTES.min(limit.saturating_sub(1));
+        let resident = resident_bytes.unwrap_or(SYNTAX_RESIDENT_RESERVE_BYTES);
+        limit.saturating_sub(resident).saturating_sub(headroom).max(1)
+    })
+}
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn wait_unpoisoned<'a, T>(condvar: &Condvar, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+    condvar
+        .wait(guard)
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Partition raw source reads into deterministic memory-bounded windows.
 ///
 /// Workspace ingestion retains one source copy in the VFS and temporarily
@@ -312,11 +407,7 @@ fn syntax_weighted_batches_for_limit_and_resident(
     limit: Option<u64>,
     resident_bytes: Option<u64>,
 ) -> Vec<Range<usize>> {
-    let working_bytes = limit.map(|limit| {
-        let headroom = WEIGHTED_SYNTAX_HEADROOM_BYTES.min(limit.saturating_sub(1));
-        let resident = resident_bytes.unwrap_or(SYNTAX_RESIDENT_RESERVE_BYTES);
-        limit.saturating_sub(resident).saturating_sub(headroom).max(1)
-    });
+    let working_bytes = syntax_working_memory_bytes(limit, resident_bytes);
     weighted_batches_for_working_set(source_bytes, cpu_workers, working_bytes)
 }
 
@@ -666,7 +757,8 @@ mod tests {
         compiler_worker_count_for_limit, min_present, rooted_semantic_query_worker_count_for_limit,
         source_ingestion_batches_for_limit_and_resident, syntax_weighted_batches_for_limit_and_resident,
         syntax_worker_count_for_limit, syntax_worker_count_for_limit_and_resident,
-        syntax_worker_count_for_sources_and_limit, worker_count_for_limit, BYTES_PER_GIB,
+        syntax_worker_count_for_sources_and_limit, weighted_compiler_unit_bytes, worker_count_for_limit,
+        SyntaxMemoryPermitPool, BYTES_PER_GIB,
     };
     use super::{linux_cgroup_limit_paths, read_numeric_limit};
 
@@ -833,6 +925,33 @@ mod tests {
             1,
             "the two largest compiler units cannot overlap inside the live budget",
         );
+    }
+
+    #[test]
+    fn continuous_weighted_permits_keep_small_units_parallel_and_bound_total_memory() {
+        let capacity = 2 * weighted_compiler_unit_bytes(1);
+        let permits = std::sync::Arc::new(SyntaxMemoryPermitPool::with_capacity(Some(capacity)));
+        let first = permits.acquire(1);
+        let second = permits.acquire(1);
+        let peer = std::sync::Arc::clone(&permits);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let _third = peer.acquire(1);
+            started_tx.send(()).expect("report acquired permit");
+        });
+
+        assert!(
+            started_rx
+                .recv_timeout(std::time::Duration::from_millis(25))
+                .is_err(),
+            "a third unit must wait while the weighted capacity is full"
+        );
+        drop(first);
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("released capacity admits the waiting exact unit");
+        drop(second);
+        waiter.join().expect("weighted permit worker");
     }
 
     #[test]

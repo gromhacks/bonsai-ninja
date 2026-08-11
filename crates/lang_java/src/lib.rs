@@ -8,69 +8,210 @@ use bonsai_lang_api::{
         collect_kinds, language_from_pack, node_text, package_module_segments_with_workspace_prefix,
         parse_with, span_of,
     },
-    AdapterContext, AdapterError, AssignValueKind, CharacterConstraintDomain, CharacterConstraintFact,
-    CharacterConstraintOutput, CharacterSubstitutionDomain, CharacterSubstitutionFact, ConditionEquality,
-    ConditionExpressionFact, ConditionOperandFact, DeclIndex, DeclKind, FileSnapshot,
-    FiniteLiteralSelectionFact, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, ParseRecoveryEdit, SameOriginPathConstraintFact,
-    StaticScalarValue, StringCompositionFact, StringCompositionPart, SyntaxTree, TypeAliasBinding, Vfs,
-    Visibility, EMPTY_HANDLER,
+    AdapterContext, AdapterError, AssignValueKind, CallTargetExtraction, CharacterConstraintDomain,
+    CharacterConstraintFact, CharacterConstraintOutput, CharacterSubstitutionDomain,
+    CharacterSubstitutionFact, ConditionEquality, ConditionExpressionFact, ConditionOperandFact, DeclIndex,
+    DeclKind, FileSnapshot, FiniteLiteralSelectionFact, FlowEvent, GrammarHandler, ImportIndex, ImportScope,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ParseRecoveryEdit, PatternBindingSite,
+    SameOriginPathConstraintFact, StaticScalarValue, StringCompositionFact, StringCompositionPart,
+    SyntaxTree, TypeAliasBinding, Vfs, Visibility, EMPTY_HANDLER,
 };
 use parse_recovery::java_parse_recovery_edits;
 use tree_sitter::{Language, Node, Tree};
 
+fn java_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    match node.kind() {
+        "method_invocation" => {
+            let member = node.child_by_field_name("name")?;
+            let member_text = node_text(&member, src).trim();
+            if member_text.is_empty() {
+                return None;
+            }
+            let full_text = node.child_by_field_name("object").map_or_else(
+                || member_text.to_string(),
+                |receiver| format!("{}.{}", node_text(&receiver, src).trim(), member_text),
+            );
+            Some(CallTargetExtraction {
+                node: member,
+                full_text,
+            })
+        }
+        "object_creation_expression" => {
+            let target = node.child_by_field_name("type")?;
+            let full_text = node_text(&target, src).trim();
+            (!full_text.is_empty()).then_some(CallTargetExtraction {
+                node: target,
+                full_text: full_text.to_string(),
+            })
+        }
+        "explicit_constructor_invocation" => {
+            let target = node
+                .child_by_field_name("constructor")
+                .or_else(|| node.named_child(0))?;
+            let full_text = node_text(&target, src).trim();
+            (!full_text.is_empty()).then_some(CallTargetExtraction {
+                node: target,
+                full_text: full_text.to_string(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn java_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    (node.kind() == "enhanced_for_statement")
+        .then(|| {
+            Some((
+                node.child_by_field_name("name")?,
+                node.child_by_field_name("value")?,
+            ))
+        })
+        .flatten()
+}
+
+fn java_pattern_bindings(node: Node<'_>) -> Vec<PatternBindingSite<'_>> {
+    let Some(condition) = node.child_by_field_name("condition") else {
+        return Vec::new();
+    };
+    let mut sites = Vec::new();
+
+    let mut stack = vec![condition];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "instanceof_expression" {
+            if let Some(source) = current.child_by_field_name("left") {
+                if let Some(name) = current.child_by_field_name("name") {
+                    sites.push(PatternBindingSite {
+                        span_node: current,
+                        pattern: name,
+                        source,
+                    });
+                }
+                if let Some(pattern) = current.child_by_field_name("pattern") {
+                    java_pattern_binding_identifiers(pattern, &mut sites, current, source);
+                }
+            }
+            continue;
+        }
+        let mut cursor = current.walk();
+        stack.extend(current.named_children(&mut cursor));
+    }
+
+    if let Some(body) = node.child_by_field_name("body") {
+        let mut stack = vec![body];
+        while let Some(current) = stack.pop() {
+            if current.kind() == "switch_label" {
+                let mut cursor = current.walk();
+                for pattern in current.named_children(&mut cursor) {
+                    java_pattern_binding_identifiers(pattern, &mut sites, current, condition);
+                }
+                continue;
+            }
+            let mut cursor = current.walk();
+            stack.extend(current.named_children(&mut cursor));
+        }
+    }
+    sites
+}
+
+fn java_pattern_binding_identifiers<'tree>(
+    pattern: Node<'tree>,
+    out: &mut Vec<PatternBindingSite<'tree>>,
+    span_node: Node<'tree>,
+    source: Node<'tree>,
+) {
+    if matches!(pattern.kind(), "type_pattern" | "record_pattern_component") {
+        let mut cursor = pattern.walk();
+        if let Some(name) = pattern
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() == "identifier")
+            .last()
+        {
+            out.push(PatternBindingSite {
+                span_node,
+                pattern: name,
+                source,
+            });
+        }
+        return;
+    }
+    if !matches!(pattern.kind(), "record_pattern" | "record_pattern_body") {
+        return;
+    }
+    let mut cursor = pattern.walk();
+    for child in pattern.named_children(&mut cursor) {
+        java_pattern_binding_identifiers(child, out, span_node, source);
+    }
+}
+
 pub const LANG_ID: LanguageId = LanguageId::new("java");
 const PACK_NAME: &str = "java";
-
-/// Java lifecycle transitions: Closeable / Future / Lock / Disposable.
-const JAVA_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "close",
-        transition: "closed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "shutdown",
-        transition: "closed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "cancel",
-        transition: "cancelled",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "unlock",
-        transition: "unlocked",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "release",
-        transition: "freed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "dispose",
-        transition: "freed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "destroy",
-        transition: "freed",
-        arg_index: 0,
-    },
+const MODULE_SOURCE_ROOTS: &[&[&str]] = &[
+    &["src", "main", "java"],
+    &["src", "test", "java"],
+    &["src", "java"],
 ];
 
 const HANDLER: GrammarHandler = GrammarHandler {
+    expression_value_kind_extractor: None,
+    literal_value_kinds: &[
+        "null_literal",
+        "boolean_literal",
+        "decimal_integer_literal",
+        "hex_integer_literal",
+        "octal_integer_literal",
+        "binary_integer_literal",
+        "decimal_floating_point_literal",
+        "hex_floating_point_literal",
+        "true",
+        "false",
+    ],
+    string_literal_kinds: &["string_literal", "character_literal", "template_expression"],
+    comment_kinds: &["line_comment", "block_comment"],
+    doc_comment_prefixes: &["/**"],
+    decorator_kinds: &[
+        "annotation",
+        "marker_annotation",
+        "normal_annotation",
+        "single_element_annotation",
+    ],
+    parameter_container_kinds: &["formal_parameters"],
+    parameter_kinds: &["formal_parameter", "spread_parameter", "receiver_parameter"],
+    parameter_modifier_kinds: &["modifiers"],
+    parameter_annotation_kinds: &[
+        "annotation",
+        "marker_annotation",
+        "normal_annotation",
+        "single_element_annotation",
+    ],
+    variadic_parameter_kinds: &["spread_parameter"],
+    binding_identifier_kinds: &["identifier"],
+    pattern_binding_extractor: Some(java_pattern_bindings),
+    identifier_kinds: &["identifier"],
+    positional_aggregate_kinds: &["array_initializer", "array_creation_expression"],
+    aggregate_value_field_names: &["value"],
+    aggregate_syntax_only_kinds: &["type_identifier"],
+    transparent_call_wrapper_kinds: &["field_access", "parenthesized_expression"],
+    assignment_target_wrapper_kinds: &["variable_declarator"],
+    binding_declaration_keyword_spellings: &["final"],
     fn_kinds: &["method_declaration", "constructor_declaration"],
     call_kinds: &[
         "method_invocation",
         "object_creation_expression",
         "explicit_constructor_invocation",
     ],
+    constructor_call_kinds: &["object_creation_expression", "explicit_constructor_invocation"],
+    call_callee_field_names: &["name", "constructor"],
+    call_receiver_field_names: &["object"],
+    call_member_field_names: &["name", "constructor"],
+    constructor_type_field_names: &["type"],
+    call_target_extractor: Some(java_call_target),
+    call_argument_field_names: &["arguments"],
+    call_argument_container_kinds: &["argument_list"],
+    lambda_body_field_names: &["body"],
     argument_passing_mode_extractor: None,
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     runtime_type_guard_operators: &["instanceof"],
+    runtime_type_wrapper_kinds: &["parenthesized_expression"],
     call_ref_kinds: &[
         "method_invocation",
         "object_creation_expression",
@@ -80,6 +221,10 @@ const HANDLER: GrammarHandler = GrammarHandler {
     callable_reference_kinds: &["method_reference"],
     member_expression_kinds: &["field_access"],
     subscript_expression_kinds: &["array_access"],
+    member_base_field_names: &["object"],
+    member_name_field_names: &["field"],
+    subscript_base_field_names: &["array"],
+    subscript_index_field_names: &["index"],
     class_kinds: &[
         "class_declaration",
         "interface_declaration",
@@ -105,8 +250,15 @@ const HANDLER: GrammarHandler = GrammarHandler {
     ],
     constructor_method_kinds: &["constructor_declaration"],
     if_kinds: &["if_statement", "switch_expression"],
+    branch_then_field_names: &["consequence", "body"],
+    branch_else_field_names: &["alternative"],
+    branch_condition_field_names: &["condition", "value"],
+    loop_body_field_names: &["body"],
+    loop_body_kinds: &["block", "expression_statement"],
+    branch_arm_kinds: &["block", "expression_statement", "switch_block_statement_group"],
     for_kinds: &["for_statement"],
     foreach_kinds: &["enhanced_for_statement"],
+    foreach_binding_extractor: Some(java_foreach_binding),
     while_kinds: &["while_statement"],
     do_kinds: &["do_statement"],
     // Java try-with-resources binds `try (T r = expr) { .. }` as a
@@ -116,6 +268,9 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // taint into `r`. This is the complete Java grammar inventory; shared
     // lowering does not add a cross-language fallback.
     assignment_kinds: &["assignment_expression", "variable_declarator", "resource"],
+    compound_assignment_operators: &[
+        "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", ">>>=", "&=", "^=", "|=",
+    ],
     return_kinds: &["return_statement"],
     throw_kinds: &["throw_statement"],
     lambda_kinds: &["lambda_expression"],
@@ -124,7 +279,10 @@ const HANDLER: GrammarHandler = GrammarHandler {
     finally_kinds: &["finally_clause"],
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
+    control_label_field_names: &["label"],
     yield_kinds: &["yield_statement"],
+    yield_value_field_names: &["value"],
+    try_body_field_names: &["body"],
     implicit_receiver_names: &["this", "super"],
     ..EMPTY_HANDLER
 };
@@ -232,13 +390,7 @@ impl LanguageAdapter for JavaAdapter {
             rewrite_java_reflection_chain(&mut decl.flow_events);
         }
         let field_aliases = collect_java_type_aliases(tree.root_node(), src, &["field_declaration"]);
-        let mut method_aliases = collect_java_method_type_aliases(&tree, file, src, &field_aliases);
-        method_aliases.extend(collect_java_graphql_datafetcher_lambda_aliases(
-            &tree,
-            file,
-            src,
-            &field_aliases,
-        ));
+        let method_aliases = collect_java_method_type_aliases(&tree, file, src, &field_aliases);
         for decl in &mut index.defs {
             if let Some(aliases) = method_aliases
                 .iter()
@@ -247,6 +399,7 @@ impl LanguageAdapter for JavaAdapter {
                 decl.type_aliases = aliases.clone();
             }
         }
+        attach_java_nested_callable_type_aliases(&mut index, &tree, file, src);
         // Resolve generic type variables from their Tree-sitter type bounds.
         // `T data` in `class Box<T extends App.Envelope>` carries both the
         // declared `T` identity and the compiler-proven `App.Envelope` upper
@@ -303,17 +456,14 @@ impl LanguageAdapter for JavaAdapter {
         // package while still rejecting duplicate type identities as invalid
         // Java source.
         if let Some(segments) = extract_java_package(tree.root_node(), src) {
-            let segments = package_module_segments_with_workspace_prefix(file, ctx, segments);
+            let segments =
+                package_module_segments_with_workspace_prefix(file, ctx, segments, MODULE_SOURCE_ROOTS);
             bonsai_lang_api::apply_module_path_semantic_identity(&mut index, segments);
         } else {
             bonsai_lang_api::apply_module_path_semantic_identity(&mut index, Vec::new());
         }
-        // Append `FlowEvent::Lifecycle` for recognised Java
-        // resource transitions (`Closeable.close`, `Future.cancel`,
-        // `Lock.unlock`).
         for decl in &mut index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, JAVA_LIFECYCLE_TRANSITIONS);
         }
         // Synthesize the implicit members of `record` declarations —
         // Java auto-generates a canonical constructor (`this.<comp> =
@@ -330,10 +480,9 @@ impl LanguageAdapter for JavaAdapter {
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
         // Local constructor-result receiver typing (`Foo c = new Foo()`
-        // → `c: Foo`) so `c.method(...)` carries a resolved receiver type
-        // for `receiver_type_in` / `[Type, method]` rules. Java class
-        // names are PascalCase and methods camelCase, so the constructor
-        // heuristic is reliable (unlike Go's uppercase exported functions).
+        // → `c: Foo`) is driven by Java's object-creation CST node or an
+        // exactly resolved declaration. Capitalization is a convention, not
+        // part of Java's type system, and is never used as proof.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut index);
         bonsai_lang_api::apply_class_field_type_aliases(&mut index);
         index
@@ -2104,9 +2253,6 @@ fn collect_java_method_type_aliases(
                 "resource",
             ],
         ));
-        method_aliases.extend(collect_java_vertx_route_handler_aliases(method_node, src));
-        method_aliases.extend(collect_java_webflux_route_handler_aliases(method_node, src));
-        method_aliases.extend(collect_java_graphql_datafetcher_aliases(method_node, src));
         let method_type_bounds = java_type_parameter_bounds(method_node, src);
         expand_java_type_parameter_aliases(&mut method_aliases, &method_type_bounds);
         dedup_type_aliases(&mut method_aliases);
@@ -2203,194 +2349,63 @@ fn expand_java_type_parameter_aliases(aliases: &mut Vec<TypeAliasBinding>, bound
     }
 }
 
-/// Vert.x route handlers commonly omit the lambda parameter type:
-/// `router.get("/").handler(ctx -> ctx.request().getParam("q"))`.
-/// The route API fixes that parameter to `RoutingContext`, so surface the
-/// semantic alias for receiver-typed source/sink rules without loosening them
-/// to every `.request().getParam(...)` chain in a Vert.x-importing file.
-fn collect_java_vertx_route_handler_aliases(root: Node<'_>, src: &[u8]) -> Vec<TypeAliasBinding> {
-    let mut aliases = Vec::new();
-    let mut work_stack = vec![root];
-    while let Some(node) = work_stack.pop() {
-        if node.kind() == "method_invocation" && java_is_vertx_route_handler_call(node, src) {
-            if let Some(lambda) = java_first_lambda_argument(node) {
-                if let Some(param) = java_first_lambda_param_name(lambda, src) {
-                    push_type_alias(&mut aliases, &param, "io.vertx.ext.web.RoutingContext");
-                    push_type_alias(&mut aliases, &param, "RoutingContext");
-                }
-            }
-        }
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            work_stack.push(child);
-        }
-    }
-    aliases
-}
-
-fn java_is_vertx_route_handler_call(node: Node<'_>, src: &[u8]) -> bool {
-    if node.child_by_field_name("name").map(|n| node_text(&n, src)) != Some("handler") {
-        return false;
-    }
-    let Some(receiver) = node.child_by_field_name("object") else {
-        return false;
-    };
-    if receiver.kind() != "method_invocation" {
-        return false;
-    }
-    let Some(route_method) = receiver.child_by_field_name("name").map(|n| node_text(&n, src)) else {
-        return false;
-    };
-    matches!(
-        route_method,
-        "route" | "get" | "post" | "put" | "delete" | "patch" | "options" | "head" | "connect" | "trace"
-    )
-}
-
-/// Spring WebFlux functional routes also omit the request lambda type:
-/// `route(GET("/"), req -> req.queryParam("q"))`. The handler parameter is a
-/// `ServerRequest`, so make receiver-typed source rules precise without
-/// matching arbitrary `.queryParam` helpers.
-fn collect_java_webflux_route_handler_aliases(root: Node<'_>, src: &[u8]) -> Vec<TypeAliasBinding> {
-    let mut aliases = Vec::new();
-    let mut work_stack = vec![root];
-    while let Some(node) = work_stack.pop() {
-        if node.kind() == "method_invocation"
-            && node.child_by_field_name("name").map(|n| node_text(&n, src)) == Some("route")
-        {
-            if let Some(lambda) = java_first_lambda_argument(node) {
-                if let Some(param) = java_first_lambda_param_name(lambda, src) {
-                    push_type_alias(
-                        &mut aliases,
-                        &param,
-                        "org.springframework.web.reactive.function.server.ServerRequest",
-                    );
-                    push_type_alias(&mut aliases, &param, "ServerRequest");
-                }
-            }
-        }
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            work_stack.push(child);
-        }
-    }
-    aliases
-}
-
-fn java_first_lambda_argument(node: Node<'_>) -> Option<Node<'_>> {
-    let args = node.child_by_field_name("arguments")?;
-    let mut cursor = args.walk();
-    let lambda = args
-        .named_children(&mut cursor)
-        .find(|child| child.kind() == "lambda_expression");
-    lambda
-}
-
-fn java_first_lambda_param_name(lambda: Node<'_>, src: &[u8]) -> Option<String> {
-    let params = lambda.child_by_field_name("parameters")?;
-    if params.kind() == "identifier" {
-        let name = node_text(&params, src).trim();
-        return (!name.is_empty()).then(|| name.to_string());
-    }
-    let mut cursor = params.walk();
-    for child in params.named_children(&mut cursor) {
-        match child.kind() {
-            "identifier" => {
-                let name = node_text(&child, src).trim();
-                if !name.is_empty() {
-                    return Some(name.to_string());
-                }
-            }
-            "formal_parameter" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = node_text(&name_node, src).trim();
-                    if !name.is_empty() {
-                        return Some(name.to_string());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// graphql-java `DataFetcher<T>` lambdas receive a
-/// `DataFetchingEnvironment` parameter. The Java syntax often omits the
-/// lambda parameter type, so infer it from the local declaration:
-/// `DataFetcher<User> f = env -> env.getArgument("id")`.
-fn collect_java_graphql_datafetcher_aliases(root: Node<'_>, src: &[u8]) -> Vec<TypeAliasBinding> {
-    let mut aliases = Vec::new();
-    let mut work_stack = vec![root];
-    while let Some(node) = work_stack.pop() {
-        if node.kind() == "local_variable_declaration" {
-            let declared_type = node
-                .child_by_field_name("type")
-                .map(|type_node| node_text(&type_node, src))
-                .unwrap_or_default();
-            if canonical_java_type_name(declared_type).as_deref() == Some("DataFetcher") {
-                let mut cursor = node.walk();
-                for child in node.named_children(&mut cursor) {
-                    if child.kind() != "variable_declarator" {
-                        continue;
-                    }
-                    let Some(value) = child.child_by_field_name("value") else {
-                        continue;
-                    };
-                    if value.kind() == "lambda_expression" {
-                        if let Some(param) = java_first_lambda_param_name(value, src) {
-                            push_type_alias(&mut aliases, &param, "graphql.schema.DataFetchingEnvironment");
-                            push_type_alias(&mut aliases, &param, "DataFetchingEnvironment");
-                        }
-                    }
-                }
-            }
-        }
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            work_stack.push(child);
-        }
-    }
-    aliases
-}
-
-fn collect_java_graphql_datafetcher_lambda_aliases(
-    tree: &Tree,
-    file: FileId,
-    src: &[u8],
-    field_aliases: &[TypeAliasBinding],
-) -> Vec<(bonsai_common::Span, Vec<TypeAliasBinding>)> {
-    let mut out = Vec::new();
-    for decl in collect_kinds(tree, &["local_variable_declaration"]) {
-        let declared_type = decl
-            .child_by_field_name("type")
-            .map(|type_node| node_text(&type_node, src))
-            .unwrap_or_default();
-        if canonical_java_type_name(declared_type).as_deref() != Some("DataFetcher") {
+/// Attach only compiler-provable types to nested callable declarations.
+/// Java's source syntax tells us that `Interface<T> f = value -> ...` binds
+/// the lambda value `f` to `Interface`; it does not tell us the external
+/// interface method's parameter types. Those external signatures are
+/// rulepack typing data and are applied later by the matcher.
+fn attach_java_nested_callable_type_aliases(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    let mut callable_bindings = Vec::new();
+    for declaration in collect_kinds(tree, &["local_variable_declaration"]) {
+        let Some(type_node) = declaration.child_by_field_name("type") else {
             continue;
-        }
-        let mut cursor = decl.walk();
-        for child in decl.named_children(&mut cursor) {
-            if child.kind() != "variable_declarator" {
-                continue;
-            }
-            let Some(value) = child.child_by_field_name("value") else {
+        };
+        let type_text = node_text(&type_node, src);
+        let Some(canonical_type) = canonical_java_type_name(type_text) else {
+            continue;
+        };
+        let qualified_type = qualified_java_type_name(type_text);
+        let mut cursor = declaration.walk();
+        for declarator in declaration
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() == "variable_declarator")
+        {
+            let (Some(name_node), Some(value)) = (
+                declarator.child_by_field_name("name"),
+                declarator.child_by_field_name("value"),
+            ) else {
                 continue;
             };
             if value.kind() != "lambda_expression" {
                 continue;
             }
-            let Some(param) = java_first_lambda_param_name(value, src) else {
+            let name = node_text(&name_node, src).trim();
+            if name.is_empty() {
                 continue;
-            };
-            let mut aliases = field_aliases.to_vec();
-            push_type_alias(&mut aliases, &param, "graphql.schema.DataFetchingEnvironment");
-            push_type_alias(&mut aliases, &param, "DataFetchingEnvironment");
-            dedup_type_aliases(&mut aliases);
-            out.push((span_of(file, &value), aliases));
+            }
+            let mut aliases = Vec::new();
+            push_java_type_alias(&mut aliases, name, &canonical_type, qualified_type.as_deref());
+            callable_bindings.push((span_of(file, &value), aliases));
         }
     }
-    out
+
+    let inherited = index
+        .defs
+        .iter()
+        .map(|decl| (decl.symbol, decl.type_aliases.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    for decl in &mut index.defs {
+        if let Some(parent_aliases) = decl.parent.and_then(|parent| inherited.get(&parent)) {
+            decl.type_aliases.extend(parent_aliases.iter().cloned());
+        }
+        if let Some(aliases) = callable_bindings
+            .iter()
+            .find_map(|(span, aliases)| (*span == decl.span).then_some(aliases))
+        {
+            decl.type_aliases.extend(aliases.iter().cloned());
+        }
+        dedup_type_aliases(&mut decl.type_aliases);
+    }
 }
 
 /// Walk `root` collecting `(name, type)` aliases from every declaration
@@ -2442,16 +2457,6 @@ fn java_type_aliases_from_decl(node: Node<'_>, src: &[u8]) -> Vec<TypeAliasBindi
             if let Some(name_node) = child.child_by_field_name("name") {
                 let name = node_text(&name_node, src);
                 push_java_type_alias(&mut aliases, name, &canonical_type, qualified_type.as_deref());
-                if let Some(value) = child.child_by_field_name("value") {
-                    if java_secure_random_factory_init(value, src) {
-                        push_java_type_alias(
-                            &mut aliases,
-                            name,
-                            "SecureRandom",
-                            Some("java.security.SecureRandom"),
-                        );
-                    }
-                }
             }
         }
         return aliases;
@@ -2506,16 +2511,10 @@ fn java_cast_type_of_init(init: Node<'_>, src: &[u8]) -> Option<String> {
     None
 }
 
-fn java_secure_random_factory_init(init: Node<'_>, src: &[u8]) -> bool {
-    let text = node_text(&init, src);
-    text.contains("SecureRandom.getInstance")
-}
-
 /// Canonicalize a Java type expression to its short, generics/array-free
 /// form: `List<String>` → `List`, `int[]` → `int`, `java.util.Map` →
-/// `Map`. Rejects names whose canonical form doesn't start with an
-/// uppercase letter — primitives like `int` survive the strip but we
-/// still want them out of the alias set.
+/// `Map`. `var` is excluded because it is an inference marker; primitive
+/// types and lowercase user-defined types remain valid compiler facts.
 fn canonical_java_type_name(raw: &str) -> Option<String> {
     // Strip generics and array brackets — they don't change the receiver type.
     let without_generics = raw.split('<').next().unwrap_or(raw);
@@ -2527,8 +2526,7 @@ fn canonical_java_type_name(raw: &str) -> Option<String> {
         .next()
         .unwrap_or(without_arrays)
         .trim();
-    // Reject primitives and empty results — only class-like types qualify.
-    if bare_type.is_empty() || !bare_type.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+    if bare_type.is_empty() || bare_type == "var" {
         return None;
     }
     Some(bare_type.to_string())
@@ -2550,7 +2548,7 @@ fn qualified_java_type_name(raw: &str) -> Option<String> {
         return None;
     }
     let tail = segments.last()?.trim();
-    if tail.is_empty() || !tail.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+    if tail.is_empty() {
         return None;
     }
     Some(qualified.to_string())

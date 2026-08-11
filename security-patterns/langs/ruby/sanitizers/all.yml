@@ -693,8 +693,9 @@
     callee:
       name: url_for
   constraints:
-  - any_arg_matches_regex: |-
-      only_path:\s*true
+  - keyword_arg_equals:
+      name: only_path
+      value: "true"
   match_examples:
   - name: ruby.sanitizer.url_for_only_path example
     code: |
@@ -718,8 +719,9 @@
     callee:
       name: redirect_to
   constraints:
-  - any_arg_matches_regex: |-
-      allow_other_host:\s*false
+  - keyword_arg_equals:
+      name: allow_other_host
+      value: "false"
   match_examples:
   - name: ruby.sanitizer.redirect_to_only_path example
     code: |
@@ -1047,8 +1049,9 @@
     callee:
       attribute: [cookies, signed]
   constraints:
-  - any_arg_matches_regex: |-
-      httponly.*true|secure.*true
+  - keyword_arg_equals:
+      name: httponly
+      value: "true"
   match_examples:
   - name: ruby.cookie.cookies_set_httponly example
     code: |

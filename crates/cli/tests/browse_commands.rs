@@ -4891,7 +4891,7 @@ fn inspect_both_sinks_reachable_for_every_lang() {
         ("java", "executeQuery", "Runtime.getRuntime"),
         ("javascript", "db.query", "execSync"),
         ("kotlin", "executeQuery", "Runtime.getRuntime"),
-        ("php", "$conn->query", "exec"),
+        ("php", "$conn.query", "exec"),
         ("python", "cursor.execute", "os.system"),
         ("ruby", "db.execute", "system"),
         ("rust", "conn.prepare", "Command"),
@@ -4981,11 +4981,13 @@ fn inspect_finds_calls_nested_in_try_using_defer() {
 }
 
 /// Dotted-method call construction: every language that has
-/// `receiver.method(args)` (or `$obj->method()`) syntax must emit the
+/// `receiver.method(args)` (including PHP's `$obj->method()` source syntax)
+/// must emit the
 /// FULL qualified name in its Call events — not just the final method
 /// name. Regressed this session: Java's
 /// `Runtime.getRuntime().exec(...)` was collapsing to just `exec`; PHP's
-/// `$conn->query($q)` was collapsing to just `query`. The
+/// `$conn->query($q)` was collapsing to just `query`. The compiler IR
+/// canonicalizes parsed member access to `$conn.query`. The
 /// `method_receiver_name` helper concatenates object + name across
 /// grammars.
 #[test]
@@ -5000,14 +5002,14 @@ fn inspect_qualified_method_calls_preserved() {
         "java: `Runtime.getRuntime().exec` callee name not preserved — inspect missed it:\n{out}"
     );
 
-    // PHP: arrow-call qualified text `$conn->query`.
+    // PHP: parsed arrow-call with canonical compiler identity `$conn.query`.
     let php_ws = lang_ws("php");
-    let Some(out) = run_inspect_graph(&php_ws, &["--query", "$conn->query"]) else {
+    let Some(out) = run_inspect_graph(&php_ws, &["--query", "$conn.query"]) else {
         return;
     };
     assert!(
         out.contains("FLOW ") && out.contains("MATCH"),
-        "php: `$conn->query` callee name not preserved:\n{out}"
+        "php: canonical `$conn.query` callee identity not preserved:\n{out}"
     );
 }
 

@@ -123,6 +123,42 @@ object Transformer {
 }
 
 #[test]
+fn lowercase_declared_types_and_bases_remain_semantic_facts() {
+    let db = db_with(
+        r#"
+class lower { def run(value: String): Unit = () }
+class child extends lower
+object App {
+  def handle(value: String): Unit = {
+    val declared = new lower()
+    declared.run(value)
+  }
+}
+"#,
+    );
+    let global = db.global_index();
+    let child = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "child")
+        .expect("child declaration");
+    assert_eq!(child.bases, ["lower"]);
+    let handle = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "handle")
+        .expect("handle declaration");
+    let mut calls = Vec::new();
+    collect_calls(&handle.flow_events, &mut calls);
+    assert!(
+        calls.iter().any(|(name, types)| {
+            name.rsplit('.').next() == Some("run") && types.iter().any(|ty| ty == "lower")
+        }),
+        "calls: {calls:?}"
+    );
+}
+
+#[test]
 fn base_constructor_named_compound_arg_uses_ast_facts() {
     let db = db_with(
         r#"

@@ -28,7 +28,7 @@
         return $client->chat($input);
       }
     expect_match_text:
-    - $client->chat
+    - $client.chat
   - name: arg tainted literal negative
     code: |
       <?php
@@ -73,7 +73,7 @@
         return $anthropic->messages->create($input);
       }
     expect_match_text:
-    - $anthropic->messages->create
+    - $anthropic->messages.create
   - name: arg tainted literal negative
     code: |
       <?php
@@ -117,7 +117,7 @@
         return $bedrock->invokeModel($input);
       }
     expect_match_text:
-    - $bedrock->invokeModel
+    - $bedrock.invokeModel
   - name: arg tainted literal negative
     code: |
       <?php

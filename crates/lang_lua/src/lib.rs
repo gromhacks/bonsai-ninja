@@ -6,13 +6,70 @@ use bonsai_lang_api::{
         collect_kinds, collect_receiver_field_writes, first_named_child_of_kind, language_from_pack,
         node_text, parse_with, span_of,
     },
-    AdapterContext, AdapterError, AssignValueKind, DeclIndex, FlowEvent, GrammarHandler, ImportIndex,
-    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, Ref, RefKind,
+    AdapterContext, AdapterError, AssignValueKind, CallTargetExtraction, DeclIndex, FlowEvent,
+    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    Ref, RefKind,
 };
 use tree_sitter::{Language, Node, Tree};
 
+fn lua_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    if !matches!(node.kind(), "for_statement" | "for_in_statement") {
+        return None;
+    }
+    let clause = node.child_by_field_name("clause").or_else(|| {
+        let mut cursor = node.walk();
+        let clause = node
+            .named_children(&mut cursor)
+            .find(|child| child.kind() == "for_generic_clause");
+        clause
+    })?;
+    Some((clause.named_child(0)?, clause.named_child(1)?))
+}
+
+/// Select the grammar's complete Lua call target. Method calls use a
+/// `method_index_expression` (`resource:close`) in the `name` field rather
+/// than the `dot_index_expression` used by ordinary table lookup. The
+/// adapter preserves `:` until its post-lowering normalization can retain the
+/// language-defined implicit receiver distinction.
+fn lua_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    if !matches!(node.kind(), "function_call" | "method_call") {
+        return None;
+    }
+    let target = node.child_by_field_name("name").or_else(|| node.named_child(0))?;
+    if !matches!(
+        target.kind(),
+        "identifier" | "dot_index_expression" | "bracket_index_expression" | "method_index_expression"
+    ) {
+        return None;
+    }
+    let full_text = node_text(&target, src)
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    (!full_text.is_empty()).then_some(CallTargetExtraction {
+        node: target,
+        full_text,
+    })
+}
+
 pub const LANG_ID: LanguageId = LanguageId::new("lua");
 const PACK_NAME: &str = "lua";
+
+fn lua_static_key(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let raw = node_text(&node, src).trim();
+    if node.kind() == "identifier" {
+        return (!raw.is_empty()).then(|| raw.to_string());
+    }
+    if node.kind() != "string" {
+        return None;
+    }
+    let quote = raw.as_bytes().first().copied()?;
+    if !matches!(quote, b'\'' | b'"') || raw.as_bytes().last().copied() != Some(quote) {
+        return None;
+    }
+    let value = raw.get(1..raw.len().checked_sub(1)?)?;
+    (!value.is_empty() && !value.contains('\\')).then(|| value.to_string())
+}
 
 // tree-sitter-lua (MunifTanjim) handler:
 //   - `function_declaration` covers `function foo()` and `function M.foo()`
@@ -22,6 +79,34 @@ const PACK_NAME: &str = "lua";
 //     idiomatic try-equivalent (function calls; we rely on the
 //     do_block-descent + call-arg walking to surface their bodies).
 const HANDLER: GrammarHandler = GrammarHandler {
+    expression_value_kind_extractor: None,
+    literal_value_kinds: &["nil", "number", "true", "false"],
+    string_literal_kinds: &["string"],
+    comment_kinds: &["comment", "hash_bang_line"],
+    doc_comment_prefixes: &["---"],
+    decorator_kinds: &[],
+    parameter_container_kinds: &["parameters"],
+    parameter_kinds: &["identifier", "vararg_expression"],
+    parameter_annotation_name_extractor: None,
+    variadic_parameter_kinds: &["vararg_expression"],
+    binding_identifier_kinds: &["identifier"],
+    identifier_kinds: &["identifier"],
+    aggregate_pattern_kinds: &["variable_list"],
+    named_aggregate_kinds: &["table_constructor"],
+    positional_aggregate_kinds: &["table_constructor"],
+    aggregate_pair_kinds: &["field"],
+    aggregate_key_field_names: &["name"],
+    aggregate_value_field_names: &["value"],
+    static_field_name_kinds: &["identifier"],
+    static_subscript_key_extractor: Some(lua_static_key),
+    lambda_value_container_kinds: &["table_constructor", "field"],
+    transparent_call_wrapper_kinds: &["dot_index_expression", "bracket_index_expression"],
+    // Lua wraps both sides of an assignment in list nodes. A list with one
+    // parsed child is one expression/place; multi-child lists remain
+    // aggregate bindings for the shared parallel-assignment lowering.
+    single_expression_group_kinds: &["expression_list", "variable_list"],
+    assignment_target_wrapper_kinds: &["variable_declaration"],
+    binding_declaration_keyword_spellings: &["local"],
     nested_type_ownership: true,
     fn_kinds: &["function_declaration", "function_definition", "local_function"],
     class_kinds: &[],
@@ -32,16 +117,38 @@ const HANDLER: GrammarHandler = GrammarHandler {
     constructor_method_kinds: &[],
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     if_kinds: &["if_statement"],
+    branch_then_field_names: &["consequence", "body"],
+    branch_else_field_names: &["alternative"],
+    branch_condition_field_names: &["condition"],
+    loop_body_field_names: &["body"],
+    loop_body_kinds: &["block"],
+    branch_arm_kinds: &["block", "elseif_statement", "else_statement"],
+    additional_alternative_kinds: &["elseif_statement", "else_statement"],
     for_kinds: &["for_statement"],
     foreach_kinds: &["for_in_statement"],
+    foreach_binding_extractor: Some(lua_foreach_binding),
     while_kinds: &["while_statement"],
     do_kinds: &["repeat_statement"],
     loop_kinds: &[],
     call_kinds: &["function_call", "method_call"],
+    call_callee_field_names: &["name"],
+    call_receiver_field_names: &["table", "prefix"],
+    call_member_field_names: &["method", "field"],
+    call_argument_field_names: &["arguments"],
+    call_argument_container_kinds: &["arguments"],
+    call_target_extractor: Some(lua_call_target),
+    lambda_body_field_names: &["body"],
     argument_passing_mode_extractor: None,
     call_ref_kinds: &["function_call", "method_call"],
     member_expression_kinds: &["dot_index_expression"],
     subscript_expression_kinds: &["bracket_index_expression"],
+    member_base_field_names: &["table", "prefix"],
+    member_name_field_names: &["field"],
+    subscript_base_field_names: &["table", "prefix"],
+    // tree-sitter-lua names the parsed key of `table[key]` as `field`.
+    // Keep `index` for grammar-pack compatibility, but derive both from CST
+    // roles rather than re-reading bracket text.
+    subscript_index_field_names: &["field", "index"],
     assignment_kinds: &["assignment_statement", "variable_declaration"],
     return_kinds: &["return_statement"],
     throw_kinds: &[],
@@ -50,6 +157,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     catch_kinds: &[],
     finally_kinds: &[],
     break_kinds: &["break_statement"],
+    control_label_field_names: &[],
     // Lua has no `continue` keyword. `goto label` is a general jump,
     // not a loop continue, so leaving this empty avoids mis-tagging
     // arbitrary gotos as `FlowEvent::Continue`.
@@ -187,21 +295,6 @@ impl LanguageAdapter for LuaAdapter {
                 }
             }
         }
-        // Recognised Lua lifecycle transitions. Lua method calls
-        // (`f:close()`) land with bare method names per the kit, so
-        // the call_match strings are the bare verbs.
-        const LUA_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "close",
-                transition: "closed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "cancel",
-                transition: "cancelled",
-                arg_index: 0,
-            },
-        ];
         let table_field_assigns = parse_with(PACK_NAME, file, ctx)
             .map(|(snapshot, tree)| {
                 collect_lua_table_literal_field_assigns(&tree, snapshot.text.as_bytes(), file)
@@ -209,7 +302,6 @@ impl LanguageAdapter for LuaAdapter {
             .unwrap_or_default();
         for decl in &mut idx.defs {
             insert_lua_table_field_assigns_in_events(&mut decl.flow_events, &table_field_assigns);
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, LUA_LIFECYCLE_TRANSITIONS);
             normalize_lua_dot_calls(&mut decl.flow_events);
             enrich_lua_factory_receiver_field_writes(decl);
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
@@ -219,9 +311,8 @@ impl LanguageAdapter for LuaAdapter {
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
-        // Local constructor-result receiver typing (`new Foo()` / `Foo()` / `Foo::new()` -> typed receiver) so `recv.method(...)` resolves
-        // `receiver_type_in` / `[Type, method]` rules; the constructor heuristic only
-        // types PascalCase callees, so language exported-function calls are unaffected.
+        // Local constructor-result receiver typing follows adapter facts and
+        // declarations; spelling alone is not constructor evidence.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
         idx
@@ -469,11 +560,38 @@ fn insert_lua_table_field_assigns_in_events(
 fn normalize_lua_dot_calls(events: &mut [FlowEvent]) {
     for event in events {
         match event {
-            FlowEvent::Call { name, call_kind, .. } if name.contains('.') => {
+            FlowEvent::Call {
+                name,
+                receiver,
+                call_kind,
+                ..
+            } if name.contains(':') => {
+                // `table:method(args)` injects `table` as the implicit
+                // receiver. Canonicalize the adapter fact to the shared
+                // dotted name representation only after preserving that
+                // execution semantic.
+                let canonical = name.replace(':', ".");
+                *receiver = canonical.rsplit_once('.').map(|(owner, _)| owner.to_string());
+                *name = canonical;
+                *call_kind = bonsai_lang_api::CallKind::Method;
+            }
+            FlowEvent::Call {
+                name,
+                receiver,
+                receiver_types,
+                call_kind,
+                ..
+            } if name.contains('.') => {
                 // Lua's `table.member(args)` syntax does not inject an
                 // implicit receiver. Only `table:member(args)` does, and
-                // the grammar preserves that colon in the call name.
+                // the grammar preserves that colon in the call name. The
+                // table qualifier is a namespace expression here; retaining
+                // it as a receiver would make the shared resolver treat the
+                // explicit first argument as an implicit receiver and shift
+                // every parameter mapping by one.
                 *call_kind = bonsai_lang_api::CallKind::Function;
+                *receiver = None;
+                receiver_types.clear();
             }
             FlowEvent::Branch {
                 then_events,
@@ -528,7 +646,11 @@ fn enrich_lua_factory_receiver_field_writes(decl: &mut bonsai_lang_api::Decl) {
 
 fn lua_returns_name(events: &[FlowEvent], name: &str) -> bool {
     events.iter().any(|event| match event {
-        FlowEvent::Return { value_flow, .. } => value_flow.place.as_deref() == Some(name),
+        FlowEvent::Return {
+            value_name,
+            value_flow,
+            ..
+        } => value_name.as_deref() == Some(name) || value_flow.place.as_deref() == Some(name),
         FlowEvent::Branch {
             then_events,
             else_events,

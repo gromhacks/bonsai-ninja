@@ -1,0 +1,57 @@
+- id: kotlin.typing.lifecycle_closed_receiver
+  enabled: true
+  language: kotlin
+  match:
+    kind: call
+    callee:
+      regex: '(?:^|\.)(?:close|shutdown)$'
+  lifecycle_transition:
+    state: closed
+    binding: { kind: receiver }
+  match_examples:
+  - name: close changes the receiver state
+    code: 'fun f(stream: java.io.InputStream) { stream.close() }'
+    expect_match_text: [stream.close]
+  description: "Kotlin/JVM close/shutdown moves the receiver to closed. Typing-only; never a finding."
+
+- id: kotlin.typing.lifecycle_cancelled_receiver
+  enabled: true
+  language: kotlin
+  match: { kind: call, callee: { name: cancel } }
+  lifecycle_transition:
+    state: cancelled
+    binding: { kind: receiver }
+  match_examples:
+  - name: cancel changes the receiver state
+    code: 'fun f(job: kotlinx.coroutines.Job) { job.cancel() }'
+    expect_match_text: [job.cancel]
+  description: "Kotlin cancel moves the receiver to cancelled. Typing-only; never a finding."
+
+- id: kotlin.typing.lifecycle_unlocked_receiver
+  enabled: true
+  language: kotlin
+  match: { kind: call, callee: { name: unlock } }
+  lifecycle_transition:
+    state: unlocked
+    binding: { kind: receiver }
+  match_examples:
+  - name: unlock changes the receiver state
+    code: 'fun f(lock: java.util.concurrent.locks.Lock) { lock.unlock() }'
+    expect_match_text: [lock.unlock]
+  description: "Kotlin unlock moves the receiver to unlocked. Typing-only; never a finding."
+
+- id: kotlin.typing.lifecycle_released_receiver
+  enabled: true
+  language: kotlin
+  match:
+    kind: call
+    callee:
+      regex: '(?:^|\.)(?:release|dispose)$'
+  lifecycle_transition:
+    state: freed
+    binding: { kind: receiver }
+  match_examples:
+  - name: dispose changes the receiver state
+    code: 'fun f(resource: Resource) { resource.dispose() }'
+    expect_match_text: [resource.dispose]
+  description: "Kotlin release/dispose moves the receiver to freed. Typing-only; never a finding."

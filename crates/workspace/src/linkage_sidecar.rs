@@ -591,6 +591,14 @@ mod tests {
             bases: Vec::new(),
             receiver_param_index: None,
             receiver_field_writes: Vec::new(),
+            receiver_field_initializers: vec![bonsai_lang_api::ReceiverFieldInitializer {
+                span,
+                target: "self.client".to_string(),
+                call_name: "Client".to_string(),
+                call_kind: bonsai_lang_api::CallKind::Constructor,
+                call_receiver: None,
+                call_receiver_types: vec!["Client".to_string()],
+            }],
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
             return_type: None,
@@ -634,6 +642,24 @@ mod tests {
         assert_eq!(restored.len(), 1);
         let headers = load_header_sidecar_checked(&path, &db).expect("load headers");
         assert_eq!(headers.len(), 1);
+        assert_eq!(
+            headers
+                .find_by_name("main")
+                .first()
+                .and_then(|symbol| headers.decl_of(*symbol))
+                .map(|decl| decl.receiver_field_initializers.as_slice()),
+            Some(
+                [bonsai_lang_api::ReceiverFieldInitializer {
+                    span: Span::new(FileId::new(0), 0, 4),
+                    target: "self.client".to_string(),
+                    call_name: "Client".to_string(),
+                    call_kind: bonsai_lang_api::CallKind::Constructor,
+                    call_receiver: None,
+                    call_receiver_types: vec!["Client".to_string()],
+                }]
+                .as_slice()
+            )
+        );
         let scoped_headers = load_header_partitions_checked_with_source_inputs(
             &path,
             &[(0, "src/input.fixture".to_string(), fnv1a_bytes64(b"first"))],

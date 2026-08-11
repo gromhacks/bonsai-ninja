@@ -67,7 +67,7 @@ fn tainted_call_kind_matches_sink(call: &TaintedCall, sink_rule: &Rule) -> bool 
         MatchKind::Call | MatchKind::New => call.kind == bonsai_taint::TaintedCallKind::Call,
         MatchKind::Write => call.kind == bonsai_taint::TaintedCallKind::Write,
         MatchKind::Return => call.kind == bonsai_taint::TaintedCallKind::Return,
-        MatchKind::Read | MatchKind::Param | MatchKind::Missing => false,
+        MatchKind::Read | MatchKind::Param | MatchKind::Missing | MatchKind::Type => false,
     }
 }
 
@@ -396,7 +396,7 @@ impl SourceGroupExecutor<'_> {
                 &current_call_taint_view,
                 &RuleConstraintTaintContext {
                     endpoint_identity_proven,
-                    factory: self.factory_returns,
+                    factory: self.rulepack_typing,
                     global_headers: self.global,
                     receiver_base_map_cell: self.receiver_base_map_cell,
                 },

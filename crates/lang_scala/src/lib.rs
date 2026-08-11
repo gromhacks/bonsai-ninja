@@ -6,14 +6,72 @@ use bonsai_lang_api::{
         call_arg_from_node_with_handler, call_arg_from_nodes_with_handler, collect_kinds,
         collect_receiver_field_writes, first_named_child_of_kind, language_from_pack,
         looks_like_bare_identifier, node_at_span, node_text, normalize_call_name_whitespace,
-        package_module_segments_with_workspace_prefix, parse_with, span_of, walk_flow_events,
+        package_module_segments_with_workspace_prefix, parse_with, pattern_binding_sites_from_arms, span_of,
+        walk_flow_events,
     },
-    AdapterContext, AdapterError, CallArg, CallKind, Decl, DeclIndex, DeclKind, FieldWrite, FlowEvent,
-    GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
-    LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
+    AdapterContext, AdapterError, CallArg, CallKind, CallTargetExtraction, Decl, DeclIndex, DeclKind,
+    FieldWrite, FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec,
+    LanguageAdapter, LanguageCapabilities, LanguageId, PatternBindingSite, TypeAliasBinding,
+    TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
 };
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
+
+fn scala_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    let target = match node.kind() {
+        "call_expression" | "generic_function" => node.child_by_field_name("function")?,
+        // tree-sitter-scala gives constructor arguments a field but leaves
+        // the constructor type as the first named child.
+        "instance_expression" => node
+            .child_by_field_name("type")
+            .or_else(|| node.named_child(0))
+            .filter(|target| {
+                matches!(
+                    target.kind(),
+                    "type_identifier" | "stable_type_identifier" | "generic_type" | "projected_type"
+                )
+            })?,
+        _ => return None,
+    };
+    let full_text = node_text(&target, src).trim();
+    (!full_text.is_empty()).then_some(CallTargetExtraction {
+        node: target,
+        full_text: full_text.to_string(),
+    })
+}
+
+fn scala_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    if node.kind() != "for_expression" {
+        return None;
+    }
+    let enumerators = node
+        .child_by_field_name("enumerators")
+        .filter(|child| matches!(child.kind(), "enumerators" | "enumerator"))
+        .or_else(|| {
+            let mut cursor = node.walk();
+            let found = node
+                .named_children(&mut cursor)
+                .find(|child| child.kind() == "enumerators");
+            found
+        })
+        .or_else(|| node.named_child(0))?;
+    // This grammar exposes one `enumerator` as the container's first named
+    // child. Selecting it positionally is exact and also survives language-
+    // pack builds where the node kind is hidden behind an alias.
+    let enumerator = if enumerators.kind() == "enumerator" {
+        enumerators
+    } else {
+        enumerators.named_child(0)?
+    };
+    Some((enumerator.named_child(0)?, enumerator.named_child(1)?))
+}
+
+fn scala_pattern_bindings(node: Node<'_>) -> Vec<PatternBindingSite<'_>> {
+    if node.kind() != "match_expression" {
+        return Vec::new();
+    }
+    pattern_binding_sites_from_arms(node, &["value"], &["case_clause"], &["pattern"], &[])
+}
 
 const SCALA_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
     fn_kinds: &["function_definition", "function_declaration"],
@@ -40,6 +98,11 @@ use tree_sitter::{Language, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("scala");
 const PACK_NAME: &str = "scala";
+const MODULE_SOURCE_ROOTS: &[&[&str]] = &[
+    &["src", "main", "scala"],
+    &["src", "test", "scala"],
+    &["src", "scala"],
+];
 
 fn extract_scala_syntax_event(
     node: Node<'_>,
@@ -73,6 +136,31 @@ fn extract_scala_syntax_event(
 }
 
 const HANDLER: GrammarHandler = GrammarHandler {
+    expression_value_kind_extractor: None,
+    literal_value_kinds: &[
+        "null_literal",
+        "boolean_literal",
+        "integer_literal",
+        "floating_point_literal",
+        "true",
+        "false",
+    ],
+    string_literal_kinds: &["string", "interpolated_string_expression", "character_literal"],
+    comment_kinds: &["comment"],
+    doc_comment_prefixes: &["/**"],
+    decorator_kinds: &["annotation"],
+    parameter_container_kinds: &["parameters"],
+    parameter_kinds: &["parameter", "class_parameter"],
+    parameter_annotation_kinds: &["annotation"],
+    variadic_parameter_kinds: &["repeated_parameter"],
+    binding_identifier_kinds: &["identifier"],
+    pattern_binding_extractor: Some(scala_pattern_bindings),
+    identifier_kinds: &["identifier"],
+    aggregate_pattern_kinds: &["tuple_pattern", "pattern_list"],
+    positional_aggregate_kinds: &["tuple_expression"],
+    transparent_call_wrapper_kinds: &["field_expression", "parenthesized_expression"],
+    assignment_target_wrapper_kinds: &["val_definition", "var_definition"],
+    binding_declaration_keyword_spellings: &["val", "var"],
     fn_kinds: &["function_definition", "function_declaration"],
     class_kinds: &[
         "class_definition",
@@ -93,9 +181,25 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "enum_definition",
     ],
     if_kinds: &["if_expression", "match_expression"],
-    for_kinds: &["for_expression"],
+    branch_then_field_names: &["consequence", "body"],
+    branch_else_field_names: &["alternative"],
+    branch_condition_field_names: &["condition", "value"],
+    loop_body_field_names: &["body"],
+    loop_body_kinds: &["block", "expression_statement"],
+    branch_arm_kinds: &["block", "case_clause"],
+    for_kinds: &[],
+    foreach_kinds: &["for_expression"],
+    foreach_binding_extractor: Some(scala_foreach_binding),
     while_kinds: &["while_expression"],
     call_kinds: &["call_expression", "generic_function", "instance_expression"],
+    constructor_call_kinds: &["instance_expression"],
+    call_callee_field_names: &["function"],
+    constructor_type_field_names: &["type"],
+    call_target_extractor: Some(scala_call_target),
+    call_argument_field_names: &["arguments"],
+    call_argument_container_kinds: &["arguments"],
+    call_callee_is_first_named_child: true,
+    lambda_body_field_names: &["body"],
     pseudo_call_extractor: Some(extract_scala_pseudo_call),
     syntax_event_extractor: Some(extract_scala_syntax_event),
     pseudo_call_receiver_extractor: Some(extract_scala_pseudo_call_receiver),
@@ -103,16 +207,21 @@ const HANDLER: GrammarHandler = GrammarHandler {
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     call_ref_kinds: &["call_expression", "generic_function", "instance_expression"],
     member_expression_kinds: &["field_expression"],
+    member_base_field_names: &["value", "object"],
+    member_name_field_names: &["field", "name"],
     assignment_kinds: &[
         "assignment_expression",
         "val_definition",
         "var_definition",
         "var_declaration",
     ],
+    compound_assignment_operators: &["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="],
+    type_only_declaration_kinds: &["var_declaration", "val_definition", "var_definition"],
     return_kinds: &["return_expression"],
     throw_kinds: &[],
     lambda_kinds: &["lambda_expression"],
     try_kinds: &["try_expression"],
+    try_body_field_names: &["body"],
     catch_kinds: &["catch_clause"],
     finally_kinds: &["finally_clause"],
     // Scala block-bodied `def f() = { …; tailExpr }` returns its tail
@@ -271,7 +380,8 @@ impl LanguageAdapter for ScalaAdapter {
         let pkg_segments = parse_with(PACK_NAME, file, ctx)
             .and_then(|(snapshot, tree)| extract_scala_package(tree.root_node(), snapshot.text.as_bytes()));
         if let Some(segments) = pkg_segments {
-            let segments = package_module_segments_with_workspace_prefix(file, ctx, segments);
+            let segments =
+                package_module_segments_with_workspace_prefix(file, ctx, segments, MODULE_SOURCE_ROOTS);
             bonsai_lang_api::apply_module_path_semantic_identity(&mut idx, segments);
         } else {
             bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
@@ -293,7 +403,15 @@ impl LanguageAdapter for ScalaAdapter {
             // of the enclosing class. Without this, the engine cannot
             // dispatch `authService.runAdminCommand(...)` to the real
             // `AuthService` decl.
-            let class_field_aliases = collect_scala_class_field_aliases(&tree, file, src);
+            let declared_type_names = idx
+                .defs
+                .iter()
+                .filter(|decl| is_class_like(decl.kind))
+                .flat_map(|decl| std::iter::once(decl.name.clone()).chain(decl.qualified_name.clone()))
+                .filter_map(|name| canonical_simple_type_name(&name))
+                .collect::<std::collections::HashSet<_>>();
+            let class_field_aliases =
+                collect_scala_class_field_aliases(&tree, file, src, &declared_type_names);
             // WS2: method-local `val c = make().asInstanceOf[Foo]` casts,
             // keyed by the enclosing method span (the class-field walk
             // skips method bodies, and the kit vocabulary only types
@@ -358,43 +476,8 @@ impl LanguageAdapter for ScalaAdapter {
                 }
             }
         }
-        // Recognised Scala lifecycle transitions — same call names as
-        // Java since the JVM library surface is shared.
-        const SCALA_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "close",
-                transition: "closed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "shutdown",
-                transition: "closed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "cancel",
-                transition: "cancelled",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "unlock",
-                transition: "unlocked",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "release",
-                transition: "freed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "dispose",
-                transition: "freed",
-                arg_index: 0,
-            },
-        ];
         for decl in &mut idx.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, SCALA_LIFECYCLE_TRANSITIONS);
         }
         // Mirror the lang_csharp / lang_dart synthesis passes: convert a method
         // body that's a simple dotted receiver field read
@@ -423,7 +506,8 @@ impl LanguageAdapter for ScalaAdapter {
         // Local constructor-result receiver typing (`val c = new Foo()`
         // / `Foo()` → `c: Foo`) so `c.method(...)` carries a resolved
         // receiver type for `receiver_type_in` / `[Type, method]` rules.
-        // Scala class names are PascalCase; the heuristic is reliable.
+        // Constructor identity comes from `new` syntax or an exact type
+        // declaration, never capitalization.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
         // Scala adds constructor-property aliases and rewrites property
@@ -759,6 +843,7 @@ fn scala_constructor_decl(
         bases: Vec::new(),
         receiver_param_index: None,
         receiver_field_writes,
+        receiver_field_initializers: Vec::new(),
         implicit_receiver_names: vec!["this".to_string(), "super".to_string()],
         receiver_state_sources: Vec::new(),
         return_type: None,
@@ -954,6 +1039,7 @@ fn collect_scala_class_field_aliases(
     tree: &Tree,
     file: FileId,
     src: &[u8],
+    declared_type_names: &std::collections::HashSet<String>,
 ) -> Vec<(Span, Vec<TypeAliasBinding>)> {
     let class_kinds = &["class_definition", "trait_definition", "object_definition"];
     let mut out = Vec::new();
@@ -974,7 +1060,7 @@ fn collect_scala_class_field_aliases(
                 continue;
             }
             if matches!(node.kind(), "val_definition" | "var_definition") {
-                if let Some(binding) = scala_field_alias(node, src) {
+                if let Some(binding) = scala_field_alias(node, src, declared_type_names) {
                     if !aliases.contains(&binding) {
                         aliases.push(binding);
                     }
@@ -983,7 +1069,7 @@ fn collect_scala_class_field_aliases(
             if node.kind() == "class_parameter"
                 && (is_case_class || scala_class_parameter_declares_property(node, src))
             {
-                if let Some(binding) = scala_field_alias(node, src) {
+                if let Some(binding) = scala_field_alias(node, src, declared_type_names) {
                     if !aliases.contains(&binding) {
                         aliases.push(binding);
                     }
@@ -1006,7 +1092,11 @@ fn collect_scala_class_field_aliases(
 /// (`val x: Foo = ...`) and constructor-shaped initializers
 /// (`val x = new Foo()`), since Scala source frequently relies on
 /// type inference for class fields.
-fn scala_field_alias(node: Node<'_>, src: &[u8]) -> Option<TypeAliasBinding> {
+fn scala_field_alias(
+    node: Node<'_>,
+    src: &[u8],
+    declared_type_names: &std::collections::HashSet<String>,
+) -> Option<TypeAliasBinding> {
     let pattern = node
         .child_by_field_name("pattern")
         .or_else(|| node.child_by_field_name("name"))?;
@@ -1018,7 +1108,7 @@ fn scala_field_alias(node: Node<'_>, src: &[u8]) -> Option<TypeAliasBinding> {
         .child_by_field_name("type")
         .map(|t| node_text(&t, src).to_string())
         .and_then(|t| canonical_simple_type_name(&t))
-        .or_else(|| scala_value_constructor_type(node, src))
+        .or_else(|| scala_value_constructor_type(node, src, declared_type_names))
         .or_else(|| scala_value_cast_type(node, src))?;
     if type_short.is_empty() || name == type_short {
         return None;
@@ -1106,11 +1196,15 @@ fn scala_value_cast_type(node: Node<'_>, src: &[u8]) -> Option<String> {
     None
 }
 
-fn scala_value_constructor_type(node: Node<'_>, src: &[u8]) -> Option<String> {
+fn scala_value_constructor_type(
+    node: Node<'_>,
+    src: &[u8],
+    declared_type_names: &std::collections::HashSet<String>,
+) -> Option<String> {
     let value = node
         .child_by_field_name("value")
         .or_else(|| node.child_by_field_name("expression"))?;
-    let candidate = match value.kind() {
+    let (candidate, syntax_proves_constructor) = match value.kind() {
         // `new Foo(...)` shape across grammar versions.
         "instance_expression" | "creator" | "new_expression" => {
             let mut found = None;
@@ -1133,10 +1227,10 @@ fn scala_value_constructor_type(node: Node<'_>, src: &[u8]) -> Option<String> {
                     }
                 }
             }
-            found?
+            (found?, true)
         }
-        // `val x = Foo()` (apply method) — Scala convention treats
-        // PascalCase callees as constructor-shaped.
+        // `val x = Foo()` is ambiguous (ordinary function vs companion
+        // apply). Only an exact type declaration can prove this type.
         "call_expression" => {
             let func = value.child_by_field_name("function").or_else(|| {
                 let mut cursor = value.walk();
@@ -1149,16 +1243,12 @@ fn scala_value_constructor_type(node: Node<'_>, src: &[u8]) -> Option<String> {
                 }
                 found
             })?;
-            node_text(&func, src).to_string()
+            (node_text(&func, src).to_string(), false)
         }
         _ => return None,
     };
     let canonical = canonical_simple_type_name(&candidate)?;
-    canonical
-        .chars()
-        .next()
-        .filter(|first| first.is_ascii_uppercase())?;
-    Some(canonical)
+    (syntax_proves_constructor || declared_type_names.contains(&canonical)).then_some(canonical)
 }
 
 fn canonical_simple_type_name(raw: &str) -> Option<String> {
@@ -1482,17 +1572,21 @@ fn collect_scala_class_bases(
 /// Canonicalize a Scala base reference to a bare type name.
 ///
 /// Strips type parameter brackets (`Foo[T]` → `Foo`) and any qualifying
-/// path (`pkg.Foo` → `Foo`). Lowercase-leading names are rejected because
-/// they're values (e.g. constructor-arg lists) not type references.
+/// path (`pkg.Foo` → `Foo`). The caller supplies only `extends_clause`
+/// children, so capitalization is neither necessary nor correct.
 fn canonical_scala_base_name(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     // Strip type parameter brackets: `Foo[T]` → `Foo`.
-    let head = trimmed.split('[').next().unwrap_or(trimmed).trim();
+    let head = trimmed.split(['[', '(']).next().unwrap_or(trimmed).trim();
     // Strip qualifying path: `pkg.Foo` → `Foo`.
     let bare = head.rsplit('.').next().unwrap_or(head).trim();
-    // Type names are conventionally upper-cased; reject lower-case leads
-    // so we don't pick up arg expressions in `extends Foo(arg)`.
-    if bare.is_empty() || !bare.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+    if bare.is_empty()
+        || !bare
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        || !bare.chars().all(|c| c.is_alphanumeric() || c == '_')
+    {
         return None;
     }
     Some(bare.to_string())
@@ -1627,6 +1721,7 @@ fn rewrite_scala_member_access_accessors(index: &mut DeclIndex) {
             let body_span = *span;
             decl.flow_events = vec![FlowEvent::Return {
                 span: body_span,
+                value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
                 value_text: Some(place.clone()),
                 value_name: Some(place.clone()),
                 value_flow: bonsai_lang_api::ExpressionFlow::from_place(&place),
@@ -1645,6 +1740,7 @@ fn rewrite_scala_member_access_accessors(index: &mut DeclIndex) {
             },
             FlowEvent::Return {
                 span: body_span,
+                value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
                 value_text: Some(format!("{call_name}()")),
                 value_name: None,
                 value_flow: bonsai_lang_api::ExpressionFlow {
@@ -1804,6 +1900,7 @@ fn synthesize_scala_case_class_accessors(idx: &mut DeclIndex, file: FileId, ctx:
                 body_span: Some(*comp_span),
                 flow_events: vec![FlowEvent::Return {
                     span: *comp_span,
+                    value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
                     value_text: Some(field.clone()),
                     value_name: Some(field.clone()),
                     value_flow: bonsai_lang_api::ExpressionFlow::from_place(field.clone()),
@@ -1816,6 +1913,7 @@ fn synthesize_scala_case_class_accessors(idx: &mut DeclIndex, file: FileId, ctx:
                 bases: Vec::new(),
                 receiver_param_index: None,
                 receiver_field_writes: Vec::new(),
+                receiver_field_initializers: Vec::new(),
                 implicit_receiver_names: vec!["this".to_string(), "super".to_string()],
                 receiver_state_sources: vec![field],
                 return_type: None,

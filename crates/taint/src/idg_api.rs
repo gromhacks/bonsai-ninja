@@ -93,6 +93,9 @@ pub struct OutputArgFlow {
 pub struct ReceiverStatePropagation {
     pub method: String,
     pub receiver_type: Option<String>,
+    /// Exact rule-matched call sites whose receiver type was established by
+    /// rulepack typing rather than directly spelled in source syntax.
+    pub resolved_call_sites: Vec<Span>,
 }
 
 /// Compatibility handle for callers that share analysis caches. IDG state is
@@ -162,14 +165,34 @@ pub struct CallPropagation {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaintedArg {
     pub index: usize,
+    /// Render-only source spelling. Semantic consumers use the structured
+    /// fields below.
     pub value_text: String,
     pub param_name: String,
+    /// Adapter-normalized addressable place at the caller site.
+    // These graph records are also encoded with MessagePack's compact
+    // positional struct representation. Keep every field in that sequence:
+    // skipping an earlier optional field shifts all later values and makes a
+    // same-version snapshot undecodable.
+    #[serde(default)]
+    pub place: Option<String>,
+    /// Exact AST-derived value carriers at the caller site.
+    #[serde(default)]
+    pub source_names: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaintedArgAtCall {
     pub index: usize,
+    /// Render-only source spelling. Semantic consumers must use `place` and
+    /// `source_names`; this text is not a compiler identity.
     pub value_text: String,
+    /// Adapter-normalized addressable place for the argument, when present.
+    #[serde(default)]
+    pub place: Option<String>,
+    /// Exact AST-derived value carriers for the argument expression.
+    #[serde(default)]
+    pub source_names: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -181,6 +204,11 @@ pub struct TaintedCall {
     pub call_span: Span,
     pub tainted_args: Vec<TaintedArgAtCall>,
     pub tainted_receiver: Option<String>,
+    /// Exact AST-derived value carriers for a tainted receiver expression.
+    /// This lets overlapping-call attribution compare compiler facts without
+    /// tokenizing the rendered receiver spelling.
+    #[serde(default)]
+    pub tainted_receiver_source_names: Vec<String>,
     #[serde(default)]
     pub kind: TaintedCallKind,
 }

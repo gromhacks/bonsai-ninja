@@ -1,0 +1,57 @@
+- id: go.typing.lifecycle_closed_receiver
+  enabled: true
+  language: go
+  match: { kind: call, callee: { name: Close } }
+  lifecycle_transition:
+    state: closed
+    binding: { kind: receiver }
+  match_examples:
+  - name: Close changes the receiver state
+    code: "package p\nfunc f(resource interface{ Close() error }) { resource.Close() }"
+    expect_match_text: [resource.Close]
+  description: "Go Close moves the receiver to closed. Typing-only; never a finding."
+
+- id: go.typing.lifecycle_unlocked_receiver
+  enabled: true
+  language: go
+  match:
+    kind: call
+    callee:
+      regex: '(?:^|\.)(?:Unlock|RUnlock)$'
+  lifecycle_transition:
+    state: unlocked
+    binding: { kind: receiver }
+  match_examples:
+  - name: Unlock changes the receiver state
+    code: "package p\nimport \"sync\"\nfunc f(lock *sync.Mutex) { lock.Unlock() }"
+    expect_match_text: [lock.Unlock]
+  description: "Go unlock methods move the receiver to unlocked. Typing-only; never a finding."
+
+- id: go.typing.lifecycle_cancelled_receiver
+  enabled: true
+  language: go
+  match:
+    kind: call
+    callee:
+      regex: '(?:^|\.)(?:Cancel|Stop)$'
+  lifecycle_transition:
+    state: cancelled
+    binding: { kind: receiver }
+  match_examples:
+  - name: Stop changes the receiver state
+    code: "package p\nfunc f(timer interface{ Stop() bool }) { timer.Stop() }"
+    expect_match_text: [timer.Stop]
+  description: "Go cancellation methods move the receiver to cancelled. Typing-only; never a finding."
+
+- id: go.typing.lifecycle_freed_cgo_argument
+  enabled: true
+  language: go
+  match: { kind: call, callee: { attribute: [C, free] } }
+  lifecycle_transition:
+    state: freed
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: C free changes the pointer state
+    code: "package p\n/* #include <stdlib.h> */\nimport \"C\"\nfunc f(ptr *C.char) { C.free(unsafe.Pointer(ptr)) }"
+    expect_match_text: [C.free]
+  description: "The cgo C.free bridge moves argument zero to freed. Typing-only; never a finding."

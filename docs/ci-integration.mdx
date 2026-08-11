@@ -126,14 +126,25 @@ seconds. The broad inspect result retained all 12,233 entry closures and
 target ownership now avoid redundant header/relevance lookups without changing
 the IDG fixed point.
 
-The current 2026-08-08 ABI-v68 migration pass passed all five tests in
+The current 2026-08-10 ABI-v83 release pass completed all five tests in
+233.57 seconds under the enforced 3 GiB scheduler. Exact generation after the
+ABI change took 1,618.72 seconds once and immediate fresh-process reuse took
+2.49 seconds. The warm test pass measured default/exact raw-taint inspect at
+7.66/27.60 seconds, fresh-cache/warm production taint at 29.42/28.31 seconds,
+and source/sink/sanitizer/dependency inventory at
+3.95/24.01/21.13/12.08 seconds. The sink matcher retained byte-identical
+output while demand-projecting optional compiler-derived facts and running
+header/body work behind source-weighted memory permits. All query and
+inventory SLOs passed; the scheduler did not cap semantic work.
+
+The previous 2026-08-08 ABI-v68 migration pass passed all five tests in
 1,822.56 seconds. Its required one-time exact generation took 1,619.68 seconds
 and immediate reuse took 2.35 seconds. Default inspect took 6.76 seconds,
 broad raw-taint inspect 24.20 seconds, fresh-cache production taint 29.51
 seconds, and warm production taint 25.42 seconds. The scoped `read-file` probe
 took 1.71 seconds. All navigation and security-inventory SLOs passed; the
 compiler worker stayed near 1.04 GiB RSS and the IDG worker near 2.67 GiB under
-the 3 GiB scheduling budget. This is the current cache-compatibility reference.
+the 3 GiB scheduling budget. This remains the prior cache-compatibility reference.
 
 The final 2026-08-09 ABI-v68 warm release-candidate repeat passed 5/5 in
 219.44 seconds. Semantic readiness/reuse took 5.29/2.38 seconds, default and

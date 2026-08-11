@@ -104,19 +104,27 @@ fn python_ws(source: &str) -> Workspace {
     ws
 }
 
-/// Run the matcher for sink rules in the given language and return the
-/// set of rule ids that fired. Audit-pair lifecycle rules live under
-/// `RuleKind::Sink` so this is the only kind we need; sources and
-/// sanitizers don't matter for these tests.
+/// Run the matcher with the complete language rule set and return sink ids.
+/// Lifecycle transitions deliberately live in typing rules, so a sink-only
+/// slice would remove the compiler model that establishes the required state.
 fn fired_sink_rule_ids(ws: &Workspace, language: &str) -> Vec<String> {
     let pack = rulepack();
     let rules: Vec<&_> = pack
         .all_rules()
         .into_iter()
-        .filter(|rule| rule.kind == RuleKind::Sink && rule.enabled && rule.language == language)
+        .filter(|rule| rule.enabled && rule.language == language)
         .collect();
+    let sink_ids = rules
+        .iter()
+        .filter(|rule| rule.kind == RuleKind::Sink)
+        .map(|rule| rule.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
     let hits = match_rules_against_facts(ws, &rules);
-    let mut ids: Vec<String> = hits.into_iter().map(|hit| hit.rule_id).collect();
+    let mut ids: Vec<String> = hits
+        .into_iter()
+        .filter(|hit| sink_ids.contains(hit.rule_id.as_str()))
+        .map(|hit| hit.rule_id)
+        .collect();
     ids.sort();
     ids.dedup();
     ids

@@ -6,12 +6,55 @@ use bonsai_lang_api::{
         call_arg_from_node_with_handler, collect_kinds, first_named_child_of_kind, language_from_pack,
         named_child_call_args_with_handler, node_text, parse_with, span_of,
     },
-    AdapterContext, AdapterError, AssignValueKind, AssignmentValueIndex, CallArg, CallKind, DeclIndex,
-    DeclKind, FieldWrite, FlowEvent, FragmentParseContext, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasVocabulary,
-    Visibility, EMPTY_HANDLER,
+    AdapterContext, AdapterError, AssignValueKind, AssignmentValueIndex, CallArg, CallKind,
+    CallTargetExtraction, DeclIndex, DeclKind, FieldWrite, FlowEvent, FragmentParseContext, GrammarHandler,
+    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    ModifierVocabulary, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
 };
 use std::collections::BTreeSet;
+fn php_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    let (target, full_text) = match node.kind() {
+        "function_call_expression" => {
+            let target = node.child_by_field_name("function")?;
+            (target, node_text(&target, src).trim().to_string())
+        }
+        "member_call_expression" | "nullsafe_member_call_expression" => {
+            let receiver = node.child_by_field_name("object")?;
+            let target = node.child_by_field_name("name")?;
+            (
+                target,
+                format!(
+                    "{}.{}",
+                    node_text(&receiver, src).trim(),
+                    node_text(&target, src).trim()
+                ),
+            )
+        }
+        "scoped_call_expression" => {
+            let receiver = node.child_by_field_name("scope")?;
+            let target = node.child_by_field_name("name")?;
+            (
+                target,
+                format!(
+                    "{}::{}",
+                    node_text(&receiver, src).trim(),
+                    node_text(&target, src).trim()
+                ),
+            )
+        }
+        "object_creation_expression" => {
+            // The PHP grammar exposes the constructed qualified name as the
+            // first named child rather than a `type` field.
+            let target = node.child_by_field_name("type").or_else(|| node.named_child(0))?;
+            (target, node_text(&target, src).trim().to_string())
+        }
+        _ => return None,
+    };
+    (!full_text.is_empty()).then_some(CallTargetExtraction {
+        node: target,
+        full_text,
+    })
+}
 
 const PHP_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
     fn_kinds: &["function_definition", "method_declaration"],
@@ -66,7 +109,147 @@ fn extract_php_callable_reference(node: Node<'_>, src: &[u8]) -> Option<String> 
     let name = node_text(&callee, src).trim();
     (!name.is_empty()).then(|| name.to_string())
 }
+
+fn php_subscript_parts(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    if node.kind() != "subscript_expression" {
+        return None;
+    }
+    // tree-sitter-php does not assign field names to either operand of a
+    // subscript. Its grammar contract is the first named child as the base
+    // and the second named child as the index. Keep the field lookups for
+    // forward compatibility, then use that exact ordered shape.
+    let mut cursor = node.walk();
+    let mut children = node.named_children(&mut cursor);
+    let first = children.next()?;
+    let second = children.next()?;
+    let object = node.child_by_field_name("object").unwrap_or(first);
+    let key = node.child_by_field_name("index").unwrap_or(second);
+    Some((object, key))
+}
+
+fn php_static_subscript_key(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() != "string" {
+        return None;
+    }
+    let text = node_text(&node, src).trim();
+    let quote = text.as_bytes().first().copied()?;
+    if !matches!(quote, b'\'' | b'"') || text.as_bytes().last().copied() != Some(quote) {
+        return None;
+    }
+    let value = text.get(1..text.len().checked_sub(1)?)?;
+    (!value.contains('\\')).then(|| value.to_string())
+}
+
+fn php_reference_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let raw = node_text(&node, src).trim();
+    // `$` is part of a PHP variable's language identity and distinguishes a
+    // runtime value from a class/function name. Preserve it in every place
+    // fact; generic name comparison already understands adapter-owned sigils.
+    (!raw.is_empty()).then(|| raw.to_string())
+}
+
+fn php_binding_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let raw = node_text(&node, src).trim();
+    let binding = raw.strip_prefix('$').unwrap_or(raw);
+    (!binding.is_empty()).then(|| binding.to_string())
+}
+
+/// PHP's append assignment (`$items[] = $value`) is represented by a
+/// `subscript_expression` with no index child.  The append mutates the whole
+/// aggregate value, so its compiler place is the parsed base expression.  A
+/// normal keyed subscript continues through the shared field-sensitive place
+/// lowering.
+fn php_assignment_place(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() != "subscript_expression" || node.named_child_count() != 1 {
+        return None;
+    }
+    let base = node.named_child(0)?;
+    if base.kind() == "variable_name" {
+        return php_reference_name(base, src);
+    }
+    None
+}
+
+fn php_aggregate_pairs(node: Node<'_>) -> Vec<(Node<'_>, Node<'_>)> {
+    if node.kind() != "list_literal" {
+        return Vec::new();
+    }
+    let mut pairs = Vec::new();
+    let mut pending_key = None;
+    let mut saw_pair_operator = false;
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.is_named() {
+                if saw_pair_operator {
+                    if let Some(key) = pending_key.take() {
+                        pairs.push((key, child));
+                    }
+                    saw_pair_operator = false;
+                } else {
+                    pending_key = Some(child);
+                }
+            } else if child.kind() == "=>" {
+                saw_pair_operator = true;
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    pairs
+}
+
+fn php_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    if node.kind() != "foreach_statement" {
+        return None;
+    }
+    let body_id = node.child_by_field_name("body").map(|body| body.id());
+    let mut cursor = node.walk();
+    let mut header = node
+        .named_children(&mut cursor)
+        .filter(|child| Some(child.id()) != body_id);
+    let iterable = header.next()?;
+    let binding = header.next()?;
+    Some((binding, iterable))
+}
 const HANDLER: GrammarHandler = GrammarHandler {
+    expression_value_kind_extractor: None,
+    literal_value_kinds: &["null", "boolean", "integer", "float"],
+    string_literal_kinds: &["string", "encapsed_string", "heredoc", "nowdoc_string"],
+    comment_kinds: &["comment"],
+    doc_comment_prefixes: &["/**"],
+    decorator_kinds: &["attribute"],
+    parameter_container_kinds: &["formal_parameters"],
+    parameter_kinds: &[
+        "simple_parameter",
+        "variadic_parameter",
+        "property_promotion_parameter",
+    ],
+    parameter_modifier_kinds: &["attribute_list"],
+    parameter_annotation_kinds: &["attribute"],
+    variadic_parameter_kinds: &["variadic_parameter"],
+    binding_identifier_kinds: &["variable_name", "name"],
+    non_binding_pattern_field_names: &["type", "key"],
+    binding_name_extractor: Some(php_binding_name),
+    identifier_kinds: &["variable_name", "name"],
+    aggregate_pattern_kinds: &["list_literal", "array_creation_expression"],
+    named_aggregate_kinds: &["array_creation_expression"],
+    positional_aggregate_kinds: &["array", "list", "list_literal", "array_creation_expression"],
+    two_child_aggregate_pair_kinds: &["array_element_initializer"],
+    aggregate_pair_extractor: Some(php_aggregate_pairs),
+    aggregate_value_field_names: &["value"],
+    static_field_name_kinds: &["name"],
+    lambda_value_container_kinds: &["array_creation_expression", "array_element_initializer"],
+    transparent_call_wrapper_kinds: &[
+        "member_access_expression",
+        "scoped_call_expression",
+        "parenthesized_expression",
+    ],
+    assignment_target_wrapper_kinds: &["variable_declaration", "property_element"],
+    assignment_place_extractor: Some(php_assignment_place),
+    binding_declaration_keyword_spellings: &["static"],
     fn_kinds: &["function_definition", "method_declaration"],
     call_kinds: &[
         "function_call_expression",
@@ -75,6 +258,21 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "scoped_call_expression",
         "object_creation_expression",
     ],
+    constructor_call_kinds: &["object_creation_expression"],
+    call_callee_field_names: &["function"],
+    call_receiver_field_names: &["object", "scope"],
+    call_member_field_names: &["name"],
+    constructor_type_field_names: &["type"],
+    call_target_extractor: Some(php_call_target),
+    call_argument_field_names: &["arguments"],
+    call_argument_container_kinds: &["arguments"],
+    // tree-sitter-php wraps every positional argument in `argument`; named
+    // arguments use the dedicated `named_argument` shape. Unwrapping both is
+    // required for an addressable `$value` to remain an exact CallArg place.
+    argument_wrapper_kinds: &["argument", "named_argument"],
+    argument_name_field_names: &["name"],
+    argument_value_field_names: &["value"],
+    lambda_body_field_names: &["body"],
     pseudo_call_extractor: Some(extract_php_pseudo_call),
     syntax_event_extractor: None,
     argument_passing_mode_extractor: None,
@@ -91,10 +289,18 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "nullsafe_member_access_expression",
     ],
     subscript_expression_kinds: &["subscript_expression"],
+    member_base_field_names: &["object"],
+    member_name_field_names: &["name"],
+    subscript_base_field_names: &["object"],
+    subscript_index_field_names: &["index"],
+    static_subscript_key_extractor: Some(php_static_subscript_key),
+    computed_subscript_extractor: Some(php_subscript_parts),
     sigil_variable_kinds: &["variable_name"],
+    reference_name_extractor: Some(php_reference_name),
     callable_reference_extractor: Some(extract_php_callable_reference),
     constructor_names: &["__construct"],
     runtime_type_guard_operators: &["instanceof"],
+    runtime_type_wrapper_kinds: &["parenthesized_expression"],
     class_kinds: &[
         "class_declaration",
         "interface_declaration",
@@ -120,8 +326,16 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "switch_statement",
         "match_expression",
     ],
+    branch_then_field_names: &["consequence", "body"],
+    branch_else_field_names: &["alternative"],
+    branch_condition_field_names: &["condition", "value"],
+    loop_body_field_names: &["body"],
+    loop_body_kinds: &["compound_statement", "expression_statement"],
+    branch_arm_kinds: &["compound_statement", "else_clause", "else_if_clause"],
+    additional_alternative_kinds: &["else_clause", "else_if_clause"],
     for_kinds: &["for_statement"],
     foreach_kinds: &["foreach_statement"],
+    foreach_binding_extractor: Some(php_foreach_binding),
     while_kinds: &["while_statement"],
     do_kinds: &["do_statement"],
     assignment_kinds: &[
@@ -130,6 +344,11 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "reference_assignment_expression",
         "property_declaration",
     ],
+    compound_assignment_kinds: &["augmented_assignment_expression"],
+    compound_assignment_operators: &[
+        "+=", "-=", "*=", "/=", "%=", "**=", ".=", "<<=", ">>=", "&=", "^=", "|=", "??=",
+    ],
+    type_only_declaration_kinds: &["property_declaration"],
     return_kinds: &["return_statement"],
     throw_kinds: &["throw_expression"],
     lambda_kinds: &["anonymous_function", "arrow_function"],
@@ -138,7 +357,10 @@ const HANDLER: GrammarHandler = GrammarHandler {
     finally_kinds: &["finally_clause"],
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
+    control_label_field_names: &[],
     yield_kinds: &["yield_expression"],
+    yield_value_field_names: &["value"],
+    try_body_field_names: &["body"],
     implicit_receiver_names: &["$this", "this"],
     ..EMPTY_HANDLER
 };
@@ -149,14 +371,16 @@ fn extract_php_pseudo_call(
     src: &[u8],
     handler: &GrammarHandler,
 ) -> Option<FlowEvent> {
-    if node.kind() != "echo_statement" {
-        return None;
-    }
+    let name = match node.kind() {
+        "echo_statement" => "echo",
+        "unset_statement" => "unset",
+        _ => return None,
+    };
     Some(FlowEvent::Call {
         span: span_of(file, &node),
         receiver: None,
         receiver_types: Vec::new(),
-        name: "echo".to_string(),
+        name: name.to_string(),
         call_kind: CallKind::Function,
         args: named_child_call_args_with_handler(&node, file, src, handler),
     })
@@ -314,32 +538,6 @@ impl LanguageAdapter for PhpAdapter {
                 decl.receiver_field_writes.dedup();
             }
         }
-        // Recognised PHP lifecycle transitions. Method-style `close`,
-        // file-handle `fclose`/`pclose`, and `unset` (a language
-        // construct that *may* surface as a Call depending on the
-        // grammar — best-effort).
-        const PHP_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "close",
-                transition: "closed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "fclose",
-                transition: "closed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "pclose",
-                transition: "closed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "unset",
-                transition: "freed",
-                arg_index: 0,
-            },
-        ];
         let assignment_values = AssignmentValueIndex::new(&idx.assignment_values);
         for decl in &mut idx.defs {
             let invoked_variables = php_invoked_variables(&decl.flow_events);
@@ -350,7 +548,6 @@ impl LanguageAdapter for PhpAdapter {
                 &invoked_variables,
             );
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, PHP_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
@@ -361,7 +558,7 @@ impl LanguageAdapter for PhpAdapter {
         // (`$x = new Foo()` → `$x: Foo`) so `$x->method(...)` carries a
         // resolved receiver type for `receiver_type_in` / `[Type, method]`
         // rules. The constructor identity comes from the adapter-lowered
-        // object-creation node, never from identifier casing or spelling.
+        // object-creation node, never from identifier casing.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
         let capabilities = self.capabilities();

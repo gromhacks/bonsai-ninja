@@ -3,7 +3,7 @@
 # receiver type on a local assigned from that factory chain
 # (`c = sqlite3.connect("db").cursor()` -> `c: cursor`), without the
 # engine owning any method-name list. These NEVER produce findings; they
-# feed `build_factory_returns`. The match_example MUST construct the
+# feed `build_rulepack_typing`. The match_example MUST construct the
 # receiver so a paired receiver-typed sink replays.
 - id: python.typing.httpx_async_client
   enabled: true

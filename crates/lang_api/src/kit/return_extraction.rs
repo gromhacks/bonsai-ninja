@@ -16,7 +16,7 @@
 //! this lives next to the throw extractor rather than in a separate
 //! module.
 
-use bonsai_common::{FileId, Span};
+use bonsai_common::FileId;
 use tree_sitter::Node;
 
 use crate::ExpressionFlow;
@@ -25,8 +25,8 @@ use super::expression_flow::expression_flow_from_node_with_handler;
 #[cfg(test)]
 use super::GENERIC_HANDLER;
 use super::{
-    first_identifier_descendant, first_identifier_like_child, looks_like_identifier,
-    looks_like_literal_value, node_text, GrammarHandler,
+    first_identifier_descendant, first_identifier_like_child, looks_like_identifier, node_text,
+    GrammarHandler,
 };
 
 /// Lower the parsed return operand into structured compiler facts.
@@ -45,20 +45,15 @@ pub(super) fn extract_return_value_flow_with_handler(
     let Some(value) = return_value_node(node) else {
         return ExpressionFlow::default();
     };
-    if let Some(selector) = dart_selector_call(&value) {
-        // Dart's grammar represents `f(x)` as sibling AST nodes rather than
-        // one call node. Join those exact syntax spans into the same call-site
-        // identity emitted by the call walker; no callee spelling is parsed.
-        return ExpressionFlow {
-            call_sites: vec![Span::new(
-                file,
-                value.start_byte() as u64,
-                selector.end_byte() as u64,
-            )],
-            ..ExpressionFlow::default()
-        };
-    }
     expression_flow_from_node_with_handler(value, file, src, handler)
+}
+
+pub(super) fn extract_return_value_kind_with_handler(
+    node: &Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<crate::AssignValueKind> {
+    return_value_node(node).and_then(|value| handler.expression_value_kind(value, src))
 }
 
 /// Lower the parsed yield operand into structured compiler facts.
@@ -102,18 +97,14 @@ pub(super) fn extract_return_value_name_with_handler(
     let value_kind = value_node.kind();
     // Direct identifier — most languages parse `return x` this way.
     if looks_like_identifier(value_kind) {
-        // Dart models a call as a bare `identifier` (the callee) followed by
-        // a sibling `selector` holding the `argument_part` — `return foo(x)`
-        // parses as `identifier "foo"` + `selector((x))`, with no unified
-        // call node. The identifier is the CALLEE, not the returned value:
-        // recording it as `value_name` fabricates a read of the function
-        // name (a spurious `read` ref) and a return-of-a-symbol. The value
-        // is the call's result, carried by the Call event + value_text.
-        if dart_selector_call_callee(&value_node) {
+        if handler
+            .expression_call_span_extractor
+            .is_some_and(|extract| !extract(value_node).is_empty())
+        {
             return None;
         }
         let text = node_text(&value_node, src).trim().to_string();
-        if !looks_like_literal_value(value_kind, &text) {
+        if !handler.is_literal_value(value_kind, &text) {
             return Some(text);
         }
         return None;
@@ -177,28 +168,6 @@ pub(super) fn extract_return_value_name_with_handler(
         return operands.into_iter().next();
     }
     None
-}
-
-/// True when `node` is the callee identifier of a Dart selector call —
-/// a bare `identifier` immediately followed by a sibling `selector` whose
-/// child is an `argument_part` (`foo` `(args)`). tree-sitter-dart has no
-/// unified call node, so this is how `foo(x)` is shaped; the identifier is
-/// the callee, not a value. Property/cascade selectors (`.field`, `..m()`)
-/// carry no `argument_part`, so a pure member read still returns its name.
-fn dart_selector_call_callee(node: &Node<'_>) -> bool {
-    dart_selector_call(node).is_some()
-}
-
-fn dart_selector_call<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
-    let selector = node.next_named_sibling()?;
-    if selector.kind() != "selector" {
-        return None;
-    }
-    let mut cursor = selector.walk();
-    let has_argument_part = selector
-        .named_children(&mut cursor)
-        .any(|child| child.kind() == "argument_part");
-    has_argument_part.then_some(selector)
 }
 
 /// Drill into a catch/rescue/except binding subtree to the actual binding

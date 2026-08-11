@@ -6,9 +6,10 @@ use bonsai_lang_api::{
         call_arg_from_node_with_handler, collect_kinds, first_named_child_of_kind, language_from_pack,
         named_child_call_args_with_handler, node_at_span, node_text, parse_with, span_of,
     },
-    AdapterContext, AdapterError, AssignValueKind, AssignmentValueIndex, CallArg, CallKind, DeclIndex,
-    DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
-    LanguageCapabilities, LanguageId, ModulePath, Ref, RefKind, TypeAliasBinding,
+    AdapterContext, AdapterError, AssignValueKind, AssignmentNodeSemantics, AssignmentValueIndex, CallArg,
+    CallKind, CallTargetExtraction, DeclIndex, DeclKind, ExpressionPlaceExtraction, FieldWrite, FlowEvent,
+    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    ModulePath, Ref, RefKind, TypeAliasBinding,
 };
 
 fn extract_perl_pseudo_call(
@@ -17,14 +18,20 @@ fn extract_perl_pseudo_call(
     src: &[u8],
     handler: &GrammarHandler,
 ) -> Option<FlowEvent> {
-    if node.kind() != "eval_expression" || node.named_child(0).is_some_and(|child| child.kind() == "block") {
-        return None;
-    }
+    let name = match node.kind() {
+        "eval_expression" if node.named_child(0).is_none_or(|child| child.kind() != "block") => "eval",
+        // `undef EXPR` is a Perl language operator with call-like value
+        // semantics. The grammar gives it a dedicated node rather than a
+        // function callee, so lower that syntax identity here and leave its
+        // lifecycle meaning to rule data.
+        "undef_expression" => "undef",
+        _ => return None,
+    };
     Some(FlowEvent::Call {
         span: span_of(file, &node),
         receiver: None,
         receiver_types: Vec::new(),
-        name: "eval".to_string(),
+        name: name.to_string(),
         call_kind: CallKind::Function,
         args: named_child_call_args_with_handler(&node, file, src, handler),
     })
@@ -54,6 +61,118 @@ fn extract_perl_syntax_event(
         _ => None,
     }
 }
+
+fn perl_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    if !matches!(node.kind(), "foreach_statement" | "for_statement") {
+        return None;
+    }
+    if let (Some(binding), Some(iterable)) = (
+        node.child_by_field_name("variable"),
+        node.child_by_field_name("list"),
+    ) {
+        return Some((binding, iterable));
+    }
+    let body_id = node.child_by_field_name("body").map(|body| body.id());
+    let mut cursor = node.walk();
+    let mut header = node
+        .named_children(&mut cursor)
+        .filter(|child| Some(child.id()) != body_id);
+    let binding = header.next()?;
+    let iterable = header.next()?;
+    Some((binding, iterable))
+}
+
+fn perl_identifier_text(value: &str) -> &str {
+    value.trim_start_matches(['$', '@', '%'])
+}
+
+fn perl_reference_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let canonical = perl_identifier_text(node_text(&node, src).trim());
+    (!canonical.is_empty()).then(|| canonical.to_string())
+}
+
+/// Preserve Perl's sigil-bearing variable wrapper as the canonical place.
+/// Tree-sitter stores the bare identifier in the child `varname`, while the
+/// parent `scalar`/`array`/`hash` node owns the execution-relevant sigil.
+fn perl_expression_places(node: Node<'_>, src: &[u8]) -> ExpressionPlaceExtraction {
+    if node.kind() == "hash_element_expression" {
+        let Some(base) = node.named_child(0) else {
+            return ExpressionPlaceExtraction::default();
+        };
+        let Some(key) = node.child_by_field_name("key") else {
+            return ExpressionPlaceExtraction::default();
+        };
+        if key.kind() != "autoquoted_bareword" {
+            return ExpressionPlaceExtraction::default();
+        }
+        let base_place = perl_expression_places(base, src);
+        let Some(base) = base_place.places.first() else {
+            return ExpressionPlaceExtraction::default();
+        };
+        let key = node_text(&key, src).trim();
+        if key.is_empty() {
+            return ExpressionPlaceExtraction::default();
+        }
+        return ExpressionPlaceExtraction {
+            places: vec![format!("{base}.{key}")],
+            consumed_node_ids: vec![node.id()],
+        };
+    }
+    if !matches!(node.kind(), "scalar" | "array" | "hash" | "container_variable") {
+        return ExpressionPlaceExtraction::default();
+    }
+    let Some(identifier) = node.named_child(0) else {
+        return ExpressionPlaceExtraction::default();
+    };
+    if identifier.kind() != "varname" || node.named_child_count() != 1 {
+        return ExpressionPlaceExtraction::default();
+    }
+    let raw = node_text(&node, src).trim();
+    if raw.len() < 2 || !raw.starts_with(['$', '@', '%']) || raw.chars().any(char::is_whitespace) {
+        return ExpressionPlaceExtraction::default();
+    }
+    ExpressionPlaceExtraction {
+        places: vec![raw.to_string()],
+        consumed_node_ids: vec![node.id()],
+    }
+}
+
+/// Accept Perl's grammar-specific `function` callee node. It is neither an
+/// identifier nor a variable node, so generic extraction intentionally
+/// refuses to guess it. Builtin meaning remains entirely in rule data.
+fn perl_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    if !matches!(
+        node.kind(),
+        "call_expression"
+            | "function_call_expression"
+            | "subroutine_call_expression"
+            | "method_call_expression"
+            | "ambiguous_function_call_expression"
+    ) {
+        return None;
+    }
+    let target = node
+        .child_by_field_name("function")
+        .or_else(|| node.child_by_field_name("function_name"))
+        .or_else(|| node.named_child(0))?;
+    let full_text = node_text(&target, src).trim();
+    (!full_text.is_empty()).then_some(CallTargetExtraction {
+        node: target,
+        full_text: full_text.to_string(),
+    })
+}
+
+/// Perl's `variable_declaration` is the binding pattern on the left of an
+/// enclosing `assignment_expression`; it never owns the initializer itself.
+/// Classifying that exact grammar role prevents a multi-variable pattern from
+/// being mistaken for a nested assignment merely because it has siblings.
+fn perl_assignment_semantics(node: Node<'_>, _src: &[u8]) -> AssignmentNodeSemantics {
+    if node.kind() == "variable_declaration" {
+        AssignmentNodeSemantics::Other
+    } else {
+        AssignmentNodeSemantics::Assignment
+    }
+}
 // Perl5 OO uses bare `package Foo;` declarations as class
 // boundaries; tree-sitter-perl exposes them as `package_statement`
 // nodes with a `name:` field. The grammar's `class_statement` form
@@ -61,6 +180,68 @@ fn extract_perl_syntax_event(
 const PERL_CLASS_KINDS: &[&str] = &["package_statement", "class_statement"];
 
 const HANDLER: GrammarHandler = GrammarHandler {
+    literal_value_kinds: &["special_literal", "integer", "octal", "number"],
+    literal_value_spellings: &[],
+    string_literal_kinds: &[
+        "interpolated_string_literal",
+        "string_literal",
+        "string_double_quoted",
+        "string_single_quoted",
+        "string_q_quoted",
+        "string_qq_quoted",
+        "heredoc_body_statement",
+    ],
+    comment_kinds: &["comment"],
+    doc_comment_kinds: &[],
+    doc_comment_prefixes: &[],
+    decorator_kinds: &["attribute"],
+    parameter_container_kinds: &["parameters"],
+    parameter_kinds: &["parameter", "variable_name", "varname"],
+    parameter_modifier_kinds: &[],
+    parameter_annotation_kinds: &["attribute"],
+    parameter_annotation_name_extractor: None,
+    keyword_parameter_kinds: &[],
+    parameter_selector_kinds: &[],
+    implicit_parameter_kinds: &[],
+    self_parameter_kinds: &[],
+    last_identifier_parameter_kinds: &[],
+    binding_identifier_kinds: &["identifier", "variable_name", "varname"],
+    non_binding_pattern_kinds: &[],
+    binding_lhs_pattern_kinds: &[],
+    binding_pattern_field_names: &[],
+    pattern_head_value_kinds: &[],
+    multi_segment_value_pattern_kinds: &[],
+    non_binding_pattern_field_names: &["type", "key"],
+    binding_name_extractor: Some(perl_reference_name),
+    binding_name_filter: None,
+    pattern_binding_extractor: None,
+    projected_pattern_binding_extractor: None,
+    anonymous_variadic_token: None,
+    variadic_parameter_kinds: &[],
+    destructured_parameter_kinds: &[],
+    identifier_kinds: &["identifier", "variable_name", "varname"],
+    aggregate_pattern_kinds: &["list_expression", "variable_list", "variables"],
+    comprehension_kinds: &[],
+    comprehension_binding_clause_kinds: &[],
+    comprehension_binding_extractor: None,
+    named_aggregate_kinds: &[],
+    positional_aggregate_kinds: &["array", "list_expression"],
+    aggregate_pair_kinds: &[],
+    two_child_aggregate_pair_kinds: &[],
+    aggregate_pair_extractor: None,
+    aggregate_key_field_names: &[],
+    aggregate_value_field_names: &[],
+    static_field_name_kinds: &[],
+    shorthand_field_kinds: &[],
+    spread_kinds: &[],
+    spread_value_field_names: &[],
+    aggregate_syntax_only_kinds: &[],
+    multi_child_aggregate_pattern_kinds: &[],
+    lambda_value_container_kinds: &[],
+    transparent_call_wrapper_kinds: &["member_expression", "parenthesized_expression"],
+    single_expression_group_kinds: &["expression_list"],
+    assignment_target_wrapper_kinds: &["variable_declaration"],
+    binding_declaration_keyword_spellings: &["my", "our", "state", "local"],
     nested_type_ownership: true,
     fn_kinds: &["subroutine_declaration_statement"],
     class_kinds: PERL_CLASS_KINDS,
@@ -77,6 +258,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     method_owner_barrier_kinds: &[],
     constructor_method_kinds: &[],
     constructor_names: &["new"],
+    function_definition_extractor: None,
+    inline_closure_yield_extractor: None,
     if_kinds: &[
         "conditional_statement",
         "conditional_expression",
@@ -86,14 +269,23 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "if_simple_statement",
         "unless_simple_statement",
     ],
+    branch_then_field_names: &["consequence", "body"],
+    branch_else_field_names: &["alternative"],
+    branch_condition_field_names: &["condition"],
+    branch_condition_kinds: &[],
+    branch_alias_extractor: None,
+    branch_arm_kinds: &["block", "block_statement", "expression_statement"],
+    // `tree-sitter-perl` wraps the trailing branch in an unfielded `else`
+    // node rather than attaching it as `alternative` on the conditional.
+    additional_alternative_kinds: &["else"],
     for_kinds: &[
-        "for_statement",
         "for_statement_1",
         "for_statement_2",
         "for_simple_statement",
         "cstyle_for_statement",
     ],
-    foreach_kinds: &[],
+    foreach_kinds: &["for_statement", "foreach_statement"],
+    foreach_binding_extractor: Some(perl_foreach_binding),
     while_kinds: &[
         "while_statement",
         "until_statement",
@@ -103,6 +295,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     ],
     do_kinds: &[],
     loop_kinds: &[],
+    loop_body_field_names: &["body"],
+    loop_body_kinds: &["block", "block_statement", "expression_statement"],
     call_kinds: &[
         "call_expression",
         "function_call_expression",
@@ -110,29 +304,75 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "method_call_expression",
         "ambiguous_function_call_expression",
     ],
+    constructor_call_kinds: &[],
     nested_call_component_kinds: &[],
+    call_callee_field_names: &["function", "function_name"],
+    call_receiver_field_names: &["object", "invocant"],
+    call_member_field_names: &["function_name", "method"],
+    constructor_type_field_names: &[],
+    call_argument_field_names: &["args", "arguments"],
+    call_argument_container_kinds: &["arguments", "argument_list"],
+    call_argument_wrapper_kinds: &[],
+    call_callee_is_first_named_child: true,
+    argument_wrapper_kinds: &[],
+    argument_name_field_names: &[],
+    argument_value_field_names: &[],
+    named_argument_extractor: None,
+    direct_call_info_extractor: None,
+    call_target_extractor: Some(perl_call_target),
+    call_receiver_extractor: None,
+    call_ref_node_filter: None,
+    expression_call_span_extractor: None,
+    writeback_operand_field_names: &[],
+    direct_call_argument_excluded_fields: &[],
+    transparent_expression_wrapper_kinds: &[],
     pseudo_call_extractor: Some(extract_perl_pseudo_call),
     syntax_event_extractor: Some(extract_perl_syntax_event),
+    syntax_events_extractor: None,
+    call_encoded_control_flow_extractor: None,
     pseudo_call_receiver_extractor: None,
     argument_passing_mode_extractor: None,
+    expression_value_kind_extractor: None,
     assignment_kinds: &["assignment_expression", "variable_declaration"],
+    assignment_semantics_extractor: Some(perl_assignment_semantics),
+    assignment_place_extractor: None,
+    compound_assignment_kinds: &[],
+    compound_assignment_operators: &[
+        "+=", "-=", "*=", "/=", "%=", "**=", ".=", "x=", "<<=", ">>=", "&=", "^=", "|=", "//=",
+    ],
+    type_only_declaration_kinds: &["variable_declaration"],
+    positional_aggregate_assignment_kinds: &[],
+    positional_aggregate_value_kinds: &[],
     return_kinds: &["return_expression"],
     throw_kinds: &[],
     lambda_kinds: &["anonymous_subroutine_expression"],
+    inline_closure_kinds: &[],
+    implicit_lambda_parameter_name: None,
+    lambda_body_field_names: &["body"],
+    lambda_body_kinds: &[],
     try_kinds: &["try_statement"],
     catch_kinds: &[],
     finally_kinds: &[],
+    try_fallback_body_kinds: &["block"],
+    catch_body_follows_marker: false,
     break_kinds: &["loop_control_statement"],
     continue_kinds: &[],
+    control_label_field_names: &[],
     yield_kinds: &[],
+    yield_value_field_names: &[],
     await_kinds: &[],
     defer_kinds: &[],
+    deferred_body_extractor: None,
     using_kinds: &[],
+    using_body_field_names: &[],
+    try_body_field_names: &["body", "block"],
+    using_alias_extractor: None,
     special_forms: &[],
     runtime_type_guard_calls: &[],
     runtime_type_guard_operators: &[],
     runtime_typeof_operators: &[],
     runtime_type_equality_operators: &[],
+    runtime_type_wrapper_kinds: &[],
     value_free_expression_kinds: &[],
     value_free_call_names: &[],
     value_free_unary_operators: &[],
@@ -145,8 +385,17 @@ const HANDLER: GrammarHandler = GrammarHandler {
     ],
     member_expression_kinds: &[],
     subscript_expression_kinds: &[],
-    sigil_variable_kinds: &[],
+    member_base_field_names: &[],
+    member_name_field_names: &[],
+    subscript_base_field_names: &[],
+    subscript_index_field_names: &[],
+    static_subscript_key_extractor: None,
+    computed_subscript_extractor: None,
+    sigil_variable_kinds: &["scalar", "array", "hash", "container_variable"],
     global_variable_kinds: &[],
+    reference_name_extractor: Some(perl_reference_name),
+    expression_place_extractor: Some(perl_expression_places),
+    indirect_place_operand_extractor: None,
     subscript_base_call_refs: false,
     non_call_ref_names: &[],
     call_name_suffix_tokens: &[],
@@ -154,6 +403,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     callable_reference_kinds: &[],
     callable_reference_extractor: None,
     method_receiver_param_index: None,
+    receiver_presence_extractor: None,
     implicit_receiver_names: &[],
     implicit_receiver_prefixes: &[],
     tail_expression_returns: false,
@@ -227,6 +477,7 @@ impl LanguageAdapter for PerlAdapter {
         // synthesize `params` so entry-point inference (G5) and
         // taint seeding work.
         for decl in &mut idx.defs {
+            add_perl_sigil_source_variants(&mut decl.flow_events);
             if let Some((_, tree)) = parsed.as_ref() {
                 normalize_perl_foreach_binding_targets(&mut decl.flow_events, tree, source.as_bytes(), file);
             }
@@ -354,33 +605,16 @@ impl LanguageAdapter for PerlAdapter {
             }
         }
         promote_perl_oo_packages(&mut idx);
-        // Recognised Perl lifecycle transitions. Perl is procedural;
-        // method calls (`$fh->close`) land bare. `undef $x` is the
-        // idiomatic Perl free, surfaced as a call to `undef`.
-        const PERL_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "close",
-                transition: "closed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "undef",
-                transition: "freed",
-                arg_index: 0,
-            },
-        ];
         for decl in &mut idx.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, PERL_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
-        // Local constructor-result receiver typing (`new Foo()` / `Foo()` / `Foo::new()` -> typed receiver) so `recv.method(...)` resolves
-        // `receiver_type_in` / `[Type, method]` rules; the constructor heuristic only
-        // types PascalCase callees, so language exported-function calls are unaffected.
+        // Local constructor-result receiver typing follows adapter-classified
+        // constructor calls and declared types; spelling alone is not proof.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
         bonsai_lang_api::apply_call_receiver_types(&mut idx);
@@ -388,6 +622,61 @@ impl LanguageAdapter for PerlAdapter {
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+/// Preserve both the exact sigil-bearing storage place and its canonical
+/// bare binding alias on assignment sources. Perl resolution uses the bare
+/// identity while the dataflow graph must retain `$`/`@`/`%` storage shape.
+fn add_perl_sigil_source_variants(events: &mut [FlowEvent]) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                source_name,
+                source_names,
+                ..
+            } => {
+                if let Some(source) = source_name.as_deref() {
+                    let bare = perl_identifier_text(source);
+                    if bare != source && !bare.is_empty() {
+                        push_unique_string(source_names, bare.to_string());
+                    }
+                }
+                let sigiled = source_names
+                    .iter()
+                    .filter_map(|source| {
+                        let bare = perl_identifier_text(source);
+                        (bare != source && !bare.is_empty()).then(|| bare.to_string())
+                    })
+                    .collect::<Vec<_>>();
+                for bare in sigiled {
+                    push_unique_string(source_names, bare);
+                }
+                source_names.sort_by_key(|source| (!source.starts_with(['$', '@', '%']), source.clone()));
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                add_perl_sigil_source_variants(then_events);
+                add_perl_sigil_source_variants(else_events);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                add_perl_sigil_source_variants(body);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                add_perl_sigil_source_variants(body);
+                add_perl_sigil_source_variants(catch_events);
+                add_perl_sigil_source_variants(finally_events);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -550,9 +839,10 @@ fn perl_value_variable_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
     fn collect(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
         if matches!(node.kind(), "scalar" | "array" | "hash" | "container_variable") {
             let raw = node_text(&node, src).trim();
-            if !raw.is_empty() {
+            let canonical = perl_identifier_text(raw);
+            if !canonical.is_empty() {
                 push_unique_string(out, raw.to_string());
-                push_unique_string(out, raw.trim_start_matches(['$', '@', '%']).to_string());
+                push_unique_string(out, canonical.to_string());
             }
             return;
         }

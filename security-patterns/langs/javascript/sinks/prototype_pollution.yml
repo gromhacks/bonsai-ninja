@@ -238,7 +238,7 @@
   match:
     kind: write
     target:
-      regex: "(\\[|\\.key$)"
+      regex: "(?:\\.\\*|\\.key)$"
   constraints:
   - arg_tainted:
       index: 0
@@ -259,7 +259,7 @@
           target[key] = source[key];
         }
       }
-    expect_match_text: [target.key]
+    expect_match_text: [target.*]
   - name: recursive merge literal value negative
     code: |
       function merge(target, source) {

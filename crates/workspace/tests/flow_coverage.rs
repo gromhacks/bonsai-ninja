@@ -104,41 +104,49 @@ fn constructor_call_in(events: &[FlowEvent], needle: &str) -> bool {
     })
 }
 
-fn call_contains_arg(ws: &bonsai_workspace::Workspace, fn_name: &str, needle: &str, arg_text: &str) -> bool {
+fn call_contains_named_arg(
+    ws: &bonsai_workspace::Workspace,
+    fn_name: &str,
+    needle: &str,
+    arg_name: &str,
+    arg_text: &str,
+) -> bool {
     let Some(d) = decl_by_name(ws, fn_name) else {
         return false;
     };
-    call_contains_arg_in(&d.flow_events, needle, arg_text)
-}
-
-fn call_contains_arg_in(events: &[FlowEvent], needle: &str, arg_text: &str) -> bool {
-    events.iter().any(|event| match event {
-        FlowEvent::Call { name, args, .. } => {
-            name.contains(needle) && args.iter().any(|arg| arg.value_text.contains(arg_text))
-        }
-        FlowEvent::Branch {
-            then_events,
-            else_events,
-            ..
-        } => {
-            call_contains_arg_in(then_events, needle, arg_text)
-                || call_contains_arg_in(else_events, needle, arg_text)
-        }
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-            call_contains_arg_in(body, needle, arg_text)
-        }
-        FlowEvent::Try {
-            body,
-            catch_events,
-            finally_events,
-            ..
-        } => {
-            call_contains_arg_in(body, needle, arg_text)
-                || call_contains_arg_in(catch_events, needle, arg_text)
-                || call_contains_arg_in(finally_events, needle, arg_text)
-        }
-        _ => false,
-    })
+    fn contains(events: &[FlowEvent], needle: &str, arg_name: &str, arg_text: &str) -> bool {
+        events.iter().any(|event| match event {
+            FlowEvent::Call { name, args, .. } => {
+                name.contains(needle)
+                    && args
+                        .iter()
+                        .any(|arg| arg.name.as_deref() == Some(arg_name) && arg.value_text.contains(arg_text))
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                contains(then_events, needle, arg_name, arg_text)
+                    || contains(else_events, needle, arg_name, arg_text)
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                contains(body, needle, arg_name, arg_text)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                contains(body, needle, arg_name, arg_text)
+                    || contains(catch_events, needle, arg_name, arg_text)
+                    || contains(finally_events, needle, arg_name, arg_text)
+            }
+            _ => false,
+        })
+    }
+    contains(&d.flow_events, needle, arg_name, arg_text)
 }
 
 fn return_contains_text(ws: &bonsai_workspace::Workspace, fn_name: &str, needle: &str) -> bool {
@@ -854,8 +862,7 @@ fn java_qualified_method_call_preserves_full_name() {
     );
 }
 
-/// PHP arrow-calls `$obj->method(args)` — the arrow-separated qualified
-/// name must be preserved (`$conn->query`, not just `query`).
+/// PHP arrow-calls retain the receiver in canonical dotted compiler IR.
 #[test]
 fn php_arrow_call_preserves_object_name() {
     let w = ws_multi(
@@ -866,7 +873,7 @@ fn php_arrow_call_preserves_object_name() {
         )],
     );
     assert!(
-        calls_contains(&w, "f", "$conn->query") || calls_contains(&w, "f", "conn->query"),
+        calls_contains(&w, "f", "$conn.query"),
         "PHP `$conn->query` collapsed to bare method. flow_events: {:?}",
         decl_by_name(&w, "f").map(|d| d.flow_events)
     );
@@ -930,7 +937,7 @@ fn perl_arrow_call_preserves_keyword_args() {
         )],
     );
     assert!(
-        call_contains_arg(&w, "f", "IO::Socket::SSL->new", "SSL_verify_mode => 0"),
+        call_contains_named_arg(&w, "f", "IO::Socket::SSL->new", "SSL_verify_mode", "0",),
         "Perl arrow call args were not attached to the method call. flow_events: {:?}",
         decl_by_name(&w, "f").map(|d| d.flow_events)
     );

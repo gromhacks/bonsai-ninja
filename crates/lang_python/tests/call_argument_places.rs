@@ -133,8 +133,8 @@ fn dynamic_subscripts_do_not_claim_an_exact_field() {
     let places = call_argument_places("def entry(obj, key):\n    sink(obj[key])\n");
     assert_eq!(
         places,
-        vec![("obj[key]".to_string(), Some("obj".to_string()))],
-        "a dynamic key conservatively consumes the aggregate, never a made-up field"
+        vec![("obj[key]".to_string(), Some("obj.*".to_string()))],
+        "a dynamic key addresses an unknown descendant, never a made-up exact field"
     );
 }
 
@@ -165,7 +165,7 @@ fn dynamic_subscript_returns_remain_aggregate_reads() {
     let places = return_places("def entry(obj, key):\n    return obj[key]\n");
     assert_eq!(
         places,
-        vec![("entry".to_string(), None, Some("obj".to_string()),)],
-        "a dynamic key must never become a fabricated field place"
+        vec![("entry".to_string(), None, Some("obj.*".to_string()),)],
+        "a dynamic key must remain an explicit wildcard descendant place"
     );
 }

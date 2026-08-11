@@ -421,6 +421,13 @@ fn compiler_syntax_header_replays_adapter_call_targets_without_body_decode() {
             .any(|assignment| assignment.target == "cleaned" && assignment.call_name.ends_with("clean")),
         "direct call-result assignment must remain available for rulepack factory typing"
     );
+    assert!(
+        header
+            .returns
+            .iter()
+            .any(|returned| returned.value_name.as_deref() == Some("cleaned")),
+        "adapter-emitted return targets must survive the independently decoded projection"
+    );
     assert_eq!(reopened.stats().cached_decl_indexes, 0);
 }
 

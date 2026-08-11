@@ -68,7 +68,7 @@
         return $schema->execute($query);
       }
     expect_match_text:
-    - $schema->execute
+    - $schema.execute
   - name: arg tainted literal negative
     code: |
       <?php
@@ -111,7 +111,7 @@
         return $server->executePsrRequest($request);
       }
     expect_match_text:
-    - $server->executePsrRequest
+    - $server.executePsrRequest
   - name: arg tainted literal negative
     code: |
       <?php

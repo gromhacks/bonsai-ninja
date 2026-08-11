@@ -1,0 +1,51 @@
+- id: ruby.typing.lifecycle_closed_receiver
+  enabled: true
+  language: ruby
+  match: { kind: call, callee: { name: close } }
+  lifecycle_transition:
+    state: closed
+    binding: { kind: receiver }
+  match_examples:
+  - name: close changes the receiver state
+    code: "def f(resource)\n  resource.close\nend"
+    expect_match_text: [resource.close]
+  description: "Ruby close moves the receiver to closed. Typing-only; never a finding."
+
+- id: ruby.typing.lifecycle_unlinked_argument
+  enabled: true
+  language: ruby
+  match: { kind: call, callee: { name: unlink } }
+  lifecycle_transition:
+    state: freed
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: File unlink changes the path state
+    code: "def f(path)\n  File.unlink(path)\nend"
+    expect_match_text: [File.unlink]
+  description: "Ruby unlink moves argument zero to freed. Typing-only; never a finding."
+
+- id: ruby.typing.lifecycle_disposed_receiver
+  enabled: true
+  language: ruby
+  match: { kind: call, callee: { name: dispose } }
+  lifecycle_transition:
+    state: freed
+    binding: { kind: receiver }
+  match_examples:
+  - name: dispose changes the receiver state
+    code: "def f(resource)\n  resource.dispose\nend"
+    expect_match_text: [resource.dispose]
+  description: "Ruby dispose moves the receiver to freed. Typing-only; never a finding."
+
+- id: ruby.typing.lifecycle_cancelled_receiver
+  enabled: true
+  language: ruby
+  match: { kind: call, callee: { name: cancel } }
+  lifecycle_transition:
+    state: cancelled
+    binding: { kind: receiver }
+  match_examples:
+  - name: cancel changes the receiver state
+    code: "def f(task)\n  task.cancel\nend"
+    expect_match_text: [task.cancel]
+  description: "Ruby cancel moves the receiver to cancelled. Typing-only; never a finding."

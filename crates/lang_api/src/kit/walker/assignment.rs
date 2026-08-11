@@ -1,13 +1,11 @@
 use super::super::{
-    argument_place, assignment_declared_type, assignment_is_compound, assignment_target_node,
-    assignment_value_node, assignment_wrapper_has_variable_declarator, binary_operator_is_assignment,
-    binary_operator_is_pipe, call_arg_from_node_with_handler, callable_reference_name, expression_flow,
-    extra_lhs_binding_targets, extract_dart_selector_call_info, extract_direct_call_info,
-    extract_rhs_expr_operands, first_call_descendant, has_direct_large_literal_initializer_child,
-    is_large_literal_initializer_node, keyed_lhs_binding_sources, looks_like_bare_identifier,
-    looks_like_identifier, node_text, prepend_pipe_arg_to_call, qualified_assign_target,
-    ruby_append_mutation_assignment, same_identifier_name, sanitize_assign_target, span_of,
-    subscript_place_parts, type_only_declaration_without_initializer, FlowEvent, Node,
+    argument_place, assignment_declared_type, assignment_is_compound, assignment_place,
+    assignment_target_node, assignment_value_node, assignment_wrapper_has_nested_assignment,
+    call_arg_from_node_with_handler, callable_reference_name, expression_flow, extra_lhs_binding_targets,
+    extract_direct_call_info, extract_rhs_expr_operands, first_call_descendant, keyed_lhs_binding_sources,
+    looks_like_bare_identifier, looks_like_identifier, node_text, prepend_pipe_arg_to_call,
+    qualified_assign_target, same_identifier_name, span_of, subscript_place_parts,
+    type_only_declaration_without_initializer, AssignmentNodeSemantics, FlowEvent, Node,
 };
 use super::{walk_into, LoweringContext};
 
@@ -23,20 +21,16 @@ pub(super) fn lower_assignment(
         class_names,
     } = context;
     let kind = node.kind();
-    if ruby_append_mutation_assignment(&node, file, src, handler, out) {
-        return true;
-    }
-
     if handler.is_assignment(kind) {
-        if kind == "binary_operator" && !binary_operator_is_assignment(&node, src) {
-            // Elixir pipe `lhs |> call(args)` desugars to `call(lhs,
-            // args)` — the piped value becomes the callee's FIRST
-            // argument. Without threading it in, `conn.params |>
-            // System.cmd()` leaves `System.cmd` with no args and the
-            // piped taint never reaches the sink (the dominant Elixir
-            // dataflow idiom). Walk the RHS call, then prepend the LHS as
-            // its arg 0.
-            if binary_operator_is_pipe(&node, src) {
+        match handler.assignment_semantics(node, src) {
+            AssignmentNodeSemantics::Assignment => {}
+            AssignmentNodeSemantics::Pipe => {
+                // Elixir pipe `lhs |> call(args)` desugars to `call(lhs,
+                // args)` — the piped value becomes the callee's FIRST
+                // argument. Without threading it in, `conn.params |>
+                // System.cmd()` leaves `System.cmd` with no args and the
+                // piped taint never reaches the sink. Walk the RHS call,
+                // then prepend the LHS as its arg 0.
                 if let (Some(left), Some(right)) = (
                     node.child_by_field_name("left"),
                     node.child_by_field_name("right"),
@@ -45,24 +39,18 @@ pub(super) fn lower_assignment(
                     let before = out.len();
                     walk_into(right, file, src, handler, class_names, out, false);
                     prepend_pipe_arg_to_call(out, before, &right, &left, file, src, handler);
-                    return true;
                 }
+                return true;
             }
-            // G3 follow-up: synthesizing a Call event for every
-            // binary_operator broke the C interproc-empty-seed
-            // invariant (every `int x = a + b;` produced a synthetic
-            // call propagation record). The Path-overload case
-            // needs a more targeted approach — gated on the LHS
-            // being a known constructor (Path, PurePath, etc.) so
-            // we don't synthesize calls for arithmetic. Tracked as
-            // task #109 for a follow-up.
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                walk_into(child, file, src, handler, class_names, out, false);
+            AssignmentNodeSemantics::Other => {
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    walk_into(child, file, src, handler, class_names, out, false);
+                }
+                return true;
             }
-            return true;
         }
-        if assignment_wrapper_has_variable_declarator(kind, &node) {
+        if assignment_wrapper_has_nested_assignment(&node, src, handler) {
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
                 walk_into(child, file, src, handler, class_names, out, false);
@@ -75,7 +63,7 @@ pub(super) fn lower_assignment(
         // gets picked. Kotlin `property_declaration` is the canonical
         // offender: its first named child is the `val`/`var` keyword
         // node, which without filtering would become the target text.
-        let target_node = assignment_target_node(node, src);
+        let target_node = assignment_target_node(node, src, handler);
         // If the picked target is itself a declarator wrapper —
         // tree-sitter emits `variable_declarator` in C# /
         // JavaScript / TypeScript / Java, `init_declarator` in C /
@@ -86,22 +74,9 @@ pub(super) fn lower_assignment(
         // and emit its own clean Assign, so without this unwrap we
         // get two events per variable: one with wrapper text and one
         // with the canonical identifier.
-        let raw_target = target_node
-            .map(|n| node_text(&n, src).trim().to_string())
+        let target = target_node
+            .and_then(|target| assignment_place(target, src, handler))
             .unwrap_or_default();
-        // C# tree-sitter-c-sharp doesn't expose the binding identifier as a
-        // *named* node inside `variable_declarator` — `action` in
-        // `action = req.Query["action"].ToString()` is anonymous, so every
-        // named-child walker picks up the RHS instead and the target
-        // becomes `action = req.Query…`. The same pattern surfaces in Perl
-        // (`my $query`), Lua (full statement), and Go
-        // multi-return destructuring (`result, _`). When the picked target
-        // text has shape `LHS = RHS`, keep just the LHS; when it has a
-        // space, keep the last whitespace-delimited token (types and Perl
-        // declaration markers stay off the target). The underlying identifier
-        // is still reachable through the structured `target` field on
-        // downstream analyses — we just display the clean name.
-        let target = sanitize_assign_target(&raw_target);
         // RHS: most grammars expose it via `right` or `value`. Kotlin's
         // property_declaration has no field for the initializer — it's
         // just a sibling of the variable-declaration identifier. We'd
@@ -114,9 +89,13 @@ pub(super) fn lower_assignment(
             .and_then(|rhs_node| callable_reference_name(&rhs_node, src, handler));
         let simple_place_source = rhs
             .filter(|rhs_node| looks_like_identifier(rhs_node.kind()))
-            .and_then(|rhs_node| argument_place(&rhs_node, src));
-        let mut assignment_value_kind = (callable_source.is_some() || rhs_is_callable_literal)
-            .then_some(crate::AssignValueKind::CallableReference);
+            .and_then(|rhs_node| argument_place(&rhs_node, src, handler));
+        let mut assignment_value_kind = rhs
+            .and_then(|value| handler.expression_value_kind(value, src))
+            .or_else(|| {
+                (callable_source.is_some() || rhs_is_callable_literal)
+                    .then_some(crate::AssignValueKind::CallableReference)
+            });
         let mut source_name = callable_source
             .clone()
             .or_else(|| simple_place_source.clone())
@@ -141,7 +120,6 @@ pub(super) fn lower_assignment(
             (None, Vec::new())
         } else {
             rhs.and_then(|n| extract_direct_call_info(&n, src, handler))
-                .or_else(|| rhs.and_then(|n| extract_dart_selector_call_info(n, file, src, handler)))
                 .or_else(|| {
                     rhs.is_none()
                         .then(|| {
@@ -150,7 +128,15 @@ pub(super) fn lower_assignment(
                         })
                         .flatten()
                 })
-                .or_else(|| extract_dart_selector_call_info(node, file, src, handler))
+                // Some grammars split one call across sibling CST nodes, so
+                // the field-selected RHS is only the callee or one selector.
+                // Give the adapter's exact decoder the complete assignment
+                // node before concluding that the initializer is not a call.
+                .or_else(|| {
+                    handler
+                        .direct_call_info_extractor
+                        .and_then(|extract| extract(node, src, handler))
+                })
                 .unwrap_or((None, Vec::new()))
         };
         // G2: when the RHS is a compound expression (template literal,
@@ -164,18 +150,14 @@ pub(super) fn lower_assignment(
         // correctly across all grammars without requiring the adapter
         // to evaluate the expression AST itself.
         let mut source_names: Vec<String> = Vec::new();
-        let rhs_is_large_literal = rhs
-            .as_ref()
-            .is_some_and(|n| is_large_literal_initializer_node(n.kind(), n))
-            || has_direct_large_literal_initializer_child(&node);
         if callable_source.is_none() && !rhs_is_callable_literal {
-            if let Some(n) = rhs.filter(|n| !is_large_literal_initializer_node(n.kind(), n)) {
+            if let Some(n) = rhs {
                 source_names.extend(extract_rhs_expr_operands(&n, src, handler));
                 // Retain the exact parser-proven qualified place in addition
                 // to scalar operands. This preserves language sigils on a
                 // projection (`$obj->token` -> `$obj.token`) without an
                 // adapter rescanning rendered expression text.
-                if let Some(place) = argument_place(&n, src).filter(|place| place.contains('.')) {
+                if let Some(place) = argument_place(&n, src, handler).filter(|place| place.contains('.')) {
                     source_names.push(place);
                 }
             }
@@ -194,7 +176,7 @@ pub(super) fn lower_assignment(
         // read. Keep it among the sources (don't strip via same_identifier)
         // so a literal / untainted RHS can't reach the clean-overwrite kill
         // arm and drop `x`'s prior taint.
-        let is_compound = assignment_is_compound(&node, kind, src);
+        let is_compound = assignment_is_compound(&node, src, handler);
         // Self-referential assignment: `x = x + a`, `x = x.field`,
         // `x = cond ? x : y`. When the target appears as an operand of a
         // NON-call RHS expression, it is genuinely read into the result
@@ -234,8 +216,8 @@ pub(super) fn lower_assignment(
         // field-sensitive across a later destructure without recovering keys
         // from rendered assignment text.
         let keyed_binding_sources = rhs
-            .and_then(|rhs_node| argument_place(&rhs_node, src))
-            .map(|base| keyed_lhs_binding_sources(&node, src, &base))
+            .and_then(|rhs_node| argument_place(&rhs_node, src, handler))
+            .map(|base| keyed_lhs_binding_sources(&node, src, &base, handler))
             .unwrap_or_default();
         // Some grammars emit a declaration-name wrapper as an
         // assignment-shaped node (`val raw` / `local raw`) in addition
@@ -245,17 +227,21 @@ pub(super) fn lower_assignment(
         // source assignment immediately after it.
         let has_value_semantics =
             (rhs.is_some() || source_name.is_some() || source_call.is_some() || !source_names.is_empty())
-                && !rhs_is_large_literal
-                && !type_only_declaration_without_initializer(&node);
+                && !type_only_declaration_without_initializer(&node, handler);
         if has_value_semantics {
             // Positional aggregate initialization is a distinct compiler
             // operation from scalar assignment. Preserve the initializer's
             // ordered tree-sitter value facts here; the workspace semantic
             // pass later resolves the declared type against its parsed field
             // layout (including layouts declared in another file).
-            if let Some(rhs_node) = rhs
-                .filter(|rhs_node| node.kind() == "init_declarator" && rhs_node.kind() == "initializer_list")
-            {
+            if let Some(rhs_node) = rhs.filter(|rhs_node| {
+                handler
+                    .positional_aggregate_assignment_kinds
+                    .contains(&node.kind())
+                    && handler
+                        .positional_aggregate_value_kinds
+                        .contains(&rhs_node.kind())
+            }) {
                 let value_flow =
                     expression_flow::positional_expression_flow_from_node(rhs_node, file, src, handler);
                 if !value_flow.tuple_items.is_empty() && !target.is_empty() {
@@ -276,7 +262,7 @@ pub(super) fn lower_assignment(
             // Both entries carry the same source_name / source_call so
             // the taint transfer sees the same RHS dependency on both
             // keys.
-            let qualified_target = qualified_assign_target(target_node, src);
+            let qualified_target = qualified_assign_target(target_node, src, handler);
             if let Some(qname) = qualified_target.as_ref() {
                 if qname != &target {
                     out.push(FlowEvent::Assign {
@@ -298,7 +284,7 @@ pub(super) fn lower_assignment(
             // result slots. Member/subscript places cannot enter this loop
             // because `extra_lhs_binding_targets` accepts only aggregate CST
             // pattern kinds.
-            for extra_target in extra_lhs_binding_targets(&node, src, &target) {
+            for extra_target in extra_lhs_binding_targets(&node, src, &target, handler) {
                 let keyed_source = keyed_binding_sources.iter().find_map(|(binding, source)| {
                     same_identifier_name(binding, &extra_target).then_some(source)
                 });
@@ -323,7 +309,7 @@ pub(super) fn lower_assignment(
             // API name in shared lowering. Gated to a simple `<ident>[...]`
             // LHS so it never fires on member/nested-subscript shapes.
             if let (Some(target_node), Some(value_node)) = (target_node, rhs) {
-                if let Some((base_node, key_node)) = subscript_place_parts(target_node) {
+                if let Some((base_node, key_node)) = subscript_place_parts(target_node, handler) {
                     let base = node_text(&base_node, src).trim();
                     if looks_like_bare_identifier(base) {
                         let key_arg = call_arg_from_node_with_handler(key_node, file, src, None, handler);

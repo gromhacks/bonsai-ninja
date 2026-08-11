@@ -24,6 +24,7 @@ fn decl(file: FileId, local_symbol: u32, name: &str) -> Decl {
         bases: Vec::new(),
         receiver_param_index: None,
         receiver_field_writes: Vec::new(),
+        receiver_field_initializers: Vec::new(),
         implicit_receiver_names: Vec::new(),
         receiver_state_sources: Vec::new(),
         return_type: None,
@@ -76,6 +77,7 @@ fn insert_merges_duplicate_declaration_facts() {
         span: fact_span,
         value_text: Some("value".to_string()),
         value_name: Some("value".to_string()),
+        value_kind: None,
         value_flow: bonsai_lang_api::ExpressionFlow::from_place("value"),
     });
     duplicate.has_implicit_returns = true;
@@ -132,6 +134,7 @@ fn compiler_headers_rebind_streamed_bodies_to_stable_symbols() {
         span: first.span,
         value_text: Some("value".to_string()),
         value_name: Some("value".to_string()),
+        value_kind: None,
         value_flow: bonsai_lang_api::ExpressionFlow::from_place("value"),
     });
     let mut body = decl(body_file, 7, "body");
@@ -139,6 +142,7 @@ fn compiler_headers_rebind_streamed_bodies_to_stable_symbols() {
         span: body.span,
         value_text: Some("input".to_string()),
         value_name: Some("input".to_string()),
+        value_kind: None,
         value_flow: bonsai_lang_api::ExpressionFlow::from_place("input"),
     });
     let body_index = DeclIndex {
@@ -204,6 +208,14 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
     let return_span = Span::new(file, 40, 57);
     let mut function = decl(file, 9, "value");
     function.body_span = Some(Span::new(file, 0, 100));
+    function.receiver_field_initializers = vec![bonsai_lang_api::ReceiverFieldInitializer {
+        span: call_span,
+        target: "self.runner".to_string(),
+        call_name: "Runner".to_string(),
+        call_kind: bonsai_lang_api::CallKind::Constructor,
+        call_receiver: None,
+        call_receiver_types: vec!["Runner".to_string()],
+    }];
     function.flow_events.push(FlowEvent::Branch {
         span: Span::new(file, 10, 60),
         condition: Some("ready".to_string()),
@@ -237,6 +249,7 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
                 span: return_span,
                 value_text: Some("self.value".to_string()),
                 value_name: None,
+                value_kind: None,
                 value_flow: bonsai_lang_api::ExpressionFlow {
                     call_sites: vec![call_span],
                     ..bonsai_lang_api::ExpressionFlow::from_place("self.value")
@@ -255,6 +268,7 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
             argument_index: 0,
             argument_span: arg_span,
             direct_call_span: Some(call_span),
+            value_kind: None,
             inline_callback_params: Vec::new(),
             value_flow: bonsai_lang_api::ExpressionFlow {
                 call_sites: vec![call_span],
@@ -288,6 +302,12 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
 
     let header = global.decls_in(file).first().expect("linkage header");
     assert!(header.flow_events.is_empty());
+    assert_eq!(header.receiver_field_initializers.len(), 1);
+    assert_eq!(header.receiver_field_initializers[0].target, "self.runner");
+    assert_eq!(
+        header.receiver_field_initializers[0].call_receiver_types,
+        ["Runner"]
+    );
     let symbol = header.symbol;
     let facts = global.linkage_facts(symbol).expect("compact linkage facts");
     assert_eq!(facts.calls.len(), 1);
@@ -369,6 +389,7 @@ fn projected_linkage_enriches_existing_headers_without_replacing_symbols() {
             span: Span::new(file, 10, 25),
             value_text: Some("consume()".to_string()),
             value_name: None,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
             value_flow: bonsai_lang_api::ExpressionFlow {
                 call_sites: vec![call_span],
                 ..Default::default()
@@ -407,6 +428,7 @@ fn scalar_return_survives_as_a_compact_summary_fact() {
         span: Span::new(file, 10, 22),
         value_text: Some("input".to_string()),
         value_name: Some("input".to_string()),
+        value_kind: None,
         value_flow: bonsai_lang_api::ExpressionFlow::from_place("input"),
     });
 
@@ -443,6 +465,7 @@ fn returned_constructor_survives_as_a_compact_type_fact() {
             span: return_span,
             value_text: Some("new(data)".to_string()),
             value_name: None,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
             value_flow: bonsai_lang_api::ExpressionFlow {
                 call_sites: vec![call_span],
                 ..Default::default()
@@ -503,10 +526,22 @@ fn reinserting_file_replaces_name_lookup_entries() {
 
 #[test]
 fn global_index_identity_is_clone_stable_and_advances_on_semantic_mutation() {
+    fn identity_hash(identity: &GlobalIndexIdentity) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        identity.hash(&mut hasher);
+        hasher.finish()
+    }
+
     let file = FileId::new(31);
     let mut index = GlobalIndex::new();
     let empty_identity = index.identity();
     assert_eq!(empty_identity, index.clone().identity());
+    assert_eq!(
+        identity_hash(&empty_identity),
+        identity_hash(&index.clone().identity())
+    );
 
     index.insert(DeclIndex {
         file,

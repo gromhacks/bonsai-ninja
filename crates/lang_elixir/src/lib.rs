@@ -10,12 +10,15 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{
-        call_arg_from_node_with_handler, collect_kinds, first_named_child_of_kind, language_from_pack,
-        node_at_span, node_text, parse_with, span_of,
+        binding_targets_from_pattern_node, call_arg_from_node_with_handler, collect_kinds,
+        dedup_assign_events, extract_catch_param, first_identifier_descendant, first_named_child,
+        first_named_child_of_kind, language_from_pack, node_at_span, node_text, parse_with,
+        pattern_binding_assign, span_of, walk_flow_node_into,
     },
-    AdapterContext, AdapterError, AssignmentValueFact, DeclIndex, ExpressionFlow, GrammarHandler,
-    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref,
-    RefKind, SyntaxSpecialForm, Visibility, EMPTY_HANDLER,
+    AdapterContext, AdapterError, AssignmentNodeSemantics, AssignmentValueFact, CallTargetExtraction,
+    DeclIndex, ExpressionFlow, ExpressionPlaceExtraction, FunctionDefinitionExtraction, GrammarHandler,
+    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, LoopKind,
+    ModulePath, Ref, RefKind, SyntaxSpecialForm, Visibility, EMPTY_HANDLER,
 };
 use bonsai_lang_api::{AssignValueKind, FlowEvent};
 use tree_sitter::{Language, Node, Tree};
@@ -36,6 +39,114 @@ fn direct_token(node: Node<'_>, src: &[u8], expected: &str) -> bool {
         if !cursor.goto_next_sibling() {
             return false;
         }
+    }
+}
+
+fn elixir_call_arguments(node: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = node.walk();
+    let arguments = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "arguments");
+    arguments
+}
+
+/// Elixir remote calls expose their complete `Module.function` expression as
+/// a `dot` node in the call's `target` field. Preserve atoms (for example
+/// `:gen_server.stop`) and aliases verbatim; rule data, not the adapter,
+/// assigns any library meaning to the resulting syntax fact.
+fn elixir_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    if node.kind() != "call" {
+        return None;
+    }
+    let target = node.child_by_field_name("target")?;
+    if !matches!(
+        target.kind(),
+        "identifier" | "alias" | "atom" | "quoted_atom" | "dot"
+    ) {
+        return None;
+    }
+    let full_text = node_text(&target, src)
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    let semantic_name_node = if target.kind() == "dot" {
+        target.child_by_field_name("right").unwrap_or(target)
+    } else {
+        target
+    };
+    (!full_text.is_empty()).then_some(CallTargetExtraction {
+        node: semantic_name_node,
+        full_text,
+    })
+}
+
+fn elixir_static_key(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let raw = node_text(&node, src).trim();
+    match node.kind() {
+        "identifier" => (!raw.is_empty()).then(|| raw.to_string()),
+        "atom" => {
+            let value = raw.strip_prefix(':')?;
+            (!value.is_empty()
+                && value
+                    .chars()
+                    .all(|ch| ch == '_' || ch == '@' || ch == '!' || ch == '?' || ch.is_alphanumeric()))
+            .then(|| value.to_string())
+        }
+        "quoted_atom" => {
+            let quoted = raw.strip_prefix(':')?;
+            let quote = quoted.as_bytes().first().copied()?;
+            if !matches!(quote, b'\'' | b'"') || quoted.as_bytes().last().copied() != Some(quote) {
+                return None;
+            }
+            let value = quoted.get(1..quoted.len().checked_sub(1)?)?;
+            (!value.is_empty() && !value.contains(['\\', '#'])).then(|| value.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn elixir_expression_places(node: Node<'_>, src: &[u8]) -> ExpressionPlaceExtraction {
+    if node.kind() != "call" || elixir_call_arguments(node).is_some() {
+        return ExpressionPlaceExtraction::default();
+    }
+    let Some(target) = node.child_by_field_name("target") else {
+        return ExpressionPlaceExtraction::default();
+    };
+    fn collect(node: Node<'_>, src: &[u8], parts: &mut Vec<String>) -> bool {
+        if node.kind() == "dot" {
+            let mut cursor = node.walk();
+            let children = node.named_children(&mut cursor).collect::<Vec<_>>();
+            let Some(left) = node
+                .child_by_field_name("left")
+                .or_else(|| children.first().copied())
+            else {
+                return false;
+            };
+            let Some(right) = node
+                .child_by_field_name("right")
+                .or_else(|| children.last().copied())
+            else {
+                return false;
+            };
+            return collect(left, src, parts) && collect(right, src, parts);
+        }
+        if !matches!(node.kind(), "identifier" | "alias" | "atom") {
+            return false;
+        }
+        let part = node_text(&node, src).trim();
+        if part.is_empty() {
+            return false;
+        }
+        parts.push(part.trim_start_matches(':').to_string());
+        true
+    }
+    let mut parts = Vec::new();
+    if !collect(target, src, &mut parts) || parts.len() < 2 {
+        return ExpressionPlaceExtraction::default();
+    }
+    ExpressionPlaceExtraction {
+        places: vec![parts.join(".")],
+        consumed_node_ids: vec![node.id()],
     }
 }
 
@@ -63,6 +174,338 @@ fn extract_elixir_callable_reference(node: Node<'_>, src: &[u8]) -> Option<Strin
     let function = node_text(&function, src).trim();
     (!function.is_empty()).then(|| function.to_string())
 }
+
+fn extract_elixir_function_definition<'tree>(
+    node: Node<'tree>,
+    src: &[u8],
+) -> Option<FunctionDefinitionExtraction<'tree>> {
+    if node.kind() != "call" {
+        return None;
+    }
+    let target = node.child_by_field_name("target")?;
+    if !matches!(
+        node_text(&target, src).trim(),
+        "def" | "defp" | "defmacro" | "defmacrop" | "defguard" | "defguardp"
+    ) {
+        return None;
+    }
+    let outer_args = node
+        .child_by_field_name("arguments")
+        .or_else(|| first_named_child_of_kind(&node, "arguments"))?;
+    let mut cursor = outer_args.walk();
+    let signature = outer_args
+        .named_children(&mut cursor)
+        .find(|child| matches!(child.kind(), "call" | "identifier"))?;
+    let name = if signature.kind() == "identifier" {
+        signature
+    } else {
+        signature.child_by_field_name("target")?
+    };
+    let short_form_body = first_named_child_of_kind(&outer_args, "keywords")
+        .and_then(|keywords| first_named_child_of_kind(&keywords, "pair"))
+        .and_then(|pair| {
+            let key = pair.child_by_field_name("key")?;
+            (node_text(&key, src).trim().trim_end_matches(':') == "do")
+                .then(|| pair.child_by_field_name("value"))
+                .flatten()
+        });
+    let body = short_form_body.or_else(|| first_named_child_of_kind(&node, "do_block"));
+    Some(FunctionDefinitionExtraction {
+        name,
+        parameter_source: signature,
+        body,
+    })
+}
+
+fn elixir_generator_bindings(
+    file: FileId,
+    node: Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<FlowEvent> {
+    let Some(arguments) = node
+        .child_by_field_name("arguments")
+        .or_else(|| first_named_child_of_kind(&node, "arguments"))
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut cursor = arguments.walk();
+    for argument in arguments.named_children(&mut cursor) {
+        if argument.kind() != "binary_operator" || !elixir_binary_operator_is(&argument, "<-") {
+            continue;
+        }
+        let (Some(pattern), Some(value)) = (
+            argument.child_by_field_name("left"),
+            argument.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        for target in binding_targets_from_pattern_node(&pattern, src, handler) {
+            if let Some(assign) = pattern_binding_assign(file, &pattern, &target, value, src, handler) {
+                out.push(assign);
+            }
+        }
+    }
+    dedup_assign_events(out)
+}
+
+fn elixir_call_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() != "call" {
+        return None;
+    }
+    let target = node.child_by_field_name("target")?;
+    let name = node_text(&target, src).split_whitespace().collect::<String>();
+    (!name.is_empty()).then_some(name)
+}
+
+fn elixir_condition_arg(node: Node<'_>) -> Option<Node<'_>> {
+    let arguments = first_named_child_of_kind(&node, "arguments")?;
+    let mut cursor = arguments.walk();
+    let condition = arguments
+        .named_children(&mut cursor)
+        .find(|child| !matches!(child.kind(), "keywords" | "pair"));
+    condition
+}
+
+fn elixir_keyword_value<'tree>(node: Node<'tree>, src: &[u8], expected: &str) -> Option<Node<'tree>> {
+    fn visit<'tree>(node: Node<'tree>, src: &[u8], expected: &str) -> Option<Node<'tree>> {
+        if node.kind() == "pair" {
+            let key = node.child_by_field_name("key")?;
+            if node_text(&key, src).trim().trim_end_matches(':').trim() == expected {
+                return node.child_by_field_name("value");
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if let Some(value) = visit(child, src, expected) {
+                return Some(value);
+            }
+        }
+        None
+    }
+    visit(node, src, expected)
+}
+
+fn elixir_case_bindings(
+    file: FileId,
+    node: Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<FlowEvent> {
+    let Some(subject) = node
+        .child_by_field_name("arguments")
+        .or_else(|| first_named_child_of_kind(&node, "arguments"))
+        .and_then(|arguments| first_named_child(&arguments).or(Some(arguments)))
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "stab_clause" {
+            if let Some(pattern) = current.child_by_field_name("left") {
+                for target in binding_targets_from_pattern_node(&pattern, src, handler) {
+                    if target == "_" || target.chars().next().is_some_and(char::is_uppercase) {
+                        continue;
+                    }
+                    if let Some(assign) =
+                        pattern_binding_assign(file, &pattern, &target, subject, src, handler)
+                    {
+                        out.push(assign);
+                    }
+                }
+            }
+        }
+        let mut cursor = current.walk();
+        stack.extend(current.named_children(&mut cursor));
+    }
+    dedup_assign_events(out)
+}
+
+fn walk_elixir_children(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+    class_names: &[String],
+    out: &mut Vec<FlowEvent>,
+) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        walk_flow_node_into(child, file, src, handler, class_names, out);
+    }
+}
+
+fn walk_elixir_branch_block(
+    block: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+    class_names: &[String],
+    then_events: &mut Vec<FlowEvent>,
+    else_events: &mut Vec<FlowEvent>,
+) {
+    let mut cursor = block.walk();
+    for child in block.named_children(&mut cursor) {
+        match child.kind() {
+            "else_block" => walk_elixir_children(child, file, src, handler, class_names, else_events),
+            "rescue_block" | "catch_block" | "after_block" => {}
+            _ => walk_flow_node_into(child, file, src, handler, class_names, then_events),
+        }
+    }
+}
+
+fn elixir_rescue_binding(node: Node<'_>, src: &[u8]) -> (Option<String>, Vec<String>) {
+    let Some(block) = first_named_child_of_kind(&node, "do_block") else {
+        return (None, Vec::new());
+    };
+    let mut cursor = block.walk();
+    for child in block.named_children(&mut cursor) {
+        if !matches!(child.kind(), "rescue_block" | "catch_block") {
+            continue;
+        }
+        let Some(clause) = first_named_child_of_kind(&child, "stab_clause") else {
+            continue;
+        };
+        let mut clause_cursor = clause.walk();
+        let Some(head) = clause
+            .named_children(&mut clause_cursor)
+            .find(|candidate| candidate.kind() != "body")
+        else {
+            continue;
+        };
+        let parameter = first_identifier_descendant(head)
+            .map(|identifier| node_text(&identifier, src).trim().to_string());
+        let mut types = Vec::new();
+        collect_elixir_aliases(head, src, &mut types);
+        if parameter.is_some() || !types.is_empty() {
+            return (parameter, types);
+        }
+    }
+    (None, Vec::new())
+}
+
+fn collect_elixir_aliases(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+    if node.kind() == "alias" {
+        let value = node_text(&node, src).trim().to_string();
+        if !value.is_empty() && !out.contains(&value) {
+            out.push(value);
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_elixir_aliases(child, src, out);
+    }
+}
+
+fn extract_elixir_control_flow(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+    class_names: &[String],
+) -> Option<Vec<FlowEvent>> {
+    let name = elixir_call_name(node, src)?;
+    match name.as_str() {
+        "if" | "unless" | "case" | "cond" | "with" => {
+            let mut prefix = Vec::new();
+            let mut then_events = Vec::new();
+            let mut else_events = Vec::new();
+            if let Some(condition) = elixir_condition_arg(node) {
+                walk_flow_node_into(condition, file, src, handler, class_names, &mut prefix);
+            }
+            if let Some(value) = elixir_keyword_value(node, src, "do") {
+                walk_flow_node_into(value, file, src, handler, class_names, &mut then_events);
+            }
+            if let Some(value) = elixir_keyword_value(node, src, "else") {
+                walk_flow_node_into(value, file, src, handler, class_names, &mut else_events);
+            }
+            if let Some(block) = first_named_child_of_kind(&node, "do_block") {
+                walk_elixir_branch_block(
+                    block,
+                    file,
+                    src,
+                    handler,
+                    class_names,
+                    &mut then_events,
+                    &mut else_events,
+                );
+            }
+            let bindings = if name == "case" {
+                elixir_case_bindings(file, node, src, handler)
+            } else if name == "with" {
+                elixir_generator_bindings(file, node, src, handler)
+            } else {
+                Vec::new()
+            };
+            if !bindings.is_empty() {
+                let mut prefixed_then = bindings.clone();
+                prefixed_then.extend(then_events);
+                then_events = prefixed_then;
+                if !else_events.is_empty() {
+                    let mut prefixed_else = bindings;
+                    prefixed_else.extend(else_events);
+                    else_events = prefixed_else;
+                }
+            }
+            let condition = elixir_condition_arg(node)
+                .map(|condition| node_text(&condition, src).trim().to_string())
+                .filter(|condition| !condition.is_empty());
+            prefix.push(FlowEvent::Branch {
+                span: span_of(file, &node),
+                condition,
+                then_events,
+                else_events,
+            });
+            Some(prefix)
+        }
+        "try" => {
+            let mut body = Vec::new();
+            let mut catch_events = Vec::new();
+            let mut finally_events = Vec::new();
+            if let Some(block) = first_named_child_of_kind(&node, "do_block") {
+                let mut cursor = block.walk();
+                for child in block.named_children(&mut cursor) {
+                    match child.kind() {
+                        "rescue_block" | "catch_block" => {
+                            walk_elixir_children(child, file, src, handler, class_names, &mut catch_events);
+                        }
+                        "after_block" => {
+                            walk_elixir_children(child, file, src, handler, class_names, &mut finally_events);
+                        }
+                        _ => walk_flow_node_into(child, file, src, handler, class_names, &mut body),
+                    }
+                }
+            }
+            let (catch_param, catch_types) = elixir_rescue_binding(node, src);
+            Some(vec![FlowEvent::Try {
+                span: span_of(file, &node),
+                body,
+                catch_events,
+                finally_events,
+                catch_param: catch_param.or_else(|| extract_catch_param(&node, src)),
+                catch_types,
+            }])
+        }
+        "for" => {
+            let mut body = elixir_generator_bindings(file, node, src, handler);
+            if let Some(value) = elixir_keyword_value(node, src, "do") {
+                walk_flow_node_into(value, file, src, handler, class_names, &mut body);
+            }
+            if let Some(block) = first_named_child_of_kind(&node, "do_block") {
+                walk_elixir_branch_block(block, file, src, handler, class_names, &mut body, &mut Vec::new());
+            }
+            Some(vec![FlowEvent::Loop {
+                span: span_of(file, &node),
+                loop_kind: LoopKind::ForEach,
+                body,
+            }])
+        }
+        _ => None,
+    }
+}
 // Elixir has no direct `function_definition` grammar node. Function
 // definitions come through as `call` nodes with target `def` / `defp`.
 // Accepting `call` as the fn-kind means the adapter treats every call
@@ -72,12 +515,54 @@ fn extract_elixir_callable_reference(node: Node<'_>, src: &[u8]) -> Option<Strin
 // syntax — precision upgrades would require a hand-rolled handler
 // filtering by target.
 const HANDLER: GrammarHandler = GrammarHandler {
+    expression_value_kind_extractor: None,
+    literal_value_kinds: &[
+        "nil",
+        "boolean",
+        "char",
+        "float",
+        "integer",
+        "atom",
+        "quoted_atom",
+        "true",
+        "false",
+    ],
+    string_literal_kinds: &["string", "charlist"],
+    comment_kinds: &["comment"],
+    parameter_container_kinds: &["arguments"],
+    parameter_kinds: &["identifier"],
+    binding_identifier_kinds: &["identifier"],
+    identifier_kinds: &["identifier"],
+    aggregate_pattern_kinds: &["tuple", "list"],
+    named_aggregate_kinds: &["map"],
+    positional_aggregate_kinds: &["tuple", "list"],
+    aggregate_pair_kinds: &["pair"],
+    aggregate_key_field_names: &["key"],
+    aggregate_value_field_names: &["value"],
+    static_field_name_kinds: &["atom", "identifier"],
+    static_subscript_key_extractor: Some(elixir_static_key),
+    expression_place_extractor: Some(elixir_expression_places),
+    transparent_call_wrapper_kinds: &["dot"],
+    branch_arm_kinds: &["do_block", "else_block"],
+    additional_alternative_kinds: &["else_block"],
     fn_kinds: &["call"],
+    function_definition_extractor: Some(extract_elixir_function_definition),
     call_kinds: &["call"],
+    call_encoded_control_flow_extractor: Some(extract_elixir_control_flow),
+    call_callee_field_names: &["target"],
+    call_target_extractor: Some(elixir_call_target),
+    call_argument_container_kinds: &["arguments"],
+    lambda_body_kinds: &["body", "block", "do_block"],
     argument_passing_mode_extractor: None,
     assignment_kinds: &["binary_operator"],
+    assignment_semantics_extractor: Some(elixir_assignment_semantics),
     call_ref_kinds: &["call"],
+    member_expression_kinds: &["dot"],
+    member_base_field_names: &["left"],
+    member_name_field_names: &["right"],
     subscript_expression_kinds: &["index_expression"],
+    subscript_base_field_names: &["target", "value"],
+    subscript_index_field_names: &["index"],
     non_call_ref_names: &[
         "def",
         "defp",
@@ -96,10 +581,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // `Return` for the last statement of the `do` block.
     tail_expression_returns: true,
     lambda_kinds: &["anonymous_function", "do_block"],
-    special_forms: &[
-        SyntaxSpecialForm::CallEncodedControlFlow,
-        SyntaxSpecialForm::DirectDoBlockBody,
-    ],
+    inline_closure_kinds: &["do_block"],
+    special_forms: &[SyntaxSpecialForm::DirectDoBlockBody],
     ..EMPTY_HANDLER
 };
 
@@ -185,7 +668,12 @@ impl LanguageAdapter for ElixirAdapter {
                     &value_field_assignments,
                 );
                 normalize_elixir_control_expression_assignments(&mut decl.flow_events, &tree, src);
-                bonsai_lang_api::kit::annotate_tuple_call_result_bindings(&mut decl.flow_events, &tree, src);
+                bonsai_lang_api::kit::annotate_tuple_call_result_bindings(
+                    &mut decl.flow_events,
+                    &tree,
+                    src,
+                    &HANDLER,
+                );
             }
             let private_spans = collect_elixir_defp_spans(&tree, src);
             for decl in &mut decl_index.defs {
@@ -207,51 +695,16 @@ impl LanguageAdapter for ElixirAdapter {
         } else {
             bonsai_lang_api::apply_file_stem_semantic_identity(&mut decl_index, ctx);
         }
-        // Recognised Elixir lifecycle transitions. Elixir's
-        // tree-sitter call names land as bare atoms (e.g.
-        // `:gen_server.stop` reads as `:gen_server.stop`); the
-        // matcher's call-name comparison strips the leading colon
-        // when the rule key omits it. Bare `close`/`cancel` cover
-        // ad-hoc resource APIs that follow the same convention.
-        const ELIXIR_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-            bonsai_lang_api::LifecycleTransition {
-                call_match: ":gen_server.stop",
-                transition: "cancelled",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: ":ets.delete",
-                transition: "freed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "Process.exit",
-                transition: "cancelled",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "close",
-                transition: "closed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "cancel",
-                transition: "cancelled",
-                arg_index: 0,
-            },
-        ];
         for decl in &mut decl_index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, ELIXIR_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
-        // Local constructor-result receiver typing (`new Foo()` / `Foo()` / `Foo::new()` -> typed receiver) so `recv.method(...)` resolves
-        // `receiver_type_in` / `[Type, method]` rules; the constructor heuristic only
-        // types PascalCase callees, so language exported-function calls are unaffected.
+        // Local constructor-result receiver typing follows adapter facts and
+        // declarations; spelling alone is not constructor evidence.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut decl_index);
         bonsai_lang_api::apply_class_field_type_aliases(&mut decl_index);
         decl_index
@@ -815,8 +1268,35 @@ fn elixir_pattern_param_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
 }
 
 fn elixir_binary_operator_is(node: &Node<'_>, expected: &str) -> bool {
-    node.child_by_field_name("operator")
+    if node
+        .child_by_field_name("operator")
         .is_some_and(|operator| operator.kind() == expected)
+    {
+        return true;
+    }
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return false;
+    }
+    loop {
+        let child = cursor.node();
+        if !child.is_named() && child.kind() == expected {
+            return true;
+        }
+        if !cursor.goto_next_sibling() {
+            return false;
+        }
+    }
+}
+
+fn elixir_assignment_semantics(node: Node<'_>, _src: &[u8]) -> AssignmentNodeSemantics {
+    if elixir_binary_operator_is(&node, "=") {
+        AssignmentNodeSemantics::Assignment
+    } else if elixir_binary_operator_is(&node, "|>") {
+        AssignmentNodeSemantics::Pipe
+    } else {
+        AssignmentNodeSemantics::Other
+    }
 }
 
 /// Lower destructured function-head parameters into explicit storage reads.

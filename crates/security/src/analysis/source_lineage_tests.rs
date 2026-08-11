@@ -25,6 +25,8 @@ fn real_edge(trace_id: u64, caller: u32, callee: u32) -> TaintedCallEdge {
         index: 0,
         value_text: format!("v{caller}"),
         param_name: format!("p{callee}"),
+        place: Some(format!("v{caller}")),
+        source_names: vec![format!("v{caller}")],
     });
     record
 }

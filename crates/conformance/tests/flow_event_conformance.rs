@@ -590,7 +590,7 @@ func G(_ a: String) {}
   z = f(x)
   F(t) if x
   begin
-    items.each do |it|
+    for it in items
       G(it)
     end
   rescue => e
@@ -738,7 +738,9 @@ void G(NSString *a) {}
       sink_f(t)
     end
     try do
-      Enum.each(items, fn it -> sink_g(it) end)
+      for it <- items do
+        sink_g(it)
+      end
     rescue
       e -> e
     end

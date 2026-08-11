@@ -74,6 +74,7 @@ fn compiler_resolution_gaps_drive_finding_completeness_without_name_guesses() {
                 call_span: unresolved_span,
                 tainted_args: Vec::new(),
                 tainted_receiver: None,
+                tainted_receiver_source_names: Vec::new(),
                 kind: bonsai_taint::TaintedCallKind::Call,
             },
             TaintedCall {
@@ -83,6 +84,7 @@ fn compiler_resolution_gaps_drive_finding_completeness_without_name_guesses() {
                 call_span: terminal_span,
                 tainted_args: Vec::new(),
                 tainted_receiver: None,
+                tainted_receiver_source_names: Vec::new(),
                 kind: bonsai_taint::TaintedCallKind::Call,
             },
         ],

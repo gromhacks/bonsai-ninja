@@ -1,0 +1,31 @@
+- id: rust.typing.lifecycle_freed_argument
+  enabled: true
+  language: rust
+  match:
+    kind: call
+    callee:
+      regex: '^(?:(?:std(?:::|\.)mem(?:::|\.)|mem(?:::|\.))?drop|(?:std(?:::|\.)ptr(?:::|\.)|ptr(?:::|\.))drop_in_place|ManuallyDrop(?:::|\.)drop)$'
+  lifecycle_transition:
+    state: freed
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: drop changes the value state
+    code: 'fn f(value: usize) { drop(value); }'
+    expect_match_text: [drop]
+  description: "Rust drop operations move argument zero to freed. Typing-only; never a finding."
+
+- id: rust.typing.lifecycle_moved_argument
+  enabled: true
+  language: rust
+  match:
+    kind: call
+    callee:
+      regex: '^(?:Box(?:::|\.)(?:from_raw|into_raw)|(?:std(?:::|\.)?mem(?:::|\.))?(?:replace|take))$'
+  lifecycle_transition:
+    state: moved
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: mem take changes the source state
+    code: 'fn f(mut value: String) { let _ = std::mem::take(&mut value); }'
+    expect_match_text: [std::mem::take]
+  description: "Rust ownership-transfer calls move argument zero to moved. Typing-only; never a finding."

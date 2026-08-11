@@ -1,0 +1,41 @@
+- id: php.typing.lifecycle_closed_receiver
+  enabled: true
+  language: php
+  match: { kind: call, callee: { name: close } }
+  lifecycle_transition:
+    state: closed
+    binding: { kind: receiver }
+  match_examples:
+  - name: method close changes the receiver state
+    code: '<?php function f($resource) { $resource->close(); }'
+    expect_match_text: [$resource.close]
+  description: "PHP method close moves the receiver to closed. Typing-only; never a finding."
+
+- id: php.typing.lifecycle_closed_argument
+  enabled: true
+  language: php
+  match:
+    kind: call
+    callee:
+      regex: '^(?:fclose|pclose)$'
+  lifecycle_transition:
+    state: closed
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: fclose changes the handle state
+    code: '<?php function f($handle) { fclose($handle); }'
+    expect_match_text: [fclose]
+  description: "PHP close functions move argument zero to closed. Typing-only; never a finding."
+
+- id: php.typing.lifecycle_freed_argument
+  enabled: true
+  language: php
+  match: { kind: call, callee: { name: unset } }
+  lifecycle_transition:
+    state: freed
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: unset changes the value state
+    code: '<?php function f($value) { unset($value); }'
+    expect_match_text: [unset]
+  description: "PHP unset moves argument zero to freed. Typing-only; never a finding."

@@ -1,0 +1,54 @@
+- id: javascript.typing.lifecycle_closed_receiver
+  enabled: true
+  language: javascript
+  match: { kind: call, callee: { name: close } }
+  lifecycle_transition:
+    state: closed
+    binding: { kind: receiver }
+  match_examples:
+  - name: close changes the receiver state
+    code: 'function f(resource) { resource.close(); }'
+    expect_match_text: [resource.close]
+  description: "ECMAScript close moves the receiver to closed. Typing-only; never a finding."
+
+- id: javascript.typing.lifecycle_destroyed_receiver
+  enabled: true
+  language: javascript
+  match: { kind: call, callee: { name: destroy } }
+  lifecycle_transition:
+    state: freed
+    binding: { kind: receiver }
+  match_examples:
+  - name: destroy changes the receiver state
+    code: 'function f(stream) { stream.destroy(); }'
+    expect_match_text: [stream.destroy]
+  description: "ECMAScript destroy moves the receiver to freed. Typing-only; never a finding."
+
+- id: javascript.typing.lifecycle_cancelled_receiver
+  enabled: true
+  language: javascript
+  match:
+    kind: call
+    callee:
+      regex: '(?:^|\.)(?:abort|unsubscribe|cancel)$'
+  lifecycle_transition:
+    state: cancelled
+    binding: { kind: receiver }
+  match_examples:
+  - name: abort changes the receiver state
+    code: 'function f(controller) { controller.abort(); }'
+    expect_match_text: [controller.abort]
+  description: "ECMAScript abort/unsubscribe/cancel moves the receiver to cancelled. Typing-only; never a finding."
+
+- id: javascript.typing.lifecycle_unlocked_receiver
+  enabled: true
+  language: javascript
+  match: { kind: call, callee: { name: release } }
+  lifecycle_transition:
+    state: unlocked
+    binding: { kind: receiver }
+  match_examples:
+  - name: release changes the receiver state
+    code: 'function f(lock) { lock.release(); }'
+    expect_match_text: [lock.release]
+  description: "ECMAScript release moves the receiver to unlocked. Typing-only; never a finding."

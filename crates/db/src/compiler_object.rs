@@ -18,8 +18,10 @@ use bonsai_lang_api::{
     CompilerAttribution, CompilerBrowseHeader, CompilerFunctionAttribution, CompilerSyntaxHeader, DeclIndex,
     ImportIndex,
 };
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,6 +32,71 @@ use std::sync::Arc;
 /// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
 /// or the object validation contract changes in a way that can alter compiler
 /// facts.
+// v83: the independently decodable syntax header retains exact
+// adapter-lowered return targets and their exact AST spans so broad rule
+// planning can reject impossible files without decoding bodies. Cached v82
+// headers omit those targets.
+// v82: branch adapters declare unfielded discriminant wrappers and every
+// direct arm kind; nested lambda wrappers unwrap to the executable callback
+// body. Cached v81 objects can omit switch/default/when and Kotlin callback
+// calls.
+// v81: shared control-flow lowering retains every adapter-declared branch arm
+// and lowers expression-bodied callbacks as complete expressions. PHP
+// parameter attribute lists are also declared explicitly by its adapter.
+// Cached v80 objects can omit those calls and parameter annotations.
+// v80: Lua static bracket writes retain the grammar-declared key field, and
+// Ruby unbound identifier receivers materialize their zero-argument call
+// result before a chained member call. Cached v79 objects can omit both.
+// v79: PHP append assignments lower their index-less subscript target to the
+// parsed aggregate place. Cached v78 objects can omit the aggregate mutation
+// and disconnect values collected with `$items[] = value` from later reads.
+// v78: calls retain the exact receiver node selected by the owning adapter;
+// cached v77 objects can omit scoped receivers whose source punctuation is
+// not the canonical dotted IR delimiter.
+// v77: C++ same-type direct-list initialization retains whole-object copy
+// semantics, and parsed template specializations bind to their base callable
+// declaration identity. Cached v76 objects can misproject one copied object
+// into its first aggregate field or leave template calls unresolved.
+// v76: assignment targets may use an adapter-owned assignment-place decoder
+// when their grammar reuses call-shaped syntax for a writable property.
+// Cached v75 objects can omit those exact writes and must not feed matcher,
+// callgraph, or IDG sidecars.
+// v75: adapter-lowered dataflow retains exact destructuring carriers,
+// indirect-place write-back operands, callable-reference arguments, tuple
+// result slots, inline constructed-receiver types, and yield-result bindings
+// across the supported grammars. Cached v74 objects can omit or weaken those
+// compiler facts and must not feed callgraph or IDG sidecars.
+// v74: assignment, return, and call-argument compiler facts carry exact
+// adapter-owned value shape, and literal/string/runtime-guard classification
+// is selected solely from the active grammar's inventories. Clean-overwrite
+// and endpoint attribution can distinguish literals from dynamic values
+// without parsing rendered text, guessing from identifier capitalization, or
+// consulting a shared cross-language token table. Cached v73 objects omit
+// these semantic facts.
+// v73: Kotlin constructors include only their actual executable regions:
+// direct property initializers/delegates and anonymous init blocks for the
+// primary constructor, plus exact this/super delegation and the block for a
+// directly owned secondary constructor. Classes that declare only secondary
+// constructors no longer receive a fabricated implicit primary. Cached v72
+// objects can retain computed/sibling members, mis-own nested constructors,
+// or omit secondary-constructor delegation.
+// v72: Swift designated constructors include only their exact executable
+// instance-property initializer prefixes; static properties and sibling
+// callable bodies are excluded, and superclass inheritance is known before
+// implicit-initializer synthesis. Cached v71 objects can retain the earlier
+// constructor body boundary.
+// v71: adapter construction/call semantics use exact declaration and CST
+// evidence across Kotlin field initialization, Lua dot calls, and Ruby
+// temporary constructed receivers. Cached v70 bodies can omit or misclassify
+// those call edges.
+// v70: declaration headers retain adapter-proven receiver-field direct-call
+// initializers. Sparse callgraph/IDG builds can resolve a field's constructed
+// type across files after constructor bodies are evicted, without restoring
+// capitalization heuristics or reparsing source.
+// v69: compact syntax headers retain exact inline-callback argument bindings
+// and typed callable bindings. Rulepack-declared external callback signatures
+// can therefore participate in broad rule planning without decoding bodies
+// or placing provider API identities in language adapters.
 // v68: Rust tuple-struct fields lower directly from Tree-sitter's ordered
 // field type nodes, preserving positional receiver types such as `self.0`.
 // Cached v67 objects can omit those projected receiver/call edges.
@@ -144,7 +211,7 @@ use std::sync::Arc;
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 68;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 83;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;
@@ -1202,6 +1269,7 @@ impl AnalyzerDb {
     pub fn save_compiler_object_sidecar(&self, workspace_root: &Path) -> std::io::Result<usize> {
         let _generation_guard = self.inner.compiler_object_generation_build.lock();
         let path = compiler_object_sidecar_path(workspace_root);
+        let _sidecar_guard = CompilerObjectSidecarWriteGuard::acquire(&path)?;
         let descriptors = self
             .inner
             .vfs
@@ -1547,6 +1615,222 @@ pub fn compiler_object_sidecar_path(workspace_root: &Path) -> PathBuf {
     workspace_bonsai_dir(workspace_root).join(format!(
         "compiler-objects.v{COMPILER_OBJECT_CACHE_VERSION}.factstore"
     ))
+}
+
+/// Cross-process ownership and bounded retention for compiler-object
+/// generations.
+///
+/// Schema versions use distinct immutable targets. The current target lock
+/// serializes publication, while each older target is removed only after a
+/// non-blocking lock proves that no peer compiler owns it.
+struct CompilerObjectSidecarWriteGuard {
+    lock_file: File,
+    target: PathBuf,
+}
+
+impl CompilerObjectSidecarWriteGuard {
+    fn acquire(target: &Path) -> std::io::Result<Self> {
+        let lock_file = open_compiler_object_lock_file(target)?;
+        lock_file.lock_exclusive()?;
+        cleanup_compiler_object_temp_files(target)?;
+        prune_obsolete_compiler_object_sidecars(target)?;
+        Ok(Self {
+            lock_file,
+            target: target.to_path_buf(),
+        })
+    }
+}
+
+impl Drop for CompilerObjectSidecarWriteGuard {
+    fn drop(&mut self) {
+        if let Err(error) = FileExt::unlock(&self.lock_file) {
+            bonsai_diagnostics::debug_log!(
+                "compiler-object",
+                "compiler-object sidecar writer lock release failed: path={} error={error}",
+                self.target.display()
+            );
+        }
+    }
+}
+
+fn open_compiler_object_lock_file(target: &Path) -> std::io::Result<File> {
+    let mut lock_path = target.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    let lock_path = PathBuf::from(lock_path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+}
+
+fn compiler_object_sidecar_version(name: &str) -> Option<u32> {
+    name.strip_prefix("compiler-objects.v")?
+        .strip_suffix(".factstore")?
+        .parse()
+        .ok()
+}
+
+fn compiler_object_writer_suffix_is_valid(suffix: &str) -> bool {
+    let mut parts = suffix.split('.');
+    parts.next().is_some_and(|pid| pid.parse::<u32>().is_ok())
+        && parts.next().is_some_and(|counter| counter.parse::<u64>().is_ok())
+        && parts.next().is_none()
+}
+
+fn compiler_object_temp_target_name(name: &str) -> Option<(&str, u32)> {
+    let (target, suffix) = name.rsplit_once(".tmp.")?;
+    if !compiler_object_writer_suffix_is_valid(suffix) {
+        return None;
+    }
+    Some((target, compiler_object_sidecar_version(target)?))
+}
+
+fn cleanup_compiler_object_temp_files(target: &Path) -> std::io::Result<usize> {
+    let Some(parent) = target.parent() else {
+        return Ok(0);
+    };
+    let Some(file_name) = target.file_name().and_then(|name| name.to_str()) else {
+        return Ok(0);
+    };
+    let prefix = format!("{file_name}.tmp.");
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut removed = 0usize;
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(suffix) = name.to_str().and_then(|name| name.strip_prefix(&prefix)) else {
+            continue;
+        };
+        if !compiler_object_writer_suffix_is_valid(suffix) {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => removed = removed.saturating_add(1),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(removed)
+}
+
+fn prune_obsolete_compiler_object_sidecars(current_target: &Path) -> std::io::Result<usize> {
+    let Some(parent) = current_target.parent() else {
+        return Ok(0);
+    };
+    let Some(current_version) = current_target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(compiler_object_sidecar_version)
+    else {
+        return Ok(0);
+    };
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut obsolete = Vec::new();
+    let mut obsolete_temps = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if compiler_object_sidecar_version(name).is_some_and(|version| version < current_version) {
+            obsolete.push(entry.path());
+        } else if let Some((target_name, version)) = compiler_object_temp_target_name(name) {
+            if version < current_version {
+                obsolete_temps.push((parent.join(target_name), entry.path()));
+            }
+        }
+    }
+    obsolete.sort();
+    obsolete_temps.sort();
+    let mut removed = 0usize;
+    for (target, temp) in obsolete_temps {
+        let lock_file = match try_acquire_compiler_object_lock(&target) {
+            Ok(Some(lock_file)) => lock_file,
+            Ok(None) => continue,
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-object",
+                    "skipping superseded compiler-object staging cleanup: path={} error={error}",
+                    temp.display()
+                );
+                continue;
+            }
+        };
+        match std::fs::remove_file(&temp) {
+            Ok(()) => removed = removed.saturating_add(1),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => bonsai_diagnostics::debug_log!(
+                "compiler-object",
+                "superseded compiler-object staging cleanup failed: path={} error={error}",
+                temp.display()
+            ),
+        }
+        unlock_compiler_object_cleanup(&lock_file, &target);
+    }
+    for target in obsolete {
+        let lock_file = match try_acquire_compiler_object_lock(&target) {
+            Ok(Some(lock_file)) => lock_file,
+            Ok(None) => continue,
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-object",
+                    "skipping superseded compiler-object sidecar cleanup: path={} error={error}",
+                    target.display()
+                );
+                continue;
+            }
+        };
+        match std::fs::remove_file(&target) {
+            Ok(()) => removed = removed.saturating_add(1),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => bonsai_diagnostics::debug_log!(
+                "compiler-object",
+                "superseded compiler-object sidecar cleanup failed: path={} error={error}",
+                target.display()
+            ),
+        }
+        unlock_compiler_object_cleanup(&lock_file, &target);
+    }
+    Ok(removed)
+}
+
+fn try_acquire_compiler_object_lock(target: &Path) -> std::io::Result<Option<File>> {
+    let file = open_compiler_object_lock_file(target)?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn unlock_compiler_object_cleanup(lock_file: &File, target: &Path) {
+    if let Err(error) = FileExt::unlock(lock_file) {
+        bonsai_diagnostics::debug_log!(
+            "compiler-object",
+            "compiler-object cleanup lock release failed: path={} error={error}",
+            target.display()
+        );
+    }
 }
 
 /// Migrate the last monolithic-header compiler-object generation into the
@@ -2352,6 +2636,68 @@ mod tests {
     use bonsai_lang_api::LanguageRegistry;
     use bonsai_vfs::Vfs;
     use std::io::{Read, Seek, SeekFrom, Write};
+
+    #[test]
+    fn compiler_object_cache_maintenance_is_versioned_and_lock_safe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let current = dir.path().join(format!(
+            "compiler-objects.v{COMPILER_OBJECT_CACHE_VERSION}.factstore"
+        ));
+        let old = dir.path().join(format!(
+            "compiler-objects.v{}.factstore",
+            COMPILER_OBJECT_CACHE_VERSION - 1
+        ));
+        let active_old = dir.path().join(format!(
+            "compiler-objects.v{}.factstore",
+            COMPILER_OBJECT_CACHE_VERSION - 2
+        ));
+        let newer = dir.path().join(format!(
+            "compiler-objects.v{}.factstore",
+            COMPILER_OBJECT_CACHE_VERSION + 1
+        ));
+        let manual = dir.path().join(format!(
+            "compiler-objects.v{}.factstore.before-audit",
+            COMPILER_OBJECT_CACHE_VERSION - 3
+        ));
+        let abandoned = PathBuf::from(format!("{}.tmp.1234.5", current.display()));
+        let old_abandoned = PathBuf::from(format!("{}.tmp.1234.6", old.display()));
+        for path in [
+            &current,
+            &old,
+            &active_old,
+            &newer,
+            &manual,
+            &abandoned,
+            &old_abandoned,
+        ] {
+            std::fs::write(path, b"fixture").expect("write cache fixture");
+        }
+        let active_lock = open_compiler_object_lock_file(&active_old).expect("open active old lock");
+        active_lock.try_lock_exclusive().expect("own old generation");
+
+        let guard = CompilerObjectSidecarWriteGuard::acquire(&current).expect("own current generation");
+        assert!(!old.exists(), "unowned obsolete generation should be reclaimed");
+        assert!(
+            active_old.exists(),
+            "an obsolete generation owned by another writer must remain"
+        );
+        assert!(newer.exists(), "a newer generation must never be reclaimed");
+        assert!(
+            manual.exists(),
+            "unrecognized manual artifacts must not be guessed at"
+        );
+        assert!(
+            !abandoned.exists(),
+            "abandoned current-writer staging should be reclaimed"
+        );
+        assert!(
+            !old_abandoned.exists(),
+            "abandoned obsolete staging should be reclaimed"
+        );
+
+        drop(guard);
+        FileExt::unlock(&active_lock).expect("release old generation");
+    }
 
     #[test]
     fn compiler_object_generation_round_trips_and_rejects_changed_source() {

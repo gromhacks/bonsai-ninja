@@ -62,9 +62,8 @@ mod taint_cache;
 mod validation;
 use clean_overwrite::{
     call_arg_target_keys, clean_overwrite_callee_tail, clean_overwrite_target_key,
-    interprocedural_clean_overwrite_kills_lineage_arg, looks_like_clean_constant,
-    same_function_clean_overwrite_kills_sink_arg, tainted_arg_info_from_events, tainted_arg_target_keys,
-    CleanOverwritePolicy,
+    interprocedural_clean_overwrite_kills_lineage_arg, same_function_clean_overwrite_kills_sink_arg,
+    tainted_arg_info_from_events, tainted_arg_target_keys, CleanOverwritePolicy,
 };
 #[cfg(test)]
 use clean_overwrite::{clean_output_call_overwrites_target, try_region_clean_overwrites_target};
@@ -741,7 +740,7 @@ struct SelectedTaintRules<'a> {
     sinks: Vec<&'a Rule>,
     sanitizers: Vec<&'a Rule>,
     sink_rule_count: usize,
-    factory_returns: Arc<crate::matcher::FactoryReturns>,
+    rulepack_typing: Arc<crate::matcher::RulepackTyping>,
 }
 
 fn select_taint_analysis_rules<'a>(
@@ -774,7 +773,7 @@ fn select_taint_analysis_rules<'a>(
 
     Ok(SelectedTaintRules {
         sink_rule_count: sinks.len(),
-        factory_returns: crate::matcher::build_factory_returns(&pack.all_rules()),
+        rulepack_typing: crate::matcher::build_rulepack_typing(&pack.all_rules()),
         sources,
         sinks,
         sanitizers,
@@ -1109,7 +1108,7 @@ where
         mut sinks,
         mut sanitizers,
         sink_rule_count: selected_sink_rule_count,
-        factory_returns,
+        rulepack_typing,
     } = select_taint_analysis_rules(ws, pack, &options)?;
 
     let scan_files = security_scan_files(
@@ -1140,7 +1139,7 @@ where
         "matching source rules",
         &scan_files,
         total_files,
-        &factory_returns,
+        &rulepack_typing,
         &mut on_progress,
     );
     // Inferred per-function entry-point sources are opt-in (was: emitted
@@ -1241,7 +1240,7 @@ where
         ws,
         &sinks,
         &endpoint_scan_files,
-        &factory_returns,
+        &rulepack_typing,
         || {
             on_progress(AnalysisProgress::PhaseTicked);
         },
@@ -1253,7 +1252,7 @@ where
         "matching sanitizer rules",
         &endpoint_scan_files,
         endpoint_total_files,
-        &factory_returns,
+        &rulepack_typing,
         &mut on_progress,
     );
     filter_by_path(ws, &mut sink_hits, &options.files, &options.exclude_files);
@@ -1277,7 +1276,7 @@ where
             "matching pattern sink rules",
             &endpoint_scan_files,
             endpoint_total_files,
-            &factory_returns,
+            &rulepack_typing,
             &mut on_progress,
         )
     };
@@ -1340,7 +1339,7 @@ where
         pack,
         max_precision: options.max_precision,
         taint_graph_resident_cache_entries: options.taint_graph_resident_cache_entries,
-        factory_returns: &factory_returns,
+        rulepack_typing: &rulepack_typing,
         on_progress: &mut on_progress,
     });
     let mut findings = finalize_taint_findings(
@@ -1654,6 +1653,7 @@ where
         context.ws,
         context.pack,
         context.transfer_languages,
+        &context.graph_config.receiver_state_propagations,
         &scoped_files,
         &scoped_funcs,
         source_call_graph.as_ref(),
@@ -1932,7 +1932,7 @@ where
         )
     })?;
     filter_rules_to_workspace_languages(ws, &mut sources);
-    let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
+    let rulepack_typing = crate::matcher::build_rulepack_typing(&pack.all_rules());
 
     let scan_files = security_scan_files(
         ws,
@@ -1960,7 +1960,7 @@ where
         "matching source rules",
         &scan_files,
         total_files,
-        &factory_returns,
+        &rulepack_typing,
         &mut on_progress,
     );
     // Opt-in synthetic per-function entry-point sources (see TaintAnalysisOptions).
@@ -2027,6 +2027,19 @@ where
 
     let global = ws.compiler_linkage_index();
     let transfer_languages = workspace_languages(ws);
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "compiling transfer sites",
+        total: scan_files.len() as u64,
+    });
+    let receiver_state_propagations = compiled_receiver_state_propagations_for_languages(
+        ws,
+        pack,
+        &transfer_languages,
+        &rulepack_typing,
+        Some(&scan_files),
+        || on_progress(AnalysisProgress::PhaseTicked),
+    );
+    on_progress(AnalysisProgress::PhaseFinished);
     let source_graph_config = InterTaintConfig {
         clean_output_overwrites: clean_output_overwrites_from_rulepack_for_languages(
             pack,
@@ -2039,10 +2052,7 @@ where
             &transfer_languages,
         ),
         output_arg_flows: output_arg_flows_from_rulepack_for_languages(pack, &transfer_languages),
-        receiver_state_propagations: receiver_state_propagations_from_rulepack_for_languages(
-            pack,
-            &transfer_languages,
-        ),
+        receiver_state_propagations,
         max_edge_precision: Some(Precision::Narrowed),
     };
     // Exact source-seeded graphs are cached through the workspace
@@ -2274,14 +2284,14 @@ where
         &pack.metadata.test_path_patterns,
     );
     let total_files = scan_files.len() as u64;
-    let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
+    let rulepack_typing = crate::matcher::build_rulepack_typing(&pack.all_rules());
     let mut matches = gather_inventory_matches_phased(
         ws,
         &selected,
         "matching source rules",
         &scan_files,
         total_files,
-        &factory_returns,
+        &rulepack_typing,
         &mut on_progress,
     );
     on_progress(AnalysisProgress::PhaseStarted {
@@ -2344,7 +2354,7 @@ where
         false,
         &pack.metadata.test_path_patterns,
     );
-    let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
+    let rulepack_typing = crate::matcher::build_rulepack_typing(&pack.all_rules());
     on_progress(AnalysisProgress::PhaseStarted {
         label: "matching sink rules",
         total: scan_files.len() as u64,
@@ -2353,7 +2363,7 @@ where
         ws,
         &selected,
         &scan_files,
-        &factory_returns,
+        &rulepack_typing,
         || on_progress(AnalysisProgress::PhaseTicked),
     );
     on_progress(AnalysisProgress::PhaseFinished);
@@ -2425,14 +2435,14 @@ where
         &pack.metadata.test_path_patterns,
     );
     let total_files = scan_files.len() as u64;
-    let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
+    let rulepack_typing = crate::matcher::build_rulepack_typing(&pack.all_rules());
     let mut matches = gather_inventory_matches_phased(
         ws,
         &selected,
         "matching sanitizer rules",
         &scan_files,
         total_files,
-        &factory_returns,
+        &rulepack_typing,
         &mut on_progress,
     );
     on_progress(AnalysisProgress::PhaseStarted {
@@ -2713,7 +2723,7 @@ fn gather_matches_phased<F>(
     label: &'static str,
     scan_files: &[FileId],
     total_files: u64,
-    factory: &Arc<crate::matcher::FactoryReturns>,
+    factory: &Arc<crate::matcher::RulepackTyping>,
     on_progress: &mut F,
 ) -> Vec<RuleMatch>
 where
@@ -2736,7 +2746,7 @@ fn gather_taint_support_matches_phased<F>(
     label: &'static str,
     scan_files: &[FileId],
     total_files: u64,
-    factory: &Arc<crate::matcher::FactoryReturns>,
+    factory: &Arc<crate::matcher::RulepackTyping>,
     on_progress: &mut F,
 ) -> Vec<RuleMatch>
 where
@@ -2765,7 +2775,7 @@ fn gather_inventory_matches_phased<F>(
     label: &'static str,
     scan_files: &[FileId],
     total_files: u64,
-    factory: &Arc<crate::matcher::FactoryReturns>,
+    factory: &Arc<crate::matcher::RulepackTyping>,
     on_progress: &mut F,
 ) -> Vec<RuleMatch>
 where
@@ -3438,6 +3448,8 @@ mod positional_index_regression_tests {
                 index,
                 value_text: format!("arg{index}"),
                 param_name: format!("param{index}"),
+                place: Some(format!("arg{index}")),
+                source_names: vec![format!("arg{index}")],
             }],
             precision: Precision::Exact,
             edge_kind: bonsai_callgraph::EdgeKind::Direct,
@@ -5740,6 +5752,7 @@ mod wrapper_dedup_tests {
             argument_index,
             argument_span: nested_span,
             direct_call_span: Some(nested_span),
+            value_kind: None,
             inline_callback_params: Vec::new(),
             value_flow: bonsai_lang_api::ExpressionFlow {
                 call_sites: vec![nested_span],
@@ -6890,7 +6903,6 @@ fn sanitizer_guard_feeds_sink_arg(
         .sink_tainted_args
         .iter()
         .flat_map(tainted_arg_target_keys)
-        .filter(|target| !looks_like_clean_constant(target))
         .collect();
     if target_keys.is_empty() {
         return false;
@@ -6909,8 +6921,7 @@ fn sanitizer_guard_feeds_sink_arg(
             &target_keys,
         );
     }
-    let mut guarded = sanitizer_guard_variables_in_events(&decl.flow_events, san, guard);
-    guarded.retain(|var| !looks_like_clean_constant(var));
+    let guarded = sanitizer_guard_variables_in_events(&decl.flow_events, san, guard);
     if guarded.is_empty() {
         return false;
     }
@@ -7768,6 +7779,7 @@ fn idg_transfer_options_from_rulepack_shapes(
             .map(|shape| bonsai_idg::ReceiverStatePropagationSpec {
                 method: shape.method.clone(),
                 receiver_type: shape.receiver_type.clone(),
+                resolved_call_sites: shape.resolved_call_sites.clone(),
             })
             .collect(),
         include_diagnostic_field_flows: false,
@@ -7801,12 +7813,19 @@ pub fn taint_transfers_from_rulepack(pack: &Rulepack) -> RulepackTaintTransfers 
 
 pub fn seed_idg_service_for_rulepack(ws: &Workspace, pack: &Rulepack) -> Arc<bonsai_idg::IdgQueryService> {
     let languages = workspace_languages(ws);
+    let rulepack_typing = crate::matcher::build_rulepack_typing(&pack.all_rules());
     let overwrites = clean_output_overwrites_from_rulepack_for_languages(pack, &languages);
     let source_outputs = source_output_args_from_rulepack_for_languages(pack, &languages);
     let source_callbacks = source_callback_args_from_rulepack_for_languages(pack, &languages);
     let output_arg_flows = output_arg_flows_from_rulepack_for_languages(pack, &languages);
-    let receiver_state_propagations =
-        receiver_state_propagations_from_rulepack_for_languages(pack, &languages);
+    let receiver_state_propagations = compiled_receiver_state_propagations_for_languages(
+        ws,
+        pack,
+        &languages,
+        &rulepack_typing,
+        None,
+        || {},
+    );
     let mut options = idg_transfer_options_from_rulepack_shapes(
         &overwrites,
         &source_outputs,
@@ -7826,6 +7845,7 @@ fn seed_idg_service_for_rulepack_for_files(
     ws: &Workspace,
     pack: &Rulepack,
     languages: &AHashSet<String>,
+    receiver_state_propagations: &[ReceiverStatePropagation],
     included_files: &[FileId],
     included_funcs: &[FuncId],
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
@@ -7834,14 +7854,12 @@ fn seed_idg_service_for_rulepack_for_files(
     let source_outputs = source_output_args_from_rulepack_for_languages(pack, languages);
     let source_callbacks = source_callback_args_from_rulepack_for_languages(pack, languages);
     let output_arg_flows = output_arg_flows_from_rulepack_for_languages(pack, languages);
-    let receiver_state_propagations =
-        receiver_state_propagations_from_rulepack_for_languages(pack, languages);
     let mut options = idg_transfer_options_from_rulepack_shapes(
         &overwrites,
         &source_outputs,
         &source_callbacks,
         &output_arg_flows,
-        &receiver_state_propagations,
+        receiver_state_propagations,
     );
     options.call_result_passthroughs = idg_call_result_passthrough_specs(
         &call_result_passthroughs_from_rulepack_for_languages(pack, languages),
@@ -8072,22 +8090,81 @@ fn semantic_transfer_callee(target: &RuleTarget) -> Option<String> {
 }
 
 fn receiver_state_propagations_from_rulepack(pack: &Rulepack) -> Vec<ReceiverStatePropagation> {
-    receiver_state_propagations_from_rules(pack.all_rules())
+    receiver_state_propagations_from_rules(pack.all_rules(), &AHashMap::new())
 }
 
-fn receiver_state_propagations_from_rulepack_for_languages(
+/// Compile receiver-mutation summaries against the current compiler snapshot.
+/// Adapter-emitted receiver types remain sufficient on their own. When an
+/// external type exists only in rulepack typing (for example Kotlin/JVM calls
+/// whose CST does not distinguish constructors from functions), the canonical
+/// matcher contributes exact call spans. The IDG consumes those spans as typed
+/// evidence and never interprets a provider/API spelling itself.
+fn compiled_receiver_state_propagations_for_languages<F>(
+    ws: &Workspace,
     pack: &Rulepack,
     languages: &AHashSet<String>,
-) -> Vec<ReceiverStatePropagation> {
-    receiver_state_propagations_from_rules(
-        pack.all_rules()
-            .into_iter()
-            .filter(|rule| languages.contains(rule.language.as_str())),
-    )
+    factory: &Arc<crate::matcher::RulepackTyping>,
+    files: Option<&[FileId]>,
+    on_file_done: F,
+) -> Vec<ReceiverStatePropagation>
+where
+    F: FnMut(),
+{
+    let rules: Vec<&Rule> = pack
+        .all_rules()
+        .into_iter()
+        .filter(|rule| {
+            rule.enabled
+                && languages.contains(rule.language.as_str())
+                && matches!(rule.kind, RuleKind::Sink | RuleKind::Typing)
+                && (rule.kind == RuleKind::Typing || rule_has_taint_predicate(rule))
+                && rule
+                    .taint_semantics
+                    .as_ref()
+                    .is_some_and(|semantics| semantics.taint_receiver_from_args)
+        })
+        .collect();
+    if rules.is_empty() {
+        return Vec::new();
+    }
+    let all_files;
+    let files = if let Some(files) = files {
+        files
+    } else {
+        all_files = {
+            let mut files = ws.vfs().all_files();
+            files.sort_by_key(|file| file.raw());
+            files
+        };
+        &all_files
+    };
+    // Transfer-site compilation has the same contract as sink inventory:
+    // ignore taint predicates (the IDG edge is what will establish them),
+    // while retaining every structural/package/type constraint.
+    let matches = crate::matcher::match_rules_against_facts_for_sink_inventory_with_progress_on_files(
+        ws,
+        &rules,
+        files,
+        factory,
+        on_file_done,
+    );
+    let mut sites_by_rule: AHashMap<String, Vec<Span>> = AHashMap::new();
+    for rule_match in matches {
+        sites_by_rule
+            .entry(rule_match.rule_id)
+            .or_default()
+            .push(rule_match.span);
+    }
+    for sites in sites_by_rule.values_mut() {
+        sites.sort();
+        sites.dedup();
+    }
+    receiver_state_propagations_from_rules(rules, &sites_by_rule)
 }
 
 fn receiver_state_propagations_from_rules<'a>(
     rules: impl IntoIterator<Item = &'a Rule>,
+    sites_by_rule: &AHashMap<String, Vec<Span>>,
 ) -> Vec<ReceiverStatePropagation> {
     let mut out: Vec<_> = rules
         .into_iter()
@@ -8100,7 +8177,12 @@ fn receiver_state_propagations_from_rules<'a>(
                     .as_ref()
                     .is_some_and(|semantics| semantics.taint_receiver_from_args)
         })
-        .filter_map(receiver_state_propagation_from_rule)
+        .filter_map(|rule| {
+            receiver_state_propagation_from_rule(rule).map(|mut propagation| {
+                propagation.resolved_call_sites = sites_by_rule.get(&rule.id).cloned().unwrap_or_default();
+                propagation
+            })
+        })
         .collect();
     sort_receiver_state_propagations(&mut out);
     out
@@ -8170,7 +8252,13 @@ fn sort_output_arg_flows(items: &mut Vec<OutputArgFlow>) {
 }
 
 fn sort_receiver_state_propagations(items: &mut Vec<ReceiverStatePropagation>) {
-    items.sort_by(|a, b| (&a.method, &a.receiver_type).cmp(&(&b.method, &b.receiver_type)));
+    items.sort_by(|a, b| {
+        (&a.method, &a.receiver_type, &a.resolved_call_sites).cmp(&(
+            &b.method,
+            &b.receiver_type,
+            &b.resolved_call_sites,
+        ))
+    });
     items.dedup();
 }
 
@@ -8187,6 +8275,7 @@ fn receiver_state_propagation_from_rule(rule: &Rule) -> Option<ReceiverStateProp
     Some(ReceiverStatePropagation {
         method: method.to_string(),
         receiver_type: Some(attribute[..attribute.len() - 1].join(".")),
+        resolved_call_sites: Vec::new(),
     })
 }
 
@@ -8280,6 +8369,7 @@ mod source_seed_tests {
             bases: Vec::new(),
             receiver_param_index: None,
             receiver_field_writes: Vec::new(),
+            receiver_field_initializers: Vec::new(),
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
             return_type: None,

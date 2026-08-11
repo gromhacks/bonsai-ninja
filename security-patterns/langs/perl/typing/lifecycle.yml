@@ -1,0 +1,25 @@
+- id: perl.typing.lifecycle_closed_argument
+  enabled: true
+  language: perl
+  match: { kind: call, callee: { name: close } }
+  lifecycle_transition:
+    state: closed
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: close changes the handle state
+    code: 'sub f { my ($handle) = @_; close($handle); }'
+    expect_match_text: [close]
+  description: "Perl close moves argument zero to closed. Typing-only; never a finding."
+
+- id: perl.typing.lifecycle_freed_argument
+  enabled: true
+  language: perl
+  match: { kind: call, callee: { name: undef } }
+  lifecycle_transition:
+    state: freed
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: undef changes the value state
+    code: 'sub f { my ($value) = @_; undef($value); }'
+    expect_match_text: [undef]
+  description: "Perl undef moves argument zero to freed. Typing-only; never a finding."

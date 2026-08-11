@@ -2585,6 +2585,54 @@ fn stitch_call_site(request: CallStitchRequest<'_>, outputs: CallStitchOutputs<'
             }
         }
     }
+    // The adapter may prove that an inline closure parameter receives this
+    // call's yielded value even when the callee is external. In that case the
+    // only compiler-proven inputs available to the yield are the explicit
+    // arguments and method receiver. Preserve those inputs at narrowed
+    // precision instead of silently dropping the adapter's `YieldResult`
+    // fact. This is deliberately independent of language and API spelling;
+    // adapters decide which syntax establishes a yield binding.
+    if !has_stitchable_candidate && !yield_results.is_empty() {
+        let mut yield_inputs = site
+            .call_arg_nodes
+            .iter()
+            .take(site.explicit_args_count as usize)
+            .copied()
+            .chain(site.receiver_arg_node)
+            .map(|node| caller_remap.get(node))
+            .filter(|node| !node.is_sentinel())
+            .collect::<Vec<_>>();
+        yield_inputs.sort_unstable();
+        yield_inputs.dedup();
+
+        for binding in yield_results {
+            let target = caller_remap.get(binding.target_node);
+            if target.is_sentinel() {
+                continue;
+            }
+            for &input in &yield_inputs {
+                place_inter_edge(
+                    caller_seg,
+                    caller_seg,
+                    IdgEdge {
+                        from: input,
+                        to: target,
+                        meta: crate::edge::EdgeMeta {
+                            precision: bonsai_common::Precision::Narrowed,
+                            kind: crate::edge::IdgEdgeKind::IntraYield,
+                            call_kind: bonsai_callgraph::EdgeKind::Indirect,
+                            via_span: site.site.0,
+                        },
+                    },
+                    ws,
+                );
+                if let Some(stats) = &mut stats {
+                    stats.passthrough_edges = stats.passthrough_edges.saturating_add(1);
+                    stats.inter_edges = stats.inter_edges.saturating_add(1);
+                }
+            }
+        }
+    }
     let higher_order_edges = stitch_indirect_callback_inputs(
         caller,
         caller_seg,

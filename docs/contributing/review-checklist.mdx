@@ -197,6 +197,12 @@ class and verify each box.
       that order before decoding declaration/flow bodies. Streaming import
       consumers read the header even when optional package prewarm is empty;
       they do not invoke the adapter/parser again.
+- [ ] **Matcher projections are demand-driven and exact.** Header/body units
+      use one continuous CPU worklist behind source-weighted memory permits.
+      Optional derived views are built only when a surviving rule can inspect
+      them, and the requirements mask participates in the cache key. A smaller
+      projection must never satisfy a larger request; no scheduling choice may
+      reject a file or rule.
 - [ ] **File-local inventory keeps exact ancestry.** Receiver-sensitive
       inventory loads the compact receiver-ancestry linkage payload and
       enriches exact local bodies. It does not load the complete symbol table

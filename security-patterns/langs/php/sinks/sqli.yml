@@ -31,7 +31,7 @@
   match:
     kind: call
     callee:
-      regex: '^\$?(conn|mysqli|db|database|link)->query$'
+      regex: '^\$?(conn|mysqli|db|database|link)\.query$'
   constraints:
   - arg_tainted:
       index: 0
@@ -43,7 +43,7 @@
         $conn = new mysqli("localhost", "root", "", "auth");
         $conn->query($input);
       }
-    expect_match_text: [$conn->query]
+    expect_match_text: [$conn.query]
   - name: local mysqli connection query literal negative
     code: |
       <?php

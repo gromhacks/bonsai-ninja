@@ -127,7 +127,7 @@
         $file->storeAs("uploads", $input);
       }
     expect_match_text:
-    - $file->storeAs
+    - $file.storeAs
   - name: arg tainted literal negative
     code: |
       <?php

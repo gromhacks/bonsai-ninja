@@ -277,7 +277,13 @@ fn eval_die_dollar_at_rewrites_to_try_throw_alias_catch() {
             )
         });
 
-    assert_eq!(catch_param.as_deref(), Some("$e"));
+    assert_eq!(
+        catch_param.as_deref(),
+        Some("$e"),
+        "events={:#?}; assignments={:#?}",
+        handle.flow_events,
+        assignment_values
+    );
     assert!(
         body.iter().any(|event| matches!(
             event,

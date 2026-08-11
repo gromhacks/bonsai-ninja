@@ -208,6 +208,7 @@ pub(crate) fn idg_service_for_inter_config(
             .map(|shape| bonsai_idg::ReceiverStatePropagationSpec {
                 method: shape.method.clone(),
                 receiver_type: shape.receiver_type.clone(),
+                resolved_call_sites: shape.resolved_call_sites.clone(),
             })
             .collect(),
         include_diagnostic_field_flows: compiler_options.include_diagnostic_field_flows,

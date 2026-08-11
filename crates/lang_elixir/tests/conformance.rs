@@ -2,6 +2,36 @@ use bonsai_conformance::run_language_suite;
 use bonsai_lang_api::{AssignValueKind, FlowEvent};
 use std::sync::Arc;
 
+fn collect_assign_targets(events: &[FlowEvent], out: &mut Vec<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Assign { target, .. } => out.push(target.clone()),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_assign_targets(then_events, out);
+                collect_assign_targets(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_assign_targets(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_assign_targets(body, out);
+                collect_assign_targets(catch_events, out);
+                collect_assign_targets(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
 #[test]
 fn conformance_traced() {
     let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =
@@ -24,7 +54,7 @@ fn macro_control_flow_is_structured() {
         adapter,
         vec![(
             "main.ex".to_string(),
-            "defmodule Main do\n  def run(items) do\n    try do\n      Enum.each(items, fn it ->\n        if it != nil, do: sink(it)\n      end)\n    rescue\n      e -> {:error, e}\n    end\n  end\nend\n".to_string(),
+            "defmodule Main do\n  def run(items) do\n    try do\n      for it <- items do\n        if it != nil, do: sink(it)\n      end\n    rescue\n      e -> {:error, e}\n    end\n  end\nend\n".to_string(),
         )],
     );
     let ws = runner.workspace();
@@ -43,13 +73,54 @@ fn macro_control_flow_is_structured() {
     );
     assert!(
         contains_loop(&decl.flow_events),
-        "expected Enum.each to emit Loop: {:?}",
+        "expected Elixir for macro to emit Loop: {:?}",
         decl.flow_events
     );
     assert!(
         contains_branch(&decl.flow_events),
         "expected Elixir if macro to emit Branch: {:?}",
         decl.flow_events
+    );
+}
+
+#[test]
+fn case_patterns_bind_values_but_not_map_keys_or_atoms() {
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        Arc::new(bonsai_lang_elixir::ElixirAdapter::new());
+    let runner = bonsai_conformance::ConformanceRunner::new(
+        adapter,
+        vec![(
+            "main.ex".to_string(),
+            r#"defmodule Main do
+  def run(subject) do
+    case subject do
+      %{value: value, nested: %{item: item}} -> sink(value, item)
+      {:ok, result} -> sink(result)
+    end
+  end
+end
+"#
+            .to_string(),
+        )],
+    );
+    let ws = runner.workspace();
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).expect("decl index should exist");
+    let run = idx.defs.iter().find(|decl| decl.name == "run").expect("run decl");
+    let mut targets = Vec::new();
+    collect_assign_targets(&run.flow_events, &mut targets);
+
+    for expected in ["value", "item", "result"] {
+        assert!(
+            targets.iter().any(|target| target == expected),
+            "missing {expected}: {targets:?}"
+        );
+    }
+    assert!(
+        !targets
+            .iter()
+            .any(|target| matches!(target.as_str(), "nested" | "ok")),
+        "{targets:?}"
     );
 }
 
@@ -286,11 +357,15 @@ fn value_dot_access_is_a_field_read_not_a_method_call() {
         .find(|decl| decl.name == "run")
         .expect("run decl should exist");
 
-    assert!(run.flow_events.iter().any(|event| matches!(
-        event,
-        FlowEvent::Assign { target, source_names, .. }
-            if target == "size" && source_names == &["c.capacity"]
-    )));
+    assert!(
+        run.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign { target, source_names, .. }
+                if target == "size" && source_names == &["c.capacity"]
+        )),
+        "events={:?}",
+        run.flow_events
+    );
     assert!(!run
         .flow_events
         .iter()
@@ -303,6 +378,28 @@ fn value_dot_access_is_a_field_read_not_a_method_call() {
         .refs
         .iter()
         .any(|reference| reference.kind == bonsai_lang_api::RefKind::Read && reference.name == "capacity"));
+}
+
+#[test]
+fn atom_qualified_call_preserves_complete_target() {
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        Arc::new(bonsai_lang_elixir::ElixirAdapter::new());
+    let runner = bonsai_conformance::ConformanceRunner::new(
+        adapter,
+        vec![(
+            "main.ex".to_string(),
+            "defmodule Main do\n  def run(value) do\n    :runtime.stop(value)\n  end\nend\n".to_string(),
+        )],
+    );
+    let ws = runner.workspace();
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).expect("decl index should exist");
+    let run = idx.defs.iter().find(|decl| decl.name == "run").expect("run decl");
+
+    assert!(run
+        .flow_events
+        .iter()
+        .any(|event| matches!(event, FlowEvent::Call { name, .. } if name == ":runtime.stop")));
 }
 
 #[test]

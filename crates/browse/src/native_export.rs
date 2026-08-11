@@ -380,6 +380,8 @@ enum ExportFlowEventPayload<'a> {
     Return {
         span: Span,
         #[serde(skip_serializing_if = "Option::is_none")]
+        value_kind: Option<AssignValueKind>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         value_text: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         value_name: Option<&'a str>,
@@ -559,11 +561,13 @@ fn flatten_flow_events<'a>(
             },
             FlowEvent::Return {
                 span,
+                value_kind,
                 value_text,
                 value_name,
                 value_flow,
             } => ExportFlowEventPayload::Return {
                 span: *span,
+                value_kind: *value_kind,
                 value_text: value_text.as_deref(),
                 value_name: value_name.as_deref(),
                 value_flow,

@@ -42,8 +42,8 @@ fn functional_loop_case_and_tail_return_are_structured() {
         .expect("handle decl should exist");
 
     assert!(
-        contains_loop(&run.flow_events),
-        "expected lists:foreach to emit Loop: {:?}",
+        !contains_loop(&run.flow_events),
+        "an external function identity cannot prove a language loop: {:?}",
         run.flow_events
     );
     assert!(
@@ -100,6 +100,38 @@ fn map_literal_emits_field_scoped_assignments() {
                         && arg.source_names.iter().any(|source| source == "B.clean")
                 })
     )));
+}
+
+#[test]
+fn remote_call_list_argument_keeps_nested_call_operand_flow() {
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        Arc::new(bonsai_lang_erlang::ErlangAdapter::new());
+    let runner = bonsai_conformance::ConformanceRunner::new(
+        adapter,
+        vec![(
+            "main.erl".to_string(),
+            "-module(main).\n-export([run/1]).\nrun(Input) -> os:cmd([\"ping \", uri_string:quote(Input)]).\n"
+                .to_string(),
+        )],
+    );
+    let ws = runner.workspace();
+    let file = ws.vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("Erlang compiler index");
+    let run = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "run")
+        .expect("run declaration");
+    let argument = run.flow_events.iter().find_map(|event| match event {
+        FlowEvent::Call { name, args, .. } if name == "os:cmd" => args.first(),
+        _ => None,
+    });
+
+    assert!(
+        argument.is_some_and(|argument| argument.source_names == ["Input"]),
+        "outer remote call must retain the nested quote(Input) operand: {:#?}",
+        run.flow_events
+    );
 }
 
 fn contains_branch(events: &[FlowEvent]) -> bool {

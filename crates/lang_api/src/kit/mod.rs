@@ -24,12 +24,10 @@
 
 mod bindings;
 mod branch_conditions;
-mod branch_repair;
 mod call_results;
 mod comments;
 mod decorators;
 mod direct_calls;
-mod elixir;
 mod expression_flow;
 mod flow_render;
 mod identifiers;
@@ -46,32 +44,30 @@ mod walker;
 #[path = "mod_tests.rs"]
 mod tests;
 
+pub use bindings::{
+    binding_targets_from_pattern_node, dedup_assign_events, pattern_binding_assign,
+    pattern_binding_sites_from_arms,
+};
 use bindings::{
-    binding_targets_from_pattern_node, dedup_assign_events, extract_comprehension_for_clause_assigns,
-    extract_elixir_case_stab_clause_bindings, extract_foreach_binding_assigns, extract_match_binding_assigns,
-    extract_rust_let_condition_bindings, pattern_binding_assign,
+    extract_comprehension_for_clause_assigns, extract_foreach_binding_assigns, extract_match_binding_assigns,
 };
 pub use branch_conditions::extract_branch_condition_facts;
 pub use call_results::normalize_call_result_assignment_sources;
 pub use comments::extract_comments;
 use comments::is_comment_node_kind;
 pub use decorators::extract_decorators;
-use elixir::{
-    elixir_call_name, elixir_unwrap_def, emit_elixir_control_flow_call, emit_erlang_functional_loop_call,
-    emit_ruby_block_loop_call,
-};
 #[cfg(test)]
 pub use expression_flow::expression_flow_from_node;
 pub use expression_flow::expression_flow_from_node_with_handler;
 pub use flow_render::{assignment_trace_message, collect_return_spans, for_each_flow_event};
 pub use identifiers::{
     first_identifier_descendant, first_identifier_like_child, first_named_child, first_named_child_of_kind,
-    looks_like_bare_identifier, looks_like_identifier, looks_like_literal_value,
+    looks_like_bare_identifier, looks_like_identifier,
 };
 pub use param_extraction::extract_param_annotations;
 pub use receiver_writes::{
-    collect_assign_targets, collect_receiver_field_writes, collect_receiver_state_sources,
-    insert_flow_field_assignments, qualify_implicit_member_assign_targets,
+    collect_assign_targets, collect_receiver_field_initializers, collect_receiver_field_writes,
+    collect_receiver_state_sources, insert_flow_field_assignments, qualify_implicit_member_assign_targets,
     qualify_implicit_member_reads_in_index, qualify_receiver_field_expression_flows,
     rewrite_implicit_member_reads, FlowFieldAssignInsertion, ImplicitMemberReadCall,
 };
@@ -79,30 +75,21 @@ pub use return_extraction::{extract_catch_param, extract_return_value_text, extr
 #[cfg(test)]
 pub use return_extraction::{extract_return_value_flow, extract_return_value_name, extract_yield_value_flow};
 use return_extraction::{
-    extract_return_value_flow_with_handler, extract_return_value_name_with_handler,
-    extract_yield_value_flow_with_handler,
+    extract_return_value_flow_with_handler, extract_return_value_kind_with_handler,
+    extract_return_value_name_with_handler, extract_yield_value_flow_with_handler,
 };
 pub use runtime_types::extract_runtime_type_narrowing_facts;
 
 pub(crate) use direct_calls::extract_direct_call_info;
 use direct_calls::{
-    extract_dart_selector_call_info, first_call_descendant, next_named_sibling_within,
-    parameter_list_is_variadic, qualified_method_name_node, synthetic_function_name,
+    first_call_descendant, next_named_sibling_within, parameter_list_is_variadic, qualified_method_name_node,
     transparent_direct_call_child,
 };
-use identifiers::has_direct_child_kind;
-use param_extraction::extract_param_names;
+use param_extraction::{extract_param_names, parameter_container};
 use pseudo_call::pseudo_call_event;
-use qualified::{
-    binary_operator_is_assignment, normalise_qualified_text, qualified_assign_target,
-    type_only_declaration_without_initializer,
-};
+use qualified::{assignment_place, qualified_assign_target, type_only_declaration_without_initializer};
 pub(crate) use receiver_writes::argument_place;
-use syntax_errors::{
-    callable_has_syntax_error, has_direct_large_literal_initializer_child, is_initializer_list_kind,
-    is_large_data_declaration_node, is_large_literal_initializer_node, retain_flow_events_outside_errors,
-    syntax_error_spans,
-};
+use syntax_errors::{callable_has_syntax_error, retain_flow_events_outside_errors, syntax_error_spans};
 use walker::walk_into;
 
 use crate::{AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent, LoopKind};
@@ -110,8 +97,6 @@ use bonsai_common::{FileId, Span};
 use bonsai_vfs::FileSnapshot;
 use std::sync::Arc;
 use tree_sitter::{Language, Node, Tree};
-
-use branch_repair::{looks_like_branch_arm_node, repair_branch_events_by_else_keyword};
 
 /// Internal carrier name for language-level rest/varargs values that
 /// have no user-visible identifier, such as Lua `...` and C-family
@@ -367,7 +352,12 @@ fn qualify_bare_hierarchy_member_events(
 /// Annotate destructured tuple call-result assignments with their parsed
 /// positional result index. Some grammars lower `{a, b} = call()` into
 /// separate Assign events that otherwise carry identical call metadata.
-pub fn annotate_tuple_call_result_bindings(events: &mut [FlowEvent], tree: &Tree, src: &[u8]) {
+pub fn annotate_tuple_call_result_bindings(
+    events: &mut [FlowEvent],
+    tree: &Tree,
+    src: &[u8],
+    handler: &GrammarHandler,
+) {
     for event in events {
         match event {
             FlowEvent::Assign {
@@ -377,7 +367,7 @@ pub fn annotate_tuple_call_result_bindings(events: &mut [FlowEvent], tree: &Tree
                 source_names,
                 ..
             } => {
-                if let Some(index) = tuple_call_result_binding_index(tree, src, *span, target) {
+                if let Some(index) = tuple_call_result_binding_index(tree, src, *span, target, handler) {
                     let marker = format!("{SYNTHETIC_TUPLE_RESULT_PREFIX}{index}");
                     if !source_names.iter().any(|source| source == &marker) {
                         source_names.push(marker);
@@ -389,11 +379,11 @@ pub fn annotate_tuple_call_result_bindings(events: &mut [FlowEvent], tree: &Tree
                 else_events,
                 ..
             } => {
-                annotate_tuple_call_result_bindings(then_events, tree, src);
-                annotate_tuple_call_result_bindings(else_events, tree, src);
+                annotate_tuple_call_result_bindings(then_events, tree, src, handler);
+                annotate_tuple_call_result_bindings(else_events, tree, src, handler);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                annotate_tuple_call_result_bindings(body, tree, src);
+                annotate_tuple_call_result_bindings(body, tree, src, handler);
             }
             FlowEvent::Try {
                 body,
@@ -401,22 +391,28 @@ pub fn annotate_tuple_call_result_bindings(events: &mut [FlowEvent], tree: &Tree
                 finally_events,
                 ..
             } => {
-                annotate_tuple_call_result_bindings(body, tree, src);
-                annotate_tuple_call_result_bindings(catch_events, tree, src);
-                annotate_tuple_call_result_bindings(finally_events, tree, src);
+                annotate_tuple_call_result_bindings(body, tree, src, handler);
+                annotate_tuple_call_result_bindings(catch_events, tree, src, handler);
+                annotate_tuple_call_result_bindings(finally_events, tree, src, handler);
             }
             _ => {}
         }
     }
 }
 
-fn tuple_call_result_binding_index(tree: &Tree, src: &[u8], span: Span, target: &str) -> Option<usize> {
+fn tuple_call_result_binding_index(
+    tree: &Tree,
+    src: &[u8],
+    span: Span,
+    target: &str,
+    handler: &GrammarHandler,
+) -> Option<usize> {
     let start = usize::try_from(span.start).ok()?;
     let end = usize::try_from(span.end).ok()?;
     let mut current = tree.root_node().descendant_for_byte_range(start, end)?;
     loop {
-        if let Some(lhs) = assignment_lhs_node(&current) {
-            if let Some(index) = positional_pattern_binding_index(lhs, target, src) {
+        if let Some(lhs) = assignment_lhs_node(&current, handler) {
+            if let Some(index) = positional_pattern_binding_index(lhs, target, src, handler) {
                 return Some(index);
             }
         }
@@ -424,25 +420,19 @@ fn tuple_call_result_binding_index(tree: &Tree, src: &[u8], span: Span, target: 
     }
 }
 
-fn positional_pattern_binding_index(pattern: Node<'_>, target: &str, src: &[u8]) -> Option<usize> {
-    const POSITIONAL_PATTERNS: &[&str] = &[
-        "tuple_pattern",
-        "pattern_list",
-        "array_pattern",
-        "list_pattern",
-        "left_assignment_list",
-        "expression_list",
-        "list_expression",
-        "tuple",
-        "list_literal",
-        "pattern",
-    ];
-    if POSITIONAL_PATTERNS.contains(&pattern.kind()) {
+fn positional_pattern_binding_index(
+    mut pattern: Node<'_>,
+    target: &str,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<usize> {
+    if let Some(aggregate) = destructured_assignment_pattern(pattern, handler) {
+        pattern = aggregate;
         let mut cursor = pattern.walk();
         let children: Vec<Node<'_>> = pattern.named_children(&mut cursor).collect();
         if children.len() > 1 {
             return children.iter().position(|child| {
-                binding_targets_from_pattern_node(child, src)
+                binding_targets_from_pattern_node(child, src, handler)
                     .iter()
                     .any(|binding| same_identifier_name(binding, target))
             });
@@ -450,7 +440,7 @@ fn positional_pattern_binding_index(pattern: Node<'_>, target: &str, src: &[u8])
     }
     let mut cursor = pattern.walk();
     for child in pattern.named_children(&mut cursor) {
-        if let Some(index) = positional_pattern_binding_index(child, target, src) {
+        if let Some(index) = positional_pattern_binding_index(child, target, src, handler) {
             return Some(index);
         }
     }
@@ -796,6 +786,7 @@ pub fn synthesize_record_members(index: &mut crate::DeclIndex, tree: &Tree, src:
                 bases: Vec::new(),
                 receiver_param_index: None,
                 receiver_field_writes,
+                receiver_field_initializers: Vec::new(),
                 implicit_receiver_names: vec!["this".to_string()],
                 receiver_state_sources: Vec::new(),
                 return_type: None,
@@ -826,6 +817,7 @@ pub fn synthesize_record_members(index: &mut crate::DeclIndex, tree: &Tree, src:
                 body_span: Some(*comp_span),
                 flow_events: vec![crate::FlowEvent::Return {
                     span: *comp_span,
+                    value_kind: Some(crate::AssignValueKind::Compound),
                     value_text: Some(field.clone()),
                     value_name: Some(field.clone()),
                     value_flow: crate::ExpressionFlow::from_place(field.clone()),
@@ -838,6 +830,7 @@ pub fn synthesize_record_members(index: &mut crate::DeclIndex, tree: &Tree, src:
                 bases: Vec::new(),
                 receiver_param_index: None,
                 receiver_field_writes: Vec::new(),
+                receiver_field_initializers: Vec::new(),
                 implicit_receiver_names: vec!["this".to_string()],
                 receiver_state_sources: vec![field],
                 return_type: None,
@@ -1006,22 +999,6 @@ pub fn canonical_simple_type_name(text: &str) -> String {
 /// New fields land in their group with a comment.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SyntaxSpecialForm {
-    /// A call is split across a callee sibling and a selector node.
-    SplitSelectorCall,
-    /// A remote-call expression is split into module and function children.
-    RemoteCallExpression,
-    /// Builder cascades encode calls/writes as cascade-section nodes.
-    CascadeSection,
-    /// Explicit object construction is not classified as an ordinary call.
-    ObjectConstructionExpression,
-    /// A call-shaped node with a trailing closure represents deferred work.
-    TrailingClosureDefer,
-    /// Control-flow constructs are encoded as call nodes with structured bodies.
-    CallEncodedControlFlow,
-    /// A functional call represents a loop and must lower to `FlowEvent::Loop`.
-    FunctionalLoopCall,
-    /// A call block represents an iterator loop with a structured body.
-    BlockLoopCall,
     /// Call arguments are direct children rather than an argument container.
     DirectCallArguments,
     /// A call's structured control body is stored in a direct `do_block` child.
@@ -1045,6 +1022,12 @@ pub type PseudoCallExtractor =
 /// into the node so nested calls and value operands remain visible.
 pub type SyntaxEventExtractor =
     for<'tree> fn(Node<'tree>, FileId, &[u8], &GrammarHandler) -> Option<FlowEvent>;
+/// Adapter-owned lowering for one CST node that represents multiple
+/// language-neutral events. Shared walking remains responsible for recursive
+/// descent after the adapter has emitted the exact node semantics.
+pub type SyntaxEventsExtractor = for<'tree> fn(Node<'tree>, FileId, &[u8], &GrammarHandler) -> Vec<FlowEvent>;
+pub type CallEncodedControlFlowExtractor =
+    for<'tree> fn(Node<'tree>, FileId, &[u8], &GrammarHandler, &[String]) -> Option<Vec<FlowEvent>>;
 
 /// Adapter-owned receiver-node extractor for pseudo calls. Returning the CST
 /// node, rather than rendered text, lets shared indexing build exact value
@@ -1055,6 +1038,121 @@ pub type PseudoCallReceiverExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Opti
 /// Shared analysis consumes the resulting language-neutral mode and never
 /// recognizes source tokens such as an address-of or `out` marker.
 pub type ArgumentPassingModeExtractor = for<'tree> fn(Node<'tree>, Node<'tree>) -> crate::ArgumentPassingMode;
+
+/// Adapter-owned classifier for a complete value expression. Assignment,
+/// return, and call-argument lowering all consume the same language-neutral
+/// shape and never infer literals from rendered text or capitalization.
+pub type ExpressionValueKindExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Option<crate::AssignValueKind>;
+/// Adapter-owned decomposition for aggregate syntax whose key/value pairs
+/// are encoded as sibling CST nodes rather than one fielded pair wrapper.
+pub type AggregatePairExtractor = for<'tree> fn(Node<'tree>) -> Vec<(Node<'tree>, Node<'tree>)>;
+
+/// Adapter-owned classification for assignment-shaped grammar nodes whose
+/// exact operator decides whether they assign, pipe a value into a call, or
+/// carry no assignment semantics.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AssignmentNodeSemantics {
+    Assignment,
+    Pipe,
+    Other,
+}
+
+pub type AssignmentSemanticsExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> AssignmentNodeSemantics;
+/// Adapter-owned place decoder used only for an assignment target. Some
+/// grammars encode writable property syntax with the same node kind used for
+/// a zero-argument call; the assignment context is what makes that node an
+/// addressable place.
+pub type AssignmentPlaceExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Option<String>;
+
+/// Adapter-owned decoder for a subscript key that is provably static in the
+/// active grammar. Dynamic keys return `None` and lower to a wildcard
+/// projection rather than being mistaken for a literal field identity.
+pub type StaticSubscriptKeyExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Option<String>;
+pub type ComputedSubscriptExtractor = for<'tree> fn(Node<'tree>) -> Option<(Node<'tree>, Node<'tree>)>;
+pub type ReferenceNameExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Option<String>;
+/// Adapter-owned exact place extraction for grammars that encode one or more
+/// projections as sibling CST nodes rather than a nested member expression.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ExpressionPlaceExtraction {
+    pub places: Vec<String>,
+    pub consumed_node_ids: Vec<usize>,
+}
+pub type ExpressionPlaceExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> ExpressionPlaceExtraction;
+/// Adapter-owned proof that an expression denotes the same addressable
+/// storage as one parsed operand (`*out`, `&out`, `ref value`, and analogous
+/// syntax). Shared lowering recursively resolves the returned operand and
+/// never interprets an operator token or language spelling itself.
+pub type IndirectPlaceOperandExtractor = for<'tree> fn(Node<'tree>) -> Option<Node<'tree>>;
+pub type NamedArgumentExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Option<(String, Node<'tree>)>;
+pub type DirectCallInfoExtractor =
+    for<'tree> fn(Node<'tree>, &[u8], &GrammarHandler) -> Option<(Option<String>, Vec<String>)>;
+#[derive(Clone, Debug)]
+pub struct CallTargetExtraction<'tree> {
+    pub node: Node<'tree>,
+    pub full_text: String,
+}
+pub type CallTargetExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Option<CallTargetExtraction<'tree>>;
+/// Adapter-owned receiver decomposition for call grammars whose receiver is
+/// positional or otherwise absent from Tree-sitter's field map.
+pub type CallReceiverExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Option<Node<'tree>>;
+pub type NodeFilter = for<'tree> fn(Node<'tree>) -> bool;
+pub type ExpressionCallSpanExtractor = for<'tree> fn(Node<'tree>) -> Vec<(usize, usize)>;
+pub type NodeListExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> Vec<Node<'tree>>;
+/// Exact decomposition of a grammar node that conditionally represents a
+/// function declaration. Macro-oriented grammars use this to distinguish a
+/// declaration from an ordinary call and expose its compiler components.
+#[derive(Copy, Clone, Debug)]
+pub struct FunctionDefinitionExtraction<'tree> {
+    pub name: Node<'tree>,
+    pub parameter_source: Node<'tree>,
+    pub body: Option<Node<'tree>>,
+}
+pub type FunctionDefinitionExtractor =
+    for<'tree> fn(Node<'tree>, &[u8]) -> Option<FunctionDefinitionExtraction<'tree>>;
+pub type InlineClosureYieldExtractor = for<'tree> fn(Node<'tree>, Node<'tree>, &[u8]) -> bool;
+pub type BindingNameFilter = fn(&str) -> bool;
+#[derive(Copy, Clone, Debug)]
+pub struct PatternBindingSite<'tree> {
+    pub span_node: Node<'tree>,
+    pub pattern: Node<'tree>,
+    pub source: Node<'tree>,
+}
+pub type PatternBindingExtractor = for<'tree> fn(Node<'tree>) -> Vec<PatternBindingSite<'tree>>;
+/// One adapter-proven projection from a match discriminant to a bound name.
+///
+/// Field and element projections retain exact destructuring semantics. A
+/// descendant projection represents a remainder/rest binding whose value is
+/// assembled from an otherwise unknown subset of the source container.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PatternSourceProjection {
+    Field(String),
+    Element(usize),
+    Descendants,
+}
+
+/// Exact binding relation for grammars that expose source substructure in a
+/// match pattern. The target is a grammar-proven binding node; labels, type
+/// heads, guards, and other pattern metadata never enter this relation.
+#[derive(Clone, Debug)]
+pub struct ProjectedPatternBindingSite<'tree> {
+    pub span_node: Node<'tree>,
+    pub target: Node<'tree>,
+    pub source: Node<'tree>,
+    pub projection: Vec<PatternSourceProjection>,
+}
+pub type ProjectedPatternBindingExtractor =
+    for<'tree> fn(Node<'tree>, &[u8]) -> Vec<ProjectedPatternBindingSite<'tree>>;
+pub type AliasBindingExtractor = for<'tree> fn(Node<'tree>) -> Option<(Node<'tree>, Node<'tree>)>;
+/// Adapter-owned decomposition of branch syntax that binds one alias to a
+/// discriminant value (Go type switches are the canonical shape).
+pub type BranchAliasExtractor = for<'tree> fn(Node<'tree>) -> Option<(Node<'tree>, Node<'tree>)>;
+
+/// Adapter-owned proof that a method-shaped declaration has a source-level
+/// receiver parameter. This handles grammars where the surrounding container
+/// is method-like but a particular declaration is static/associated. Shared
+/// lowering consumes only the boolean fact and never recognizes decorator or
+/// self-parameter syntax from another language.
+pub type ReceiverPresenceExtractor = for<'tree> fn(Node<'tree>, &[u8]) -> bool;
 
 #[derive(Clone, Debug, Default)]
 pub struct GrammarHandler {
@@ -1095,11 +1193,36 @@ pub struct GrammarHandler {
     /// Bare names that adapters treat as constructors regardless of
     /// kind (`__init__`, `constructor`, `__construct`, `init`, `new`).
     pub constructor_names: &'static [&'static str],
+    /// Exact declaration decomposition for a grammar whose function-kind
+    /// node can also represent non-declaration syntax.
+    pub function_definition_extractor: Option<FunctionDefinitionExtractor>,
+    /// Whether one inline closure receives values yielded by its enclosing
+    /// call instead of the call's ordinary receiver/argument inputs.
+    pub inline_closure_yield_extractor: Option<InlineClosureYieldExtractor>,
 
     // === Branch / loop shapes ===
     pub if_kinds: &'static [&'static str],
+    /// Ordered fields that identify the primary branch body.
+    pub branch_then_field_names: &'static [&'static str],
+    /// Ordered fields that identify the first alternative branch body.
+    pub branch_else_field_names: &'static [&'static str],
+    /// Ordered fields that hold the evaluated branch discriminant.
+    pub branch_condition_field_names: &'static [&'static str],
+    /// Exact direct-child wrappers for an unfielded branch discriminant.
+    pub branch_condition_kinds: &'static [&'static str],
+    /// Optional exact branch alias/value decomposition.
+    pub branch_alias_extractor: Option<BranchAliasExtractor>,
+    /// Parsed statement/block wrappers that may form one branch arm when the
+    /// grammar exposes repeated arm fields.
+    pub branch_arm_kinds: &'static [&'static str],
+    /// Additional alternative/else/elseif clause nodes beyond the first
+    /// `alternative`/`else` field returned by Tree-sitter.
+    pub additional_alternative_kinds: &'static [&'static str],
     pub for_kinds: &'static [&'static str],
     pub foreach_kinds: &'static [&'static str],
+    /// Optional exact `(binding_pattern, iterable_value)` decomposition for
+    /// a loop that carries iteration bindings.
+    pub foreach_binding_extractor: Option<AliasBindingExtractor>,
     pub while_kinds: &'static [&'static str],
     pub do_kinds: &'static [&'static str],
     /// Unconditional infinite-loop constructs (Rust `loop { }`, etc.)
@@ -1107,14 +1230,75 @@ pub struct GrammarHandler {
     /// These map to `LoopKind::Loop` so consumers can distinguish them
     /// from do/while loops.
     pub loop_kinds: &'static [&'static str],
+    /// Ordered fields that hold a loop body.
+    pub loop_body_field_names: &'static [&'static str],
+    /// Exact unfielded loop-body wrapper kinds.
+    pub loop_body_kinds: &'static [&'static str],
 
     // === Call / assignment / return / lambda shapes ===
     pub call_kinds: &'static [&'static str],
+    /// Call nodes whose grammar proves construction/allocation semantics.
+    /// Declared independently from ordinary calls so shared lowering never
+    /// carries a cross-language constructor-node inventory.
+    pub constructor_call_kinds: &'static [&'static str],
     /// Call-shaped grammar components whose enclosing call already owns the
     /// complete callee and argument list. The method-chain walker must not
     /// emit these components a second time. This inventory is adapter-owned;
     /// shared lowering does not recognize a language-specific node kind.
     pub nested_call_component_kinds: &'static [&'static str],
+    /// Ordered fields that may hold the complete callee expression. The
+    /// adapter owns these names because Tree-sitter field schemas are part of
+    /// the language frontend, not a shared cross-language convention.
+    pub call_callee_field_names: &'static [&'static str],
+    /// Ordered fields that may hold a method/message receiver directly on a
+    /// call node.
+    pub call_receiver_field_names: &'static [&'static str],
+    /// Ordered fields that may hold the selected method/message name when a
+    /// grammar splits it from the receiver.
+    pub call_member_field_names: &'static [&'static str],
+    /// Ordered fields that may hold an explicitly constructed type.
+    pub constructor_type_field_names: &'static [&'static str],
+    /// Ordered fields that may hold a call's argument container.
+    pub call_argument_field_names: &'static [&'static str],
+    /// Exact direct-child argument-list node kinds for calls whose grammar
+    /// omits a field.
+    pub call_argument_container_kinds: &'static [&'static str],
+    /// Exact direct-child wrappers under which an argument container may be
+    /// nested one level (Kotlin call suffixes, for example).
+    pub call_argument_wrapper_kinds: &'static [&'static str],
+    /// Whether an otherwise unfielded first named child is the callee.
+    pub call_callee_is_first_named_child: bool,
+    /// Argument wrapper kinds whose name/value fields must be unwrapped.
+    pub argument_wrapper_kinds: &'static [&'static str],
+    /// Ordered fields that may name a keyword/labeled argument.
+    pub argument_name_field_names: &'static [&'static str],
+    /// Ordered fields that may hold the runtime value of an argument wrapper.
+    pub argument_value_field_names: &'static [&'static str],
+    /// Optional exact decoder for a named-argument grammar shape that does
+    /// not expose usable name/value fields.
+    pub named_argument_extractor: Option<NamedArgumentExtractor>,
+    /// Optional exact direct-call decomposition for a grammar whose calls are
+    /// not represented by one ordinary call node.
+    pub direct_call_info_extractor: Option<DirectCallInfoExtractor>,
+    /// Exact callee identity for grammars whose call target is split across
+    /// multiple CST nodes.
+    pub call_target_extractor: Option<CallTargetExtractor>,
+    /// Exact receiver expression for grammars whose call target carries a
+    /// positional receiver rather than a named Tree-sitter field.
+    pub call_receiver_extractor: Option<CallReceiverExtractor>,
+    /// Optional inclusion filter for nodes in `call_ref_kinds`.
+    pub call_ref_node_filter: Option<NodeFilter>,
+    /// Optional exact call spans for sibling-encoded call expressions.
+    pub expression_call_span_extractor: Option<ExpressionCallSpanExtractor>,
+    /// Fields that contain the addressable operand of caller-visible
+    /// write-back syntax.
+    pub writeback_operand_field_names: &'static [&'static str],
+    /// Fields excluded from direct-child argument walking (message receiver
+    /// and selector fields, for example).
+    pub direct_call_argument_excluded_fields: &'static [&'static str],
+    /// Single-child expression wrapper kinds that preserve their child's
+    /// value identity.
+    pub transparent_expression_wrapper_kinds: &'static [&'static str],
     /// Optional adapter callback for call semantics encoded by non-call CST
     /// nodes (operator forms, language constructs, markup sugar, and similar
     /// grammar-specific shapes).
@@ -1123,6 +1307,11 @@ pub struct GrammarHandler {
     /// This is used when one grammar node kind represents several semantic
     /// transfers and the adapter must inspect its parsed token/child shape.
     pub syntax_event_extractor: Option<SyntaxEventExtractor>,
+    /// Optional multi-event counterpart to `syntax_event_extractor`.
+    pub syntax_events_extractor: Option<SyntaxEventsExtractor>,
+    /// Exact control-flow lowering for grammars that encode language
+    /// constructs as call-shaped syntax.
+    pub call_encoded_control_flow_extractor: Option<CallEncodedControlFlowExtractor>,
     /// Optional adapter callback returning the value receiver of a pseudo
     /// call. It must classify exactly the same nodes as
     /// `pseudo_call_extractor` when that pseudo call has a receiver.
@@ -1131,23 +1320,199 @@ pub struct GrammarHandler {
     /// do not expose caller-visible write-back leave this unset and receive
     /// ordinary value semantics.
     pub argument_passing_mode_extractor: Option<ArgumentPassingModeExtractor>,
+    /// Exact adapter-owned classifier for complete value expressions whose
+    /// grammar needs more than the literal inventories below.
+    pub expression_value_kind_extractor: Option<ExpressionValueKindExtractor>,
+    /// Named Tree-sitter node kinds that are source-language scalar keywords
+    /// rather than addressable values (`nil`, `null`, booleans, and similar).
+    pub literal_value_kinds: &'static [&'static str],
+    /// Literal keyword spellings used only when the owning grammar exposes
+    /// that keyword through an identifier-shaped node.
+    pub literal_value_spellings: &'static [&'static str],
+    /// Complete string/character literal node kinds for this grammar. The
+    /// shared `strings` inventory walks only this adapter-owned set.
+    pub string_literal_kinds: &'static [&'static str],
+    /// Exact comment node kinds emitted by this grammar.
+    pub comment_kinds: &'static [&'static str],
+    /// Comment kinds that are documentation comments by grammar contract.
+    pub doc_comment_kinds: &'static [&'static str],
+    /// Source prefixes that make an otherwise generic comment node a
+    /// documentation comment in this language.
+    pub doc_comment_prefixes: &'static [&'static str],
+    /// Exact decorator/annotation/attribute usage nodes for this grammar.
+    pub decorator_kinds: &'static [&'static str],
+    /// Parameter-list wrapper kinds used when the grammar does not expose a
+    /// `parameters` field on the callable declaration.
+    pub parameter_container_kinds: &'static [&'static str],
+    /// Parameter declaration/binding nodes emitted directly by this grammar.
+    pub parameter_kinds: &'static [&'static str],
+    /// Wrapper nodes that contain parameter annotations/modifiers but do not
+    /// introduce a parameter binding themselves.
+    pub parameter_modifier_kinds: &'static [&'static str],
+    /// Exact annotation/decorator/attribute nodes valid inside a parameter.
+    pub parameter_annotation_kinds: &'static [&'static str],
+    /// Optional adapter-owned decoder for an annotation node whose grammar
+    /// does not expose its name through the standard `name` field or the
+    /// adapter's value-identifier kinds.
+    pub parameter_annotation_name_extractor: Option<ReferenceNameExtractor>,
+    /// Flat keyword-parameter nodes whose selector label and bound value are
+    /// siblings (Objective-C method selector pieces, for example).
+    pub keyword_parameter_kinds: &'static [&'static str],
+    /// Exact selector/label nodes inside a flat keyword parameter.
+    pub parameter_selector_kinds: &'static [&'static str],
+    /// Parameter nodes whose own source span is the binding name and which do
+    /// not expose a nested identifier node.
+    pub implicit_parameter_kinds: &'static [&'static str],
+    /// Dedicated receiver/self parameter nodes whose canonical compiler
+    /// binding is the grammar node's source spelling.
+    pub self_parameter_kinds: &'static [&'static str],
+    /// Parameter shapes where the final identifier descendant is the bound
+    /// name because earlier identifiers belong to its type/selector syntax.
+    pub last_identifier_parameter_kinds: &'static [&'static str],
+    /// Identifier nodes that introduce bindings while walking a destructured
+    /// parameter pattern. Property keys/type names must not be included.
+    pub binding_identifier_kinds: &'static [&'static str],
+    pub non_binding_pattern_kinds: &'static [&'static str],
+    pub binding_lhs_pattern_kinds: &'static [&'static str],
+    pub binding_pattern_field_names: &'static [&'static str],
+    pub pattern_head_value_kinds: &'static [&'static str],
+    pub multi_segment_value_pattern_kinds: &'static [&'static str],
+    pub non_binding_pattern_field_names: &'static [&'static str],
+    pub binding_name_extractor: Option<ReferenceNameExtractor>,
+    pub binding_name_filter: Option<BindingNameFilter>,
+    /// Exact pattern/source relations introduced by match, case, type-test,
+    /// and conditional-binding syntax in this grammar.
+    pub pattern_binding_extractor: Option<PatternBindingExtractor>,
+    /// Exact projected pattern/source relations for grammars whose match
+    /// syntax proves a field, element, or remainder relation.
+    pub projected_pattern_binding_extractor: Option<ProjectedPatternBindingExtractor>,
+    /// Anonymous positional varargs token used by this grammar, if any.
+    pub anonymous_variadic_token: Option<&'static str>,
+    /// Positional variadic collector nodes (`*args`, `...rest`, `T...`) for
+    /// this grammar. Keyword-only collectors are intentionally absent.
+    pub variadic_parameter_kinds: &'static [&'static str],
+    /// Parameter pattern wrappers whose nested rest nodes destructure one
+    /// argument rather than collect overflow positional arguments.
+    pub destructured_parameter_kinds: &'static [&'static str],
+    /// Identifier/value-carrier node kinds for expression dependency
+    /// extraction. Type/member-name nodes are excluded unless the grammar
+    /// uses the same kind for a runtime binding.
+    pub identifier_kinds: &'static [&'static str],
+    /// Parsed list/tuple/object pattern nodes that introduce multiple
+    /// assignment bindings in this grammar.
+    pub aggregate_pattern_kinds: &'static [&'static str],
+    /// Expression nodes whose grammar defines comprehension/generator
+    /// evaluation semantics.
+    pub comprehension_kinds: &'static [&'static str],
+    /// Descendant clauses that bind a comprehension iteration variable.
+    pub comprehension_binding_clause_kinds: &'static [&'static str],
+    /// Optional exact `(binding_pattern, iterable_value)` decomposition for
+    /// one comprehension clause.
+    pub comprehension_binding_extractor: Option<AliasBindingExtractor>,
+    /// Aggregate containers with statically named fields.
+    pub named_aggregate_kinds: &'static [&'static str],
+    /// Ordered aggregate containers lowered as tuple items.
+    pub positional_aggregate_kinds: &'static [&'static str],
+    /// Nodes that may pair one or more key/value fields.
+    pub aggregate_pair_kinds: &'static [&'static str],
+    /// Pair nodes whose two direct named children are key then value.
+    pub two_child_aggregate_pair_kinds: &'static [&'static str],
+    /// Exact decoder for an adapter-specific aggregate pair layout.
+    pub aggregate_pair_extractor: Option<AggregatePairExtractor>,
+    /// Ordered key fields on an aggregate pair node.
+    pub aggregate_key_field_names: &'static [&'static str],
+    /// Ordered value fields on an aggregate pair/item node.
+    pub aggregate_value_field_names: &'static [&'static str],
+    /// Key node kinds whose exact node text is a static field identity.
+    pub static_field_name_kinds: &'static [&'static str],
+    /// Field nodes whose own identity is both key and value.
+    pub shorthand_field_kinds: &'static [&'static str],
+    /// Spread/splat/base-update nodes.
+    pub spread_kinds: &'static [&'static str],
+    /// Ordered fields that hold a spread's value expression.
+    pub spread_value_field_names: &'static [&'static str],
+    /// Named syntax-only children skipped in ordered aggregates.
+    pub aggregate_syntax_only_kinds: &'static [&'static str],
+    /// Generic pattern wrappers that are aggregate only when they contain
+    /// multiple parsed binding children.
+    pub multi_child_aggregate_pattern_kinds: &'static [&'static str],
+    /// Aggregate literal/property containers that make a nested lambda a
+    /// stored value rather than a direct inline call argument.
+    pub lambda_value_container_kinds: &'static [&'static str],
+    /// Expression wrappers that transparently preserve one direct call
+    /// result in this grammar.
+    pub transparent_call_wrapper_kinds: &'static [&'static str],
+    /// Expression-series wrappers that are transparent only when they hold
+    /// exactly one named expression.
+    pub single_expression_group_kinds: &'static [&'static str],
+    /// Declaration/declarator wrappers whose parsed `name` child is the
+    /// assignment binding rather than the wrapper itself.
+    pub assignment_target_wrapper_kinds: &'static [&'static str],
+    /// Named declaration keyword spellings that may precede an unfielded
+    /// binding child in this grammar.
+    pub binding_declaration_keyword_spellings: &'static [&'static str],
     pub assignment_kinds: &'static [&'static str],
+    /// Optional exact operator classifier for assignment-shaped nodes whose
+    /// grammar kind also represents non-assignment expressions.
+    pub assignment_semantics_extractor: Option<AssignmentSemanticsExtractor>,
+    /// Exact decoder for assignment-only place syntax that cannot safely be
+    /// admitted as an ordinary expression place.
+    pub assignment_place_extractor: Option<AssignmentPlaceExtractor>,
+    /// Assignment node kinds that are intrinsically read-modify-write.
+    pub compound_assignment_kinds: &'static [&'static str],
+    /// Exact operator tokens that make an otherwise generic assignment node
+    /// read-modify-write in this language.
+    pub compound_assignment_operators: &'static [&'static str],
+    /// Declaration nodes that have no runtime value when neither a `value`
+    /// nor `right` field is present.
+    pub type_only_declaration_kinds: &'static [&'static str],
+    /// Assignment/declarator kinds whose RHS is an ordered aggregate
+    /// initializer rather than a scalar expression.
+    pub positional_aggregate_assignment_kinds: &'static [&'static str],
+    /// Exact ordered aggregate initializer node kinds for the grammar.
+    pub positional_aggregate_value_kinds: &'static [&'static str],
     pub return_kinds: &'static [&'static str],
     pub throw_kinds: &'static [&'static str],
     pub lambda_kinds: &'static [&'static str],
+    /// Closure/block nodes that act as inline call arguments even when the
+    /// grammar does not classify them as standalone lambda expressions.
+    pub inline_closure_kinds: &'static [&'static str],
+    /// Canonical implicit parameter binding for a lambda that omits an
+    /// explicit parameter list, if the language has one.
+    pub implicit_lambda_parameter_name: Option<&'static str>,
+    /// Ordered fields that may hold a lambda/closure body.
+    pub lambda_body_field_names: &'static [&'static str],
+    /// Exact body wrapper kinds when the grammar omits a body field.
+    pub lambda_body_kinds: &'static [&'static str],
 
     // === Try / catch / finally shapes ===
     pub try_kinds: &'static [&'static str],
     pub catch_kinds: &'static [&'static str],
     pub finally_kinds: &'static [&'static str],
+    /// Exact unfielded block kinds that may represent try/catch bodies.
+    pub try_fallback_body_kinds: &'static [&'static str],
+    /// Whether a catch marker's following fallback body is its body.
+    pub catch_body_follows_marker: bool,
 
     // === Loop control + suspension shapes ===
     pub break_kinds: &'static [&'static str],
     pub continue_kinds: &'static [&'static str],
+    /// Ordered fields that hold an optional break/continue label.
+    pub control_label_field_names: &'static [&'static str],
     pub yield_kinds: &'static [&'static str],
+    /// Ordered fields that hold a yielded expression.
+    pub yield_value_field_names: &'static [&'static str],
     pub await_kinds: &'static [&'static str],
     pub defer_kinds: &'static [&'static str],
+    pub deferred_body_extractor: Option<NodeListExtractor>,
     pub using_kinds: &'static [&'static str],
+    /// Ordered fields that hold the scope body of a using/with construct.
+    pub using_body_field_names: &'static [&'static str],
+    /// Ordered fields that hold the executable body of a try construct.
+    pub try_body_field_names: &'static [&'static str],
+    /// Adapter-owned decomposition of a scope/resource alias into its bound
+    /// name and value expression.
+    pub using_alias_extractor: Option<AliasBindingExtractor>,
 
     // === Grammar-specific lowering capabilities ===
     /// Non-standard syntax forms this adapter asks the shared compiler
@@ -1165,6 +1530,9 @@ pub struct GrammarHandler {
     pub runtime_typeof_operators: &'static [&'static str],
     /// Equality operator node kinds accepted around a runtime type label.
     pub runtime_type_equality_operators: &'static [&'static str],
+    /// Transparent expression wrappers around runtime-type guards. The
+    /// shared extractor may unwrap only kinds declared by the active grammar.
+    pub runtime_type_wrapper_kinds: &'static [&'static str],
     /// Tree-sitter node kinds whose operands describe a type or layout but do
     /// not read the operand's runtime value (`sizeof_expression`, for
     /// example). The owning adapter declares these exact grammar facts so
@@ -1189,11 +1557,29 @@ pub struct GrammarHandler {
     pub member_expression_kinds: &'static [&'static str],
     /// Grammar node kinds that represent subscript/index projections.
     pub subscript_expression_kinds: &'static [&'static str],
+    /// Ordered Tree-sitter fields that may hold the base of a member place.
+    pub member_base_field_names: &'static [&'static str],
+    /// Ordered Tree-sitter fields that may hold the selected member name.
+    pub member_name_field_names: &'static [&'static str],
+    /// Ordered Tree-sitter fields that may hold the base of a subscript place.
+    pub subscript_base_field_names: &'static [&'static str],
+    /// Ordered Tree-sitter fields that may hold the subscript key expression.
+    pub subscript_index_field_names: &'static [&'static str],
+    /// Exact static-key decoder owned by the language frontend.
+    pub static_subscript_key_extractor: Option<StaticSubscriptKeyExtractor>,
+    /// Adapter-owned decomposition for a grammar kind that represents both
+    /// dotted member access and computed subscript access.
+    pub computed_subscript_extractor: Option<ComputedSubscriptExtractor>,
     /// Variable node kinds whose leading source punctuation is not part of
     /// the canonical binding identity.
     pub sigil_variable_kinds: &'static [&'static str],
     /// Dedicated global/special-variable node kinds.
     pub global_variable_kinds: &'static [&'static str],
+    /// Adapter-owned canonical name for sigil/global reference inventory.
+    pub reference_name_extractor: Option<ReferenceNameExtractor>,
+    /// Optional exact extraction of sibling-encoded expression places.
+    pub expression_place_extractor: Option<ExpressionPlaceExtractor>,
+    pub indirect_place_operand_extractor: Option<IndirectPlaceOperandExtractor>,
     /// A bare subscript receiver also denotes an implicit call-like lookup in
     /// this grammar/DSL surface.
     pub subscript_base_call_refs: bool,
@@ -1219,6 +1605,9 @@ pub struct GrammarHandler {
     /// parameter index here. Consumers must use this metadata instead of
     /// guessing from parameter names.
     pub method_receiver_param_index: Option<usize>,
+    /// Optional exact syntax classifier for whether the receiver index applies
+    /// to this particular declaration.
+    pub receiver_presence_extractor: Option<ReceiverPresenceExtractor>,
     /// Receiver spellings for languages whose method receiver is implicit
     /// in the grammar. The adapter has already emitted assignment targets
     /// from tree-sitter member/instance-variable nodes; these spellings let
@@ -1261,44 +1650,163 @@ pub const EMPTY_HANDLER: GrammarHandler = GrammarHandler {
     method_owner_barrier_kinds: &[],
     constructor_method_kinds: &[],
     constructor_names: &[],
+    function_definition_extractor: None,
+    inline_closure_yield_extractor: None,
     if_kinds: &[],
+    branch_then_field_names: &[],
+    branch_else_field_names: &[],
+    branch_condition_field_names: &[],
+    branch_condition_kinds: &[],
+    branch_alias_extractor: None,
+    branch_arm_kinds: &[],
+    additional_alternative_kinds: &[],
     for_kinds: &[],
     foreach_kinds: &[],
+    foreach_binding_extractor: None,
     while_kinds: &[],
     do_kinds: &[],
     loop_kinds: &[],
+    loop_body_field_names: &[],
+    loop_body_kinds: &[],
     call_kinds: &[],
+    constructor_call_kinds: &[],
     nested_call_component_kinds: &[],
+    call_callee_field_names: &[],
+    call_receiver_field_names: &[],
+    call_member_field_names: &[],
+    constructor_type_field_names: &[],
+    call_argument_field_names: &[],
+    call_argument_container_kinds: &[],
+    call_argument_wrapper_kinds: &[],
+    call_callee_is_first_named_child: false,
+    argument_wrapper_kinds: &[],
+    argument_name_field_names: &[],
+    argument_value_field_names: &[],
+    named_argument_extractor: None,
+    direct_call_info_extractor: None,
+    call_target_extractor: None,
+    call_receiver_extractor: None,
+    call_ref_node_filter: None,
+    expression_call_span_extractor: None,
+    writeback_operand_field_names: &[],
+    direct_call_argument_excluded_fields: &[],
+    transparent_expression_wrapper_kinds: &[],
     pseudo_call_extractor: None,
     syntax_event_extractor: None,
+    syntax_events_extractor: None,
+    call_encoded_control_flow_extractor: None,
     pseudo_call_receiver_extractor: None,
     argument_passing_mode_extractor: None,
+    expression_value_kind_extractor: None,
+    literal_value_kinds: &[],
+    literal_value_spellings: &[],
+    string_literal_kinds: &[],
+    comment_kinds: &[],
+    doc_comment_kinds: &[],
+    doc_comment_prefixes: &[],
+    decorator_kinds: &[],
+    parameter_container_kinds: &[],
+    parameter_kinds: &[],
+    parameter_modifier_kinds: &[],
+    parameter_annotation_kinds: &[],
+    parameter_annotation_name_extractor: None,
+    keyword_parameter_kinds: &[],
+    parameter_selector_kinds: &[],
+    implicit_parameter_kinds: &[],
+    self_parameter_kinds: &[],
+    last_identifier_parameter_kinds: &[],
+    binding_identifier_kinds: &[],
+    non_binding_pattern_kinds: &[],
+    binding_lhs_pattern_kinds: &[],
+    binding_pattern_field_names: &[],
+    pattern_head_value_kinds: &[],
+    multi_segment_value_pattern_kinds: &[],
+    non_binding_pattern_field_names: &[],
+    binding_name_extractor: None,
+    binding_name_filter: None,
+    pattern_binding_extractor: None,
+    projected_pattern_binding_extractor: None,
+    anonymous_variadic_token: None,
+    variadic_parameter_kinds: &[],
+    destructured_parameter_kinds: &[],
+    identifier_kinds: &[],
+    aggregate_pattern_kinds: &[],
+    comprehension_kinds: &[],
+    comprehension_binding_clause_kinds: &[],
+    comprehension_binding_extractor: None,
+    named_aggregate_kinds: &[],
+    positional_aggregate_kinds: &[],
+    aggregate_pair_kinds: &[],
+    two_child_aggregate_pair_kinds: &[],
+    aggregate_pair_extractor: None,
+    aggregate_key_field_names: &[],
+    aggregate_value_field_names: &[],
+    static_field_name_kinds: &[],
+    shorthand_field_kinds: &[],
+    spread_kinds: &[],
+    spread_value_field_names: &[],
+    aggregate_syntax_only_kinds: &[],
+    multi_child_aggregate_pattern_kinds: &[],
+    lambda_value_container_kinds: &[],
+    transparent_call_wrapper_kinds: &[],
+    single_expression_group_kinds: &[],
+    assignment_target_wrapper_kinds: &[],
+    binding_declaration_keyword_spellings: &[],
     assignment_kinds: &[],
+    assignment_semantics_extractor: None,
+    assignment_place_extractor: None,
+    compound_assignment_kinds: &[],
+    compound_assignment_operators: &[],
+    type_only_declaration_kinds: &[],
+    positional_aggregate_assignment_kinds: &[],
+    positional_aggregate_value_kinds: &[],
     return_kinds: &[],
     throw_kinds: &[],
     lambda_kinds: &[],
+    inline_closure_kinds: &[],
+    implicit_lambda_parameter_name: None,
+    lambda_body_field_names: &[],
+    lambda_body_kinds: &[],
     try_kinds: &[],
     catch_kinds: &[],
     finally_kinds: &[],
+    try_fallback_body_kinds: &[],
+    catch_body_follows_marker: false,
     break_kinds: &[],
     continue_kinds: &[],
+    control_label_field_names: &[],
     yield_kinds: &[],
+    yield_value_field_names: &[],
     await_kinds: &[],
     defer_kinds: &[],
+    deferred_body_extractor: None,
     using_kinds: &[],
+    using_body_field_names: &[],
+    try_body_field_names: &[],
+    using_alias_extractor: None,
     special_forms: &[],
     runtime_type_guard_calls: &[],
     runtime_type_guard_operators: &[],
     runtime_typeof_operators: &[],
     runtime_type_equality_operators: &[],
+    runtime_type_wrapper_kinds: &[],
     value_free_expression_kinds: &[],
     value_free_call_names: &[],
     value_free_unary_operators: &[],
     call_ref_kinds: &[],
     member_expression_kinds: &[],
     subscript_expression_kinds: &[],
+    member_base_field_names: &[],
+    member_name_field_names: &[],
+    subscript_base_field_names: &[],
+    subscript_index_field_names: &[],
+    static_subscript_key_extractor: None,
+    computed_subscript_extractor: None,
     sigil_variable_kinds: &[],
     global_variable_kinds: &[],
+    reference_name_extractor: None,
+    expression_place_extractor: None,
+    indirect_place_operand_extractor: None,
     subscript_base_call_refs: false,
     non_call_ref_names: &[],
     call_name_suffix_tokens: &[],
@@ -1306,6 +1814,7 @@ pub const EMPTY_HANDLER: GrammarHandler = GrammarHandler {
     callable_reference_kinds: &[],
     callable_reference_extractor: None,
     method_receiver_param_index: None,
+    receiver_presence_extractor: None,
     implicit_receiver_names: &[],
     implicit_receiver_prefixes: &[],
     tail_expression_returns: false,
@@ -1398,6 +1907,8 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
     // Constructor method spellings belong to the language adapter. The
     // generic tree-sitter lowering recognizes constructor node kinds only.
     constructor_names: &[],
+    function_definition_extractor: None,
+    inline_closure_yield_extractor: None,
     if_kinds: &[
         "if_statement",
         "if_expression",
@@ -1427,6 +1938,21 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         // Swift's `guard` is a one-sided branch (fall-through or exit).
         "guard_statement",
     ],
+    branch_then_field_names: &["consequence", "then", "body"],
+    branch_else_field_names: &["alternative", "else"],
+    branch_condition_field_names: &["condition", "subject", "value", "discriminant"],
+    branch_condition_kinds: &[],
+    branch_alias_extractor: None,
+    branch_arm_kinds: &[
+        "statement",
+        "statements",
+        "block",
+        "block_statement",
+        "function_body",
+        "compound_statement",
+        "expression_statement",
+    ],
+    additional_alternative_kinds: &["elif_clause", "else_clause", "elseif_statement", "else_statement"],
     for_kinds: &[
         "for_statement",
         "for_expression",
@@ -1442,6 +1968,7 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         "enhanced_for_statement",
         "foreach_statement",
     ],
+    foreach_binding_extractor: None,
     while_kinds: &[
         "while_statement",
         "while_expression",
@@ -1453,12 +1980,349 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
     ],
     do_kinds: &["do_statement", "do_while_statement", "repeat_while_statement"],
     loop_kinds: &["loop_expression"],
+    loop_body_field_names: &["body", "consequence"],
+    loop_body_kinds: &["block", "compound_statement", "statement", "expression_statement"],
     call_kinds: COMMON_CALL_KINDS,
+    constructor_call_kinds: &[
+        "new_expression",
+        "object_creation_expression",
+        "instance_expression",
+        "constructor_invocation",
+        "explicit_constructor_invocation",
+        "composite_literal",
+    ],
     nested_call_component_kinds: &[],
+    call_callee_field_names: &["function", "callee", "target", "name"],
+    call_receiver_field_names: &["receiver", "object", "invocant", "scope"],
+    call_member_field_names: &["method", "name", "property"],
+    constructor_type_field_names: &["type", "constructor"],
+    call_argument_field_names: &["arguments", "args"],
+    call_argument_container_kinds: &[
+        "arguments",
+        "argument_list",
+        "value_arguments",
+        "expr_args",
+        "token_tree",
+    ],
+    call_argument_wrapper_kinds: &["call_suffix", "literal_value", "tuple_expression"],
+    call_callee_is_first_named_child: true,
+    argument_wrapper_kinds: &[
+        "argument",
+        "keyword_argument",
+        "named_argument",
+        "named_expression",
+        "labeled_expression",
+        "tuple_expression_element",
+        "value_argument",
+    ],
+    argument_name_field_names: &["name", "label"],
+    argument_value_field_names: &["value", "expression", "argument", "operand"],
+    named_argument_extractor: None,
+    direct_call_info_extractor: None,
+    call_target_extractor: None,
+    call_receiver_extractor: None,
+    call_ref_node_filter: None,
+    expression_call_span_extractor: None,
+    writeback_operand_field_names: &["argument", "operand", "value", "expression"],
+    direct_call_argument_excluded_fields: &["receiver", "method"],
+    transparent_expression_wrapper_kinds: &["expression"],
     pseudo_call_extractor: None,
     syntax_event_extractor: None,
+    syntax_events_extractor: None,
+    call_encoded_control_flow_extractor: None,
     pseudo_call_receiver_extractor: None,
     argument_passing_mode_extractor: None,
+    expression_value_kind_extractor: None,
+    literal_value_kinds: &[
+        "null",
+        "nil",
+        "none",
+        "true",
+        "false",
+        "null_literal",
+        "nil_literal",
+        "none_literal",
+        "boolean_literal",
+    ],
+    literal_value_spellings: &[
+        "null",
+        "nil",
+        "none",
+        "undefined",
+        "nullptr",
+        "true",
+        "false",
+        "NULL",
+    ],
+    string_literal_kinds: &[
+        "string",
+        "string_literal",
+        "interpreted_string_literal",
+        "raw_string_literal",
+        "heredoc",
+        "heredoc_body",
+        "string_content",
+        "template_string",
+        "string_fragment",
+        "char_literal",
+        "character_literal",
+        "line_string_literal",
+        "multi_line_string_literal",
+        "interpolated_string_expression",
+        "interpolated_string_literal",
+    ],
+    comment_kinds: &[
+        "comment",
+        "line_comment",
+        "block_comment",
+        "shebang",
+        "hash_bang_line",
+        "doc_comment",
+        "documentation_comment",
+        "multiline_comment",
+        "dartdoc_comment",
+        "jsdoc_comment",
+    ],
+    doc_comment_kinds: &[
+        "doc_comment",
+        "documentation_comment",
+        "dartdoc_comment",
+        "jsdoc_comment",
+        "outer_doc_comment_marker",
+        "inner_doc_comment_marker",
+    ],
+    doc_comment_prefixes: &["///", "//!", "/**", "#'"],
+    decorator_kinds: &[
+        "decorator",
+        "annotation",
+        "marker_annotation",
+        "normal_annotation",
+        "single_element_annotation",
+        "attribute",
+        "attribute_item",
+        "attribute_list",
+        "property_modifier",
+    ],
+    parameter_container_kinds: &[
+        "parameters",
+        "formal_parameters",
+        "parameter_list",
+        "function_value_parameters",
+        "formal_parameter_list",
+        "lambda_parameters",
+        "lambda_function_type_parameters",
+        "expr_args",
+        "arguments",
+    ],
+    parameter_kinds: &[
+        "parameter",
+        "method_parameter",
+        "formal_parameter",
+        "lambda_parameter",
+    ],
+    parameter_modifier_kinds: &[
+        "parameter_modifiers",
+        "modifiers",
+        "annotation_list",
+        "attribute_list",
+    ],
+    parameter_annotation_kinds: &["marker_annotation", "annotation", "attribute", "decorator"],
+    parameter_annotation_name_extractor: None,
+    keyword_parameter_kinds: &["keyword_argument", "keyword_declarator"],
+    parameter_selector_kinds: &["keyword", "selector_keyword", "identifier"],
+    implicit_parameter_kinds: &["implicit_parameter"],
+    self_parameter_kinds: &["self_parameter"],
+    last_identifier_parameter_kinds: &["method_parameter"],
+    binding_identifier_kinds: &[
+        "identifier",
+        "simple_identifier",
+        "variable_name",
+        "varname",
+        "shorthand_property_identifier_pattern",
+    ],
+    non_binding_pattern_kinds: &[
+        "variable_reference_pattern",
+        "reference_pattern",
+        "pin_pattern",
+        "pin",
+    ],
+    binding_lhs_pattern_kinds: &["assignment_pattern"],
+    binding_pattern_field_names: &["left", "name"],
+    pattern_head_value_kinds: &["class_pattern"],
+    multi_segment_value_pattern_kinds: &["dotted_name"],
+    non_binding_pattern_field_names: &[
+        "type",
+        "key",
+        "class",
+        "path",
+        "constructor",
+        "guard",
+        "function",
+        "method",
+        "operator",
+    ],
+    binding_name_extractor: None,
+    binding_name_filter: None,
+    pattern_binding_extractor: None,
+    projected_pattern_binding_extractor: None,
+    anonymous_variadic_token: Some("..."),
+    variadic_parameter_kinds: &[
+        "variadic_parameter",
+        "variadic_declaration",
+        "vararg_expression",
+        "spread_parameter",
+        "rest_parameter",
+        "rest_pattern",
+        "list_splat_pattern",
+        "splat_parameter",
+    ],
+    destructured_parameter_kinds: &[
+        "object_pattern",
+        "array_pattern",
+        "object_type",
+        "tuple_pattern",
+        "rest_pattern",
+    ],
+    identifier_kinds: &[
+        "identifier",
+        "simple_identifier",
+        "constant",
+        "variable_name",
+        "var",
+        "varname",
+        "name",
+        "property_identifier",
+        "shorthand_property_identifier",
+        "scope_resolution",
+        "interpolated_identifier",
+        "identifier_dollar_escaped",
+    ],
+    aggregate_pattern_kinds: &[
+        "array_pattern",
+        "destructuring_pattern",
+        "expression_list",
+        "left_assignment_list",
+        "list",
+        "list_expression",
+        "list_literal",
+        "list_pattern",
+        "multi_variable_declaration",
+        "object_pattern",
+        "pattern_list",
+        "struct_pattern",
+        "tuple",
+        "tuple_pattern",
+        "variable_list",
+        "variables",
+    ],
+    comprehension_kinds: &[
+        "list_comprehension",
+        "dictionary_comprehension",
+        "set_comprehension",
+        "generator_expression",
+        "binary_comprehension",
+        "map_comprehension",
+    ],
+    comprehension_binding_clause_kinds: &["for_in_clause", "generator", "b_generator", "m_generator"],
+    comprehension_binding_extractor: None,
+    named_aggregate_kinds: &[
+        "object",
+        "dictionary",
+        "hash",
+        "map",
+        "set_or_map_literal",
+        "struct_expression",
+        "initializer_list",
+        "array_creation_expression",
+        "table_constructor",
+        "literal_value",
+    ],
+    positional_aggregate_kinds: &[
+        "tuple",
+        "tuple_expression",
+        "set",
+        "list",
+        "array",
+        "array_literal",
+        "array_expression",
+        "array_initializer",
+        "initializer_list",
+        "array_creation_expression",
+    ],
+    aggregate_pair_kinds: &[
+        "pair",
+        "field",
+        "field_initializer",
+        "initializer_pair",
+        "keyed_element",
+        "dictionary_literal",
+    ],
+    two_child_aggregate_pair_kinds: &["dictionary_pair", "array_element_initializer"],
+    aggregate_pair_extractor: None,
+    aggregate_key_field_names: &["key", "name", "field", "designator"],
+    aggregate_value_field_names: &["value", "expression", "right", "initializer", "element"],
+    static_field_name_kinds: &[
+        "identifier",
+        "simple_identifier",
+        "property_identifier",
+        "field_identifier",
+        "hash_key_symbol",
+    ],
+    shorthand_field_kinds: &[
+        "shorthand_property_identifier",
+        "shorthand_property_identifier_pattern",
+        "shorthand_field_initializer",
+        "shorthand_field_identifier",
+        "field_identifier",
+    ],
+    spread_kinds: &[
+        "spread_element",
+        "spread_expression",
+        "splat_argument",
+        "splat_expression",
+        "base_field_initializer",
+    ],
+    spread_value_field_names: &["argument", "value", "expression", "base"],
+    aggregate_syntax_only_kinds: &["comment", "label", "type_identifier"],
+    multi_child_aggregate_pattern_kinds: &["pattern"],
+    lambda_value_container_kinds: &["object", "pair", "array", "object_literal", "array_literal"],
+    transparent_call_wrapper_kinds: &[
+        "field_expression",
+        "member_expression",
+        "member_access_expression",
+        "navigation_expression",
+        "selector_expression",
+        "scoped_identifier",
+        "scope_resolution",
+        "selector",
+        "postfix_expression",
+        "parenthesized_expression",
+        "expression",
+        "primary_expression",
+        "await",
+        "await_expression",
+        "co_await_expression",
+        "try_expression",
+        "as_expression",
+        "satisfies_expression",
+        "non_null_expression",
+        "type_assertion",
+        "dot",
+    ],
+    single_expression_group_kinds: &["expression_list", "expressions", "expression_series"],
+    assignment_target_wrapper_kinds: &[
+        "variable_declarator",
+        "init_declarator",
+        "declarator",
+        "property_identifier",
+        "variable_declaration",
+        "function_declarator",
+        "pointer_declarator",
+        "parenthesized_declarator",
+        "block_pointer_declarator",
+        "multi_variable_declaration",
+    ],
+    binding_declaration_keyword_spellings: &["val", "var", "let", "const", "auto", "type"],
     assignment_kinds: &[
         "assignment",
         "assignment_expression",
@@ -1502,6 +2366,25 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         // C / C++ / Objective-C `int x = ...` initializer declarators.
         "init_declarator",
     ],
+    assignment_semantics_extractor: None,
+    assignment_place_extractor: None,
+    compound_assignment_kinds: &[
+        "augmented_assignment",
+        "augmented_assignment_expression",
+        "compound_assignment_expr",
+        "operator_assignment",
+    ],
+    compound_assignment_operators: &[
+        "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", ".=", "<<=", ">>=", "??=", "~=",
+    ],
+    type_only_declaration_kinds: &[
+        "variable_declaration",
+        "parameter",
+        "formal_parameter",
+        "field_declaration",
+    ],
+    positional_aggregate_assignment_kinds: &["init_declarator"],
+    positional_aggregate_value_kinds: &["initializer_list"],
     return_kinds: &[
         "return_statement",
         "return_expression",
@@ -1536,6 +2419,10 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         // lambda.
         "do_block",
     ],
+    inline_closure_kinds: &["block", "do_block"],
+    implicit_lambda_parameter_name: Some("it"),
+    lambda_body_field_names: &["body"],
+    lambda_body_kinds: &["lambda_literal", "closure_expression", "lambda_expression"],
     try_kinds: &[
         "try_statement",
         "try_expression",
@@ -1569,6 +2456,8 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         "ensure",
         "ensure_clause",
     ],
+    try_fallback_body_kinds: &["block", "compound_statement"],
+    catch_body_follows_marker: true,
     break_kinds: &[
         "break_statement",
         "break_expression",
@@ -1589,6 +2478,7 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         // Perl's `next` form.
         "next_statement",
     ],
+    control_label_field_names: &["label"],
     yield_kinds: &[
         "yield",
         "yield_statement",
@@ -1598,6 +2488,7 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         "co_yield_statement",
         "co_yield_expression",
     ],
+    yield_value_field_names: &["value", "expression", "argument"],
     await_kinds: &[
         "await",
         "await_expression",
@@ -1606,25 +2497,39 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         "co_await_expression",
     ],
     defer_kinds: &["defer_statement", "defer_expression"],
+    deferred_body_extractor: None,
     using_kinds: &[
         // Python context-manager statement.
         "with_statement",
         // C# `using (var x = ...) { ... }` block form.
         "using_statement",
     ],
+    using_body_field_names: &["body", "block"],
+    try_body_field_names: &["body", "block"],
+    using_alias_extractor: None,
     special_forms: &[],
     runtime_type_guard_calls: &[],
     runtime_type_guard_operators: &[],
     runtime_typeof_operators: &[],
     runtime_type_equality_operators: &[],
+    runtime_type_wrapper_kinds: &["parenthesized_expression", "parenthesized", "condition"],
     value_free_expression_kinds: &[],
     value_free_call_names: &[],
     value_free_unary_operators: &[],
     call_ref_kinds: &[],
     member_expression_kinds: &[],
     subscript_expression_kinds: &[],
+    member_base_field_names: &["object", "receiver", "value", "operand", "target", "expression"],
+    member_name_field_names: &["field", "property", "name", "member", "method"],
+    subscript_base_field_names: &["object", "receiver", "value", "operand", "target"],
+    subscript_index_field_names: &["index", "subscript", "key"],
+    static_subscript_key_extractor: None,
+    computed_subscript_extractor: None,
     sigil_variable_kinds: &[],
     global_variable_kinds: &[],
+    reference_name_extractor: None,
+    expression_place_extractor: None,
+    indirect_place_operand_extractor: None,
     subscript_base_call_refs: false,
     non_call_ref_names: &[],
     call_name_suffix_tokens: &[],
@@ -1632,6 +2537,7 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
     callable_reference_kinds: &[],
     callable_reference_extractor: None,
     method_receiver_param_index: None,
+    receiver_presence_extractor: None,
     implicit_receiver_names: &[],
     implicit_receiver_prefixes: &[],
     tail_expression_returns: false,
@@ -1707,6 +2613,10 @@ impl GrammarHandler {
     fn is_assignment(&self, k: &str) -> bool {
         self.assignment_kinds.contains(&k)
     }
+    fn assignment_semantics(&self, node: Node<'_>, src: &[u8]) -> AssignmentNodeSemantics {
+        self.assignment_semantics_extractor
+            .map_or(AssignmentNodeSemantics::Assignment, |extract| extract(node, src))
+    }
     fn is_return(&self, k: &str) -> bool {
         self.return_kinds.contains(&k)
     }
@@ -1715,6 +2625,44 @@ impl GrammarHandler {
     }
     fn is_lambda(&self, k: &str) -> bool {
         self.lambda_kinds.contains(&k)
+    }
+    fn is_literal_value(&self, kind: &str, text: &str) -> bool {
+        self.literal_value_kinds.contains(&kind) || self.literal_value_spellings.contains(&text.trim())
+    }
+    fn is_string_literal(&self, kind: &str) -> bool {
+        self.string_literal_kinds.contains(&kind)
+    }
+    /// Classify a complete parsed value expression using only this grammar's
+    /// inventories and optional exact callback.
+    pub fn expression_value_kind(&self, mut node: Node<'_>, src: &[u8]) -> Option<crate::AssignValueKind> {
+        loop {
+            if let Some(kind) = self
+                .expression_value_kind_extractor
+                .and_then(|extract| extract(node, src))
+            {
+                return Some(kind);
+            }
+            let is_literal = if self.is_string_literal(node.kind()) {
+                !string_expression_has_dynamic_input(node, src, self)
+            } else {
+                self.is_literal_value(node.kind(), node_text(&node, src))
+            };
+            if is_literal {
+                return Some(crate::AssignValueKind::Literal);
+            }
+            if !self.single_expression_group_kinds.contains(&node.kind())
+                && !self.transparent_expression_wrapper_kinds.contains(&node.kind())
+            {
+                return None;
+            }
+            let mut cursor = node.walk();
+            let mut children = node.named_children(&mut cursor);
+            let child = children.next()?;
+            if children.next().is_some() || child.id() == node.id() {
+                return None;
+            }
+            node = child;
+        }
     }
     fn is_constructor_method(&self, name: &str) -> bool {
         self.constructor_names.contains(&name)
@@ -1751,11 +2699,43 @@ impl GrammarHandler {
     }
 }
 
+/// A grammar's string node kind describes syntax, not constantness. Template,
+/// interpolation, and formatted-string grammars commonly use that same outer
+/// node for both static text and expressions with runtime inputs. Only call a
+/// complete string expression a literal when its Tree-sitter subtree contains
+/// no adapter-declared identifier read, implicit receiver, or call.
+fn string_expression_has_dynamic_input(node: Node<'_>, src: &[u8], handler: &GrammarHandler) -> bool {
+    let mut stack = Vec::new();
+    let mut cursor = node.walk();
+    stack.extend(node.named_children(&mut cursor));
+    while let Some(current) = stack.pop() {
+        if handler.identifier_kinds.contains(&current.kind())
+            || handler.sigil_variable_kinds.contains(&current.kind())
+            || handler.global_variable_kinds.contains(&current.kind())
+            || handler.is_call(current.kind())
+        {
+            return true;
+        }
+        if current.named_child_count() == 0 {
+            let text = node_text(&current, src).trim();
+            if handler.implicit_receiver_names.contains(&text) {
+                return true;
+            }
+        }
+        let mut cursor = current.walk();
+        stack.extend(current.named_children(&mut cursor));
+    }
+    false
+}
+
 /// Select an assignment target from Tree-sitter fields and named-node
 /// relationships. Downstream consumers must not split the surrounding source
 /// statement to rediscover this node.
-fn assignment_target_pattern_node<'tree>(node: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
-    let kind = node.kind();
+fn assignment_target_pattern_node<'tree>(
+    node: Node<'tree>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<Node<'tree>> {
     node.child_by_field_name("left")
         .or_else(|| node.child_by_field_name("lhs"))
         .or_else(|| node.child_by_field_name("target"))
@@ -1763,38 +2743,62 @@ fn assignment_target_pattern_node<'tree>(node: Node<'tree>, src: &[u8]) -> Optio
         .or_else(|| node.child_by_field_name("pattern"))
         .or_else(|| node.child_by_field_name("declarator"))
         .or_else(|| {
-            (kind == "property_declaration")
-                .then(|| {
-                    first_named_child_of_kind(&node, "multi_variable_declaration")
-                        .or_else(|| first_named_child_of_kind(&node, "variable_declaration"))
-                })
-                .flatten()
+            let mut cursor = node.walk();
+            let selected = node
+                .named_children(&mut cursor)
+                .find(|child| handler.assignment_target_wrapper_kinds.contains(&child.kind()));
+            selected
         })
-        .or_else(|| first_non_keyword_named_child(&node, src))
+        .or_else(|| first_non_keyword_named_child(&node, src, handler))
 }
 
-fn assignment_target_node<'tree>(node: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
-    let target = assignment_target_pattern_node(node, src)?;
-    Some(match target.kind() {
-        "variable_declarator"
-        | "init_declarator"
-        | "declarator"
-        | "property_identifier"
-        | "variable_declaration"
-        | "function_declarator"
-        | "pointer_declarator"
-        | "parenthesized_declarator"
-        | "block_pointer_declarator" => target
-            .child_by_field_name("name")
-            .or_else(|| {
-                first_named_child_of_kind(&target, "variable_declarator")
-                    .and_then(|decl| decl.child_by_field_name("name"))
+fn assignment_target_node<'tree>(
+    node: Node<'tree>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<Node<'tree>> {
+    let mut target = assignment_target_pattern_node(node, src, handler)?;
+    // Some grammars wrap even a single assignment LHS in an expression-list
+    // node. Unwrap only a structurally singular group; multi-target groups
+    // remain intact for parallel-binding lowering.
+    if handler.single_expression_group_kinds.contains(&target.kind()) {
+        let mut cursor = target.walk();
+        let mut children = target.named_children(&mut cursor);
+        if let Some(only) = children.next() {
+            if children.next().is_none() {
+                target = only;
+            }
+        }
+    }
+    Some(
+        if handler.assignment_target_wrapper_kinds.contains(&target.kind())
+            // Some grammars use a wrapper for a complete assignable place,
+            // not merely for a declaration name.  Preserve that exact CST
+            // node when the adapter can lower it; otherwise the generic
+            // identifier fallback would silently turn `object.field` into
+            // `object` before place extraction runs.
+            && !handler.expression_place_extractor.is_some_and(|extract| {
+                let places = extract(target, src);
+                !places.places.is_empty() && places.consumed_node_ids.contains(&target.id())
             })
-            .or_else(|| first_identifier_descendant(target))
-            .or_else(|| first_non_keyword_named_child(&target, src))
-            .unwrap_or(target),
-        _ => target,
-    })
+        {
+            target
+                .child_by_field_name("name")
+                .or_else(|| {
+                    let mut cursor = target.walk();
+                    let selected = target
+                        .named_children(&mut cursor)
+                        .find(|child| handler.assignment_target_wrapper_kinds.contains(&child.kind()))
+                        .and_then(|decl| decl.child_by_field_name("name"));
+                    selected
+                })
+                .or_else(|| first_identifier_descendant(target))
+                .or_else(|| first_non_keyword_named_child(&target, src, handler))
+                .unwrap_or(target)
+        } else {
+            target
+        },
+    )
 }
 
 /// Select an assignment RHS from Tree-sitter fields. The last-named-child
@@ -1812,22 +2816,6 @@ fn assignment_value_node<'tree>(node: Node<'tree>, target_node: Option<Node<'tre
         .or_else(|| node.child_by_field_name("value").filter(Node::is_named))
         .or_else(|| node.child_by_field_name("result").filter(Node::is_named))
         .or_else(|| last_named_child_excluding(&node, target_node))
-}
-
-fn has_direct_token(node: &Node<'_>, src: &[u8], expected: &str) -> bool {
-    let mut cursor = node.walk();
-    if !cursor.goto_first_child() {
-        return false;
-    }
-    loop {
-        let child = cursor.node();
-        if !child.is_named() && node_text(&child, src).trim() == expected {
-            return true;
-        }
-        if !cursor.goto_next_sibling() {
-            return false;
-        }
-    }
 }
 
 /// Return the compiler-resolved callable name for assignment RHS syntax that
@@ -1880,42 +2868,18 @@ pub fn walk_flow_events(
     out
 }
 
-fn walk_deep_sequence_executable_nodes(
-    root: Node<'_>,
+/// Lower one nested executable CST node into an existing event list using
+/// the active adapter contract. Adapter callbacks use this when a language
+/// construct owns several separately-classified body regions.
+pub fn walk_flow_node_into(
+    node: Node<'_>,
     file: FileId,
     src: &[u8],
     handler: &GrammarHandler,
     class_names: &[String],
     out: &mut Vec<FlowEvent>,
 ) {
-    // Iterative pre-order over the sequence's executable nodes. Children
-    // are pushed in REVERSE so the LIFO stack pops them in source order —
-    // otherwise a comma/sequence expression (`(a = gets(s), system(a))`)
-    // emits its events backwards, so the sink appears "before" the
-    // assignment that taints it (breaks ordered intra-analysis and the
-    // last-write clean-overwrite accounting).
-    let mut stack: Vec<Node<'_>> = Vec::new();
-    {
-        let mut cursor = root.walk();
-        let children: Vec<Node<'_>> = root.named_children(&mut cursor).collect();
-        stack.extend(children.into_iter().rev());
-    }
-    while let Some(node) = stack.pop() {
-        let kind = node.kind();
-        if is_large_literal_initializer_node(kind, &node) {
-            continue;
-        }
-        if is_initializer_list_kind(kind)
-            || kind == "comma_expression"
-            || !(handler.is_assignment(kind) || handler.is_call(kind) || kind == "selector")
-        {
-            let mut cursor = node.walk();
-            let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
-            stack.extend(children.into_iter().rev());
-            continue;
-        }
-        walk_into(node, file, src, handler, class_names, out, false);
-    }
+    walk_into(node, file, src, handler, class_names, out, false);
 }
 
 /// Recursive flow-event emitter. The biggest single function in the
@@ -1929,8 +2893,8 @@ fn walk_deep_sequence_executable_nodes(
 ///
 /// 1. **Skippable nested fn/class** — early return; their events
 ///    belong to their own decls.
-/// 2. **`if` / `match` / `case`** (line ~709) — emit `Branch` with
-///    then/else_events, calls `repair_branch_events_by_else_keyword`.
+/// 2. **`if` / `match` / `case`** — emit `Branch` from the grammar's
+///    fields and adapter-declared arm/alternative kinds.
 /// 3. **`for` / `foreach` / `while` / `loop` / `do`** (~790) — emit
 ///    `Loop { kind, body }`. `extract_foreach_binding_assigns` adds
 ///    synthetic Assigns for binding shapes.
@@ -1964,32 +2928,16 @@ fn walk_deep_sequence_executable_nodes(
 /// (a genexpr passed as a call arg — `any(f(t) for t in xs)` — exposes
 /// the `generator_expression` directly as the call's `arguments` field,
 /// so it must be walked AS a comprehension, not iterated as a container).
-fn is_comprehension_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "list_comprehension"
-            | "dict_comprehension"
-            | "dictionary_comprehension"
-            | "set_comprehension"
-            | "generator_expression"
-            | "array_comprehension"
-            // Erlang `<< <<X>> || <<X>> <= Bin >>` (its list form shares
-            // Python's `list_comprehension` kind name).
-            | "binary_comprehension"
-            // Erlang OTP 26+ map comprehension `#{K => V || ...}`.
-            | "map_comprehension"
-    )
+fn is_comprehension_kind(kind: &str, handler: &GrammarHandler) -> bool {
+    handler.comprehension_kinds.contains(&kind)
 }
 
 /// Node kinds that bind a comprehension's loop variable from its
 /// iterable. Python/JS: `for_in_clause` / `comp_for` (direct children of
 /// the comprehension). Erlang: `generator` / `b_generator` / `m_generator`
 /// (`X <- List`, `<<X>> <= Bin`), nested under wrapper nodes.
-fn is_comprehension_binding_clause(kind: &str) -> bool {
-    matches!(
-        kind,
-        "for_in_clause" | "comp_for" | "generator" | "b_generator" | "m_generator"
-    )
+fn is_comprehension_binding_clause(kind: &str, handler: &GrammarHandler) -> bool {
+    handler.comprehension_binding_clause_kinds.contains(&kind)
 }
 
 /// Declared type surrounding an assignment-shaped initializer node.
@@ -2018,171 +2966,44 @@ fn assignment_declared_type(node: &Node<'_>, src: &[u8]) -> Option<String> {
     None
 }
 
-/// Walk a using-clause subtree (`with_clause`/`using_declaration` and
-/// their `with_item`/`using_variable_declaration` children) and emit
-/// a synthetic `FlowEvent::Assign` for every `as`-bound name found.
-///
-/// `with Transaction(runner, tag) as tx:` looks like
-/// `with_statement > with_clause > with_item { value: <call>, alias:
-/// <ident "tx"> }` (newer grammars) or wraps the binding in an
-/// `as_pattern { value, alias }` node (older grammars). Without this
-/// emission the binding `tx` has no assignment record, so the alias
-/// map cannot bind `tx → Type{Transaction}` and the receiver-typed
-/// dispatch for `tx.perform(...)` fails. The synthetic Assign feeds
-/// into [`extend_alias_map_with_flow_events`] just like a regular
-/// `tx = Transaction(runner, tag)` would.
-fn emit_using_as_pattern_assigns(
-    node: tree_sitter::Node<'_>,
-    file: bonsai_common::FileId,
+fn emit_using_alias_assigns(
+    node: Node<'_>,
+    file: FileId,
     src: &[u8],
-    out: &mut Vec<crate::FlowEvent>,
+    handler: &GrammarHandler,
+    out: &mut Vec<FlowEvent>,
 ) {
-    fn extract_alias_target<'a>(node: tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
-        let alias = node
-            .child_by_field_name("alias")
-            .or_else(|| node.child_by_field_name("name"))?;
-        match alias.kind() {
-            "identifier" | "simple_identifier" | "variable_name" | "name" | "type_identifier" => Some(alias),
-            _ => first_identifier_descendant(alias).or(Some(alias)),
-        }
-    }
-
-    fn extract_alias_value<'a>(node: tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
-        if let Some(value_field) = node
-            .child_by_field_name("value")
-            .or_else(|| node.child_by_field_name("expression"))
-            .or_else(|| node.child_by_field_name("init"))
-            .or_else(|| node.child_by_field_name("initializer"))
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if let Some((name_node, value_node)) =
+            handler.using_alias_extractor.and_then(|extract| extract(current))
         {
-            return Some(value_field);
-        }
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            if matches!(
-                child.kind(),
-                "call"
-                    | "call_expression"
-                    | "object_creation_expression"
-                    | "instance_expression"
-                    | "new_expression"
-            ) {
-                return Some(child);
-            }
-        }
-        None
-    }
-
-    let mut work = vec![node];
-    let mut emitted_spans: std::collections::HashSet<bonsai_common::Span> = std::collections::HashSet::new();
-    while let Some(current) = work.pop() {
-        // Match only the binding shapes the main walker doesn't
-        // already turn into `Assign` events. `variable_declarator`,
-        // `variable_declaration`, and `init_declarator` are in
-        // [`GrammarHandler::assignment_kinds`] and would emit a
-        // duplicate Assign here; let the main walker own those.
-        if matches!(
-            current.kind(),
-            "with_item"
-                | "with_variable_assignment"
-                | "with_declarator"
-                | "as_pattern"
-                | "using_variable_declaration"
-                | "using_declarator"
-        ) {
-            if let (Some(name_node), Some(value_node)) =
-                (extract_alias_target(current), extract_alias_value(current))
-            {
-                let target = node_text(&name_node, src).trim().to_string();
-                let value_text = node_text(&value_node, src).trim().to_string();
-                let span = span_of(file, &current);
-                if !target.is_empty() && !value_text.is_empty() && emitted_spans.insert(span) {
-                    let (source_call, source_call_args, source_names) =
-                        synthesize_assign_components_from_value(value_node, src, &value_text);
-                    out.push(crate::FlowEvent::Assign {
-                        span,
-                        target,
-                        source_name: None,
-                        source_call,
-                        source_call_args,
-                        source_names,
-                        declares_new_binding: false,
-                        value_kind: None,
-                    });
+            let target = argument_place(&name_node, src, handler)
+                .unwrap_or_else(|| node_text(&name_node, src).trim().to_string());
+            let value_text = normalize_call_name_whitespace(node_text(&value_node, src));
+            if !target.is_empty() && !value_text.is_empty() {
+                let (source_call, source_call_args) =
+                    extract_direct_call_info(&value_node, src, handler).unwrap_or((None, Vec::new()));
+                let mut source_names = extract_rhs_expr_operands(&value_node, src, handler);
+                if let Some(place) = argument_place(&value_node, src, handler) {
+                    source_names.push(place);
                 }
+                source_names.sort();
+                source_names.dedup();
+                out.push(FlowEvent::Assign {
+                    span: span_of(file, &current),
+                    target,
+                    source_name: None,
+                    source_call,
+                    source_call_args,
+                    source_names,
+                    declares_new_binding: true,
+                    value_kind: handler.expression_value_kind(value_node, src),
+                });
             }
         }
-        // Always descend: an outer container (`with_item`) may not
-        // expose alias/value fields directly but its inner
-        // `as_pattern` does, and vice versa. The `emitted_spans`
-        // set prevents duplicate emission when both levels match.
         let mut cursor = current.walk();
-        for child in current.named_children(&mut cursor) {
-            work.push(child);
-        }
-    }
-}
-
-fn synthesize_assign_components_from_value(
-    value_node: tree_sitter::Node<'_>,
-    src: &[u8],
-    value_text: &str,
-) -> (Option<String>, Vec<String>, Vec<String>) {
-    if matches!(
-        value_node.kind(),
-        "call" | "call_expression" | "object_creation_expression" | "instance_expression" | "new_expression"
-    ) {
-        // Constructor or call: pull out the callee tail so
-        // `extend_alias_map_with_flow_events` recognises the
-        // PascalCase constructor convention and binds the target as
-        // a Type alias. Argument operands feed source_call_args so
-        // the engine sees what data flowed into the call.
-        let callee_node = value_node
-            .child_by_field_name("function")
-            .or_else(|| value_node.child_by_field_name("type"))
-            .or_else(|| value_node.child_by_field_name("name"))
-            .or_else(|| {
-                let mut cursor = value_node.walk();
-                let mut found = None;
-                for child in value_node.named_children(&mut cursor) {
-                    if matches!(
-                        child.kind(),
-                        "identifier" | "simple_identifier" | "type_identifier" | "navigation_expression"
-                    ) {
-                        found = Some(child);
-                        break;
-                    }
-                }
-                found
-            });
-        let callee = callee_node
-            .map(|n| node_text(&n, src).trim().to_string())
-            .unwrap_or_else(|| value_text.to_string());
-        let arguments = value_node
-            .child_by_field_name("arguments")
-            .or_else(|| value_node.child_by_field_name("argument_list"));
-        let mut args: Vec<String> = Vec::new();
-        if let Some(args_node) = arguments {
-            let mut cursor = args_node.walk();
-            for child in args_node.named_children(&mut cursor) {
-                let text = node_text(&child, src).trim().to_string();
-                if !text.is_empty() {
-                    args.push(text);
-                }
-            }
-        }
-        let mut source_names = vec![callee.clone()];
-        let tail = bonsai_common::short_qualified_tail(&callee);
-        if tail != callee {
-            let tail = tail.trim().to_string();
-            if !tail.is_empty() && !source_names.contains(&tail) {
-                source_names.push(tail);
-            }
-        }
-        (Some(callee), args, source_names)
-    } else {
-        // Bare identifier or expression: surface as source_names so
-        // engine taint propagation picks up any tainted operand.
-        (None, Vec::new(), vec![value_text.to_string()])
+        stack.extend(current.named_children(&mut cursor));
     }
 }
 
@@ -2246,8 +3067,9 @@ fn append_tail_expression_return(
     }
     events.push(FlowEvent::Return {
         span,
+        value_kind: handler.expression_value_kind(tail, src),
         value_text: Some(text),
-        value_name: tail_expression_value_name(&tail, src),
+        value_name: tail_expression_value_name(&tail, src, handler),
         value_flow: expression_flow::expression_flow_from_node_with_handler(tail, file, src, handler),
     });
 }
@@ -2272,8 +3094,9 @@ fn append_expression_body_return(
     }
     events.push(FlowEvent::Return {
         span,
+        value_kind: handler.expression_value_kind(*body, src),
         value_text: Some(text),
-        value_name: tail_expression_value_name(body, src),
+        value_name: tail_expression_value_name(body, src, handler),
         value_flow: expression_flow::expression_flow_from_node_with_handler(*body, file, src, handler),
     });
 }
@@ -2345,11 +3168,6 @@ fn implicit_return_expression_node<'tree>(
         return None;
     }
     implicit_return_expression_node(&first, handler).or(Some(first))
-}
-
-fn last_named_child<'a>(node: &Node<'a>) -> Option<Node<'a>> {
-    let mut cursor = node.walk();
-    node.named_children(&mut cursor).last()
 }
 
 /// Last named child that is not a comment. Used by tail-expression
@@ -2806,15 +3624,15 @@ fn call_invokes_local_binding(name: &str, receiver: Option<&str>, binding: &str)
         .is_some_and(|(head, _)| same_identifier_name(head, binding))
 }
 
-fn tail_expression_value_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
+fn tail_expression_value_name(node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> Option<String> {
     if looks_like_identifier(node.kind()) {
         let text = node_text(node, src).trim().to_string();
-        if !text.is_empty() && !looks_like_literal_value(node.kind(), &text) {
+        if !text.is_empty() && !handler.is_literal_value(node.kind(), &text) {
             return Some(text);
         }
     }
     let text = node_text(node, src).trim();
-    (looks_like_bare_identifier(text) && !looks_like_literal_value(node.kind(), text))
+    (looks_like_bare_identifier(text) && !handler.is_literal_value(node.kind(), text))
         .then(|| text.to_string())
 }
 
@@ -2822,10 +3640,9 @@ fn tail_expression_value_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
 /// call_expression nodes. Each such node is walked via `walk_into`
 /// so `build_call_event` fires on it, producing a structured Call
 /// event (with its own args / callee text) for every step in the
-/// chain. Passes through field-access wrappers (`field_expression`,
-/// `member_expression`, navigation / selector / scope-resolution
-/// nodes) that don't themselves carry args but contain the inner
-/// call. Stops at leaves that can't host a call.
+/// chain. Traversal follows the parsed receiver subtree rather than a shared
+/// inventory of wrapper node spellings; only adapter-declared call kinds can
+/// emit events.
 fn walk_method_chain_receivers(
     node: Node<'_>,
     file: FileId,
@@ -2845,112 +3662,92 @@ fn walk_method_chain_receivers(
         walk_into(node, file, src, handler, class_names, out, false);
         return;
     }
-    // Wrapper kinds that hold a nested call / further wrapper on their
-    // `value` / `object` / `receiver` / `function` / `expression` /
-    // `target` field. We don't enumerate every wrapper kind — we just
-    // look for these field names and a few common node shapes.
-    const WRAPPER_KINDS: &[&str] = &[
-        "field_expression",
-        "member_expression",
-        "member_access_expression",
-        "navigation_expression",
-        "selector_expression",
-        "scoped_identifier",
-        "scope_resolution",
-        "selector",
-        "postfix_expression",
-        "parenthesized_expression",
-        "expression",
-        "primary_expression",
-        "dot",
-        // Python member access (`a.b(x).c()` → the outer call's callee is
-        // an `attribute` whose `object` is the inner call). Without this,
-        // every inner call in a Python method chain — e.g. the
-        // `cursor.execute(sql)` in `cursor.execute(sql).fetchall()` — is
-        // dropped along with its args. `subscript` covers the computed
-        // form `f()[i].m()`. Descent only emits on nodes that ARE calls,
-        // so pure attribute/subscript chains add no spurious events.
-        "attribute",
-        "subscript",
-        "subscript_expression",
-    ];
-    if !WRAPPER_KINDS.contains(&node.kind()) && !handler.is_lambda(node.kind()) {
-        // Leaf or unknown wrapper — nothing more to do.
+    // A receiver-side lambda introduces its own callable scope; its body is
+    // lowered by the lambda pass, not as part of the enclosing method chain.
+    if handler.is_lambda(node.kind()) {
         return;
     }
-    let next = node
-        .child_by_field_name("value")
-        .or_else(|| node.child_by_field_name("object"))
-        .or_else(|| node.child_by_field_name("receiver"))
-        .or_else(|| node.child_by_field_name("function"))
-        .or_else(|| node.child_by_field_name("callee"))
-        .or_else(|| node.child_by_field_name("operand"))
-        .or_else(|| node.child_by_field_name("expression"))
-        .or_else(|| node.child_by_field_name("target"))
-        // Kotlin navigation_expression children are positional rather than
-        // field-labelled; source order makes the first child its receiver.
-        .or_else(|| first_named_child(&node));
-    if let Some(inner) = next {
-        walk_method_chain_receivers(inner, file, src, handler, class_names, out);
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        walk_method_chain_receivers(child, file, src, handler, class_names, out);
     }
-}
-
-struct ParsedCallTarget<'tree> {
-    node: Node<'tree>,
-    full_text: String,
 }
 
 /// Select the semantic callee node once from grammar fields. Both call-event
 /// lowering and file-local receiver facts use this result, so their span join
 /// cannot drift and receiver collection does not rebuild every argument list.
-fn parsed_call_target<'tree>(node: &Node<'tree>, src: &[u8]) -> Option<ParsedCallTarget<'tree>> {
-    // Method-invocation shapes across grammars use different field
-    // names for the receiver and the method identifier. Concatenate
-    // them into a `receiver.method` string so the full callee path
-    // is preserved:
-    //   * Ruby:                receiver + method            → `r.m`
-    //   * Java:                object   + name              → `o.name`
-    //   * PHP arrow-call:      object   + name  (sep `->`)  → `o->name`
-    //   * C#  member_access:   expression + name            → `e.name`
-    // Without this, `Runtime.getRuntime().exec(x)` in Java would
-    // collapse to just `exec` (losing the qualified path) and
-    // `$conn->query($q)` in PHP would collapse to just `query`.
-    let method_compound = method_receiver_name(node, src);
-    let erlang_remote = erlang_remote_callee(node, src);
-    let callee_node = node
-        .child_by_field_name("function")
-        .or_else(|| node.child_by_field_name("constructor"))
-        .or_else(|| node.child_by_field_name("type"))
-        .or_else(|| node.child_by_field_name("callee"))
-        .or_else(|| erlang_remote.as_ref().map(|(n, _)| *n))
-        .or_else(|| method_compound.as_ref().map(|(n, _)| *n))
-        .or_else(|| node.child_by_field_name("name"))
-        // Many grammars (Kotlin, Swift) don't name the callee field; the
-        // first named child IS the call target (e.g. a navigation_expression
-        // for `list.add`). Prefer that over walking to the first identifier.
-        .or_else(|| first_named_child(node))
-        .or_else(|| first_identifier_like_child(node))
-        .or_else(|| first_identifier_descendant(*node))?;
-    let mut full_text = erlang_remote
+fn parsed_call_target<'tree>(
+    node: &Node<'tree>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<CallTargetExtraction<'tree>> {
+    if let Some(extract) = handler.call_target_extractor {
+        return extract(*node, src);
+    }
+    let receiver = handler
+        .call_receiver_field_names
+        .iter()
+        .find_map(|field| node.child_by_field_name(field));
+    let member = handler
+        .call_member_field_names
+        .iter()
+        .find_map(|field| node.child_by_field_name(field));
+    let compound = receiver.zip(member).and_then(|(receiver, member)| {
+        let receiver_name = call_target_component(receiver, src, handler)?;
+        let member_name = node_text(&member, src).trim();
+        (!receiver_name.is_empty() && !member_name.is_empty())
+            .then(|| (member, format!("{receiver_name}.{member_name}")))
+    });
+    let callee_node = handler
+        .constructor_type_field_names
+        .iter()
+        .find_map(|field| node.child_by_field_name(field))
+        .or_else(|| {
+            handler
+                .call_callee_field_names
+                .iter()
+                .find_map(|field| node.child_by_field_name(field))
+        })
+        .or_else(|| compound.as_ref().map(|(n, _)| *n))
+        .or_else(|| {
+            handler
+                .call_callee_is_first_named_child
+                .then(|| first_named_child(node))
+                .flatten()
+        })?;
+    let mut full_text = compound
         .as_ref()
         .map(|(_, name)| name.as_str())
-        .or_else(|| method_compound.as_ref().map(|(_, name)| name.as_str()))
-        .unwrap_or_else(|| node_text(&callee_node, src).trim())
+        .map(str::to_string)
+        .or_else(|| call_target_component(callee_node, src, handler))
+        .unwrap_or_default()
         .to_string();
-    if node.kind() == "macro_invocation" && !full_text.ends_with('!') {
-        let node_src = node_text(node, src);
-        let rest = node_src.trim_start().strip_prefix(&full_text).unwrap_or_default();
-        if rest.trim_start().starts_with('!') {
-            full_text.push('!');
+    let node_src = node_text(node, src);
+    let rest = node_src.trim_start().strip_prefix(&full_text).unwrap_or_default();
+    for suffix in handler.call_name_suffix_tokens {
+        if !full_text.ends_with(suffix) && rest.trim_start().starts_with(suffix) {
+            full_text.push_str(suffix);
+            break;
         }
     }
     if full_text.is_empty() {
         return None;
     }
-    Some(ParsedCallTarget {
+    Some(CallTargetExtraction {
         node: callee_node,
         full_text,
     })
+}
+
+fn call_target_component(node: Node<'_>, src: &[u8], handler: &GrammarHandler) -> Option<String> {
+    if let Some(place) = argument_place(&node, src, handler) {
+        return Some(place);
+    }
+    if handler.is_call(node.kind()) {
+        return parsed_call_target(&node, src, handler).map(|target| target.full_text);
+    }
+    let text = node_text(&node, src).trim();
+    (handler.identifier_kinds.contains(&node.kind()) && !text.is_empty()).then(|| text.to_string())
 }
 
 fn build_call_event(
@@ -2960,22 +3757,14 @@ fn build_call_event(
     handler: &GrammarHandler,
     class_names: &[String],
 ) -> Option<FlowEvent> {
-    let target = parsed_call_target(&node, src)?;
+    let target = parsed_call_target(&node, src, handler)?;
     let callee_node = target.node;
     let full_text = target.full_text;
     let is_method = bonsai_common::qualified_name_owner(&full_text).is_some();
     let short = short_name_of(&full_text);
     let is_ctor = class_names.iter().any(|c| c == &full_text || c == short);
     let call_kind = if is_ctor
-        || matches!(
-            node.kind(),
-            "new_expression"
-                | "object_creation_expression"
-                | "instance_expression"
-                | "constructor_invocation"
-                | "explicit_constructor_invocation"
-                | "composite_literal"
-        )
+        || handler.constructor_call_kinds.contains(&node.kind())
         || handler.is_constructor_method(short)
     {
         CallKind::Constructor
@@ -3006,97 +3795,21 @@ fn build_call_event(
     // Find the argument-list child. Grammars disagree on the field name
     // so we try the common ones. Kotlin uses a `call_suffix` wrapper
     // that contains `value_arguments` inside.
-    let arg_list = node
-        .child_by_field_name("arguments")
-        .or_else(|| first_named_child_of_kind(&node, "arguments"))
-        .or_else(|| first_named_child_of_kind(&node, "argument_list"))
-        .or_else(|| first_named_child_of_kind(&node, "value_arguments"))
-        .or_else(|| {
-            // Kotlin: wrap `call_suffix` to find nested value_arguments.
-            first_named_child_of_kind(&node, "call_suffix")
-                .and_then(|cs| first_named_child_of_kind(&cs, "value_arguments"))
-        })
-        .or_else(|| first_named_child_of_kind(&node, "literal_value"))
-        .or_else(|| first_named_child_of_kind(&node, "tuple_expression")); // swift
-
-    // Erlang's `call` node has `args: expr_args` (field name is "args").
-    let erlang_args_field = node
-        .child_by_field_name("args")
-        .or_else(|| erlang_remote_args_node(&node));
-    if let Some(arg_list) = arg_list {
-        let mut cursor = arg_list.walk();
-        for arg in arg_list.named_children(&mut cursor) {
-            let argument_node = arg;
-            // Keyword arg (Python `k=v`, some C# / JS named args, Kotlin
-            // `key = value` inside value_arguments, Dart `name: value`
-            // as named_argument with a `label` child).
-            let (name, value_node) = if arg.kind() == "argument"
-                || arg.kind() == "keyword_argument"
-                || arg.kind() == "named_argument"
-                || arg.kind() == "value_argument"
-                || arg.kind() == "named_expression"
-                || arg.kind() == "labeled_expression"
-                || arg.kind() == "tuple_expression_element"
-            {
-                let structural_named = named_value_argument_parts(arg);
-                // Resolve the name field. Most grammars expose `name`;
-                // Dart's named_argument holds a `label` child whose
-                // first named child is the identifier.
-                let nm = arg
-                    .child_by_field_name("name")
-                    .map(|n| node_text(&n, src).to_string())
-                    .or_else(|| {
-                        arg.named_children(&mut arg.walk())
-                            .find(|c| c.kind() == "label")
-                            .and_then(|lbl| {
-                                lbl.named_children(&mut lbl.walk())
-                                    .next()
-                                    .map(|id| node_text(&id, src).to_string())
-                            })
-                    })
-                    .or_else(|| {
-                        arg.child_by_field_name("label")
-                            .map(|n| node_text(&n, src).trim_end_matches(':').trim().to_string())
-                    })
-                    .or_else(|| structural_named.map(|(name, _)| node_text(&name, src).trim().to_string()));
-                // Resolve the value node.
-                let vn = arg
-                    .child_by_field_name("value")
-                    .or_else(|| arg.child_by_field_name("expression"))
-                    .or_else(|| {
-                        // Dart named_argument: the value is the named
-                        // sibling AFTER the `label` child.
-                        let children: Vec<_> = arg.named_children(&mut arg.walk()).collect();
-                        let label_idx = children.iter().position(|c| c.kind() == "label");
-                        match label_idx {
-                            Some(i) if i + 1 < children.len() => Some(children[i + 1]),
-                            _ => None,
-                        }
-                    })
-                    .or_else(|| structural_named.map(|(_, value)| value))
-                    .unwrap_or_else(|| argument_value_node(arg));
-                (nm, vn)
-            } else {
-                (None, argument_value_node(arg))
-            };
+    let argument_containers = call_argument_containers(node, handler);
+    for arg_list in &argument_containers {
+        let arguments = if handler.is_call(arg_list.kind()) || is_comprehension_kind(arg_list.kind(), handler)
+        {
+            vec![*arg_list]
+        } else {
+            let mut cursor = arg_list.walk();
+            arg_list.named_children(&mut cursor).collect()
+        };
+        for argument_node in arguments {
+            let (name, value_node) = argument_name_and_value(argument_node, src, handler);
             if let Some(argument) =
                 call_arg_from_nodes_with_handler(argument_node, value_node, file, src, name, handler)
             {
                 args.push(argument);
-            }
-        }
-    }
-
-    // Erlang: `args: expr_args` with `args: var` (or identifier-like)
-    // children. expr_args can hold complex expressions; we take each
-    // named child's trimmed text as the value.
-    if let Some(eargs) = erlang_args_field {
-        if eargs.kind() == "expr_args" {
-            let mut cursor = eargs.walk();
-            for arg in eargs.named_children(&mut cursor) {
-                if let Some(argument) = call_arg_from_nodes_with_handler(arg, arg, file, src, None, handler) {
-                    args.push(argument);
-                }
             }
         }
     }
@@ -3109,7 +3822,7 @@ fn build_call_event(
     // identifier / literal / expression children in between. We
     // collect all direct children except the `receiver` field and
     // any child whose field name is `method`.
-    if node.kind() == "message_expression" {
+    if argument_containers.is_empty() && handler.has_special_form(SyntaxSpecialForm::DirectCallArguments) {
         // tree-sitter exposes field names per child via
         // `cursor.field_name()` while walking; we need the cursor
         // form (not `named_children`) to see field names.
@@ -3119,7 +3832,8 @@ fn build_call_event(
                 let child = cur.node();
                 if child.is_named() {
                     let field = cur.field_name();
-                    let skip = matches!(field, Some("receiver" | "method"));
+                    let skip = field
+                        .is_some_and(|field| handler.direct_call_argument_excluded_fields.contains(&field));
                     if !skip {
                         if let Some(argument) =
                             call_arg_from_nodes_with_handler(child, child, file, src, None, handler)
@@ -3135,10 +3849,12 @@ fn build_call_event(
         }
     }
 
-    let receiver_types = inline_constructed_receiver_type(&node, src).into_iter().collect();
+    let receiver_types = inline_constructed_receiver_type(&node, src, handler)
+        .into_iter()
+        .collect();
     Some(FlowEvent::Call {
         span: span_of(file, &callee_node),
-        receiver: call_receiver_from_name(&name),
+        receiver: parsed_call_receiver_text(&node, src, handler),
         receiver_types,
         name,
         call_kind,
@@ -3146,72 +3862,65 @@ fn build_call_event(
     })
 }
 
-/// Kotlin-style named arguments expose two named children separated by an
-/// unnamed `=` token but no field names. Preserve the label/value identity
-/// from that CST shape so adapters and IDG transfer never parse `value_text`.
-fn named_value_argument_parts(argument: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
-    if argument.kind() != "value_argument" {
-        return None;
-    }
-    let mut cursor = argument.walk();
-    let mut saw_equals = false;
-    if cursor.goto_first_child() {
-        loop {
-            let child = cursor.node();
-            if !child.is_named() && child.kind() == "=" {
-                saw_equals = true;
-                break;
-            }
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
-    }
-    if !saw_equals {
-        return None;
-    }
-    let mut cursor = argument.walk();
-    let children = argument.named_children(&mut cursor).collect::<Vec<_>>();
-    (children.len() == 2).then(|| (children[0], children[1]))
+/// Render the receiver node selected by the owning adapter's grammar fields.
+/// This is compiler IR construction, not recovery from the callee spelling:
+/// scoped calls, member calls, and message sends may use different source
+/// punctuation while exposing the same typed receiver relationship.
+fn parsed_call_receiver_text(node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> Option<String> {
+    let receiver = call_receiver_node(node, src, handler)?;
+    argument_place(&receiver, src, handler).or_else(|| {
+        let text = normalize_call_name_whitespace(node_text(&receiver, src));
+        (!text.is_empty()).then_some(text)
+    })
 }
 
 /// Type of an inline constructor used as a method receiver, derived from the
 /// receiver subtree (`new T().m()`, `T().m()`). This is a tree-sitter fact;
 /// downstream resolution never parses the rendered receiver text.
-fn inline_constructed_receiver_type(node: &Node<'_>, src: &[u8]) -> Option<String> {
-    fn constructor_descendant(node: Node<'_>) -> Option<Node<'_>> {
-        if matches!(
-            node.kind(),
-            "new_expression"
-                | "object_creation_expression"
-                | "instance_expression"
-                | "constructor_invocation"
-                | "explicit_constructor_invocation"
-        ) {
+fn inline_constructed_receiver_type(node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> Option<String> {
+    fn constructor_descendant<'tree>(node: Node<'tree>, handler: &GrammarHandler) -> Option<Node<'tree>> {
+        if handler.constructor_call_kinds.contains(&node.kind()) {
             return Some(node);
         }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            if let Some(found) = constructor_descendant(child) {
+            if let Some(found) = constructor_descendant(child, handler) {
                 return Some(found);
             }
         }
         None
     }
 
-    let receiver = node
-        .child_by_field_name("object")
-        .or_else(|| node.child_by_field_name("receiver"))
-        .or_else(|| node.child_by_field_name("target"))
-        .or_else(|| first_callee_expression_child(node))?;
-    let constructor = constructor_descendant(receiver)?;
-    let type_node = constructor
-        .child_by_field_name("type")
-        .or_else(|| constructor.child_by_field_name("constructor"))
-        .or_else(|| constructor.child_by_field_name("name"))
-        .or_else(|| first_identifier_like_child(&constructor))
-        .or_else(|| first_identifier_descendant(constructor))?;
-    let type_name = node_text(&type_node, src).trim();
+    let receiver = call_receiver_node(node, src, handler)?;
+    if let Some(constructor) = constructor_descendant(receiver, handler) {
+        // Delegate the constructor target shape to the adapter. Some
+        // grammars expose a named `type`/`constructor` field, while others
+        // (notably PHP) define the first named child as the exact type node.
+        // `parsed_call_target` honors both the adapter callback and its
+        // declared fields without interpreting rendered source in shared
+        // analysis.
+        let target = parsed_call_target(&constructor, src, handler)?;
+        let type_name = target.full_text.trim();
+        return (!type_name.is_empty()).then(|| type_name.to_string());
+    }
+
+    // Factory-shaped language constructors such as `Type.new(...).method()`
+    // are ordinary call nodes in their Tree-sitter grammars. The selector is
+    // constructor evidence only when the adapter declares it as such; the
+    // owner comes from the parsed receiver subtree, never from capitalization
+    // or a shared token inventory.
+    if !handler.is_call(receiver.kind()) {
+        return None;
+    }
+    let target = parsed_call_target(&receiver, src, handler)?;
+    if !handler.is_constructor_method(short_name_of(&target.full_text)) {
+        return None;
+    }
+    let owner = call_receiver_node(&receiver, src, handler)?;
+    if handler.is_call(owner.kind()) {
+        return None;
+    }
+    let type_name = node_text(&owner, src).trim();
     (!type_name.is_empty()).then(|| type_name.to_string())
 }
 
@@ -3231,18 +3940,22 @@ fn argument_passing_mode(
         })
 }
 
-fn writeback_argument_place(argument: Node<'_>, value: Node<'_>, src: &[u8]) -> Option<String> {
-    fn addressable_operand(node: Node<'_>) -> Option<Node<'_>> {
-        node.child_by_field_name("argument")
-            .or_else(|| node.child_by_field_name("operand"))
-            .or_else(|| node.child_by_field_name("value"))
-            .or_else(|| node.child_by_field_name("expression"))
+fn writeback_argument_place(
+    argument: Node<'_>,
+    value: Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<String> {
+    fn addressable_operand<'tree>(node: Node<'tree>, handler: &GrammarHandler) -> Option<Node<'tree>> {
+        handler
+            .writeback_operand_field_names
+            .iter()
+            .find_map(|field| node.child_by_field_name(field))
     }
-
-    let operand = addressable_operand(value)
-        .or_else(|| addressable_operand(argument))
+    let operand = addressable_operand(value, handler)
+        .or_else(|| addressable_operand(argument, handler))
         .unwrap_or(value);
-    argument_place(&operand, src)
+    argument_place(&operand, src, handler)
 }
 
 /// Build a language-neutral call argument directly from the tree-sitter
@@ -3280,7 +3993,7 @@ pub fn call_arg_from_nodes_with_handler(
     name: Option<String>,
     handler: &GrammarHandler,
 ) -> Option<CallArg> {
-    if is_comment_node_kind(argument.kind()) || is_comment_node_kind(value.kind()) {
+    if is_comment_node_kind(handler, argument.kind()) || is_comment_node_kind(handler, value.kind()) {
         return None;
     }
     let value_text = normalize_call_name_whitespace(node_text(&value, src));
@@ -3289,9 +4002,15 @@ pub fn call_arg_from_nodes_with_handler(
     }
     let passing_mode = argument_passing_mode(argument, value, handler);
     let place = if matches!(passing_mode, crate::ArgumentPassingMode::WriteBack) {
-        writeback_argument_place(argument, value, src)
+        writeback_argument_place(argument, value, src, handler)
     } else {
-        argument_place(&value, src)
+        argument_place(&value, src, handler)
+            // A grammar-proven callable reference is an exact value identity
+            // even when its syntax is not an ordinary storage place (Elixir
+            // `&name/arity`, Kotlin `::name`, and analogous forms). Preserve
+            // that compiler fact so callback resolution need not reinterpret
+            // rendered argument text.
+            .or_else(|| callable_reference_name(&value, src, handler))
     };
     Some(CallArg {
         passing_mode,
@@ -3315,7 +4034,7 @@ pub fn call_arg_from_node(
     src: &[u8],
     name: Option<String>,
 ) -> Option<CallArg> {
-    let value = argument_value_node(argument);
+    let value = argument_value_node(argument, src, &GENERIC_HANDLER);
     call_arg_from_nodes(argument, value, file, src, name)
 }
 
@@ -3330,7 +4049,7 @@ pub fn call_arg_from_node_with_handler(
     name: Option<String>,
     handler: &GrammarHandler,
 ) -> Option<CallArg> {
-    let value = argument_value_node(argument);
+    let value = argument_value_node(argument, src, handler);
     call_arg_from_nodes_with_handler(argument, value, file, src, name, handler)
 }
 
@@ -3354,50 +4073,74 @@ pub fn named_child_call_args_with_handler(
     args
 }
 
-fn argument_value_node(argument: Node<'_>) -> Node<'_> {
-    if !matches!(
-        argument.kind(),
-        "argument"
-            | "keyword_argument"
-            | "named_argument"
-            | "named_expression"
-            | "labeled_expression"
-            | "tuple_expression_element"
-            | "value_argument"
-    ) {
-        return unwrap_transparent_expression(argument);
-    }
-    // Dart represents one projected argument (`c.capacity`) as sibling
-    // nodes inside the `argument` wrapper: an identifier followed by one or
-    // more selector nodes.  The wrapper, not its last selector, is therefore
-    // the value expression proved by the CST.
-    if argument.kind() == "argument" && has_split_selector_projection(&argument) {
-        return argument;
-    }
-    if let Some(value) = argument
-        .child_by_field_name("value")
-        .or_else(|| argument.child_by_field_name("expression"))
-        .or_else(|| argument.child_by_field_name("argument"))
-        .or_else(|| argument.child_by_field_name("operand"))
+fn argument_name_and_value<'tree>(
+    argument: Node<'tree>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> (Option<String>, Node<'tree>) {
+    if let Some((name, value)) = handler
+        .named_argument_extractor
+        .and_then(|extract| extract(argument, src))
     {
-        return unwrap_transparent_expression(value);
+        return (Some(name), unwrap_transparent_expression(value, handler));
     }
-    let name_id = argument.child_by_field_name("name").map(|name| name.id());
-    let label_id = argument.child_by_field_name("label").map(|label| label.id());
-    let mut cursor = argument.walk();
-    let mut value = None;
-    for child in argument.named_children(&mut cursor) {
-        if Some(child.id()) != name_id && Some(child.id()) != label_id {
-            value = Some(child);
-        }
+    if !handler.argument_wrapper_kinds.contains(&argument.kind()) {
+        return (None, unwrap_transparent_expression(argument, handler));
     }
-    unwrap_transparent_expression(value.unwrap_or(argument))
+    let name_node = handler
+        .argument_name_field_names
+        .iter()
+        .find_map(|field| argument.child_by_field_name(field));
+    let name = name_node.and_then(|node| {
+        let node = if handler.identifier_kinds.contains(&node.kind()) {
+            node
+        } else {
+            let mut cursor = node.walk();
+            let identifier = node
+                .named_children(&mut cursor)
+                .find(|child| handler.identifier_kinds.contains(&child.kind()));
+            identifier?
+        };
+        let name = node_text(&node, src).trim();
+        (!name.is_empty()).then(|| name.to_string())
+    });
+    let value = handler
+        .argument_value_field_names
+        .iter()
+        .find_map(|field| argument.child_by_field_name(field))
+        .or_else(|| {
+            let name_id = name_node.map(|node| node.id());
+            let mut cursor = argument.walk();
+            let mut value = None;
+            for child in argument.named_children(&mut cursor) {
+                if Some(child.id()) != name_id {
+                    value = Some(child);
+                }
+            }
+            value
+        })
+        .unwrap_or(argument);
+    (name, unwrap_transparent_expression(value, handler))
+}
+
+pub(super) fn argument_value_node<'tree>(
+    argument: Node<'tree>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Node<'tree> {
+    if !handler.argument_wrapper_kinds.contains(&argument.kind()) {
+        return unwrap_transparent_expression(argument, handler);
+    }
+    argument_name_and_value(argument, src, handler).1
 }
 
 /// Peel parser-declared, single-child expression wrappers while preserving
 /// the actual operator/member/call node that proves value semantics.
-fn unwrap_transparent_expression(mut node: Node<'_>) -> Node<'_> {
-    while node.kind() == "expression" {
+fn unwrap_transparent_expression<'tree>(mut node: Node<'tree>, handler: &GrammarHandler) -> Node<'tree> {
+    while handler
+        .transparent_expression_wrapper_kinds
+        .contains(&node.kind())
+    {
         let mut cursor = node.walk();
         let mut children = node.named_children(&mut cursor);
         let Some(only_child) = children.next() else {
@@ -3409,124 +4152,6 @@ fn unwrap_transparent_expression(mut node: Node<'_>) -> Node<'_> {
         node = only_child;
     }
     node
-}
-
-/// Whether a parser wrapper contains one static dotted value as a base node
-/// followed by selector siblings. Tree-sitter-Dart uses this shape for call
-/// arguments such as `c.capacity`.
-fn has_split_selector_projection(node: &Node<'_>) -> bool {
-    let mut cursor = node.walk();
-    let children: Vec<_> = node.named_children(&mut cursor).collect();
-    children.len() > 1
-        && matches!(children[0].kind(), "identifier" | "this" | "super")
-        && children[1..].iter().all(|child| child.kind() == "selector")
-}
-
-fn split_selector_projection(node: &Node<'_>, src: &[u8]) -> Option<String> {
-    if !has_split_selector_projection(node) {
-        return None;
-    }
-    let (projections, _) = split_selector_sequences(node, src)?;
-    (projections.len() == 1)
-        .then(|| projections.into_iter().next())
-        .flatten()
-}
-
-/// Find static Dart-style selector chains among a node's named children.
-/// Compound expressions keep unrelated operands as siblings, so return the
-/// exact child ids consumed by each projection as well as its canonical path.
-fn split_selector_sequences(node: &Node<'_>, src: &[u8]) -> Option<(Vec<String>, ahash::AHashSet<usize>)> {
-    let mut cursor = node.walk();
-    let children: Vec<_> = node.named_children(&mut cursor).collect();
-    let mut projections = Vec::new();
-    let mut consumed = ahash::AHashSet::default();
-    let mut index = 0usize;
-    while index < children.len() {
-        let base = children[index];
-        if !matches!(base.kind(), "identifier" | "this" | "super") {
-            index += 1;
-            continue;
-        }
-        let mut parts = vec![node_text(&base, src).trim().to_string()];
-        let mut selector_ids = Vec::new();
-        let mut next = index + 1;
-        while let Some(selector) = children.get(next) {
-            if selector.kind() != "selector" || first_named_child_of_kind(selector, "argument_part").is_some()
-            {
-                break;
-            }
-            let Some(inner) = first_named_child(selector) else {
-                break;
-            };
-            if !matches!(
-                inner.kind(),
-                "unconditional_assignable_selector" | "conditional_assignable_selector"
-            ) {
-                break;
-            }
-            let Some(field) =
-                first_identifier_like_child(&inner).or_else(|| first_identifier_descendant(inner))
-            else {
-                break;
-            };
-            let field = node_text(&field, src).trim();
-            if field.is_empty() {
-                break;
-            }
-            parts.push(field.to_string());
-            selector_ids.push(selector.id());
-            next += 1;
-        }
-        if selector_ids.is_empty() || parts.iter().any(String::is_empty) {
-            index += 1;
-            continue;
-        }
-        consumed.insert(base.id());
-        consumed.extend(selector_ids);
-        projections.push(parts.join("."));
-        index = next;
-    }
-    (!projections.is_empty()).then_some((projections, consumed))
-}
-
-/// A syntax-proven value projection represented as a call node without an
-/// argument list. Elixir parses `c.capacity` as `call(target: dot(...))`;
-/// this is a field read, not a method invocation.
-fn argumentless_dot_projection(node: &Node<'_>, src: &[u8]) -> Option<String> {
-    if node.kind() != "call" || node.child_by_field_name("arguments").is_some() {
-        return None;
-    }
-    let target = node.child_by_field_name("target")?;
-    fn collect(node: Node<'_>, src: &[u8], parts: &mut Vec<String>) -> bool {
-        if node.kind() == "dot" {
-            let mut cursor = node.walk();
-            let children: Vec<_> = node.named_children(&mut cursor).collect();
-            let Some(left) = node
-                .child_by_field_name("left")
-                .or_else(|| children.first().copied())
-            else {
-                return false;
-            };
-            let Some(right) = node
-                .child_by_field_name("right")
-                .or_else(|| children.last().copied())
-            else {
-                return false;
-            };
-            return left.id() != right.id() && collect(left, src, parts) && collect(right, src, parts);
-        }
-        if !matches!(node.kind(), "identifier" | "alias" | "atom") {
-            return false;
-        }
-        let text = node_text(&node, src).trim();
-        if text.is_empty() {
-            return false;
-        }
-        parts.push(text.to_string());
-        true
-    }
-    let mut parts = Vec::new();
-    (collect(target, src, &mut parts) && parts.len() > 1).then(|| parts.join("."))
 }
 
 /// Extract every bare-identifier operand from a compound RHS
@@ -3545,45 +4170,25 @@ fn argumentless_dot_projection(node: &Node<'_>, src: &[u8]) -> Option<String> {
 /// read as the value-bearing operand and ignores the carrier token when
 /// that token only appears as the base of a qualified access.
 fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> Vec<String> {
-    const IDENT_KINDS: &[&str] = &[
-        "identifier",
-        "simple_identifier",
-        "constant",
-        "variable_name",
-        "var",
-        "varname",
-        "name",
-        "property_identifier",
-        "shorthand_property_identifier",
-        "scope_resolution",
-        "interpolated_identifier",
-        "identifier_dollar_escaped",
-    ];
-    if is_large_literal_initializer_node(node.kind(), node)
-        || node_is_value_free_expression(*node, src, handler)
-    {
+    if node_is_value_free_expression(*node, src, handler) {
         return Vec::new();
-    }
-    if let Some(projection) = split_selector_projection(node, src) {
-        return vec![projection];
     }
     let mut out: Vec<String> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![*node];
     while let Some(n) = stack.pop() {
-        if is_large_literal_initializer_node(n.kind(), &n) || node_is_value_free_expression(n, src, handler) {
+        if node_is_value_free_expression(n, src, handler) {
             continue;
         }
-        if n.kind() == "vararg_expression" {
+        if handler.variadic_parameter_kinds.contains(&n.kind()) {
             out.push(SYNTHETIC_VARARGS_PARAM.to_string());
             continue;
         }
-        if let Some(projection) = argumentless_dot_projection(&n, src) {
-            out.push(projection);
+        let extracted_places = handler
+            .expression_place_extractor
+            .map_or_else(ExpressionPlaceExtraction::default, |extract| extract(n, src));
+        out.extend(extracted_places.places);
+        if extracted_places.consumed_node_ids.contains(&n.id()) {
             continue;
-        }
-        let split_selector_children = split_selector_sequences(&n, src);
-        if let Some((projections, _)) = &split_selector_children {
-            out.extend(projections.iter().cloned());
         }
         out.extend(call_receiver_source_names(&n, src, handler));
         // Objective-C messages expose selector components and value
@@ -3620,10 +4225,10 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8], handler: &GrammarHandl
             // leftmost carrier, so recurse through the parsed receiver
             // expression to retain those nested argument dependencies while
             // still excluding method-name syntax.
-            if let Some(receiver) = call_receiver_node(&n, handler) {
+            if let Some(receiver) = call_receiver_node(&n, src, handler) {
                 out.extend(extract_rhs_expr_operands(&receiver, src, handler));
             }
-            for args_node in call_argument_containers(n) {
+            for args_node in call_argument_containers(n, handler) {
                 let mut arg_cursor = args_node.walk();
                 for arg in args_node.named_children(&mut arg_cursor) {
                     out.extend(extract_rhs_expr_operands(&arg, src, handler));
@@ -3632,14 +4237,8 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8], handler: &GrammarHandl
             continue;
         }
         if handler.member_expression_kinds.contains(&n.kind()) {
-            if let Some(name) = normalize_member_name(&n, src, handler) {
-                let bare = name
-                    .trim_start_matches(bonsai_common::is_name_punctuation)
-                    .to_string();
-                out.push(name);
-                if !bare.is_empty() {
-                    out.push(bare);
-                }
+            if let Some(place) = argument_place(&n, src, handler) {
+                out.push(place);
             }
             // H6: suppress the member TAIL (the property / attribute name)
             // as a standalone bare operand. Consumers only ever strip the
@@ -3654,14 +4253,10 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8], handler: &GrammarHandl
             // grammars (C# `member_access_expression` uses
             // `expression`/`name`; JS `member_expression` uses
             // `object`/`property`) and previously dropped the C# receiver.
-            let tail_id = n
-                .child_by_field_name("name")
-                .or_else(|| n.child_by_field_name("property"))
-                .or_else(|| n.child_by_field_name("field"))
-                .or_else(|| {
-                    let mut cursor = n.walk();
-                    n.named_children(&mut cursor).skip(1).last()
-                })
+            let tail_id = handler
+                .member_name_field_names
+                .iter()
+                .find_map(|field| n.child_by_field_name(field))
                 .map(|tail| tail.id());
             let mut member_cursor = n.walk();
             for child in n.named_children(&mut member_cursor) {
@@ -3671,34 +4266,28 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8], handler: &GrammarHandl
             }
             continue;
         }
-        if let Some(place) = argument_place(&n, src) {
+        if let Some(place) = argument_place(&n, src, handler) {
             if bonsai_common::qualified_name_owner(&place).is_some() {
                 out.push(place);
             }
         }
-        if IDENT_KINDS.contains(&n.kind()) {
+        let atomic_variable_wrapper = handler.sigil_variable_kinds.contains(&n.kind())
+            || handler.global_variable_kinds.contains(&n.kind());
+        if handler.identifier_kinds.contains(&n.kind()) || atomic_variable_wrapper {
             let text = node_text(&n, src).trim();
-            let cleaned = text.trim_start_matches('$');
-            if looks_like_bare_identifier(cleaned) {
-                out.push(cleaned.to_string());
-                // PHP/Perl carry the `$` in identifier text; some
-                // taint paths store the variable with the sigil
-                // (`$token`) while others store it bare (`token`).
-                // Emit both so downstream matching works regardless
-                // of which form the tainted set holds.
-                if text != cleaned {
-                    out.push(text.to_string());
-                } else if let Some(sigil) = identifier_parent_sigil(n, src) {
-                    out.push(format!("{sigil}{cleaned}"));
-                }
+            if !text.is_empty() {
+                out.push(text.to_string());
             }
+        }
+        // Sigil/global variable nodes own their runtime identity. Their
+        // identifier child is grammar structure, not a second unsigiled
+        // value read (`$value` must not also become `value`).
+        if atomic_variable_wrapper {
+            continue;
         }
         let mut child_cursor = n.walk();
         for child in n.named_children(&mut child_cursor) {
-            if split_selector_children
-                .as_ref()
-                .is_some_and(|(_, consumed)| consumed.contains(&child.id()))
-            {
+            if extracted_places.consumed_node_ids.contains(&child.id()) {
                 continue;
             }
             stack.push(child);
@@ -3746,47 +4335,49 @@ fn node_is_value_free_expression(node: Node<'_>, src: &[u8], handler: &GrammarHa
     if handler.value_free_call_names.is_empty() || !handler.is_call(node.kind()) {
         return false;
     }
-    parsed_call_target(&node, src).is_some_and(|target| {
+    parsed_call_target(&node, src, handler).is_some_and(|target| {
         handler
             .value_free_call_names
             .contains(&short_name_of(&target.full_text))
     })
 }
 
-fn identifier_parent_sigil(node: Node<'_>, src: &[u8]) -> Option<&'static str> {
-    let parent = node.parent()?;
-    if !matches!(
-        parent.kind(),
-        "scalar" | "array" | "hash" | "variable_name" | "identifier_dollar_escaped"
-    ) {
-        return None;
-    }
-    ["$", "@", "%"]
-        .into_iter()
-        .find(|sigil| has_direct_token(&parent, src, sigil))
-}
-
 fn call_receiver_source_names(node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> Vec<String> {
     if !handler.call_ref_kinds.contains(&node.kind()) {
         return Vec::new();
     }
-    let Some(receiver) = call_receiver_node(node, handler) else {
+    let Some(receiver) = call_receiver_node(node, src, handler) else {
         return Vec::new();
     };
     receiver_value_bases(receiver, src, handler)
 }
 
-fn call_receiver_node<'tree>(node: &Node<'tree>, handler: &GrammarHandler) -> Option<Node<'tree>> {
-    node.child_by_field_name("receiver")
-        .or_else(|| node.child_by_field_name("object"))
-        .or_else(|| node.child_by_field_name("invocant"))
+pub(super) fn call_receiver_node<'tree>(
+    node: &Node<'tree>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<Node<'tree>> {
+    if let Some(receiver) = handler
+        .call_receiver_extractor
+        .and_then(|extract| extract(*node, src))
+    {
+        return Some(receiver);
+    }
+    handler
+        .call_receiver_field_names
+        .iter()
+        .find_map(|field| node.child_by_field_name(field))
         .or_else(|| {
-            let callee = node
-                .child_by_field_name("function")
-                .or_else(|| node.child_by_field_name("callee"))
-                // Kotlin and Swift call expressions expose their callee as
-                // the first named child rather than through a field.
-                .or_else(|| first_named_child(node))?;
+            let callee = handler
+                .call_callee_field_names
+                .iter()
+                .find_map(|field| node.child_by_field_name(field))
+                .or_else(|| {
+                    handler
+                        .call_callee_is_first_named_child
+                        .then(|| first_named_child(node))
+                        .flatten()
+                })?;
             member_receiver_node(callee, handler)
         })
 }
@@ -3795,7 +4386,10 @@ fn call_receiver_node<'tree>(node: &Node<'tree>, handler: &GrammarHandler) -> Op
 /// Kotlin/Swift navigation expressions use positional children; the other
 /// supported grammars expose one of the named receiver fields below.
 fn member_receiver_node<'tree>(node: Node<'tree>, handler: &GrammarHandler) -> Option<Node<'tree>> {
-    let member = if node.kind() == "expression" {
+    let member = if handler
+        .transparent_expression_wrapper_kinds
+        .contains(&node.kind())
+    {
         first_named_child(&node).unwrap_or(node)
     } else {
         node
@@ -3803,25 +4397,16 @@ fn member_receiver_node<'tree>(node: Node<'tree>, handler: &GrammarHandler) -> O
     if !handler.member_expression_kinds.contains(&member.kind()) {
         return None;
     }
-    member
-        .child_by_field_name("object")
-        .or_else(|| member.child_by_field_name("receiver"))
-        .or_else(|| member.child_by_field_name("target"))
-        .or_else(|| member.child_by_field_name("expression"))
-        // tree-sitter-rust field expressions use `value` for the receiver.
-        .or_else(|| member.child_by_field_name("value"))
-        .or_else(|| first_named_child(&member))
+    handler
+        .member_base_field_names
+        .iter()
+        .find_map(|field| member.child_by_field_name(field))
 }
 
 fn receiver_value_bases(node: Node<'_>, src: &[u8], handler: &GrammarHandler) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(base) = leftmost_value_base(node, src, handler) {
         push_receiver_base_variants(&mut out, &base);
-    }
-    if out.is_empty() {
-        if let Some(base) = receiver_base_from_text(node_text(&node, src)) {
-            push_receiver_base_variants(&mut out, &base);
-        }
     }
     out.sort();
     out.dedup();
@@ -3830,32 +4415,31 @@ fn receiver_value_bases(node: Node<'_>, src: &[u8], handler: &GrammarHandler) ->
 
 fn leftmost_value_base(node: Node<'_>, src: &[u8], handler: &GrammarHandler) -> Option<String> {
     let kind = node.kind();
-    if matches!(
-        kind,
-        "identifier"
-            | "simple_identifier"
-            | "constant"
-            | "variable_name"
-            | "var"
-            | "varname"
-            | "name"
-            | "identifier_dollar_escaped"
-    ) {
-        let text = node_text(&node, src).trim();
-        if looks_like_bare_identifier(text.trim_start_matches('$')) {
-            return Some(text.to_string());
-        }
+    if handler.identifier_kinds.contains(&kind)
+        || handler.sigil_variable_kinds.contains(&kind)
+        || handler.global_variable_kinds.contains(&kind)
+    {
+        return argument_place(&node, src, handler);
     }
     if handler.call_ref_kinds.contains(&kind) {
-        if let Some(receiver) = call_receiver_node(&node, handler) {
+        if let Some(receiver) = call_receiver_node(&node, src, handler) {
             return leftmost_value_base(receiver, src, handler);
         }
     }
-    if handler.member_expression_kinds.contains(&kind) || handler.subscript_expression_kinds.contains(&kind) {
-        if let Some(object) = node
-            .child_by_field_name("object")
-            .or_else(|| node.child_by_field_name("receiver"))
-            .or_else(|| node.child_by_field_name("value"))
+    if handler.member_expression_kinds.contains(&kind) {
+        if let Some(object) = handler
+            .member_base_field_names
+            .iter()
+            .find_map(|field| node.child_by_field_name(field))
+        {
+            return leftmost_value_base(object, src, handler);
+        }
+    }
+    if handler.subscript_expression_kinds.contains(&kind) {
+        if let Some(object) = handler
+            .subscript_base_field_names
+            .iter()
+            .find_map(|field| node.child_by_field_name(field))
         {
             return leftmost_value_base(object, src, handler);
         }
@@ -3870,10 +4454,7 @@ fn leftmost_value_base(node: Node<'_>, src: &[u8], handler: &GrammarHandler) -> 
 }
 
 fn receiver_base_from_text(text: &str) -> Option<String> {
-    let normalized = normalise_qualified_text(text);
-    let trimmed = normalized
-        .trim()
-        .trim_start_matches(bonsai_common::is_name_punctuation);
+    let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -3881,8 +4462,7 @@ fn receiver_base_from_text(text: &str) -> Option<String> {
         .first()
         .copied()
         .unwrap_or(trimmed)
-        .trim()
-        .trim_start_matches(bonsai_common::is_name_punctuation);
+        .trim();
     looks_like_bare_identifier(candidate).then(|| candidate.to_string())
 }
 
@@ -3891,121 +4471,61 @@ fn push_receiver_base_variants(out: &mut Vec<String>, base: &str) {
     if base.is_empty() {
         return;
     }
-    let cleaned = base.trim_start_matches(bonsai_common::is_name_punctuation);
-    if looks_like_bare_identifier(cleaned) {
-        out.push(cleaned.to_string());
-        if cleaned != base {
-            out.push(base.to_string());
-        }
+    if looks_like_bare_identifier(base) {
+        out.push(base.to_string());
     }
-}
-
-/// Identifier-continue byte: `_`, `$`, or ASCII alphanumeric.
-pub(crate) fn is_ident_continue_byte(byte: u8) -> bool {
-    byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric()
-}
-
-/// True when `op` is a compound (read-modify-write) assignment operator
-/// like `+=`, `||=`, `.=`, `<<=`. A bare `=` is NOT compound, nor are
-/// comparisons (`==`, `<=`), the walrus/short-var `:=`, or the arrow `=>`.
-fn is_compound_assignment_operator(op: &str) -> bool {
-    let op = op.trim();
-    op.len() >= 2
-        && op.ends_with('=')
-        && !matches!(op, "==" | "!=" | "<=" | ">=" | ":=" | "=>")
-        && op.chars().next().is_some_and(|c| {
-            matches!(
-                c,
-                '+' | '-' | '*' | '/' | '%' | '&' | '|' | '^' | '.' | '<' | '>' | '?' | '~'
-            )
-        })
 }
 
 /// True when an assignment node is a compound `x OP= rhs` (so `x` is
-/// always a read operand). Recognized by node kind, an `operator` field,
-/// or a top-level `OP=` token among the node's unnamed children.
-fn assignment_is_compound(node: &Node<'_>, kind: &str, src: &[u8]) -> bool {
-    if matches!(
-        kind,
-        "augmented_assignment"
-            | "augmented_assignment_expression"
-            | "compound_assignment_expr"
-            | "operator_assignment"
-    ) {
+/// always a read operand). The active adapter owns both intrinsic node kinds
+/// and exact operator tokens.
+fn assignment_is_compound(node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> bool {
+    if handler.compound_assignment_kinds.contains(&node.kind()) {
         return true;
     }
     if let Some(op) = node.child_by_field_name("operator") {
-        if is_compound_assignment_operator(node_text(&op, src)) {
+        if handler
+            .compound_assignment_operators
+            .contains(&node_text(&op, src).trim())
+        {
             return true;
         }
     }
     let mut cursor = node.walk();
     let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
-    children
-        .iter()
-        .any(|child| !child.is_named() && is_compound_assignment_operator(node_text(child, src)))
+    children.iter().any(|child| {
+        !child.is_named()
+            && handler
+                .compound_assignment_operators
+                .contains(&node_text(child, src).trim())
+    })
 }
 
-/// Clean up an assign-target string picked up from a grammar
-/// whose named-child exposure loses the bare identifier. Drops
-/// the RHS when the text has shape `lhs = rhs`, strips trailing
-/// declaration-only keywords (types / `my` / `let`), and keeps
-/// only the last whitespace-delimited token when a type prefix
-/// survives (`bytes32 t` → `t`, `my $query` → `$query`). Tuple
-/// targets (Go `result, _`) keep only the first binding so the
-/// emitted `target` is a plain identifier callers can substring
-/// on.
-#[must_use]
-pub fn sanitize_assign_target(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    // Strip RHS: `action = req.Query[...]` → `action`.
-    let lhs = trimmed.split_once('=').map_or(trimmed, |(l, _)| l).trim();
-    // Tuple / destructuring: keep the first comma-delimited piece.
-    // Covers Go `result, _ := foo()` and similar multi-return patterns.
-    let first_tuple = lhs.split_once(',').map_or(lhs, |(a, _)| a).trim();
-    if first_tuple.contains('[') {
-        return normalise_qualified_text(first_tuple)
-            .split_whitespace()
-            .collect::<String>();
-    }
-    // Last whitespace-delimited token survives, so `my $query` → `$query`,
-    // `bytes32 t` → `t`, `const int x` → `x`.
-    let last_tok = first_tuple.split_whitespace().next_back().unwrap_or(first_tuple);
-    let cleaned = last_tok
-        .trim_matches(|c: char| {
-            !(c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '@' | '%' | '!' | '?'))
-        })
-        .to_string();
-    // Reject fragments that aren't a plausible bare lvalue. Structured
-    // extractor/destructuring bindings are recovered from their CST pattern
-    // nodes, so a wrapper fragment such as `Envelope(kind` is never a
-    // semantic target.
-    if cleaned.contains(['(', ')']) || cleaned.chars().any(|c: char| c.is_whitespace()) {
-        return String::new();
-    }
-    cleaned
-}
-
-/// Compare two identifier names, ignoring leading sigils (`$`, `@`, `%`)
-/// so Perl `$foo` and adapter-emitted `foo` map to the same binding.
+/// Compare two canonical identifier names emitted by the active adapter.
+/// Language sigils and other source spelling are normalized while lowering;
+/// shared compiler passes never interpret them.
 fn same_identifier_name(left: &str, right: &str) -> bool {
-    let left_bare = left.trim().trim_start_matches(['$', '@', '%']);
-    let right_bare = right.trim().trim_start_matches(['$', '@', '%']);
-    left_bare == right_bare
+    let left = left.trim();
+    let right = right.trim();
+    left == right
+        || bonsai_common::trim_leading_name_punctuation(left)
+            == bonsai_common::trim_leading_name_punctuation(right)
 }
 
-fn extra_lhs_binding_targets(node: &Node<'_>, src: &[u8], primary: &str) -> Vec<String> {
-    let Some(lhs) = assignment_lhs_node(node) else {
+fn extra_lhs_binding_targets(
+    node: &Node<'_>,
+    src: &[u8],
+    primary: &str,
+    handler: &GrammarHandler,
+) -> Vec<String> {
+    let Some(lhs) = assignment_lhs_node(node, handler) else {
         return Vec::new();
     };
-    let Some(pattern) = destructured_assignment_pattern(lhs) else {
+    let Some(pattern) = destructured_assignment_pattern(lhs, handler) else {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for target in binding_targets_from_pattern_node(&pattern, src) {
+    for target in binding_targets_from_pattern_node(&pattern, src, handler) {
         if !target.is_empty() && target != primary && !out.iter().any(|t| t == &target) {
             out.push(target);
         }
@@ -4018,15 +4538,20 @@ fn extra_lhs_binding_targets(node: &Node<'_>, src: &[u8], primary: &str) -> Vec<
 /// pair node or retain an anonymous `=>` token between two named children
 /// (PHP array destructuring). Both shapes are parsed syntax relationships;
 /// this helper never scans or splits the surrounding assignment rendering.
-fn keyed_lhs_binding_sources(node: &Node<'_>, src: &[u8], rhs_base: &str) -> Vec<(String, String)> {
-    let Some(lhs) = assignment_lhs_node(node) else {
+fn keyed_lhs_binding_sources(
+    node: &Node<'_>,
+    src: &[u8],
+    rhs_base: &str,
+    handler: &GrammarHandler,
+) -> Vec<(String, String)> {
+    let Some(lhs) = assignment_lhs_node(node, handler) else {
         return Vec::new();
     };
-    let Some(pattern) = destructured_assignment_pattern(lhs) else {
+    let Some(pattern) = destructured_assignment_pattern(lhs, handler) else {
         return Vec::new();
     };
     let mut keyed = Vec::new();
-    collect_keyed_pattern_bindings(pattern, src, &mut Vec::new(), &mut keyed);
+    collect_keyed_pattern_bindings(pattern, src, handler, &mut Vec::new(), &mut keyed);
     let base = rhs_base.trim().trim_end_matches('.');
     if base.is_empty() {
         return Vec::new();
@@ -4050,62 +4575,24 @@ fn keyed_lhs_binding_sources(node: &Node<'_>, src: &[u8], rhs_base: &str) -> Vec
 fn collect_keyed_pattern_bindings(
     node: Node<'_>,
     src: &[u8],
+    handler: &GrammarHandler,
     prefix: &mut Vec<String>,
     out: &mut Vec<(String, Vec<String>)>,
 ) {
-    if let (Some(key), Some(value)) = (
-        node.child_by_field_name("key")
-            .or_else(|| node.child_by_field_name("name")),
-        node.child_by_field_name("value")
-            .or_else(|| node.child_by_field_name("pattern")),
-    ) {
-        if key.id() != value.id() {
-            if let Some(key) = expression_flow::static_field_name(key, src) {
-                prefix.push(key);
-                collect_keyed_pattern_value(value, src, prefix, out);
-                prefix.pop();
-                return;
-            }
-        }
-    }
-
-    // PHP's list-literal pattern does not field its key/value children, but
-    // the grammar retains the `=>` terminal between them. Walk the direct CST
-    // children so nested expressions cannot be mistaken for pair syntax.
-    let mut cursor = node.walk();
-    let mut previous_named = None;
-    let mut awaiting_value = false;
     let mut handled_value_ids = Vec::new();
-    if cursor.goto_first_child() {
-        loop {
-            let child = cursor.node();
-            if child.is_named() {
-                if awaiting_value {
-                    if let Some(key_node) = previous_named.take() {
-                        if let Some(key) = expression_flow::static_field_name(key_node, src) {
-                            prefix.push(key);
-                            collect_keyed_pattern_value(child, src, prefix, out);
-                            prefix.pop();
-                            handled_value_ids.push(child.id());
-                        }
-                    }
-                    awaiting_value = false;
-                } else {
-                    previous_named = Some(child);
-                }
-            } else if node_text(&child, src).trim() == "=>" {
-                awaiting_value = true;
-            }
-            if !cursor.goto_next_sibling() {
-                break;
-            }
+    for (key_node, value) in expression_flow::field_pair_nodes(node, handler) {
+        if let Some(key) = expression_flow::static_field_name(key_node, src, handler) {
+            prefix.push(key);
+            collect_keyed_pattern_value(value, src, handler, prefix, out);
+            prefix.pop();
+            handled_value_ids.push(value.id());
         }
     }
 
     let mut named = node.walk();
     for child in node.named_children(&mut named) {
         if !handled_value_ids.contains(&child.id()) {
-            collect_keyed_pattern_bindings(child, src, prefix, out);
+            collect_keyed_pattern_bindings(child, src, handler, prefix, out);
         }
     }
 }
@@ -4113,14 +4600,15 @@ fn collect_keyed_pattern_bindings(
 fn collect_keyed_pattern_value(
     value: Node<'_>,
     src: &[u8],
+    handler: &GrammarHandler,
     prefix: &mut Vec<String>,
     out: &mut Vec<(String, Vec<String>)>,
 ) {
-    if destructured_assignment_pattern(value).is_some() {
-        collect_keyed_pattern_bindings(value, src, prefix, out);
+    if destructured_assignment_pattern(value, handler).is_some() {
+        collect_keyed_pattern_bindings(value, src, handler, prefix, out);
         return;
     }
-    let targets = binding_targets_from_pattern_node(&value, src);
+    let targets = binding_targets_from_pattern_node(&value, src, handler);
     if targets.len() == 1 && !prefix.is_empty() {
         out.push((targets[0].clone(), prefix.clone()));
     }
@@ -4135,26 +4623,11 @@ fn collect_keyed_pattern_value(
 /// grammars represent real parallel/destructured bindings with one of these
 /// aggregate pattern/list nodes, so only those nodes may fan out into extra
 /// assignment targets.
-fn destructured_assignment_pattern(node: Node<'_>) -> Option<Node<'_>> {
-    const AGGREGATE_BINDING_KINDS: &[&str] = &[
-        "array_pattern",
-        "destructuring_pattern",
-        "expression_list",
-        "left_assignment_list",
-        "list",
-        "list_expression",
-        "list_literal",
-        "list_pattern",
-        "multi_variable_declaration",
-        "object_pattern",
-        "pattern_list",
-        "struct_pattern",
-        "tuple",
-        "tuple_pattern",
-        "variable_list",
-        "variables",
-    ];
-    if AGGREGATE_BINDING_KINDS.contains(&node.kind()) {
+fn destructured_assignment_pattern<'tree>(
+    node: Node<'tree>,
+    handler: &GrammarHandler,
+) -> Option<Node<'tree>> {
+    if handler.aggregate_pattern_kinds.contains(&node.kind()) {
         return Some(node);
     }
 
@@ -4163,34 +4636,34 @@ fn destructured_assignment_pattern(node: Node<'_>) -> Option<Node<'_>> {
     // instead has one `variable` field. Repeated binding fields are the CST's
     // declaration that this is parallel binding, so the wrapper itself is the
     // aggregate pattern.
-    if node.kind() == "variable_declaration" {
-        let mut cursor = node.walk();
-        let mut variable_fields = 0usize;
-        if cursor.goto_first_child() {
-            loop {
-                if cursor.node().is_named() && cursor.field_name() == Some("variables") {
-                    variable_fields += 1;
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
+    let mut cursor = node.walk();
+    let mut variable_fields = 0usize;
+    if cursor.goto_first_child() {
+        loop {
+            if cursor.node().is_named() && cursor.field_name() == Some("variables") {
+                variable_fields += 1;
+            }
+            if !cursor.goto_next_sibling() {
+                break;
             }
         }
-        if variable_fields > 1 {
-            return Some(node);
-        }
+    }
+    if variable_fields > 1 {
+        return Some(node);
     }
 
     // Swift and a few pattern grammars use a generic `pattern` wrapper. It is
     // aggregate only when the CST itself exposes multiple pattern children;
     // a single identifier wrapper is not destructuring.
-    if node.kind() == "pattern" {
+    if handler.multi_child_aggregate_pattern_kinds.contains(&node.kind()) {
         let mut cursor = node.walk();
         let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
         if children.len() > 1 {
             return Some(node);
         }
-        return children.into_iter().find_map(destructured_assignment_pattern);
+        return children
+            .into_iter()
+            .find_map(|child| destructured_assignment_pattern(child, handler));
     }
 
     // Declaration wrappers may contain the actual parsed pattern as a field.
@@ -4198,7 +4671,7 @@ fn destructured_assignment_pattern(node: Node<'_>) -> Option<Node<'_>> {
     // descend through member, field, or subscript place expressions.
     for field in ["pattern", "declarator"] {
         if let Some(child) = node.child_by_field_name(field) {
-            if let Some(pattern) = destructured_assignment_pattern(child) {
+            if let Some(pattern) = destructured_assignment_pattern(child, handler) {
                 return Some(pattern);
             }
         }
@@ -4206,7 +4679,7 @@ fn destructured_assignment_pattern(node: Node<'_>) -> Option<Node<'_>> {
     None
 }
 
-fn assignment_lhs_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
+fn assignment_lhs_node<'tree>(node: &Node<'tree>, handler: &GrammarHandler) -> Option<Node<'tree>> {
     node.child_by_field_name("left")
         .or_else(|| node.child_by_field_name("lhs"))
         .or_else(|| node.child_by_field_name("target"))
@@ -4215,15 +4688,29 @@ fn assignment_lhs_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
         // `name` field. Lua's `variable_list` gives each child the `name`
         // field, so asking for `name` first silently collapses `ok, value`
         // to only `ok`.
-        .or_else(|| first_named_child_of_kind(node, "variable_list"))
-        .or_else(|| first_named_child_of_kind(node, "variables"))
-        .or_else(|| first_named_child_of_kind(node, "multi_variable_declaration"))
-        .or_else(|| first_named_child_of_kind(node, "pattern"))
-        .or_else(|| first_named_child_of_kind(node, "tuple_pattern"))
-        .or_else(|| first_named_child_of_kind(node, "array_pattern"))
-        .or_else(|| first_named_child_of_kind(node, "list_pattern"))
-        .or_else(|| first_named_child_of_kind(node, "left_assignment_list"))
-        .or_else(|| first_named_child_of_kind(node, "tuple"))
+        .or_else(|| {
+            let mut cursor = node.walk();
+            if !cursor.goto_first_child() {
+                return None;
+            }
+            loop {
+                let child = cursor.node();
+                let field = cursor.field_name();
+                let is_rhs = matches!(field, Some("right" | "rhs" | "value" | "result"));
+                if child.is_named()
+                    && !is_rhs
+                    && (handler.aggregate_pattern_kinds.contains(&child.kind())
+                        || handler
+                            .multi_child_aggregate_pattern_kinds
+                            .contains(&child.kind()))
+                {
+                    return Some(child);
+                }
+                if !cursor.goto_next_sibling() {
+                    return None;
+                }
+            }
+        })
         // A grammar-declared singular binding beats an unfielded expression
         // list. Go `var_spec`, for example, has `name: identifier` and
         // `value: expression_list`; selecting the latter as an LHS turns RHS
@@ -4231,7 +4718,6 @@ fn assignment_lhs_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
         // assignment grammars expose `left`/`lhs` or one of the aggregate
         // binding containers above.
         .or_else(|| node.child_by_field_name("name"))
-        .or_else(|| first_named_child_of_kind(node, "expression_list"))
         .or_else(|| node.child_by_field_name("declarator"))
 }
 
@@ -4239,30 +4725,27 @@ fn assignment_lhs_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
 /// place. This deliberately consumes tree-sitter fields/children rather than
 /// splitting the rendered LHS text; the synthetic item-write call therefore
 /// carries the same exact argument facts as an ordinary parsed call.
-fn subscript_place_parts(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
-    if !matches!(
-        node.kind(),
-        "subscript_expression"
-            | "subscript"
-            | "element_reference"
-            | "array_access"
-            | "element_access_expression"
-            | "bracket_index_expression"
-            | "index_expression"
-            | "indexing_expression"
-    ) {
+fn subscript_place_parts<'tree>(
+    node: Node<'tree>,
+    handler: &GrammarHandler,
+) -> Option<(Node<'tree>, Node<'tree>)> {
+    if let Some(parts) = handler
+        .computed_subscript_extractor
+        .and_then(|extract| extract(node))
+    {
+        return Some(parts);
+    }
+    if !handler.subscript_expression_kinds.contains(&node.kind()) {
         return None;
     }
-    let base = node
-        .child_by_field_name("object")
-        .or_else(|| node.child_by_field_name("value"))
-        .or_else(|| node.child_by_field_name("argument"))
-        .or_else(|| node.child_by_field_name("base"))
-        .or_else(|| node.child_by_field_name("receiver"));
-    let key = node
-        .child_by_field_name("index")
-        .or_else(|| node.child_by_field_name("subscript"))
-        .or_else(|| node.child_by_field_name("key"));
+    let base = handler
+        .subscript_base_field_names
+        .iter()
+        .find_map(|field| node.child_by_field_name(field));
+    let key = handler
+        .subscript_index_field_names
+        .iter()
+        .find_map(|field| node.child_by_field_name(field));
     if let (Some(base), Some(key)) = (base, key) {
         return Some((base, key));
     }
@@ -4272,57 +4755,6 @@ fn subscript_place_parts(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
         [base, key, ..] => Some((*base, *key)),
         _ => None,
     }
-}
-
-fn ruby_append_mutation_assignment(
-    node: &Node<'_>,
-    file: FileId,
-    src: &[u8],
-    handler: &GrammarHandler,
-    out: &mut Vec<FlowEvent>,
-) -> bool {
-    if node.kind() != "binary" {
-        return false;
-    }
-    let (Some(left), Some(right)) = (
-        node.child_by_field_name("left"),
-        node.child_by_field_name("right"),
-    ) else {
-        return false;
-    };
-    let Ok(operator_text) = std::str::from_utf8(&src[left.end_byte()..right.start_byte()]) else {
-        return false;
-    };
-    if operator_text.trim() != "<<" {
-        return false;
-    }
-    let target = qualified_assign_target(Some(left), src)
-        .unwrap_or_else(|| sanitize_assign_target(node_text(&left, src)));
-    if target.is_empty() {
-        return false;
-    }
-    let right_text = node_text(&right, src).trim();
-    let source_name = looks_like_bare_identifier(right_text).then(|| right_text.to_string());
-    let mut source_names = extract_rhs_expr_operands(&right, src, handler);
-    if source_names.is_empty() {
-        if let Some(source_name) = source_name.as_ref() {
-            source_names.push(source_name.clone());
-        }
-    }
-    source_names.retain(|name| !same_identifier_name(name, &target));
-    source_names.sort();
-    source_names.dedup();
-    out.push(FlowEvent::Assign {
-        span: span_of(file, node),
-        target,
-        source_name,
-        source_call: None,
-        source_call_args: Vec::new(),
-        source_names,
-        declares_new_binding: false,
-        value_kind: None,
-    });
-    true
 }
 
 /// Fold every run of ASCII whitespace (spaces, tabs, newlines) in
@@ -4409,44 +4841,163 @@ pub const fn with_fn_kinds_and_implicit_receivers(
         method_owner_barrier_kinds: GENERIC_HANDLER.method_owner_barrier_kinds,
         constructor_method_kinds: GENERIC_HANDLER.constructor_method_kinds,
         constructor_names: GENERIC_HANDLER.constructor_names,
+        function_definition_extractor: GENERIC_HANDLER.function_definition_extractor,
+        inline_closure_yield_extractor: GENERIC_HANDLER.inline_closure_yield_extractor,
         if_kinds: GENERIC_HANDLER.if_kinds,
+        branch_then_field_names: GENERIC_HANDLER.branch_then_field_names,
+        branch_else_field_names: GENERIC_HANDLER.branch_else_field_names,
+        branch_condition_field_names: GENERIC_HANDLER.branch_condition_field_names,
+        branch_condition_kinds: GENERIC_HANDLER.branch_condition_kinds,
+        branch_alias_extractor: GENERIC_HANDLER.branch_alias_extractor,
+        branch_arm_kinds: GENERIC_HANDLER.branch_arm_kinds,
+        additional_alternative_kinds: GENERIC_HANDLER.additional_alternative_kinds,
         for_kinds: GENERIC_HANDLER.for_kinds,
         foreach_kinds: GENERIC_HANDLER.foreach_kinds,
+        foreach_binding_extractor: GENERIC_HANDLER.foreach_binding_extractor,
         while_kinds: GENERIC_HANDLER.while_kinds,
         do_kinds: GENERIC_HANDLER.do_kinds,
         loop_kinds: GENERIC_HANDLER.loop_kinds,
+        loop_body_field_names: GENERIC_HANDLER.loop_body_field_names,
+        loop_body_kinds: GENERIC_HANDLER.loop_body_kinds,
         call_kinds: GENERIC_HANDLER.call_kinds,
+        constructor_call_kinds: GENERIC_HANDLER.constructor_call_kinds,
         nested_call_component_kinds: GENERIC_HANDLER.nested_call_component_kinds,
+        call_callee_field_names: GENERIC_HANDLER.call_callee_field_names,
+        call_receiver_field_names: GENERIC_HANDLER.call_receiver_field_names,
+        call_member_field_names: GENERIC_HANDLER.call_member_field_names,
+        constructor_type_field_names: GENERIC_HANDLER.constructor_type_field_names,
+        call_argument_field_names: GENERIC_HANDLER.call_argument_field_names,
+        call_argument_container_kinds: GENERIC_HANDLER.call_argument_container_kinds,
+        call_argument_wrapper_kinds: GENERIC_HANDLER.call_argument_wrapper_kinds,
+        call_callee_is_first_named_child: GENERIC_HANDLER.call_callee_is_first_named_child,
+        argument_wrapper_kinds: GENERIC_HANDLER.argument_wrapper_kinds,
+        argument_name_field_names: GENERIC_HANDLER.argument_name_field_names,
+        argument_value_field_names: GENERIC_HANDLER.argument_value_field_names,
+        named_argument_extractor: GENERIC_HANDLER.named_argument_extractor,
+        direct_call_info_extractor: GENERIC_HANDLER.direct_call_info_extractor,
+        call_target_extractor: GENERIC_HANDLER.call_target_extractor,
+        call_receiver_extractor: GENERIC_HANDLER.call_receiver_extractor,
+        call_ref_node_filter: GENERIC_HANDLER.call_ref_node_filter,
+        expression_call_span_extractor: GENERIC_HANDLER.expression_call_span_extractor,
+        writeback_operand_field_names: GENERIC_HANDLER.writeback_operand_field_names,
+        direct_call_argument_excluded_fields: GENERIC_HANDLER.direct_call_argument_excluded_fields,
+        transparent_expression_wrapper_kinds: GENERIC_HANDLER.transparent_expression_wrapper_kinds,
         pseudo_call_extractor: GENERIC_HANDLER.pseudo_call_extractor,
         syntax_event_extractor: GENERIC_HANDLER.syntax_event_extractor,
+        syntax_events_extractor: GENERIC_HANDLER.syntax_events_extractor,
+        call_encoded_control_flow_extractor: GENERIC_HANDLER.call_encoded_control_flow_extractor,
         pseudo_call_receiver_extractor: GENERIC_HANDLER.pseudo_call_receiver_extractor,
         argument_passing_mode_extractor: GENERIC_HANDLER.argument_passing_mode_extractor,
+        expression_value_kind_extractor: GENERIC_HANDLER.expression_value_kind_extractor,
+        literal_value_kinds: GENERIC_HANDLER.literal_value_kinds,
+        literal_value_spellings: GENERIC_HANDLER.literal_value_spellings,
+        string_literal_kinds: GENERIC_HANDLER.string_literal_kinds,
+        comment_kinds: GENERIC_HANDLER.comment_kinds,
+        doc_comment_kinds: GENERIC_HANDLER.doc_comment_kinds,
+        doc_comment_prefixes: GENERIC_HANDLER.doc_comment_prefixes,
+        decorator_kinds: GENERIC_HANDLER.decorator_kinds,
+        parameter_container_kinds: GENERIC_HANDLER.parameter_container_kinds,
+        parameter_kinds: GENERIC_HANDLER.parameter_kinds,
+        parameter_modifier_kinds: GENERIC_HANDLER.parameter_modifier_kinds,
+        parameter_annotation_kinds: GENERIC_HANDLER.parameter_annotation_kinds,
+        parameter_annotation_name_extractor: GENERIC_HANDLER.parameter_annotation_name_extractor,
+        keyword_parameter_kinds: GENERIC_HANDLER.keyword_parameter_kinds,
+        parameter_selector_kinds: GENERIC_HANDLER.parameter_selector_kinds,
+        implicit_parameter_kinds: GENERIC_HANDLER.implicit_parameter_kinds,
+        self_parameter_kinds: GENERIC_HANDLER.self_parameter_kinds,
+        last_identifier_parameter_kinds: GENERIC_HANDLER.last_identifier_parameter_kinds,
+        binding_identifier_kinds: GENERIC_HANDLER.binding_identifier_kinds,
+        non_binding_pattern_kinds: GENERIC_HANDLER.non_binding_pattern_kinds,
+        binding_lhs_pattern_kinds: GENERIC_HANDLER.binding_lhs_pattern_kinds,
+        binding_pattern_field_names: GENERIC_HANDLER.binding_pattern_field_names,
+        pattern_head_value_kinds: GENERIC_HANDLER.pattern_head_value_kinds,
+        multi_segment_value_pattern_kinds: GENERIC_HANDLER.multi_segment_value_pattern_kinds,
+        non_binding_pattern_field_names: GENERIC_HANDLER.non_binding_pattern_field_names,
+        binding_name_extractor: GENERIC_HANDLER.binding_name_extractor,
+        binding_name_filter: GENERIC_HANDLER.binding_name_filter,
+        pattern_binding_extractor: GENERIC_HANDLER.pattern_binding_extractor,
+        projected_pattern_binding_extractor: GENERIC_HANDLER.projected_pattern_binding_extractor,
+        anonymous_variadic_token: GENERIC_HANDLER.anonymous_variadic_token,
+        variadic_parameter_kinds: GENERIC_HANDLER.variadic_parameter_kinds,
+        destructured_parameter_kinds: GENERIC_HANDLER.destructured_parameter_kinds,
+        identifier_kinds: GENERIC_HANDLER.identifier_kinds,
+        aggregate_pattern_kinds: GENERIC_HANDLER.aggregate_pattern_kinds,
+        comprehension_kinds: GENERIC_HANDLER.comprehension_kinds,
+        comprehension_binding_clause_kinds: GENERIC_HANDLER.comprehension_binding_clause_kinds,
+        comprehension_binding_extractor: GENERIC_HANDLER.comprehension_binding_extractor,
+        named_aggregate_kinds: GENERIC_HANDLER.named_aggregate_kinds,
+        positional_aggregate_kinds: GENERIC_HANDLER.positional_aggregate_kinds,
+        aggregate_pair_kinds: GENERIC_HANDLER.aggregate_pair_kinds,
+        two_child_aggregate_pair_kinds: GENERIC_HANDLER.two_child_aggregate_pair_kinds,
+        aggregate_pair_extractor: GENERIC_HANDLER.aggregate_pair_extractor,
+        aggregate_key_field_names: GENERIC_HANDLER.aggregate_key_field_names,
+        aggregate_value_field_names: GENERIC_HANDLER.aggregate_value_field_names,
+        static_field_name_kinds: GENERIC_HANDLER.static_field_name_kinds,
+        shorthand_field_kinds: GENERIC_HANDLER.shorthand_field_kinds,
+        spread_kinds: GENERIC_HANDLER.spread_kinds,
+        spread_value_field_names: GENERIC_HANDLER.spread_value_field_names,
+        aggregate_syntax_only_kinds: GENERIC_HANDLER.aggregate_syntax_only_kinds,
+        multi_child_aggregate_pattern_kinds: GENERIC_HANDLER.multi_child_aggregate_pattern_kinds,
+        lambda_value_container_kinds: GENERIC_HANDLER.lambda_value_container_kinds,
+        transparent_call_wrapper_kinds: GENERIC_HANDLER.transparent_call_wrapper_kinds,
+        single_expression_group_kinds: GENERIC_HANDLER.single_expression_group_kinds,
+        assignment_target_wrapper_kinds: GENERIC_HANDLER.assignment_target_wrapper_kinds,
+        binding_declaration_keyword_spellings: GENERIC_HANDLER.binding_declaration_keyword_spellings,
         assignment_kinds: GENERIC_HANDLER.assignment_kinds,
+        assignment_semantics_extractor: GENERIC_HANDLER.assignment_semantics_extractor,
+        assignment_place_extractor: GENERIC_HANDLER.assignment_place_extractor,
+        compound_assignment_kinds: GENERIC_HANDLER.compound_assignment_kinds,
+        compound_assignment_operators: GENERIC_HANDLER.compound_assignment_operators,
+        type_only_declaration_kinds: GENERIC_HANDLER.type_only_declaration_kinds,
+        positional_aggregate_assignment_kinds: GENERIC_HANDLER.positional_aggregate_assignment_kinds,
+        positional_aggregate_value_kinds: GENERIC_HANDLER.positional_aggregate_value_kinds,
         return_kinds: GENERIC_HANDLER.return_kinds,
         throw_kinds: GENERIC_HANDLER.throw_kinds,
         lambda_kinds: GENERIC_HANDLER.lambda_kinds,
+        inline_closure_kinds: GENERIC_HANDLER.inline_closure_kinds,
+        implicit_lambda_parameter_name: GENERIC_HANDLER.implicit_lambda_parameter_name,
+        lambda_body_field_names: GENERIC_HANDLER.lambda_body_field_names,
+        lambda_body_kinds: GENERIC_HANDLER.lambda_body_kinds,
         try_kinds: GENERIC_HANDLER.try_kinds,
         catch_kinds: GENERIC_HANDLER.catch_kinds,
         finally_kinds: GENERIC_HANDLER.finally_kinds,
+        try_fallback_body_kinds: GENERIC_HANDLER.try_fallback_body_kinds,
+        catch_body_follows_marker: GENERIC_HANDLER.catch_body_follows_marker,
         break_kinds: GENERIC_HANDLER.break_kinds,
         continue_kinds: GENERIC_HANDLER.continue_kinds,
+        control_label_field_names: GENERIC_HANDLER.control_label_field_names,
         yield_kinds: GENERIC_HANDLER.yield_kinds,
+        yield_value_field_names: GENERIC_HANDLER.yield_value_field_names,
         await_kinds: GENERIC_HANDLER.await_kinds,
         defer_kinds: GENERIC_HANDLER.defer_kinds,
+        deferred_body_extractor: GENERIC_HANDLER.deferred_body_extractor,
         using_kinds: GENERIC_HANDLER.using_kinds,
+        using_body_field_names: GENERIC_HANDLER.using_body_field_names,
+        try_body_field_names: GENERIC_HANDLER.try_body_field_names,
+        using_alias_extractor: GENERIC_HANDLER.using_alias_extractor,
         special_forms: GENERIC_HANDLER.special_forms,
         runtime_type_guard_calls: GENERIC_HANDLER.runtime_type_guard_calls,
         runtime_type_guard_operators: GENERIC_HANDLER.runtime_type_guard_operators,
         runtime_typeof_operators: GENERIC_HANDLER.runtime_typeof_operators,
         runtime_type_equality_operators: GENERIC_HANDLER.runtime_type_equality_operators,
+        runtime_type_wrapper_kinds: GENERIC_HANDLER.runtime_type_wrapper_kinds,
         value_free_expression_kinds: GENERIC_HANDLER.value_free_expression_kinds,
         value_free_call_names: GENERIC_HANDLER.value_free_call_names,
         value_free_unary_operators: GENERIC_HANDLER.value_free_unary_operators,
         call_ref_kinds: GENERIC_HANDLER.call_ref_kinds,
         member_expression_kinds: GENERIC_HANDLER.member_expression_kinds,
         subscript_expression_kinds: GENERIC_HANDLER.subscript_expression_kinds,
+        member_base_field_names: GENERIC_HANDLER.member_base_field_names,
+        member_name_field_names: GENERIC_HANDLER.member_name_field_names,
+        subscript_base_field_names: GENERIC_HANDLER.subscript_base_field_names,
+        subscript_index_field_names: GENERIC_HANDLER.subscript_index_field_names,
+        static_subscript_key_extractor: GENERIC_HANDLER.static_subscript_key_extractor,
+        computed_subscript_extractor: GENERIC_HANDLER.computed_subscript_extractor,
         sigil_variable_kinds: GENERIC_HANDLER.sigil_variable_kinds,
         global_variable_kinds: GENERIC_HANDLER.global_variable_kinds,
+        reference_name_extractor: GENERIC_HANDLER.reference_name_extractor,
+        expression_place_extractor: GENERIC_HANDLER.expression_place_extractor,
+        indirect_place_operand_extractor: GENERIC_HANDLER.indirect_place_operand_extractor,
         subscript_base_call_refs: GENERIC_HANDLER.subscript_base_call_refs,
         non_call_ref_names: GENERIC_HANDLER.non_call_ref_names,
         call_name_suffix_tokens: GENERIC_HANDLER.call_name_suffix_tokens,
@@ -4454,6 +5005,7 @@ pub const fn with_fn_kinds_and_implicit_receivers(
         callable_reference_kinds: GENERIC_HANDLER.callable_reference_kinds,
         callable_reference_extractor: GENERIC_HANDLER.callable_reference_extractor,
         method_receiver_param_index: GENERIC_HANDLER.method_receiver_param_index,
+        receiver_presence_extractor: GENERIC_HANDLER.receiver_presence_extractor,
         implicit_receiver_names,
         implicit_receiver_prefixes,
         tail_expression_returns: GENERIC_HANDLER.tail_expression_returns,
@@ -4507,9 +5059,9 @@ pub fn extract_assignment_value_facts(
     while let Some(node) = node_stack.pop() {
         let span = span_of(file, &node);
         let is_assignment = handler.is_assignment(node.kind())
-            && (node.kind() != "binary_operator" || binary_operator_is_assignment(&node, src));
+            && handler.assignment_semantics(node, src) == AssignmentNodeSemantics::Assignment;
         if is_assignment {
-            let target = assignment_target_pattern_node(node, src);
+            let target = assignment_target_pattern_node(node, src, handler);
             if let Some(value) = assignment_value_node(node, target) {
                 let target_span = target.map(|target| span_of(file, &target));
                 let value_span = span_of(file, &value);
@@ -4525,7 +5077,7 @@ pub fn extract_assignment_value_facts(
                             .or_else(|| {
                                 handler
                                     .is_call(value.kind())
-                                    .then(|| parsed_call_target(&value, src))
+                                    .then(|| parsed_call_target(&value, src, handler))
                                     .flatten()
                                     .map(|target| normalize_call_name_whitespace(&target.full_text))
                             })
@@ -4538,8 +5090,8 @@ pub fn extract_assignment_value_facts(
                     };
                     facts.push(crate::AssignmentValueFact {
                         assignment_span: span,
-                        target: assignment_target_node(node, src)
-                            .and_then(|target| argument_place(&target, src)),
+                        target: assignment_target_node(node, src, handler)
+                            .and_then(|target| assignment_place(target, src, handler)),
                         target_is_immutable: false,
                         target_owner: None,
                         target_span,
@@ -4587,8 +5139,8 @@ pub fn extract_call_receiver_facts(
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
         let receiver_and_span = if handler.is_call(node.kind()) {
-            call_receiver_node(&node, handler)
-                .zip(parsed_call_target(&node, src))
+            call_receiver_node(&node, src, handler)
+                .zip(parsed_call_target(&node, src, handler))
                 .map(|(receiver, target)| (receiver, span_of(file, &target.node)))
         } else {
             handler
@@ -4637,7 +5189,7 @@ pub fn extract_call_argument_value_facts(
         handler: &GrammarHandler,
     ) -> Option<Span> {
         if handler.call_ref_kinds.contains(&node.kind()) {
-            return parsed_call_target(&node, src).map(|target| span_of(file, &target.node));
+            return parsed_call_target(&node, src, handler).map(|target| span_of(file, &target.node));
         }
         let child = transparent_direct_call_child(&node, handler)?;
         direct_call_callee_span(child, file, src, handler)
@@ -4710,35 +5262,40 @@ pub fn extract_call_argument_value_facts(
                 nodes
                     .iter()
                     .map(|node| {
-                        let value = argument_value_node(*node);
+                        let value = argument_value_node(*node, src, handler);
                         (
                             expression_flow::expression_flow_from_node_with_handler(
                                 value, file, src, handler,
                             ),
                             direct_call_callee_span(value, file, src, handler),
+                            handler.expression_value_kind(value, src),
                             if handler.is_lambda(value.kind()) {
-                                extract_param_names(&value, src)
+                                extract_param_names(&value, src, handler)
                             } else {
                                 Vec::new()
                             },
                         )
                     })
-                    .max_by_key(|(flow, _, callback_params)| {
+                    .max_by_key(|(flow, _, value_kind, callback_params)| {
                         (
                             flow.aggregate_fields.len() + flow.tuple_items.len() + flow.spreads.len(),
                             usize::from(!flow.is_empty()),
+                            usize::from(value_kind.is_some()),
                             callback_params.len(),
                         )
                     })
             });
-        if let Some((value_flow, direct_call_span, inline_callback_params)) =
-            selected.filter(|(flow, _, callback_params)| !flow.is_empty() || !callback_params.is_empty())
+        if let Some((value_flow, direct_call_span, value_kind, inline_callback_params)) =
+            selected.filter(|(flow, _, value_kind, callback_params)| {
+                !flow.is_empty() || value_kind.is_some() || !callback_params.is_empty()
+            })
         {
             facts.push(crate::CallArgumentValueFact {
                 call_span,
                 argument_index,
                 argument_span,
                 direct_call_span,
+                value_kind,
                 inline_callback_params,
                 value_flow,
                 static_value: None,
@@ -4838,12 +5395,13 @@ pub fn populate_call_argument_static_values(
         let Some(argument_node) = argument_nodes.get(&(argument_span.start, argument_span.end)) else {
             continue;
         };
-        let value_node = argument_value_node(*argument_node);
+        let value_node = argument_value_node(*argument_node, src, handler);
         let static_value = decode(value_node, src);
         let exact_static_aggregate_fields =
-            expression_flow::exact_static_aggregate_fields(value_node, src, decode).unwrap_or_default();
+            expression_flow::exact_static_aggregate_fields(value_node, src, handler, decode)
+                .unwrap_or_default();
         let exact_static_sequence_values =
-            expression_flow::exact_static_sequence_values(value_node, src, decode);
+            expression_flow::exact_static_sequence_values(value_node, src, handler, decode);
         if static_value.is_none()
             && exact_static_aggregate_fields.is_empty()
             && exact_static_sequence_values.is_none()
@@ -4864,12 +5422,13 @@ pub fn populate_call_argument_static_values(
                 argument_index,
                 argument_span,
                 direct_call_span: if handler.call_ref_kinds.contains(&value_node.kind()) {
-                    parsed_call_target(&value_node, src).map(|target| span_of(file, &target.node))
+                    parsed_call_target(&value_node, src, handler).map(|target| span_of(file, &target.node))
                 } else {
                     None
                 },
+                value_kind: handler.expression_value_kind(value_node, src),
                 inline_callback_params: if handler.is_lambda(value_node.kind()) {
-                    extract_param_names(&value_node, src)
+                    extract_param_names(&value_node, src, handler)
                 } else {
                     Vec::new()
                 },
@@ -4945,7 +5504,7 @@ fn lower_lambda_declarations(lowering: &CallableLowering<'_>, defs: &mut Vec<cra
         if name.is_empty() {
             continue;
         }
-        let params = extract_param_names(&lambda, lowering.src);
+        let params = extract_param_names(&lambda, lowering.src, lowering.handler);
         let body_node = lambda
             .child_by_field_name("body")
             .or_else(|| lambda.child_by_field_name("block"))
@@ -5016,7 +5575,7 @@ fn lower_lambda_declarations(lowering: &CallableLowering<'_>, defs: &mut Vec<cra
                 lowering.handler.syntax_error_tolerant_call_names,
             );
         }
-        annotate_tuple_call_result_bindings(&mut flow_events, lowering.tree, lowering.src);
+        annotate_tuple_call_result_bindings(&mut flow_events, lowering.tree, lowering.src, lowering.handler);
         if params.is_empty() && flow_events.is_empty() {
             continue;
         }
@@ -5042,6 +5601,7 @@ fn lower_lambda_declarations(lowering: &CallableLowering<'_>, defs: &mut Vec<cra
             bases: Vec::new(),
             receiver_param_index: None,
             receiver_field_writes: Vec::new(),
+            receiver_field_initializers: Vec::new(),
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
             return_type: None,
@@ -5163,6 +5723,7 @@ fn lower_class_declarations(
             bases: Vec::new(),
             receiver_param_index: None,
             receiver_field_writes: Vec::new(),
+            receiver_field_initializers: Vec::new(),
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
             return_type: None,
@@ -5266,6 +5827,7 @@ fn lower_module_declaration(lowering: &CallableLowering<'_>, defs: &mut Vec<crat
         bases: Vec::new(),
         receiver_param_index: None,
         receiver_field_writes: Vec::new(),
+        receiver_field_initializers: Vec::new(),
         implicit_receiver_names: Vec::new(),
         receiver_state_sources: Vec::new(),
         return_type: None,
@@ -5340,14 +5902,11 @@ pub fn decl_index_from_tree_with_handler(
     let mut function_parent_spans: Vec<(bonsai_common::SymbolId, bonsai_common::Span)> = Vec::new();
     let mut next: u32 = 0;
     for node in fn_nodes {
-        // Elixir-specific: `def foo(x) do ... end` parses as a `call`
-        // whose target is `def` / `defp`, first argument is a *second*
-        // `call` carrying the real function name, and a `do_block`
-        // child holding the body. Skip `call` nodes that don't look
-        // like a def-macro (ordinary runtime calls also match the
-        // `call` kind) and unwrap the ones that do.
-        let elixir_def = if node.kind() == "call" {
-            elixir_unwrap_def(&node, src)
+        let extracted_definition = if let Some(extract) = handler.function_definition_extractor {
+            let Some(definition) = extract(node, src) else {
+                continue;
+            };
+            Some(definition)
         } else {
             None
         };
@@ -5357,9 +5916,9 @@ pub fn decl_index_from_tree_with_handler(
         // subtree — dig into that BEFORE falling back to
         // `first_identifier_like_child`, which would otherwise pick the
         // return-type identifier (`UserInfo` in `UserInfo *get_user(...)`).
-        let name_node = elixir_def
+        let name_node = extracted_definition
             .as_ref()
-            .map(|def| def.name)
+            .map(|definition| definition.name)
             .or_else(|| node.child_by_field_name("name"))
             .or_else(|| binding_name_node(&node, src))
             // H8: out-of-line `RetType Class::method(...)` — take the
@@ -5374,11 +5933,7 @@ pub fn decl_index_from_tree_with_handler(
                     .and_then(first_identifier_descendant)
             })
             .or_else(|| first_identifier_like_child(&node));
-        let synthetic_name = name_node
-            .is_none()
-            .then(|| synthetic_function_name(&node, src))
-            .flatten();
-        let Some(name_node) = name_node.or_else(|| synthetic_name.as_ref().map(|_| node)) else {
+        let Some(name_node) = name_node else {
             continue;
         };
         // Lua-style `function M.updateUser(...)` gives us a
@@ -5388,24 +5943,10 @@ pub fn decl_index_from_tree_with_handler(
         // when present so the stored decl name is the short form and
         // name-resolution doesn't need module-prefix stripping.
         let name_node = name_node.child_by_field_name("field").unwrap_or(name_node);
-        let name = synthetic_name
-            .as_deref()
-            .unwrap_or_else(|| node_text(&name_node, src));
+        let name = node_text(&name_node, src);
         if name.is_empty() {
             continue;
         }
-        // Elixir-only: skip the call node if it's NOT a def/defp macro
-        // call. The unwrap_def returned None, meaning this is an
-        // ordinary runtime call like `IO.puts(x)` — indexing it as a
-        // function decl is noise (and its "name" would be the callee).
-        // We still want to index top-level `defmodule Foo do ... end`
-        // calls as module markers, but those aren't functions, so
-        // filter them here. The `node.kind() == "call"` check is
-        // Elixir-specific (other grammars don't use `call` as a fn kind).
-        if node.kind() == "call" && elixir_def.is_none() {
-            continue;
-        }
-
         let decl_kind = if handler.constructor_method_kinds.contains(&node.kind())
             || handler.is_constructor_method(name)
         {
@@ -5418,9 +5959,9 @@ pub fn decl_index_from_tree_with_handler(
             crate::DeclKind::Function
         };
 
-        let body_node = elixir_def
+        let body_node = extracted_definition
             .as_ref()
-            .and_then(|d| d.short_form_body)
+            .and_then(|definition| definition.body)
             .or_else(|| node.child_by_field_name("body"))
             .or_else(|| node.child_by_field_name("block"))
             .or_else(|| first_named_child_of_kind(&node, "function_body"))
@@ -5455,13 +5996,20 @@ pub fn decl_index_from_tree_with_handler(
                 matches!(p_sib.kind(), "function_body" | "block" | "body_statement").then_some(p_sib)
             });
         let syntax_broken = file_has_syntax_errors && callable_has_syntax_error(&node, body_node.as_ref());
-        let implicit_return_node = body_node.and_then(|b| implicit_return_expression_node(&b, handler));
+        // Constructors initialize and return a new receiver at the call ABI,
+        // but they never return a source-language value. Their bodies must
+        // still lower assignments/calls; only implicit value-return synthesis
+        // is disabled here.
+        let is_constructor = decl_kind == crate::DeclKind::Constructor;
+        let implicit_return_node = (!is_constructor)
+            .then(|| body_node.and_then(|b| implicit_return_expression_node(&b, handler)))
+            .flatten();
         let body_implicit_returns = implicit_return_node.is_some();
         // A function declared to return a void/unit type carries no return
         // value, so synthesizing an implicit Return for its tail expression
         // would tokenize that expression (often a side-effecting call whose
         // args are consumed, not returned) into a bogus tainted return.
-        let returns_void = callable_returns_void(&node, src, handler);
+        let returns_void = is_constructor || callable_returns_void(&node, src, handler);
         let mut flow_events = if let Some(b) = body_node {
             let mut events = walk_flow_events(b, file, src, handler, &class_names);
             if returns_void {
@@ -5475,11 +6023,6 @@ pub fn decl_index_from_tree_with_handler(
         } else {
             Vec::new()
         };
-        let mut pre_body_events = pre_body_call_events(&node, file, src, handler, &class_names);
-        if !pre_body_events.is_empty() {
-            pre_body_events.extend(flow_events);
-            flow_events = pre_body_events;
-        }
         // Narrow syntax-error gating: keep flows from the cleanly-parsed
         // statements, drop only the events inside a recovered error span.
         if syntax_broken {
@@ -5489,20 +6032,19 @@ pub fn decl_index_from_tree_with_handler(
                 handler.syntax_error_tolerant_call_names,
             );
         }
-        annotate_tuple_call_result_bindings(&mut flow_events, tree, src);
+        annotate_tuple_call_result_bindings(&mut flow_events, tree, src, handler);
 
-        // For Elixir def-macros, params live on the SIGNATURE call
-        // (the first argument of the outer call), not on the outer
-        // call node itself. Use the unwrapped signature node.
-        let param_source = elixir_def.as_ref().map(|d| d.signature_call).unwrap_or(node);
-        let params = extract_param_names(&param_source, src);
+        let param_source = extracted_definition
+            .as_ref()
+            .map_or(node, |definition| definition.parameter_source);
+        let params = extract_param_names(&param_source, src, handler);
         // M1: a positional variadic collector (`*args`, `...rest`, `T...`,
         // C-family bare `...`) absorbs every overflow positional argument.
         // Flag it so `param_index_for_call_arg` routes those args onto the
         // collector instead of dropping them. Named splats are stored under
         // their bare name in `params`, so the engine cannot infer this from
         // the name alone.
-        let is_variadic = parameter_list_is_variadic(&param_source)
+        let is_variadic = parameter_list_is_variadic(&param_source, handler)
             || params.last().is_some_and(|p| p == SYNTHETIC_VARARGS_PARAM);
         let param_annotations = extract_param_annotations(&param_source, src, handler);
         let receiver_param_index =
@@ -5512,11 +6054,11 @@ pub fn decl_index_from_tree_with_handler(
                 handler
                     .method_receiver_param_index
                     .filter(|idx| *idx < params.len())
-                    // Skip when the syntax proves no receiver exists:
-                    // Python `@staticmethod` (decorator above the fn)
-                    // and Rust associated functions whose first formal
-                    // parameter is NOT a `self_parameter` grammar node.
-                    .filter(|_| function_has_syntactic_receiver(&node, src))
+                    .filter(|_| {
+                        handler
+                            .receiver_presence_extractor
+                            .is_none_or(|extractor| extractor(node, src))
+                    })
             } else {
                 None
             };
@@ -5568,6 +6110,7 @@ pub fn decl_index_from_tree_with_handler(
             bases: Vec::new(),
             receiver_param_index,
             receiver_field_writes,
+            receiver_field_initializers: Vec::new(),
             implicit_receiver_names,
             receiver_state_sources,
             return_type: None,
@@ -5615,10 +6158,10 @@ pub fn decl_index_from_tree_with_handler(
     lower_module_declaration(&lowering, &mut defs, &mut next);
 
     let mut refs = extract_call_refs(tree, file, src, handler);
-    refs.extend(extract_decorators(tree, file, src));
+    refs.extend(extract_decorators(tree, file, src, handler));
     refs.extend(extract_read_write_refs(tree, file, src, handler));
-    let strings = extract_string_literals(tree, file, src);
-    let comments = extract_comments(tree, file, src);
+    let strings = extract_string_literals(tree, file, src, handler);
+    let comments = extract_comments(tree, file, src, handler);
     let assignment_values = extract_assignment_value_facts(tree, file, handler, src);
     let call_receivers = extract_call_receiver_facts(tree, file, handler, src);
     let call_argument_values = extract_call_argument_value_facts(tree, file, &defs, src, handler);
@@ -5696,26 +6239,6 @@ fn callable_binding_name_from_node(node: &Node<'_>, src: &[u8]) -> String {
     callable_binding_name_from_text(node_text(node, src))
 }
 
-fn pre_body_call_events(
-    node: &Node<'_>,
-    file: FileId,
-    src: &[u8],
-    handler: &GrammarHandler,
-    class_names: &[String],
-) -> Vec<FlowEvent> {
-    let mut out = Vec::new();
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if child.kind() != "modifier_invocation" {
-            continue;
-        }
-        if let Some(event) = build_call_event(child, file, src, handler, class_names) {
-            out.push(event);
-        }
-    }
-    out
-}
-
 fn has_ancestor_kind(node: &Node<'_>, kinds: &[&str]) -> bool {
     let mut current = node.parent();
     while let Some(parent) = current {
@@ -5727,345 +6250,10 @@ fn has_ancestor_kind(node: &Node<'_>, kinds: &[&str]) -> bool {
     false
 }
 
-/// True when syntactic evidence indicates the function actually has
-/// a receiver parameter, i.e. the `method_receiver_param_index`
-/// declared by the handler is meaningful for this specific node.
-///
-/// Two negative cases are honored:
-///
-/// - **Rust associated functions**: if a parameter list is present
-///   and its first formal parameter is NOT a `self_parameter` node,
-///   the function has no receiver. `fn new(s: String)` inside
-///   `impl Foo` lands here — without this check `params[0] = "s"`
-///   would be misclassified as the implicit receiver.
-/// - **Python `@staticmethod`**: when the function is wrapped in a
-///   `decorated_definition` whose decorator list contains a
-///   `staticmethod` reference, the function has no receiver.
-///   Plain `@classmethod` keeps a receiver (it's `cls`).
-///
-/// Languages without these specific shapes (Java, Go, JS, etc.)
-/// fall through to `true` so existing behavior is preserved.
-fn function_has_syntactic_receiver(node: &Node<'_>, src: &[u8]) -> bool {
-    // --- Rust: probe the parameter list for a `self_parameter` ---
-    if let Some(params_node) = node
-        .child_by_field_name("parameters")
-        .or_else(|| first_named_child_of_kind(node, "parameters"))
-    {
-        let mut cur = params_node.walk();
-        let mut saw_self = false;
-        let mut saw_other_param = false;
-        for child in params_node.named_children(&mut cur) {
-            match child.kind() {
-                "self_parameter" => saw_self = true,
-                "parameter"
-                | "method_parameter"
-                | "formal_parameter"
-                | "typed_parameter"
-                | "default_parameter"
-                | "typed_default_parameter"
-                | "list_splat_pattern"
-                | "dictionary_splat_pattern"
-                | "identifier"
-                | "shorthand_property_identifier_pattern"
-                | "required_parameter"
-                | "optional_parameter"
-                | "rest_parameter" => saw_other_param = true,
-                _ => {}
-            }
-        }
-        // If the grammar exposes `self_parameter` and we didn't see
-        // one, there is no receiver — even if other params exist.
-        if !saw_self && saw_other_param && grammar_uses_self_parameter_kind(node) {
-            return false;
-        }
-        if saw_self {
-            return true;
-        }
-    }
-
-    // --- Python: walk to a `decorated_definition` parent and look ---
-    // --- for an exact `@staticmethod` / `@builtins.staticmethod`. ---
-    if let Some(parent) = node.parent() {
-        if parent.kind() == "decorated_definition" {
-            let mut cur = parent.walk();
-            for child in parent.named_children(&mut cur) {
-                if child.kind() != "decorator" {
-                    continue;
-                }
-                if decorator_is_staticmethod(&child, src) {
-                    return false;
-                }
-            }
-        }
-    }
-
-    true
-}
-
-/// True iff `decorator` is the bare `@staticmethod` decorator
-/// (or one of its accepted aliases). Substring-matching the whole
-/// decorator text would false-positive on
-/// `@abc.abstractstaticmethod`, `@my_staticmethod_helper`,
-/// `@StaticmethodWrapper`, etc., so we inspect the decorator's
-/// identifier expression directly.
-///
-/// Accepted shapes (recurses through parens and call wrappers):
-///   `@staticmethod`             → identifier
-///   `@(staticmethod)`           → parenthesized_expression
-///   `@staticmethod()`           → call(callee=identifier)
-///   `@builtins.staticmethod`    → attribute(object=builtins, attr=staticmethod)
-fn decorator_is_staticmethod(decorator: &Node<'_>, src: &[u8]) -> bool {
-    let mut decorator_cursor = decorator.walk();
-    let Some(decorator_expr) = decorator.named_children(&mut decorator_cursor).next() else {
-        return false;
-    };
-    expr_is_staticmethod(&decorator_expr, src)
-}
-
-fn expr_is_staticmethod(node: &Node<'_>, src: &[u8]) -> bool {
-    match node.kind() {
-        "identifier" => node
-            .utf8_text(src)
-            .map(|t| t.trim() == "staticmethod")
-            .unwrap_or(false),
-        "attribute" => {
-            // `attribute` is `<object>.<attribute>`. Only honor the
-            // canonical `builtins.staticmethod` form so we don't
-            // mis-match `@some_pkg.staticmethod` (the package's
-            // arbitrary helper that happens to share the name).
-            let attr_is_static = node
-                .child_by_field_name("attribute")
-                .and_then(|n| n.utf8_text(src).ok())
-                .map(|t| t.trim() == "staticmethod")
-                .unwrap_or(false);
-            let object_is_builtins = node
-                .child_by_field_name("object")
-                .and_then(|n| n.utf8_text(src).ok())
-                .map(|t| t.trim() == "builtins")
-                .unwrap_or(false);
-            attr_is_static && object_is_builtins
-        }
-        "parenthesized_expression" => {
-            let mut c = node.walk();
-            let inner = node.named_children(&mut c).next();
-            inner.is_some_and(|n| expr_is_staticmethod(&n, src))
-        }
-        "call" => node
-            .child_by_field_name("function")
-            .is_some_and(|callee| expr_is_staticmethod(&callee, src)),
-        _ => false,
-    }
-}
-
-/// Heuristic: does the grammar containing `node` know about the
-/// `self_parameter` kind at all? We check by looking at all named
-/// descendants of the parameter list's parent for any node tagged
-/// `self_parameter`. A grammar that doesn't model self-parameters
-/// (Java, JS, Python, Go, etc.) will never emit one, so the absence
-/// of a `self_parameter` child is not by itself proof of "no
-/// receiver." Currently only Rust's tree-sitter grammar uses the
-/// `self_parameter` kind.
-fn grammar_uses_self_parameter_kind(node: &Node<'_>) -> bool {
-    // Cheap proxy: check whether the function lives inside a
-    // Rust-specific `impl_item` / `trait_item` ancestor. We
-    // intentionally do NOT include `declaration_list` here — that
-    // kind also exists in C/C++/Java/C#/PHP grammars and would
-    // silently strip receiver-param indices from any future
-    // language that sets `method_receiver_param_index = Some`.
-    let mut cur = node.parent();
-    while let Some(p) = cur {
-        if matches!(p.kind(), "impl_item" | "trait_item") {
-            return true;
-        }
-        cur = p.parent();
-    }
-    false
-}
-
 fn call_receiver_from_name(name: &str) -> Option<String> {
-    if let Some(receiver) = rust_value_receiver_from_scoped_name(name) {
-        return Some(receiver);
-    }
-    let normalised = normalise_qualified_text(name);
-    let (receiver, _) = normalised.rsplit_once('.')?;
+    let (receiver, _) = name.rsplit_once('.')?;
     let receiver = receiver.trim();
     (!receiver.is_empty()).then(|| receiver.to_string())
-}
-
-fn rust_value_receiver_from_scoped_name(name: &str) -> Option<String> {
-    let segments = bonsai_common::qualified_name_segments(name);
-    let [head, tail] = segments.as_slice() else {
-        return None;
-    };
-    let head = head.trim();
-    let tail = tail.trim();
-    if head.is_empty() || tail.is_empty() {
-        return None;
-    }
-    let mut chars = head.chars();
-    let first = chars.next()?;
-    if !(first == '_' || first.is_ascii_lowercase()) {
-        return None;
-    }
-    if !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
-        return None;
-    }
-    let mut tail_chars = tail.chars();
-    let tail_first = tail_chars.next()?;
-    if !(tail_first == '_' || tail_first.is_ascii_lowercase()) {
-        return None;
-    }
-    if !tail_chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
-        return None;
-    }
-    Some(head.to_string())
-}
-
-/// One row in a language's lifecycle-transition table.
-/// `call_match` is the callee name (bare tail or fully qualified);
-/// `transition` is the canonical state (`freed`, `closed`,
-/// `unlocked`, `cancelled`, `moved`); `arg_index` selects which
-/// positional arg names the binding (used for `free(p)` shapes;
-/// receiver-style calls preferentially use the receiver).
-#[derive(Clone, Copy, Debug)]
-pub struct LifecycleTransition {
-    pub call_match: &'static str,
-    pub transition: &'static str,
-    pub arg_index: usize,
-}
-
-/// Append a `FlowEvent::Lifecycle` after every recognised
-/// transition call in `events`. Conservative: emits only when the
-/// binding reduces to a bare identifier (after stripping `&` / `*`
-/// and folding `obj.fd` → `fd`).
-pub fn inject_lifecycle_events(events: &mut Vec<crate::FlowEvent>, transitions: &[LifecycleTransition]) {
-    use crate::FlowEvent;
-    for event in events.iter_mut() {
-        match event {
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                inject_lifecycle_events(then_events, transitions);
-                inject_lifecycle_events(else_events, transitions);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                inject_lifecycle_events(body, transitions);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                inject_lifecycle_events(body, transitions);
-                inject_lifecycle_events(catch_events, transitions);
-                inject_lifecycle_events(finally_events, transitions);
-            }
-            _ => {}
-        }
-    }
-    let mut inserts: Vec<(usize, FlowEvent)> = Vec::new();
-    for (idx, event) in events.iter().enumerate() {
-        let FlowEvent::Call {
-            span,
-            name,
-            receiver,
-            args,
-            ..
-        } = event
-        else {
-            continue;
-        };
-        for row in transitions {
-            if !lifecycle_call_matches(name, row.call_match) {
-                continue;
-            }
-            // Bare row keys target method-style calls — the binding is the
-            // receiver. Qualified row keys target namespaced
-            // free functions — the binding is the indexed arg.
-            // The qualified-name fallback only fires for adapters
-            // that fold receiver and method into the call name
-            // and emit no args.
-            let row_is_qualified = bonsai_common::qualified_name_owner(row.call_match).is_some();
-            let raw = if !row_is_qualified {
-                if let Some(rx) = receiver.as_deref() {
-                    rx.trim().to_string()
-                } else if let Some(arg) = args.get(row.arg_index) {
-                    let Some(place) = arg.place.as_deref() else {
-                        continue;
-                    };
-                    place.trim().to_string()
-                } else if let Some(head) = bonsai_common::qualified_name_owner(name) {
-                    head.trim().to_string()
-                } else {
-                    continue;
-                }
-            } else if let Some(arg) = args.get(row.arg_index) {
-                let Some(place) = arg.place.as_deref() else {
-                    continue;
-                };
-                place.trim().to_string()
-            } else {
-                continue;
-            };
-            let bare = lifecycle_binding_name(&raw);
-            if bare.is_empty() {
-                continue;
-            }
-            inserts.push((
-                idx + 1,
-                FlowEvent::Lifecycle {
-                    span: *span,
-                    name: bare,
-                    transition: row.transition.to_string(),
-                },
-            ));
-            break;
-        }
-    }
-    for (at, ev) in inserts.into_iter().rev() {
-        events.insert(at, ev);
-    }
-}
-
-/// Bare row keys match the call's trailing segment; qualified keys require an
-/// exact match. Separator syntax remains adapter-owned.
-fn lifecycle_call_matches(call_name: &str, row_match: &str) -> bool {
-    let call = call_name.trim();
-    if call == row_match {
-        return true;
-    }
-    if bonsai_common::qualified_name_owner(row_match).is_some() {
-        return false;
-    }
-    bonsai_common::short_qualified_tail(call) == row_match
-}
-
-/// Bare-identifier binding name for the lifecycle lattice.
-/// Source punctuation is stripped structurally from an adapter-classified
-/// place, and a qualified place is folded to its trailing identifier.
-fn lifecycle_binding_name(raw: &str) -> String {
-    let trimmed = bonsai_common::trim_leading_name_punctuation(raw.trim()).trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    let tail = bonsai_common::short_qualified_tail(trimmed).trim();
-    if tail.is_empty() {
-        return String::new();
-    }
-    if !tail
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-    {
-        return String::new();
-    }
-    if !tail.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return String::new();
-    }
-    tail.to_string()
 }
 
 /// Collect every string / char literal in the tree with a rough content
@@ -6074,41 +6262,14 @@ pub fn extract_string_literals(
     tree: &tree_sitter::Tree,
     file: FileId,
     src: &[u8],
+    handler: &GrammarHandler,
 ) -> Vec<crate::StringLiteral> {
-    const STRING_KINDS: &[&str] = &[
-        "string",
-        "string_literal",
-        "interpreted_string_literal",
-        "raw_string_literal",
-        "heredoc",
-        "heredoc_body",
-        "string_content",
-        "template_string",
-        "string_fragment",
-        "char_literal",
-        "character_literal",
-        // Swift string variants.
-        "line_string_literal",
-        "multi_line_string_literal",
-        // Scala interpolated strings: `s"..."`, `f"..."`, raw/etc.
-        // Tree-sitter-scala emits `interpolated_string_expression`
-        // wrapping a `string` literal. We also recognize the
-        // dedicated `interpolated_string_expression` so the outer
-        // node's text (which still contains the meaningful literal
-        // portion plus interpolation parts) is captured.
-        "interpolated_string_expression",
-        "interpolated_string_literal",
-        // Rust `format!("...")` / `concat!("...")` style — the macro
-        // arguments contain regular string_literal nodes which are
-        // already covered above; noted here for future grammar-
-        // specific variants.
-    ];
     let mut out = Vec::new();
     let mut cursor = tree.walk();
     let root = tree.root_node();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        if STRING_KINDS.contains(&node.kind()) {
+        if handler.is_string_literal(node.kind()) {
             let text = node_text(&node, src).to_string();
             if !text.is_empty() {
                 out.push(crate::StringLiteral {
@@ -6138,57 +6299,15 @@ pub fn extract_call_refs(
 ) -> Vec<crate::Ref> {
     let mut out = Vec::new();
     let call_ref_kinds = handler.call_ref_kinds.to_vec();
-    let remote_call_syntax = handler
-        .special_forms
-        .contains(&SyntaxSpecialForm::RemoteCallExpression);
     for node in collect_kinds(tree, &call_ref_kinds) {
-        if remote_call_syntax && erlang_remote_is_call_expr(&node) {
+        if handler.call_ref_node_filter.is_some_and(|include| !include(node)) {
             continue;
         }
-        let erlang_call = remote_call_syntax
-            .then(|| erlang_call_callee(&node, src))
-            .flatten();
-        let erlang_remote = remote_call_syntax
-            .then(|| erlang_remote_callee(&node, src))
-            .flatten();
-        // Prefer the named expression-like child that names the callee.
-        // For dotted calls (`req.getParameter(...)`, `foo.bar.baz(...)`)
-        // the callee is a `navigation_expression` / `member_expression`
-        // / `field_expression` — taking `first_identifier_like_child`
-        // would only grab the leftmost receiver (`req`) and miss the
-        // actual method name. Using the full expression subtree gives
-        // `req.getParameter` which is what downstream ref-lookup wants.
-        let callee_node = node
-            .child_by_field_name("function")
-            .or_else(|| node.child_by_field_name("callee"))
-            .or_else(|| erlang_call.as_ref().map(|(n, _)| *n))
-            .or_else(|| erlang_remote.as_ref().map(|(n, _)| *n))
-            .or_else(|| node.child_by_field_name("name"))
-            .or_else(|| first_callee_expression_child(&node))
-            .or_else(|| first_identifier_like_child(&node))
-            .or_else(|| first_identifier_descendant(node));
-        let Some(callee) = callee_node else { continue };
-        // The callee identity is derived from adapter-declared Tree-sitter
-        // node shapes; no source-text API inventories are consulted here.
-        let mut inner_name = erlang_remote
-            .as_ref()
-            .or(erlang_call.as_ref())
-            .map(|(_, name)| normalize_call_name_whitespace(name))
-            .unwrap_or_else(|| normalize_call_name_whitespace(node_text(&callee, src)));
-        for suffix in handler.call_name_suffix_tokens {
-            if inner_name.ends_with(suffix) {
-                continue;
-            }
-            let node_src = node_text(&node, src);
-            let rest = node_src
-                .trim_start()
-                .strip_prefix(&inner_name)
-                .unwrap_or_default();
-            if rest.trim_start().starts_with(suffix) {
-                inner_name.push_str(suffix);
-                break;
-            }
-        }
+        let Some(target) = parsed_call_target(&node, src, handler) else {
+            continue;
+        };
+        let callee = target.node;
+        let inner_name = target.full_text;
         if inner_name.is_empty() {
             continue;
         }
@@ -6206,28 +6325,6 @@ pub fn extract_call_refs(
             scope: None,
             resolved: None,
         });
-    }
-    if handler
-        .special_forms
-        .contains(&SyntaxSpecialForm::SplitSelectorCall)
-    {
-        for node in collect_kinds(tree, &["selector"]) {
-            let has_argument_part = first_named_child_of_kind(&node, "argument_part").is_some();
-            if !has_argument_part {
-                continue;
-            }
-            if let Some(FlowEvent::Call { name, span, .. }) =
-                build_dart_selector_call_event(node, file, src, handler)
-            {
-                out.push(crate::Ref {
-                    span,
-                    name: normalize_call_name_whitespace(&name),
-                    kind: crate::RefKind::Call,
-                    scope: None,
-                    resolved: None,
-                });
-            }
-        }
     }
     out
 }
@@ -6261,9 +6358,9 @@ pub enum AliasTarget {
     /// in the call chain to the `module` name.
     Namespace { module: String },
     /// Local name binds an instance of a type. Populated by
-    /// [`extend_alias_map_with_flow_events`] when an assignment's
-    /// RHS is a constructor call (PascalCase callee, `new <T>(...)`,
-    /// or a known factory). Lets the security matcher rewrite
+    /// [`extend_alias_map_with_flow_events`] when an assignment's RHS is a
+    /// compiler-proven constructor call or a rulepack-declared factory. Lets
+    /// the security matcher rewrite
     /// `recv.method(x)` to `Type.method(x)` so attribute-chain rules
     /// like `[Logger, info]` / `[File, readText]` /
     /// `[HttpClient, GetStringAsync]` fire on real-world instance
@@ -6703,120 +6800,39 @@ fn is_write_target(node: &Node<'_>, handler: &GrammarHandler) -> bool {
 /// reduced to a single meaningful dotted string (e.g. parenthesised
 /// subexpressions, call returns, computed property access).
 fn normalize_member_name(node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
-    let mut cur = Some(*node);
-    while let Some(n) = cur {
-        if !handler.member_expression_kinds.contains(&n.kind()) {
-            // Base of the chain — include its text and stop.
-            let text = node_text(&n, src).trim().to_string();
-            if !text.is_empty() {
-                // Preserve language sigils in the canonical storage place.
-                // The operand inventory separately emits bare aliases for
-                // tolerant name matching; dropping the sigil here loses the
-                // exact qualified identity (`$c.capacity`) needed to suppress
-                // its whole-object carrier (`$c`).
-                parts.push(text);
-            }
-            break;
-        }
-        // Extract the property/field/name identifier for this level.
-        let field = n
-            .child_by_field_name("property")
-            .or_else(|| n.child_by_field_name("field"))
-            .or_else(|| n.child_by_field_name("name"))
-            .or_else(|| n.child_by_field_name("attribute"))
-            .or_else(|| n.child_by_field_name("right"))
-            .or_else(|| n.child_by_field_name("member"))
-            .or_else(|| {
-                n.child_by_field_name("suffix")
-                    .and_then(|suffix| first_identifier_descendant(suffix))
-            })
-            .or_else(|| {
-                let mut cursor = n.walk();
-                n.named_children(&mut cursor)
-                    .skip(1)
-                    .last()
-                    .and_then(first_identifier_descendant)
-            });
-        if let Some(f) = field {
-            let text = node_text(&f, src).trim().to_string();
-            if !text.is_empty() {
-                parts.push(text);
-            }
-        }
-        cur = n
-            .child_by_field_name("object")
-            .or_else(|| n.child_by_field_name("expression"))
-            .or_else(|| n.child_by_field_name("operand"))
-            .or_else(|| n.child_by_field_name("value"))
-            .or_else(|| n.child_by_field_name("argument"))
-            .or_else(|| n.child_by_field_name("left"))
-            .or_else(|| n.child_by_field_name("target"))
-            .or_else(|| n.child_by_field_name("table"))
-            .or_else(|| n.child_by_field_name("receiver"))
-            .or_else(|| first_named_child(&n));
-        // Guard: if the object field is missing or already non-member with
-        // no readable text, stop.
-        if cur.is_none() {
-            break;
-        }
-    }
-    if parts.is_empty() {
-        return None;
-    }
-    parts.reverse();
-    let joined = parts
-        .iter()
-        .filter(|s| !s.is_empty() && !s.contains('\n'))
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(".");
-    if joined.is_empty() || !joined.contains('.') {
-        // Single-segment chains aren't useful as attribute-chain reads —
-        // bare identifiers are emitted elsewhere (sigil'd / global).
-        return None;
-    }
-    Some(joined)
+    argument_place(node, src, handler).filter(|place| bonsai_common::qualified_name_owner(place).is_some())
 }
 
 /// True when a subscript expression's base is a plain identifier (no
 /// dotted path, no function call, no other subscript). Used to decide
 /// whether to emit the companion `Call` ref for DSL-style
 /// implicit-receiver subscripts.
-fn is_bare_identifier_base(node: &Node<'_>) -> bool {
-    let base = node
-        .child_by_field_name("object")
-        .or_else(|| node.child_by_field_name("value"))
-        .or_else(|| node.child_by_field_name("argument"))
-        .or_else(|| node.child_by_field_name("operand"))
-        .or_else(|| first_named_child(node));
+fn is_bare_identifier_base(node: &Node<'_>, handler: &GrammarHandler) -> bool {
+    let base = handler
+        .subscript_base_field_names
+        .iter()
+        .find_map(|field| node.child_by_field_name(field));
     let Some(base) = base else {
         return false;
     };
-    matches!(
-        base.kind(),
-        "identifier" | "simple_identifier" | "constant" | "type_identifier"
-    )
+    handler.identifier_kinds.contains(&base.kind())
+        || handler.sigil_variable_kinds.contains(&base.kind())
+        || handler.global_variable_kinds.contains(&base.kind())
 }
 
 /// Extract the base expression's text for a subscript / element-access
 /// node — the thing being indexed. `$_GET['x']` → `_GET`, `arr[i]` → `arr`.
-fn normalize_subscript_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
-    let base = node
-        .child_by_field_name("object")
-        .or_else(|| node.child_by_field_name("value"))
-        .or_else(|| node.child_by_field_name("argument"))
-        .or_else(|| node.child_by_field_name("operand"))
-        .or_else(|| first_named_child(node))?;
-    let text = node_text(&base, src).trim().to_string();
-    if text.is_empty() {
-        return None;
-    }
-    let cleaned = bonsai_common::trim_leading_name_punctuation(&text).to_string();
-    if cleaned.is_empty() {
-        return None;
-    }
-    Some(cleaned)
+fn normalize_subscript_name(node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> Option<String> {
+    let base = handler
+        .computed_subscript_extractor
+        .and_then(|extract| extract(*node).map(|(base, _)| base))
+        .or_else(|| {
+            handler
+                .subscript_base_field_names
+                .iter()
+                .find_map(|field| node.child_by_field_name(field))
+        })?;
+    argument_place(&base, src, handler)
 }
 
 /// Scan the tree for attribute-chain and subscript reads (and their
@@ -6870,7 +6886,7 @@ pub fn extract_read_write_refs(
         if is_call_callee(&node, handler) {
             continue;
         }
-        let Some(name) = normalize_subscript_name(&node, src) else {
+        let Some(name) = normalize_subscript_name(&node, src, handler) else {
             continue;
         };
         let kind = if is_write_target(&node, handler) {
@@ -6895,7 +6911,7 @@ pub fn extract_read_write_refs(
         // see the access at all.
         if handler.subscript_base_call_refs
             && bonsai_common::qualified_name_owner(&name).is_none()
-            && is_bare_identifier_base(&node)
+            && is_bare_identifier_base(&node, handler)
         {
             out.push(crate::Ref {
                 span: span_of(file, &node),
@@ -6913,8 +6929,10 @@ pub fn extract_read_write_refs(
         if is_call_callee(&node, handler) {
             continue;
         }
-        let raw = node_text(&node, src).trim().to_string();
-        let name = bonsai_common::trim_leading_name_punctuation(&raw).to_string();
+        let name = handler
+            .reference_name_extractor
+            .and_then(|extract| extract(node, src))
+            .unwrap_or_else(|| node_text(&node, src).trim().to_string());
         if name.is_empty() {
             continue;
         }
@@ -6934,8 +6952,10 @@ pub fn extract_read_write_refs(
 
     // Ruby-style `$stdin` / `$stdout` globals.
     for node in collect_kinds(tree, handler.global_variable_kinds) {
-        let raw = node_text(&node, src).trim().to_string();
-        let name = bonsai_common::trim_leading_name_punctuation(&raw).to_string();
+        let name = handler
+            .reference_name_extractor
+            .and_then(|extract| extract(node, src))
+            .unwrap_or_else(|| node_text(&node, src).trim().to_string());
         if name.is_empty() {
             continue;
         }
@@ -6965,11 +6985,12 @@ pub fn extract_read_write_refs(
             .or_else(|| node.child_by_field_name("target"))
             .or_else(|| first_named_child(&node));
         let Some(lhs) = lhs else { continue };
-        let lhs_text = node_text(&lhs, src).trim().to_string();
         // Only fire on dotted member writes; bare-identifier writes
         // (`x = y`) are already covered by the Assign FlowEvent's
         // target field and don't need a separate Write ref.
-        let canonical_lhs = normalise_qualified_text(&lhs_text);
+        let Some(canonical_lhs) = argument_place(&lhs, src, handler) else {
+            continue;
+        };
         if bonsai_common::qualified_name_owner(&canonical_lhs).is_none() {
             continue;
         }
@@ -6994,490 +7015,6 @@ pub fn extract_read_write_refs(
     }
 
     out
-}
-
-/// Pull `(name_node, "receiver<sep>method")` out of a method-invocation
-/// node when the grammar exposes separate receiver + name fields.
-/// Covers Ruby (`receiver` + `method`, separator `.`), Java
-/// (`object` + `name`, separator `.`), PHP arrow-call (`object` +
-/// `name`, separator `->`), and similar shapes in other grammars.
-/// Returns `None` when the shape doesn't match — the caller falls
-/// back to the generic callee extraction.
-fn method_receiver_name<'tree>(node: &Node<'tree>, src: &[u8]) -> Option<(Node<'tree>, String)> {
-    // Elixir `Module.func(args)` parses as `call { target: dot { left,
-    // right } }`. Unwrap the `target` field's dot node to pick up the
-    // module-qualified name before falling back to simpler shapes.
-    if node.kind() == "call" {
-        if let Some(target) = node.child_by_field_name("target") {
-            if target.kind() == "dot" {
-                if let (Some(l), Some(r)) = (
-                    target.child_by_field_name("left"),
-                    target.child_by_field_name("right"),
-                ) {
-                    return Some((r, format!("{}.{}", node_text(&l, src), node_text(&r, src))));
-                }
-            }
-        }
-    }
-    // PHP static calls: `Request::input(...)` parses as
-    // `scoped_call_expression { scope, name }`.
-    if let (Some(scope), Some(name)) = (
-        node.child_by_field_name("scope"),
-        node.child_by_field_name("name"),
-    ) {
-        return Some((
-            name,
-            format!("{}::{}", node_text(&scope, src), node_text(&name, src)),
-        ));
-    }
-    // Ruby / Objective-C: `receiver` + `method`.
-    if let (Some(r), Some(m)) = (
-        node.child_by_field_name("receiver"),
-        node.child_by_field_name("method"),
-    ) {
-        let receiver_raw = node_text(&r, src).trim();
-        let receiver = if node.kind() == "member_call_expression" {
-            receiver_raw
-        } else {
-            receiver_raw.trim_start_matches('$')
-        };
-        return Some((m, format!("{}.{}", receiver, node_text(&m, src))));
-    }
-    // Perl: `$dbh->prepare(...)` exposes `invocant` + `method`.
-    if let (Some(r), Some(m)) = (
-        node.child_by_field_name("invocant"),
-        node.child_by_field_name("method"),
-    ) {
-        let receiver = node_text(&r, src).trim().trim_start_matches('$');
-        return Some((m, format!("{}->{}", receiver, node_text(&m, src))));
-    }
-    // Java / PHP / Kotlin: `object` + `name`.
-    if let (Some(obj), Some(nm)) = (
-        node.child_by_field_name("object"),
-        node.child_by_field_name("name"),
-    ) {
-        // PHP arrow-calls (`$obj->method()`) use `->` as the
-        // semantic separator; detect this by the node kind so the
-        // reconstructed text matches the source idiom.
-        let sep = if matches!(
-            node.kind(),
-            "member_call_expression" | "nullsafe_member_call_expression"
-        ) {
-            "->"
-        } else {
-            "."
-        };
-        let receiver_raw = node_text(&obj, src).trim();
-        let receiver = if matches!(
-            node.kind(),
-            "member_call_expression" | "nullsafe_member_call_expression"
-        ) {
-            receiver_raw
-        } else {
-            receiver_raw.trim_start_matches('$')
-        };
-        return Some((nm, format!("{}{sep}{}", receiver, node_text(&nm, src))));
-    }
-    // Member expressions commonly expose `object` + `property` fields.
-    if let (Some(obj), Some(prop)) = (
-        node.child_by_field_name("object"),
-        node.child_by_field_name("property"),
-    ) {
-        return Some((
-            prop,
-            format!("{}.{}", node_text(&obj, src), node_text(&prop, src)),
-        ));
-    }
-    // Walk one step through a transparent expression wrapper attached to the
-    // call's `function` field before extracting a member receiver.
-    if let Some(func) = node.child_by_field_name("function") {
-        let inner = if func.kind() == "expression" {
-            first_named_child(&func).unwrap_or(func)
-        } else {
-            func
-        };
-        if inner.kind() == "member_expression" {
-            if let (Some(obj), Some(prop)) = (
-                inner.child_by_field_name("object"),
-                inner.child_by_field_name("property"),
-            ) {
-                return Some((
-                    prop,
-                    format!("{}.{}", node_text(&obj, src), node_text(&prop, src)),
-                ));
-            }
-        }
-    }
-    None
-}
-
-/// True when a Scala `field_expression` is actually a postfix method
-/// call on an operator-named method: `foo.!`, `xs.>>`, etc. Detected
-/// by the presence of an `operator_identifier` child — a dotted
-/// access to a regular identifier is NOT considered a method call
-/// here (the downstream `call_expression` for parenthesized calls
-/// handles those).
-/// Synthesize a `FlowEvent::Call` for Dart's split call grammar.
-///
-/// tree-sitter-dart emits `identifier selector(argument_part)` as two
-/// sibling nodes rather than a unified call. Given the `selector`
-/// node, walk backward through named siblings to collect the callee
-/// text — a simple identifier is the base case; `receiver.method`
-/// calls appear as `identifier "." identifier selector`, so we join
-/// dot-separated identifiers into a qualified callee. Returns `None`
-/// if no identifier-like prev sibling exists (selector appearing in
-/// an unexpected position).
-fn build_dart_selector_call_event(
-    node: Node<'_>,
-    file: FileId,
-    src: &[u8],
-    handler: &GrammarHandler,
-) -> Option<FlowEvent> {
-    first_named_child_of_kind(&node, "argument_part")?;
-    // Walk back through named siblings to assemble the dotted callee.
-    // Shape in the Dart grammar:
-    //   - plain call: `identifier selector(argument_part)`
-    //   - method chain: `identifier selector(.b) selector(.c) …
-    //     selector(argument_part)`
-    // The first identifier we encounter is the *base* — everything
-    // before it (LHS of an assignment, operator, etc.) is NOT part
-    // of this call expression. The old walker accepted any number of
-    // bare identifiers, which is how
-    //   `var user = getUser(token)`
-    // ended up emitting callee `user.getUser` — it treated the
-    // assignment LHS as a receiver. Mark `have_base` after the first
-    // bare identifier and bail if we see a second one; method-access
-    // selectors can still precede or follow.
-    let mut parts: Vec<String> = Vec::new();
-    let mut cursor = node.prev_named_sibling();
-    let mut have_base = false;
-    while let Some(prev) = cursor {
-        let k = prev.kind();
-        if k == "identifier" || k == "type_identifier" || k == "super" || k == "this" {
-            if have_base {
-                break;
-            }
-            parts.push(node_text(&prev, src).to_string());
-            have_base = true;
-            cursor = prev.prev_named_sibling();
-        } else if k == "selector" {
-            // `.method` access selector: drill down to the identifier.
-            let inner = first_named_child(&prev)?;
-            if inner.kind() == "unconditional_assignable_selector"
-                || inner.kind() == "conditional_assignable_selector"
-            {
-                let id = first_identifier_like_child(&inner)?;
-                parts.push(node_text(&id, src).to_string());
-                cursor = prev.prev_named_sibling();
-            } else {
-                break;
-            }
-        } else if k == "unconditional_assignable_selector" || k == "conditional_assignable_selector" {
-            let id = first_identifier_like_child(&prev)?;
-            parts.push(node_text(&id, src).to_string());
-            cursor = prev.prev_named_sibling();
-        } else {
-            break;
-        }
-    }
-    if parts.is_empty() {
-        return None;
-    }
-    parts.reverse();
-    let name = parts.join(".");
-
-    // Build arg list from `selector > argument_part > arguments`.
-    let mut args: Vec<CallArg> = Vec::new();
-    if let Some(arg_part) = first_named_child_of_kind(&node, "argument_part") {
-        if let Some(arg_list) = first_named_child_of_kind(&arg_part, "arguments") {
-            args = dart_call_args_from_arguments(&arg_list, file, src, handler);
-        }
-    }
-
-    Some(FlowEvent::Call {
-        span: span_of(file, &node),
-        receiver: call_receiver_from_name(&name),
-        receiver_types: Vec::new(),
-        name,
-        call_kind: if parts.len() > 1 {
-            CallKind::Method
-        } else {
-            CallKind::Function
-        },
-        args,
-    })
-}
-
-/// Build [`CallArg`]s from a Dart `arguments` node. Dart splits named
-/// args (`runInShell: true`) into a `named_argument` node with a `label`
-/// child; those surface with `name` populated so `keyword_arg_equals`
-/// constraints fire.
-fn dart_call_args_from_arguments(
-    arg_list: &Node<'_>,
-    file: FileId,
-    src: &[u8],
-    handler: &GrammarHandler,
-) -> Vec<CallArg> {
-    let mut args: Vec<CallArg> = Vec::new();
-    let mut cursor = arg_list.walk();
-    for arg in arg_list.named_children(&mut cursor) {
-        if arg.kind() == "named_argument" {
-            // Named (labeled) argument: `name: value`.
-            let mut lbl_cursor = arg.walk();
-            let label_node = arg.named_children(&mut lbl_cursor).find(|c| c.kind() == "label");
-            let name = label_node.and_then(|lbl| {
-                lbl.named_children(&mut lbl.walk())
-                    .next()
-                    .map(|id| node_text(&id, src).to_string())
-            });
-            // The value is the first named sibling AFTER the
-            // label (tree-sitter-dart named_argument is
-            // `label expr` — value has no field name). Dart splits
-            // a member value like `AESMode.ecb` into a base
-            // identifier plus trailing `selector` siblings, so the
-            // base alone truncates to `AESMode`; extend the value
-            // span through any trailing selectors to capture the
-            // whole chain (so `keyword_arg_equals: AESMode.ecb`
-            // can distinguish ECB from CBC/CTR).
-            let (value_node, value_text) = {
-                let mut kids = arg.walk();
-                let all: Vec<_> = arg.named_children(&mut kids).collect();
-                let label_idx = all.iter().position(|c| c.kind() == "label").unwrap_or(0);
-                let base = all.get(label_idx + 1).copied().unwrap_or(arg);
-                let mut chain_end = base.end_byte();
-                for sib in all.iter().skip(label_idx + 2) {
-                    if sib.kind() == "selector" {
-                        chain_end = sib.end_byte();
-                    } else {
-                        break;
-                    }
-                }
-                let text = if chain_end > base.end_byte() {
-                    normalize_call_name_whitespace(
-                        std::str::from_utf8(&src[base.start_byte()..chain_end]).unwrap_or(""),
-                    )
-                } else {
-                    normalize_call_name_whitespace(node_text(&base, src))
-                };
-                (base, text)
-            };
-            if value_text.is_empty() {
-                continue;
-            }
-            args.push(CallArg {
-                passing_mode: Default::default(),
-                span: span_of(file, &arg),
-                name,
-                place: argument_place(&value_node, src),
-                source_names: extract_rhs_expr_operands(&value_node, src, handler),
-                value_text,
-            });
-            continue;
-        }
-        if let Some(argument) = call_arg_from_node_with_handler(arg, file, src, None, handler) {
-            args.push(argument);
-        }
-    }
-    args
-}
-
-/// The receiver a Dart `cascade_section` applies to: the variable the
-/// whole cascade expression is bound to (`var b = Builder()..name = x`
-/// → `b`), or — for statement-position cascades (`w..m(x);`) — the base
-/// identifier that opens the sibling chain.
-fn dart_cascade_receiver(node: &Node<'_>, src: &[u8]) -> Option<String> {
-    let parent = node.parent()?;
-    if matches!(
-        parent.kind(),
-        "initialized_variable_definition" | "initialized_identifier"
-    ) {
-        if let Some(name) = parent.child_by_field_name("name") {
-            let text = node_text(&name, src).trim().to_string();
-            if !text.is_empty() {
-                return Some(text);
-            }
-        }
-    }
-    // Statement-position cascade (`w..a()..b()`): the receiver is the
-    // base identifier that opens the chain — the last identifier-like
-    // node BEFORE the first `cascade_section`. Resolve it by a single
-    // FORWARD scan of the parent's children (which stops at the first
-    // cascade_section), NOT a per-section backward `prev_named_sibling`
-    // walk: tree-sitter's prev_sibling is O(child-index), so walking
-    // back once per section over an n-section chain is O(n^2)+ and hangs
-    // on long generated cascades.
-    let mut cursor = parent.walk();
-    let mut base: Option<String> = None;
-    for child in parent.named_children(&mut cursor) {
-        match child.kind() {
-            "identifier" | "this" | "super" => {
-                base = Some(node_text(&child, src).trim().to_string());
-            }
-            "selector" | "argument_part" => {}
-            "cascade_section" => break,
-            _ => {}
-        }
-    }
-    if let Some(base) = base.filter(|b| !b.is_empty()) {
-        return Some(base);
-    }
-    None
-}
-
-/// Events for one Dart `cascade_section`:
-/// - `..method(args)` (has an `argument_part`) → a Method `Call` on the
-///   cascade receiver.
-/// - `..field = value` (selector + trailing value expression) → an
-///   `Assign` to `receiver.field` carrying the value's operands.
-fn build_dart_cascade_events(
-    node: Node<'_>,
-    file: FileId,
-    src: &[u8],
-    handler: &GrammarHandler,
-) -> Option<Vec<FlowEvent>> {
-    let selector = first_named_child_of_kind(&node, "cascade_selector")?;
-    let member = first_identifier_like_child(&selector)
-        .map(|id| node_text(&id, src).trim().to_string())
-        .filter(|name| !name.is_empty())?;
-    let receiver = dart_cascade_receiver(&node, src);
-    if let Some(arg_part) = first_named_child_of_kind(&node, "argument_part") {
-        let args = first_named_child_of_kind(&arg_part, "arguments")
-            .map(|list| dart_call_args_from_arguments(&list, file, src, handler))
-            .unwrap_or_default();
-        let name = match receiver.as_deref() {
-            Some(recv) => format!("{recv}.{member}"),
-            None => member,
-        };
-        return Some(vec![FlowEvent::Call {
-            span: span_of(file, &node),
-            receiver: call_receiver_from_name(&name).or(receiver),
-            receiver_types: Vec::new(),
-            name,
-            call_kind: CallKind::Method,
-            args,
-        }]);
-    }
-    // Field-write form: the value expression is the named child after
-    // the cascade_selector.
-    let mut cursor = node.walk();
-    let value = node
-        .named_children(&mut cursor)
-        .find(|child| child.kind() != "cascade_selector" && child.start_byte() > selector.end_byte())?;
-    let target = match receiver.as_deref() {
-        Some(recv) => format!("{recv}.{member}"),
-        None => member,
-    };
-    let value_text = node_text(&value, src).trim();
-    Some(vec![FlowEvent::Assign {
-        span: span_of(file, &node),
-        target,
-        source_name: looks_like_bare_identifier(value_text).then(|| value_text.to_string()),
-        source_call: None,
-        source_call_args: Vec::new(),
-        source_names: extract_rhs_expr_operands(&value, src, handler),
-        declares_new_binding: false,
-        value_kind: None,
-    }])
-}
-
-/// Call event for Dart `new T(args)` / `const T(args)` object
-/// expressions — the explicit forms of construction (the implicit
-/// `T(args)` form already goes through the selector-call path).
-///
-/// `new_expression` is a node kind SHARED with C++ (`new Box(args)`),
-/// whose args live in an `argument_list` child and which the generic
-/// walker already handles correctly. Require the Dart-specific
-/// `arguments`-kind child so C++ new-expressions fall through untouched.
-fn build_dart_object_expression_call(
-    node: Node<'_>,
-    file: FileId,
-    src: &[u8],
-    handler: &GrammarHandler,
-) -> Option<FlowEvent> {
-    let arguments = first_named_child_of_kind(&node, "arguments")?;
-    let type_node =
-        first_named_child_of_kind(&node, "type_identifier").or_else(|| first_identifier_like_child(&node))?;
-    let name = node_text(&type_node, src).trim().to_string();
-    if name.is_empty() {
-        return None;
-    }
-    let args = dart_call_args_from_arguments(&arguments, file, src, handler);
-    Some(FlowEvent::Call {
-        span: span_of(file, &node),
-        receiver: None,
-        receiver_types: Vec::new(),
-        name,
-        call_kind: CallKind::Constructor,
-        args,
-    })
-}
-
-/// True when a Swift `call_expression` looks like the `defer {...}`
-/// form. Detected by callee text == "defer" AND a `lambda_literal`
-/// reachable directly or via a `call_suffix` wrapper (tree-sitter-
-/// swift nests the trailing closure inside `call_suffix`, so a direct
-/// children scan misses it).
-fn is_swift_defer_call(node: &Node<'_>, src: &[u8]) -> bool {
-    let callee = node
-        .child_by_field_name("function")
-        .or_else(|| first_identifier_like_child(node));
-    let Some(callee) = callee else { return false };
-    if node_text(&callee, src).trim() != "defer" {
-        return false;
-    }
-    !swift_trailing_lambdas(*node).is_empty()
-}
-
-/// Find trailing closures through the grammar's `call_suffix` wrappers.
-/// The iterative walk is bounded by the finite CST, not an arbitrary depth.
-fn swift_trailing_lambdas(node: Node<'_>) -> Vec<Node<'_>> {
-    let mut lambdas = Vec::new();
-    let mut pending = vec![node];
-    while let Some(current) = pending.pop() {
-        let mut cursor = current.walk();
-        let children = current.named_children(&mut cursor).collect::<Vec<_>>();
-        for child in children.into_iter().rev() {
-            if child.kind() == "lambda_literal" {
-                lambdas.push(child);
-            } else if child.kind() == "call_suffix" {
-                pending.push(child);
-            }
-        }
-    }
-    lambdas.sort_by_key(tree_sitter::Node::start_byte);
-    lambdas
-}
-
-fn walk_named_children(
-    node: Node<'_>,
-    file: FileId,
-    src: &[u8],
-    handler: &GrammarHandler,
-    class_names: &[String],
-    out: &mut Vec<FlowEvent>,
-) {
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        walk_into(child, file, src, handler, class_names, out, false);
-    }
-}
-
-/// True when a `binary_operator` node is an Elixir/F#-style pipe (`|>`).
-/// The operator is an unnamed child between `left` and `right`.
-fn binary_operator_is_pipe(node: &Node<'_>, src: &[u8]) -> bool {
-    let mut cursor = node.walk();
-    if !cursor.goto_first_child() {
-        return false;
-    }
-    loop {
-        let child = cursor.node();
-        if !child.is_named() && node_text(&child, src).trim() == "|>" {
-            return true;
-        }
-        if !cursor.goto_next_sibling() {
-            return false;
-        }
-    }
 }
 
 /// Prepend the piped value (`left`) as argument 0 of the RHS call event
@@ -7520,23 +7057,24 @@ fn prepend_pipe_arg_to_call(
     }
 }
 
-fn call_argument_containers(node: Node<'_>) -> Vec<Node<'_>> {
+fn call_argument_containers<'tree>(node: Node<'tree>, handler: &GrammarHandler) -> Vec<Node<'tree>> {
     let mut v: Vec<Node<'_>> = Vec::new();
-    if let Some(n) = node.child_by_field_name("arguments") {
-        v.push(n);
+    for field in handler.call_argument_field_names {
+        if let Some(arguments) = node.child_by_field_name(field) {
+            v.push(arguments);
+        }
     }
-    // Grammars that don't expose `arguments` as a field (Kotlin wraps it
-    // in `call_suffix`; Scala / Swift may place it inline): also collect
-    // direct children that look like argument lists or trailing-lambda
-    // wrappers.
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        match child.kind() {
-            "arguments" | "argument_list" | "value_arguments" | "call_suffix" | "expr_args"
-            | "token_tree" => {
-                v.push(child);
+        if handler.call_argument_container_kinds.contains(&child.kind()) {
+            v.push(child);
+        } else if handler.call_argument_wrapper_kinds.contains(&child.kind()) {
+            let mut wrapper_cursor = child.walk();
+            for nested in child.named_children(&mut wrapper_cursor) {
+                if handler.call_argument_container_kinds.contains(&nested.kind()) {
+                    v.push(nested);
+                }
             }
-            _ => {}
         }
     }
     let mut seen = std::collections::HashSet::new();
@@ -7552,8 +7090,8 @@ fn walk_call_argument_expressions(
     class_names: &[String],
     out: &mut Vec<FlowEvent>,
 ) {
-    for container in call_argument_containers(node) {
-        if is_comprehension_kind(container.kind()) {
+    for container in call_argument_containers(node, handler) {
+        if is_comprehension_kind(container.kind(), handler) {
             walk_into(container, file, src, handler, class_names, out, false);
             continue;
         }
@@ -7576,9 +7114,16 @@ fn immediately_invoked_lambda_callee<'tree>(
     call: &Node<'tree>,
     handler: &GrammarHandler,
 ) -> Option<Node<'tree>> {
-    let callee = call
-        .child_by_field_name("function")
-        .or_else(|| call.child_by_field_name("callee"))?;
+    let callee = handler
+        .call_callee_field_names
+        .iter()
+        .find_map(|field| call.child_by_field_name(field))
+        .or_else(|| {
+            handler
+                .call_callee_is_first_named_child
+                .then(|| first_named_child(call))
+                .flatten()
+        })?;
     unwrap_invoked_lambda_callee(callee, handler)
 }
 
@@ -7590,70 +7135,15 @@ fn unwrap_invoked_lambda_callee<'tree>(
         if handler.is_lambda(node.kind()) {
             return Some(node);
         }
-        if !is_transparent_lambda_callee_wrapper(node.kind()) {
+        if !handler
+            .transparent_expression_wrapper_kinds
+            .contains(&node.kind())
+        {
             return None;
         }
-        node = node
-            .child_by_field_name("expression")
-            .or_else(|| node.child_by_field_name("value"))
-            .or_else(|| first_named_child(&node))?;
+        node = first_named_child(&node)?;
     }
     None
-}
-
-fn is_transparent_lambda_callee_wrapper(kind: &str) -> bool {
-    matches!(
-        kind,
-        "parenthesized_expression"
-            | "primary_expression"
-            | "expression"
-            | "postfix_expression"
-            | "unary_expression"
-    )
-}
-
-fn non_closure_arg_source_names(
-    node: &Node<'_>,
-    src: &[u8],
-    arg_container_kinds: &[&str],
-    handler: &GrammarHandler,
-) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if arg_container_kinds.contains(&child.kind()) {
-            out.extend(non_closure_arg_source_names_from_container(child, src, handler));
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn non_closure_arg_source_names_from_container(
-    container: Node<'_>,
-    src: &[u8],
-    handler: &GrammarHandler,
-) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cursor = container.walk();
-    for arg in container.named_children(&mut cursor) {
-        if matches!(
-            arg.kind(),
-            "anonymous_function" | "anonymous_fun" | "keywords" | "pair"
-        ) || arg.kind().contains("lambda")
-            || arg.kind().contains("closure")
-        {
-            continue;
-        }
-        out.extend(extract_rhs_expr_operands(&arg, src, handler));
-        if let Some(place) = argument_place(&arg, src) {
-            push_value_text_source_name(&mut out, &place);
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
 }
 
 /// A call-argument node that should have its body inlined into the
@@ -7663,17 +7153,14 @@ fn non_closure_arg_source_names_from_container(
 /// `block` kind can't be in lambda_kinds globally — it also serves as
 /// "compound statement" in most other grammars.
 fn is_closure_arg(kind: &str, handler: &GrammarHandler) -> bool {
-    if handler.is_lambda(kind) {
-        return true;
-    }
-    // Ruby `method { |x| ... }` and `method do |x| ... end`.
-    matches!(kind, "block" | "do_block")
+    handler.is_lambda(kind) || handler.inline_closure_kinds.contains(&kind)
 }
 
 fn emit_invoked_lambda_param_bindings(
     lambda: Node<'_>,
     file: FileId,
     src: &[u8],
+    handler: &GrammarHandler,
     call_event: &FlowEvent,
     out: &mut Vec<FlowEvent>,
 ) {
@@ -7683,7 +7170,7 @@ fn emit_invoked_lambda_param_bindings(
     if args.is_empty() {
         return;
     }
-    for (idx, param) in extract_param_names(&lambda, src).into_iter().enumerate() {
+    for (idx, param) in extract_param_names(&lambda, src, handler).into_iter().enumerate() {
         if param.is_empty() {
             continue;
         }
@@ -7720,19 +7207,16 @@ fn emit_inline_closure_param_bindings(
     lambda: Node<'_>,
     file: FileId,
     src: &[u8],
+    handler: &GrammarHandler,
     source_names: &[String],
     out: &mut Vec<FlowEvent>,
 ) {
-    let params = extract_param_names(&lambda, src);
-    // H11: a single-param Kotlin lambda omits the param list and refers to
-    // the implicit `it`. Synthesize it so `xs.forEach { sink(it) }` and
-    // `tainted.let { sink(it) }` seed `it` from the receiver/source.
+    let params = extract_param_names(&lambda, src, handler);
     let params = if params.is_empty() {
-        if matches!(lambda.kind(), "lambda_literal" | "annotated_lambda") {
-            vec!["it".to_string()]
-        } else {
+        let Some(implicit) = handler.implicit_lambda_parameter_name else {
             return;
-        }
+        };
+        vec![implicit.to_string()]
     } else {
         params
     };
@@ -7763,6 +7247,7 @@ fn emit_inline_closure_param_bindings_from_yield_call(
     lambda: Node<'_>,
     _file: FileId,
     src: &[u8],
+    handler: &GrammarHandler,
     call_event: Option<&FlowEvent>,
     out: &mut Vec<FlowEvent>,
 ) {
@@ -7775,7 +7260,7 @@ fn emit_inline_closure_param_bindings_from_yield_call(
     else {
         return;
     };
-    let params = extract_param_names(&lambda, src);
+    let params = extract_param_names(&lambda, src, handler);
     if params.is_empty() {
         return;
     }
@@ -7799,12 +7284,6 @@ fn emit_inline_closure_param_bindings_from_yield_call(
             value_kind: Some(crate::AssignValueKind::YieldResult),
         });
     }
-}
-
-fn ruby_call_block_uses_yield_result(call: &Node<'_>, block: &Node<'_>, src: &[u8]) -> bool {
-    call.kind() == "call"
-        && matches!(block.kind(), "block" | "do_block")
-        && elixir_call_name(call, src).is_none()
 }
 
 fn call_event_value_source_names(event: &FlowEvent) -> Vec<String> {
@@ -7837,12 +7316,8 @@ fn push_value_text_source_name(out: &mut Vec<String>, value: &str) {
         push_receiver_base_variants(out, &base);
         return;
     }
-    let cleaned = value.trim_start_matches('$');
-    if looks_like_bare_identifier(cleaned) {
-        out.push(cleaned.to_string());
-        if cleaned != value {
-            out.push(value.to_string());
-        }
+    if looks_like_bare_identifier(value) {
+        out.push(value.to_string());
     }
 }
 
@@ -7862,27 +7337,34 @@ fn walk_lambda_body(
     class_names: &[String],
     out: &mut Vec<FlowEvent>,
 ) {
-    // If this wrapper contains an inner lambda_literal / closure_expression,
-    // descend into it.
-    let inner = {
-        let mut cursor = lambda.walk();
-        let mut inner: Option<Node<'_>> = None;
-        for child in lambda.named_children(&mut cursor) {
-            match child.kind() {
-                "lambda_literal" | "closure_expression" | "lambda_expression" => {
-                    inner = Some(child);
-                    break;
-                }
-                _ => {}
-            }
+    let body_node = handler
+        .lambda_body_field_names
+        .iter()
+        .find_map(|field| lambda.child_by_field_name(field))
+        .or_else(|| {
+            let mut cursor = lambda.walk();
+            let body = lambda
+                .named_children(&mut cursor)
+                .find(|child| handler.lambda_body_kinds.contains(&child.kind()));
+            body
+        })
+        .unwrap_or(lambda);
+    // Expression-bodied closures expose the expression itself as `body`
+    // (`x => step(x)`). Lower that node as a whole so a call-valued body
+    // emits its Call event. When the closure node is its own body (Ruby
+    // block/do-block shapes), descend into children to bypass the normal
+    // nested-lambda ownership guard without recursing back into the closure.
+    if body_node.id() != lambda.id() {
+        if handler.is_lambda(body_node.kind()) || handler.inline_closure_kinds.contains(&body_node.kind()) {
+            walk_lambda_body(body_node, file, src, handler, class_names, out);
+        } else {
+            walk_into(body_node, file, src, handler, class_names, out, false);
         }
-        inner
-    };
-    let body_node = inner.unwrap_or(lambda);
+        return;
+    }
     let mut cursor = body_node.walk();
     for child in body_node.named_children(&mut cursor) {
-        // Skip parameter lists / capture specs; walk body statements.
-        if child.kind().contains("parameter") || child.kind().contains("capture") {
+        if parameter_container(&lambda, handler).is_some_and(|params| child.id() == params.id()) {
             continue;
         }
         walk_into(child, file, src, handler, class_names, out, false);
@@ -7909,14 +7391,30 @@ fn last_named_child_excluding<'tree>(
     last
 }
 
-fn assignment_wrapper_has_variable_declarator(kind: &str, node: &Node<'_>) -> bool {
-    if kind == "variable_declaration" {
-        return first_named_child_of_kind(node, "variable_declarator").is_some();
-    }
-    if kind == "local_declaration_statement" {
-        return first_named_child_of_kind(node, "variable_declaration")
-            .and_then(|decl| first_named_child_of_kind(&decl, "variable_declarator"))
-            .is_some();
+fn assignment_wrapper_has_nested_assignment(node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> bool {
+    let is_semantic_assignment = |candidate: Node<'_>| {
+        handler.is_assignment(candidate.kind())
+            && matches!(
+                handler.assignment_semantics(candidate, src),
+                AssignmentNodeSemantics::Assignment
+            )
+            && {
+                let target = assignment_target_node(candidate, src, handler);
+                assignment_value_node(candidate, target).is_some()
+            }
+    };
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if is_semantic_assignment(child) {
+            return true;
+        }
+        let mut nested_cursor = child.walk();
+        if child
+            .named_children(&mut nested_cursor)
+            .any(is_semantic_assignment)
+        {
+            return true;
+        }
     }
     false
 }
@@ -7925,12 +7423,15 @@ fn assignment_wrapper_has_variable_declarator(kind: &str, node: &Node<'_>) -> bo
 /// (`val` / `var` / `let` / `const` / `auto`). Kotlin / Swift /
 /// etc. emit those keywords as visible named nodes — picking the
 /// literal keyword as a target name would be wrong.
-fn first_non_keyword_named_child<'tree>(node: &Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
-    const KEYWORDS: &[&str] = &["val", "var", "let", "const", "auto", "type"];
+fn first_non_keyword_named_child<'tree>(
+    node: &Node<'tree>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<Node<'tree>> {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         let text = node_text(&child, src).trim();
-        if KEYWORDS.contains(&text) {
+        if handler.binding_declaration_keyword_spellings.contains(&text) {
             continue;
         }
         return Some(child);
@@ -8000,11 +7501,10 @@ fn lambda_is_inlined_call_argument(node: &Node<'_>, handler: &GrammarHandler) ->
     // own Pass-2b decl; otherwise its body is never walked and every
     // source/sink inside it is invisible. Stop the upward scan here and
     // report "not an inlined argument" so the decl survives.
-    const VALUE_CONTAINER_KINDS: &[&str] = &["object", "pair", "array", "object_literal", "array_literal"];
     let mut parent = node.parent();
     while let Some(candidate) = parent {
         let kind = candidate.kind();
-        if VALUE_CONTAINER_KINDS.contains(&kind) {
+        if handler.lambda_value_container_kinds.contains(&kind) {
             return false;
         }
         if handler.is_call(kind) {
@@ -8019,127 +7519,6 @@ fn lambda_is_inlined_call_argument(node: &Node<'_>, handler: &GrammarHandler) ->
         parent = candidate.parent();
     }
     false
-}
-
-/// Find the first named child of a call-expression node that names the
-/// callee — typically a `navigation_expression`, `member_expression`,
-/// `field_expression`, `scoped_identifier`, or bare `identifier`. Skips
-/// argument-list children (`arguments`, `value_arguments`, etc.) and
-/// type-argument children so dotted method calls surface as the whole
-/// dotted path rather than the leftmost receiver.
-fn first_callee_expression_child<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
-    const SKIP_KINDS: &[&str] = &[
-        "arguments",
-        "argument_list",
-        "value_arguments",
-        "type_arguments",
-        "type_argument_list",
-        "lambda_literal",
-        "annotated_lambda",
-        "call_suffix",
-    ];
-    const CALLEE_KINDS: &[&str] = &[
-        // Dotted / member accesses across grammars:
-        "navigation_expression",    // kotlin
-        "member_expression",        // js/ts
-        "member_access_expression", // php / c# (sometimes)
-        "field_expression",         // rust / go / c / c++
-        "field_access",             // java
-        "selector_expression",      // go
-        "scoped_identifier",        // rust / c++
-        "scoped_call_expression",
-        "qualified_identifier",
-        "dotted_name",        // python
-        "attribute",          // python `a.b`
-        "prefix_expression",  // swift
-        "postfix_expression", // swift — often wraps dotted chains
-        "generic_type",
-        // Bare identifiers:
-        "identifier",
-        "simple_identifier", // kotlin
-        "type_identifier",
-        "property_identifier", // js/ts
-    ];
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        let kind = child.kind();
-        if SKIP_KINDS.contains(&kind) {
-            continue;
-        }
-        if CALLEE_KINDS.contains(&kind) || kind.ends_with("identifier") || kind.ends_with("expression") {
-            return Some(child);
-        }
-    }
-    None
-}
-
-fn erlang_call_callee<'tree>(node: &Node<'tree>, src: &[u8]) -> Option<(Node<'tree>, String)> {
-    if node.kind() != "call" {
-        return None;
-    }
-    let expr = node.child_by_field_name("expr")?;
-    if let Some((callee_node, name)) = erlang_remote_callee(&expr, src) {
-        return Some((callee_node, name));
-    }
-    let callee_node = expr
-        .child_by_field_name("expr")
-        .or_else(|| expr.child_by_field_name("name"))
-        .or_else(|| first_identifier_like_child(&expr))
-        .or_else(|| first_identifier_descendant(expr))
-        .unwrap_or(expr);
-    let name = node_text(&callee_node, src).trim().to_string();
-    if name.is_empty() {
-        return None;
-    }
-    Some((callee_node, name))
-}
-
-fn erlang_remote_is_call_expr(node: &Node<'_>) -> bool {
-    if node.kind() != "remote" {
-        return false;
-    }
-    let Some(parent) = node.parent() else {
-        return false;
-    };
-    if parent.kind() != "call" {
-        return false;
-    }
-    parent
-        .child_by_field_name("expr")
-        .is_some_and(|expr| expr.id() == node.id())
-}
-
-fn erlang_remote_callee<'tree>(node: &Node<'tree>, src: &[u8]) -> Option<(Node<'tree>, String)> {
-    if node.kind() != "remote" {
-        return None;
-    }
-    let module = node.child_by_field_name("module")?;
-    let fun = node.child_by_field_name("fun")?;
-    let callee_node = fun
-        .child_by_field_name("expr")
-        .or_else(|| fun.child_by_field_name("name"))
-        .or_else(|| first_identifier_like_child(&fun))
-        .or_else(|| first_identifier_descendant(fun))
-        .unwrap_or(fun);
-    let module_text = node_text(&module, src).trim_end_matches(':').trim();
-    let fun_text = node_text(&callee_node, src).trim();
-    if module_text.is_empty() || fun_text.is_empty() {
-        return None;
-    }
-    Some((callee_node, format!("{module_text}:{fun_text}")))
-}
-
-fn erlang_remote_args_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
-    if node.kind() != "remote" {
-        return None;
-    }
-    let fun = node.child_by_field_name("fun")?;
-    let call = if fun.kind() == "call" {
-        fun
-    } else {
-        first_named_child_of_kind(&fun, "call")?
-    };
-    call.child_by_field_name("args")
 }
 
 /// Apply file-path-based qualified_name and module_path to every
@@ -8204,6 +7583,7 @@ pub fn package_module_segments_with_workspace_prefix<I, S>(
     file: FileId,
     ctx: &AdapterContext<'_>,
     package_segments: I,
+    source_roots: &[&[&str]],
 ) -> Vec<String>
 where
     I: IntoIterator<Item = S>,
@@ -8221,7 +7601,7 @@ where
     };
     let mut prefix = relative.parent().map(path_components).unwrap_or_default();
     strip_suffix_segments(&mut prefix, &package_segments);
-    strip_known_source_root_suffix(&mut prefix);
+    strip_source_root_suffix(&mut prefix, source_roots);
     let mut out = prefix
         .into_iter()
         .filter(|segment| !segment.is_empty())
@@ -8256,19 +7636,8 @@ fn strip_suffix_segments(segments: &mut Vec<String>, suffix: &[String]) {
     }
 }
 
-fn strip_known_source_root_suffix(segments: &mut Vec<String>) {
-    const SOURCE_ROOTS: &[&[&str]] = &[
-        &["src", "main", "java"],
-        &["src", "test", "java"],
-        &["src", "main", "kotlin"],
-        &["src", "test", "kotlin"],
-        &["src", "main", "scala"],
-        &["src", "test", "scala"],
-        &["src", "java"],
-        &["src", "kotlin"],
-        &["src", "scala"],
-    ];
-    for root in SOURCE_ROOTS {
+fn strip_source_root_suffix(segments: &mut Vec<String>, source_roots: &[&[&str]]) {
+    for root in source_roots {
         if root.len() > segments.len() {
             continue;
         }
@@ -8551,8 +7920,8 @@ fn receiver_field_write_directly_uses_parameter(
     })
 }
 
-/// Heuristically classify the RHS shape of every
-/// `FlowEvent::Assign` whose `value_kind` is still `None`. Engine-
+/// Conservatively classify complete assignment and return expressions whose
+/// `value_kind` is still `None`. Engine-
 /// driven Phase-5 const-propagation reads `value_kind` to decide
 /// whether the write is a "clean overwrite" (literal RHS — no
 /// identifier carriers reach it) or a name-bridging carrier
@@ -8560,15 +7929,14 @@ fn receiver_field_write_directly_uses_parameter(
 ///
 /// Adapters can set `value_kind` themselves at construction time
 /// when their CST surface gives them exact info; this pass is the
-/// safety net for adapters that don't. The classification is
-/// conservative — when the adapter recorded no `source_name`,
-/// `source_call`, `source_names`, or `source_call_args`, the RHS
-/// has no identifier carriers and is treated as `Literal`. When
-/// `source_call` is set, the RHS is a call (`CallResult`).
-/// Everything else is `Compound`. The pass runs after
+/// safety net for adapter-specific synthetic events. For assignments, a `source_call`
+/// produces `CallResult`; structured carriers produce `Compound`; an event
+/// with neither remains `Unknown`. Only the adapter-owned AST classifier may
+/// emit `Literal`. Returns use their typed `ExpressionFlow` to distinguish
+/// calls, compound values, and unknown empty shapes. The pass runs after
 /// `apply_call_receiver_types` so the classification reflects
 /// the post-stitch event tree.
-pub fn apply_assign_value_kind(idx: &mut crate::DeclIndex) {
+pub fn apply_expression_value_kinds(idx: &mut crate::DeclIndex) {
     let call_bearing_assignments: ahash::AHashSet<Span> = idx
         .assignment_values
         .iter()
@@ -8576,7 +7944,7 @@ pub fn apply_assign_value_kind(idx: &mut crate::DeclIndex) {
         .map(|fact| fact.assignment_span)
         .collect();
     for decl in &mut idx.defs {
-        classify_assign_value_kinds(&mut decl.flow_events, &call_bearing_assignments);
+        classify_flow_value_kinds(&mut decl.flow_events, &call_bearing_assignments);
     }
 }
 
@@ -9155,7 +8523,7 @@ fn propose_call_result_type_aliases(
     }
 }
 
-fn classify_assign_value_kinds(events: &mut [FlowEvent], call_bearing_assignments: &ahash::AHashSet<Span>) {
+fn classify_flow_value_kinds(events: &mut [FlowEvent], call_bearing_assignments: &ahash::AHashSet<Span>) {
     for event in events {
         match event {
             FlowEvent::Assign {
@@ -9172,27 +8540,42 @@ fn classify_assign_value_kinds(events: &mut [FlowEvent], call_bearing_assignment
                 }
                 let kind = if source_call.is_some() {
                     crate::AssignValueKind::CallResult
-                } else if source_name.is_none()
-                    && source_names.is_empty()
-                    && source_call_args.is_empty()
-                    && !call_bearing_assignments.contains(span)
+                } else if source_name.is_some()
+                    || !source_names.is_empty()
+                    || !source_call_args.is_empty()
+                    || call_bearing_assignments.contains(span)
                 {
-                    crate::AssignValueKind::Literal
-                } else {
                     crate::AssignValueKind::Compound
+                } else {
+                    crate::AssignValueKind::Unknown
                 };
                 *value_kind = Some(kind);
+            }
+            FlowEvent::Return {
+                value_kind,
+                value_flow,
+                ..
+            } => {
+                if value_kind.is_none() {
+                    *value_kind = Some(if expression_flow_contains_call(value_flow) {
+                        crate::AssignValueKind::CallResult
+                    } else if value_flow.is_empty() {
+                        crate::AssignValueKind::Unknown
+                    } else {
+                        crate::AssignValueKind::Compound
+                    });
+                }
             }
             FlowEvent::Branch {
                 then_events,
                 else_events,
                 ..
             } => {
-                classify_assign_value_kinds(then_events, call_bearing_assignments);
-                classify_assign_value_kinds(else_events, call_bearing_assignments);
+                classify_flow_value_kinds(then_events, call_bearing_assignments);
+                classify_flow_value_kinds(else_events, call_bearing_assignments);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                classify_assign_value_kinds(body, call_bearing_assignments);
+                classify_flow_value_kinds(body, call_bearing_assignments);
             }
             FlowEvent::Try {
                 body,
@@ -9200,13 +8583,23 @@ fn classify_assign_value_kinds(events: &mut [FlowEvent], call_bearing_assignment
                 finally_events,
                 ..
             } => {
-                classify_assign_value_kinds(body, call_bearing_assignments);
-                classify_assign_value_kinds(catch_events, call_bearing_assignments);
-                classify_assign_value_kinds(finally_events, call_bearing_assignments);
+                classify_flow_value_kinds(body, call_bearing_assignments);
+                classify_flow_value_kinds(catch_events, call_bearing_assignments);
+                classify_flow_value_kinds(finally_events, call_bearing_assignments);
             }
             _ => {}
         }
     }
+}
+
+fn expression_flow_contains_call(flow: &crate::ExpressionFlow) -> bool {
+    !flow.call_sites.is_empty()
+        || flow
+            .aggregate_fields
+            .iter()
+            .any(|field| expression_flow_contains_call(&field.value))
+        || flow.tuple_items.iter().any(expression_flow_contains_call)
+        || flow.spreads.iter().any(expression_flow_contains_call)
 }
 
 /// Populate `FlowEvent::Call::receiver_types` from adapter-emitted
@@ -9669,12 +9062,10 @@ fn push_receiver_type_and_bases_inner(
     if first_canonical_visit {
         if let Some(qualified) = qualified_receiver_type_evidence(&ty, &canonical) {
             // A qualified compiler type is stronger evidence than its bare
-            // tail. Keeping both lets a same-named type in the caller's file
-            // win lexical resolution before the qualified identity is ever
-            // considered (`scheduler.Handle` becoming local `Handle`).
-            // Preserve the exact adapter-lowered identity; the semantic
-            // resolver already performs a constrained bare-tail fallback
-            // when that identity genuinely needs import resolution.
+            // tail. Preserve only the exact adapter-lowered identity here;
+            // the semantic resolver and rule matcher own their constrained
+            // suffix matching. Adding the bare tail to compiler IR would let
+            // an unrelated local type weaken `scheduler.Handle` to `Handle`.
             push_unique_receiver_type(out, qualified);
         } else {
             push_unique_receiver_type(out, canonical.clone());
@@ -9701,7 +9092,7 @@ fn qualified_receiver_type_evidence(raw: &str, canonical: &str) -> Option<String
 }
 
 fn normalize_receiver_type_expr(receiver: &str) -> String {
-    normalise_qualified_text(receiver)
+    receiver
         .trim()
         .trim_matches(bonsai_common::is_name_punctuation)
         .to_string()

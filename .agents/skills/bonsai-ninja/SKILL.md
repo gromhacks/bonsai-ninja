@@ -98,13 +98,35 @@ source snapshot, adapter/compiler frontend ABI, dependency metadata, transfer
 semantics, and rule-selected graph options; a mismatch is rejected and rebuilt
 without narrowing semantic work.
 
+Compiler objects retain exact callback/type syntax headers and direct-call
+receiver-field initializer linkage. Adapters prove syntax; complete-workspace
+linking resolves class/constructor identity. Neither capitalization nor callee
+spelling alone is type evidence. Rulepack typing keeps its import constraints,
+and exact workspace values/functions shadow external `kind: new` models; the
+matcher fails closed on mixed or ambiguous callable identities.
+
+Compiler objects also retain adapter-owned assignment, return, and
+call-argument value shapes. A literal/static fact may prove a clean output
+value; a carrier-free unknown expression, rendered text, and ALL_CAPS spelling
+never do.
+
+Rulepack-only receiver types are compiled through the canonical matcher into
+exact AST call spans before IDG construction. Those spans participate in the
+transfer fingerprint; the IDG consumes the proven sites and never interprets
+provider, class, or method spellings. Import and workspace-shadowing checks
+therefore remain exact in both warm and cold analysis.
+
 Persisted analysis artifacts live in a canonical-path-keyed OS cache, not in
 the repository. `cache stats <workspace>` prints the exact directory;
 `BONSAI_WORKSPACE_DIR` supplies an explicit override. The repository-local
 `<workspace>/.bonsai/rules/` path is only a rule overlay.
+Current compiler-object publication prunes unlocked older recognized schema
+generations automatically. Use `cache clear <workspace>` only when you
+intentionally want to discard every reusable sidecar; it never changes source.
 
 When this skill is used to modify bonsai-ninja itself, preserve the compiler
-boundary: adapters own Tree-sitter syntax lowering; rulepack YAML owns
+boundary: adapters own Tree-sitter syntax lowering, including literal/value
+node inventories; rulepack YAML owns
 library/package/framework identities and security-sensitive values; shared
 crates consume typed facts without language-id or API-name branches.
 

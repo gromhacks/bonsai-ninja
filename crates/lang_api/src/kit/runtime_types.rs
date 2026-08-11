@@ -1,6 +1,6 @@
 use super::{
-    first_named_child_of_kind, looks_like_bare_identifier, looks_like_identifier, looks_like_literal_value,
-    node_text, parsed_call_target, span_of, FileId, GrammarHandler, Node, Tree,
+    first_named_child_of_kind, looks_like_bare_identifier, looks_like_identifier, node_text,
+    parsed_call_target, span_of, FileId, GrammarHandler, Node, Tree,
 };
 
 /// Extract branch-local runtime type refinements from parsed guard nodes.
@@ -64,9 +64,9 @@ fn runtime_type_guard_parts(
     handler: &GrammarHandler,
     src: &[u8],
 ) -> Option<(String, String)> {
-    let condition = unwrap_runtime_guard(condition);
+    let condition = unwrap_runtime_guard(condition, handler);
     if !handler.runtime_type_guard_calls.is_empty() && handler.is_call(condition.kind()) {
-        let target = parsed_call_target(&condition, src)?;
+        let target = parsed_call_target(&condition, src, handler)?;
         let tail = bonsai_common::short_qualified_tail(&target.full_text);
         if !handler.runtime_type_guard_calls.contains(&tail) {
             return None;
@@ -79,14 +79,14 @@ fn runtime_type_guard_parts(
         let mut cursor = arguments.walk();
         let values = arguments
             .named_children(&mut cursor)
-            .map(unwrap_runtime_guard)
+            .map(|node| unwrap_runtime_guard(node, handler))
             .collect::<Vec<_>>();
         if values.len() != 2 {
             return None;
         }
         return Some((
-            runtime_guard_identifier(values[0], src)?,
-            runtime_guard_identifier(values[1], src)?,
+            runtime_guard_identifier(values[0], src, handler)?,
+            runtime_guard_identifier(values[1], src, handler)?,
         ));
     }
 
@@ -109,8 +109,8 @@ fn runtime_type_guard_parts(
             condition.named_child(last)
         })?;
     Some((
-        runtime_guard_identifier(unwrap_runtime_guard(left), src)?,
-        runtime_guard_identifier(unwrap_runtime_guard(right), src)?,
+        runtime_guard_identifier(unwrap_runtime_guard(left, handler), src, handler)?,
+        runtime_guard_identifier(unwrap_runtime_guard(right, handler), src, handler)?,
     ))
 }
 
@@ -141,19 +141,16 @@ fn runtime_typeof_pair(
     handler: &GrammarHandler,
     src: &[u8],
 ) -> Option<(String, String)> {
-    let typeof_node = unwrap_runtime_guard(typeof_node);
+    let typeof_node = unwrap_runtime_guard(typeof_node, handler);
     (0..typeof_node.child_count())
         .filter_map(|index| typeof_node.child(u32::try_from(index).ok()?))
         .find(|child| handler.runtime_typeof_operators.contains(&child.kind()))?;
     let subject = typeof_node
         .child_by_field_name("argument")
         .or_else(|| typeof_node.named_child(0))?;
-    let subject = runtime_guard_identifier(unwrap_runtime_guard(subject), src)?;
-    let type_node = unwrap_runtime_guard(type_node);
-    if !matches!(
-        type_node.kind(),
-        "string" | "string_literal" | "interpreted_string_literal"
-    ) {
+    let subject = runtime_guard_identifier(unwrap_runtime_guard(subject, handler), src, handler)?;
+    let type_node = unwrap_runtime_guard(type_node, handler);
+    if !handler.is_string_literal(type_node.kind()) {
         return None;
     }
     let type_name = node_text(&type_node, src)
@@ -167,12 +164,8 @@ fn runtime_typeof_pair(
     .then_some((subject, type_name))
 }
 
-fn unwrap_runtime_guard(mut node: Node<'_>) -> Node<'_> {
-    while matches!(
-        node.kind(),
-        "parenthesized_expression" | "parenthesized" | "condition"
-    ) && node.named_child_count() == 1
-    {
+fn unwrap_runtime_guard<'tree>(mut node: Node<'tree>, handler: &GrammarHandler) -> Node<'tree> {
+    while handler.runtime_type_wrapper_kinds.contains(&node.kind()) && node.named_child_count() == 1 {
         if let Some(inner) = node.named_child(0) {
             node = inner;
         } else {
@@ -182,11 +175,11 @@ fn unwrap_runtime_guard(mut node: Node<'_>) -> Node<'_> {
     node
 }
 
-fn runtime_guard_identifier(node: Node<'_>, src: &[u8]) -> Option<String> {
+fn runtime_guard_identifier(node: Node<'_>, src: &[u8], handler: &GrammarHandler) -> Option<String> {
     if !looks_like_identifier(node.kind()) {
         return None;
     }
     let text = node_text(&node, src).trim();
-    (looks_like_bare_identifier(text) && !looks_like_literal_value(node.kind(), text))
+    (looks_like_bare_identifier(text) && !handler.is_literal_value(node.kind(), text))
         .then(|| text.to_string())
 }

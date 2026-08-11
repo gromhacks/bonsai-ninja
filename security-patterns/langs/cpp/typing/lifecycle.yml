@@ -1,0 +1,79 @@
+# External C++ lifecycle transfers. Provider spellings live here rather than
+# in the C++ Tree-sitter adapter.
+- id: cpp.typing.lifecycle_freed_argument
+  enabled: true
+  language: cpp
+  match:
+    kind: call
+    callee: { name: free }
+  lifecycle_transition:
+    state: freed
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: free changes the pointer state
+    code: 'void f(void *p) { free(p); }'
+    expect_match_text: [free]
+  description: "C++ free moves argument zero to the freed lifecycle state. Typing-only; never a finding."
+
+- id: cpp.typing.lifecycle_closed_argument
+  enabled: true
+  language: cpp
+  match:
+    kind: call
+    callee:
+      regex: '^(?:fclose|close|closedir)$'
+  lifecycle_transition:
+    state: closed
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: fclose changes the stream state
+    code: 'void f(FILE *stream) { fclose(stream); }'
+    expect_match_text: [fclose]
+  description: "C-compatible close functions move argument zero to closed. Typing-only; never a finding."
+
+- id: cpp.typing.lifecycle_released_receiver
+  enabled: true
+  language: cpp
+  match:
+    kind: call
+    callee:
+      regex: '(?:^|[.:])(?:release|reset)$'
+  lifecycle_transition:
+    state: freed
+    binding: { kind: receiver }
+  match_examples:
+  - name: smart-pointer release changes its receiver state
+    code: 'void f(std::unique_ptr<int> p) { p.release(); }'
+    expect_match_text: [p.release]
+  description: "Smart-pointer release/reset changes the receiver lifecycle state. Typing-only; never a finding."
+
+- id: cpp.typing.lifecycle_moved_argument
+  enabled: true
+  language: cpp
+  match:
+    kind: call
+    callee:
+      regex: '^(?:(?:std(?:::|\.))?move)$'
+  lifecycle_transition:
+    state: moved
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: std move changes the source state
+    code: 'void f(std::string value) { auto moved = std::move(value); }'
+    expect_match_text: [std::move]
+  description: "std::move and imported move change argument zero to moved. Typing-only; never a finding."
+
+- id: cpp.typing.lifecycle_unlocked_argument
+  enabled: true
+  language: cpp
+  match:
+    kind: call
+    callee: { name: pthread_mutex_unlock }
+  lifecycle_transition:
+    state: unlocked
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: pthread unlock changes the lock state
+    code: 'void f(pthread_mutex_t *m) { pthread_mutex_unlock(m); }'
+    expect_match_text: [pthread_mutex_unlock]
+  description: "pthread_mutex_unlock moves argument zero to unlocked. Typing-only; never a finding."

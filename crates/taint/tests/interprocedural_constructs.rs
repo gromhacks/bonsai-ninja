@@ -162,6 +162,7 @@ fn config_with_receiver_mutators(mutators: &[&str]) -> InterTaintConfig {
             .map(|name| ReceiverStatePropagation {
                 method: (*name).to_string(),
                 receiver_type: None,
+                resolved_call_sites: Vec::new(),
             })
             .collect(),
         ..Default::default()

@@ -621,6 +621,13 @@ AST into `FlowEvent`s. IDG transfer interns those facts as `Place::Read`,
 edges. Engines do not recover constructor names, mutable-reference keywords,
 callback factories, or nested calls from raw expression text.
 
+Caller-visible out/ref/pointer write-back follows the same boundary. The
+adapter classifies the argument's passing mode and, when the grammar wraps the
+addressable place in an indirect expression, returns that exact operand node.
+Shared lowering recursively normalizes the proven place and the IDG stitches
+the callee parameter's outbound writes back to it. No shared operator or
+language token table participates.
+
 Qualified-place canonicalization remains shared for compatibility seed names
 (`obj['k']` ↔ `obj.k`, language sigils, and wildcard descendants), but it does
 not invent a read that the adapter failed to emit. This is what keeps
