@@ -364,6 +364,10 @@ fn denylist_constructor_and_condition_emit_exact_compiler_facts() {
         .find(|fact| fact.direct_call_name.as_deref() == Some("Set"))
         .expect("adapter-declared constructor assignment");
     assert_eq!(constructor.target.as_deref(), Some("BLOCKED"));
+    assert!(
+        constructor.target_is_immutable,
+        "const constructor bindings must be adapter-proven immutable"
+    );
     let values = index
         .call_argument_values
         .iter()

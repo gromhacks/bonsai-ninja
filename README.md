@@ -188,14 +188,15 @@ entries that own exact target nodes. Fresh-cache production taint completed in
 34.28 seconds, warm production taint in 27.74 seconds, and immediate semantic
 reuse in 2.48 seconds under the same 3 GiB schedule and unchanged SLOs.
 
-The current 2026-08-10 ABI-v83 Elasticsearch release gate passed 5/5 in
-233.57 seconds under `BONSAI_MEMORY_BUDGET_MB=3072`. The exact ABI-v83
-compiler-object/IDG generation completed once in 1,618.72 seconds and
-immediate fresh-process reuse in 2.49 seconds. In the final warm gate,
-fresh-cache and warm production taint completed in 29.42/28.31 seconds;
-default and exact broad raw-taint inspect completed in 7.66/27.60 seconds.
-Source, high-severity sink, sanitizer, and dependency inventories completed
-in 3.95/24.01/21.13/12.08 seconds. The sink inventory emits the same exact
+The current 2026-08-11 ABI-v84 Elasticsearch release gate passed 5/5 in
+225.16 seconds under `BONSAI_MEMORY_BUDGET_MB=3072`. The one-time migration
+gate that published the exact v84 compiler-object/IDG generation completed in
+1,802.20 seconds; final semantic readiness and immediate fresh-process reuse
+completed in 5.20/2.36 seconds. In the final warm gate, fresh-cache and warm
+production taint completed in 31.12/26.66 seconds; default and exact broad
+raw-taint inspect completed in 7.50/26.31 seconds. Source,
+high-severity sink, sanitizer, and dependency inventories completed in
+3.90/23.46/20.49/10.23 seconds. The sink inventory emits the same exact
 6,866 matches as the pre-optimization run: compact compiler headers reject
 impossible bodies, and surviving bodies derive only the secondary views their
 rules can inspect. Header and body workers use source-weighted memory permits;

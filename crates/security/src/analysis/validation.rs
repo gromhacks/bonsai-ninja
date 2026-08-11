@@ -990,6 +990,53 @@ fn validate_callback_origin_constraints(rule: &Rule, issues: &mut Vec<PackValida
         }
     }
     for constraint in &rule.constraints.0 {
+        let ConstraintKind::ReceiverFactoryArgumentFieldsEqual {
+            receiver_factory_argument_fields_equal: spec,
+        } = constraint
+        else {
+            continue;
+        };
+        if rule.kind != RuleKind::Sink || rule.match_spec.kind != MatchKind::Call {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-receiver-factory-fields-constraint",
+                Some(rule),
+                "receiver_factory_argument_fields_equal is valid only on sink rules with match.kind=call",
+            );
+        }
+        let has_invalid_fields = spec.required_fields.is_empty()
+            || spec
+                .required_fields
+                .iter()
+                .any(|field| field.path.is_empty() || field.path.iter().any(|part| part.trim().is_empty()))
+            || spec.required_fields.iter().enumerate().any(|(index, field)| {
+                spec.required_fields[index + 1..]
+                    .iter()
+                    .any(|other| other.path == field.path)
+            });
+        if !callable_target(&spec.factory) || has_invalid_fields {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-receiver-factory-fields-constraint",
+                Some(rule),
+                "receiver_factory_argument_fields_equal requires a callable factory and unique non-empty exact field paths",
+            );
+        }
+        if let Some(pattern) = spec.factory.regex.as_deref() {
+            if let Err(error) = Regex::new(pattern) {
+                push_validation_issue(
+                    issues,
+                    "error",
+                    "invalid-receiver-factory-fields-constraint",
+                    Some(rule),
+                    &format!("receiver_factory_argument_fields_equal.factory.regex is invalid: {error}"),
+                );
+            }
+        }
+    }
+    for constraint in &rule.constraints.0 {
         let ConstraintKind::UnlessPriorReceiverCall {
             unless_prior_receiver_call: spec,
         } = constraint
@@ -2242,6 +2289,7 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
             | crate::rule::ConstraintKind::ReceiverTainted { .. }
             | crate::rule::ConstraintKind::AnyArgTainted { .. }
             | crate::rule::ConstraintKind::ReceiverOriginCallbackParamReachesCall { .. }
+            | crate::rule::ConstraintKind::ReceiverFactoryArgumentFieldsEqual { .. }
             | crate::rule::ConstraintKind::FormatArgIndex { .. }
             | crate::rule::ConstraintKind::Namespace { .. }
             | crate::rule::ConstraintKind::TopLevel { .. }

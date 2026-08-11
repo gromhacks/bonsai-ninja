@@ -781,6 +781,20 @@ pub struct RequiredAggregateFieldSemantics {
     pub value: StaticScalarValue,
 }
 
+/// Exact configured factory state required on a matched call receiver.
+///
+/// The language frontend supplies the immutable receiver assignment, direct
+/// factory identity, and complete aggregate argument fields. Rule data owns
+/// the factory, argument position, field paths, and values; the shared matcher
+/// only joins those typed facts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiverFactoryArgumentFieldsSpec {
+    pub factory: RuleTarget,
+    pub configuration_argument_index: usize,
+    pub required_fields: Vec<RequiredAggregateFieldSemantics>,
+}
+
 /// Rulepack-owned safe configuration for a direct sink call.
 ///
 /// The adapter decodes exact scalar fields from a structurally complete,
@@ -1341,6 +1355,13 @@ pub enum ConstraintKind {
     ReceiverOriginCallbackParamReachesCall {
         receiver_origin_callback_param_reaches_call: Box<ReceiverOriginCallbackParamReachesCallSpec>,
     },
+    /// Require the matched call receiver to be an immutable value initialized
+    /// by a declared factory whose selected aggregate argument has every
+    /// rule-declared exact field/value. Unknown, mutable, spread, or
+    /// ambiguous state fails closed.
+    ReceiverFactoryArgumentFieldsEqual {
+        receiver_factory_argument_fields_equal: Box<ReceiverFactoryArgumentFieldsSpec>,
+    },
     FormatArgIndex {
         format_arg_index: u32,
     },
@@ -1459,6 +1480,7 @@ impl ConstraintKind {
             Self::ReceiverOriginCallbackParamReachesCall { .. } => {
                 "receiver_origin_callback_param_reaches_call"
             }
+            Self::ReceiverFactoryArgumentFieldsEqual { .. } => "receiver_factory_argument_fields_equal",
             Self::FormatArgIndex { .. } => "format_arg_index",
             Self::Namespace { .. } => "namespace",
             Self::TopLevel { .. } => "top_level",

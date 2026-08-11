@@ -130,39 +130,37 @@
   enabled: true
   language: typescript
   tag: xxe
-  category: source-independent
   severity: medium
-  packages:
+  imports:
   - fast-xml-parser
   cwe:
   - CWE-776
   match:
-    kind: new
+    kind: call
     callee:
-      name: XMLParser
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.parse$'
   constraints:
-  - any_arg_matches_regex: "(?i)(processEntities|htmlEntities)\\s*[:=]\\s*true"
+  - arg_tainted: {index: 0}
+  - receiver_factory_argument_fields_equal:
+      factory: {name: XMLParser}
+      configuration_argument_index: 0
+      required_fields:
+      - path: [processEntities]
+        value: {kind: boolean, value: true}
   match_examples:
-  - name: fast xml parser process entities
-    code: "import { XMLParser } from \"fast-xml-parser\";\nfunction parser() {\n  return new XMLParser({ processEntities: true });\n}\n"
+  - name: fast xml parser processes tainted entities
+    code: "import { XMLParser } from \"fast-xml-parser\";\nconst parser = new XMLParser({ processEntities: true });\nfunction parse(xml: string) {\n  return parser.parse(xml);\n}\n"
     expect_match_text:
-    - XMLParser
-  - name: fast xml parser html entities
-    code: |
-      const { XMLParser } = require("fast-xml-parser");
-      function parser() {
-        return new XMLParser({ htmlEntities: true });
-      }
-    expect_match_text:
-    - XMLParser
+    - parser.parse
   - name: fast xml parser entities disabled negative
     code: |
-      const { XMLParser } = require("fast-xml-parser");
-      function parser() {
-        return new XMLParser({ processEntities: false });
+      import { XMLParser } from "fast-xml-parser";
+      const parser = new XMLParser({ processEntities: false });
+      function parse(xml: string) {
+        return parser.parse(xml);
       }
     expect_no_match: true
-  description: "fast-xml-parser internal/named entity expansion is explicitly enabled. This is an entity-expansion resource-exhaustion hazard (CWE-776), not a claim that the parser resolves external SYSTEM entities."
+  description: "Tainted XML reaches an immutable fast-xml-parser receiver configured with processEntities=true. The compiler-proven configuration and consumption path is an entity-expansion resource-exhaustion hazard (CWE-776), not a claim that the parser resolves external SYSTEM entities."
 - id: typescript.xxe.fast_xml_parser_parse
   enabled: false
   disabled_reason:

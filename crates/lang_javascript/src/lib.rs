@@ -364,6 +364,7 @@ impl LanguageAdapter for JavaScriptAdapter {
 /// grammar extends ECMAScript; downstream engines see only typed boolean
 /// relations and exact decoded literal values.
 pub fn populate_ecmascript_compiler_facts(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    mark_ecmascript_const_bindings_immutable(index, tree, file, src);
     for branch in collect_kinds(tree, &["if_statement"]) {
         let branch_span = span_of(file, &branch);
         let Some(condition) = branch.child_by_field_name("condition") else {
@@ -406,6 +407,52 @@ pub fn populate_ecmascript_compiler_facts(index: &mut DeclIndex, tree: &Tree, fi
         &HANDLER,
         ecmascript_static_scalar,
     );
+}
+
+/// Mark simple `const name = value` bindings as immutable compiler places.
+///
+/// This is syntax owned by the ECMAScript adapters. Shared consumers can use
+/// the fact without knowing JavaScript/TypeScript declaration spellings, and
+/// `let`/`var`, destructuring, or malformed declarations remain mutable or
+/// unknown.
+fn mark_ecmascript_const_bindings_immutable(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    for declaration in collect_kinds(tree, &["lexical_declaration"]) {
+        let is_const = (0..declaration.child_count())
+            .filter_map(|index| declaration.child(index as u32))
+            .any(|child| child.kind() == "const");
+        if !is_const {
+            continue;
+        }
+        let mut cursor = declaration.walk();
+        for declarator in declaration
+            .named_children(&mut cursor)
+            .filter(|node| node.kind() == "variable_declarator")
+        {
+            let (Some(name), Some(value)) = (
+                declarator.child_by_field_name("name"),
+                declarator.child_by_field_name("value"),
+            ) else {
+                continue;
+            };
+            if name.kind() != "identifier" {
+                continue;
+            }
+            let target = node_text(&name, src).trim();
+            let value_span = span_of(file, &value);
+            let declarator_span = span_of(file, &declarator);
+            if target.is_empty() {
+                continue;
+            }
+            for fact in index.assignment_values.iter_mut().filter(|fact| {
+                fact.target.as_deref() == Some(target)
+                    && fact.value_span == value_span
+                    && fact.assignment_span.start <= declarator_span.start
+                    && declarator_span.end <= fact.assignment_span.end
+            }) {
+                fact.target_is_immutable = true;
+            }
+        }
+    }
 }
 
 /// Lower complete ECMAScript string concatenations into typed compiler facts.

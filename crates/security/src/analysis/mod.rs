@@ -12,8 +12,8 @@ use crate::finding::{
 };
 use crate::loader::{Rulepack, RulepackMetadata};
 use crate::matcher::{
-    callback_extension_attribution_match, dedup_inventory_matches,
-    infer_entry_point_sources_for_files_with_progress,
+    callback_extension_attribution_match, configured_receiver_factory_attribution_match,
+    dedup_inventory_matches, infer_entry_point_sources_for_files_with_progress,
     match_rules_against_facts_for_inventory_with_progress_on_files,
     match_rules_against_facts_for_sink_inventory_with_progress_on_files,
     match_rules_against_facts_for_taint_support_with_progress_on_files,

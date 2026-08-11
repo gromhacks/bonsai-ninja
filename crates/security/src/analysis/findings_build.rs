@@ -177,7 +177,10 @@ pub(super) fn make_finding(
     context: FindingBuildContext<'_>,
 ) -> Option<Finding> {
     let skr = pack.find_rule_by_id(&snk.rule_id)?;
-    let attributed_sink = callback_extension_attribution_match(context.ws, context.global.as_ref(), snk, skr);
+    let attributed_sink = callback_extension_attribution_match(context.ws, context.global.as_ref(), snk, skr)
+        .or_else(|| {
+            configured_receiver_factory_attribution_match(context.ws, context.global.as_ref(), snk, skr)
+        });
     let report_sink = attributed_sink.as_ref().unwrap_or(snk);
     let is_inferred = src.origin != MatchOrigin::Rulepack;
     let source_rule = if is_inferred {

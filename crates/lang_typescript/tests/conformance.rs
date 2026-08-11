@@ -353,6 +353,38 @@ class Store {
 }
 
 #[test]
+fn const_binding_is_immutable_but_let_binding_is_not() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "parser.ts",
+            r#"
+const stable = new Parser({ enabled: true });
+let mutable = new Parser({ enabled: true });
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("TypeScript declaration index");
+    let stable = index
+        .assignment_values
+        .iter()
+        .find(|fact| fact.target.as_deref() == Some("stable"))
+        .expect("const assignment fact");
+    let mutable = index
+        .assignment_values
+        .iter()
+        .find(|fact| fact.target.as_deref() == Some("mutable"))
+        .expect("let assignment fact");
+
+    assert!(stable.target_is_immutable);
+    assert!(!mutable.target_is_immutable);
+}
+
+#[test]
 fn finite_object_selection_uses_typed_ast_shape_and_static_branches() {
     use bonsai_lang_api::LanguageAdapter;
 

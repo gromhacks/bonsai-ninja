@@ -159,6 +159,7 @@ Constraints are post-filters applied after the basic match. All must pass.
 | `arg_tainted: { index \| kw }` | Engine must prove the named arg flows from a source. |
 | `receiver_tainted: true` | Engine must prove the call receiver flows from a source. |
 | `any_arg_tainted: true` | Engine must prove at least one syntactic arg flows from a source. |
+| `receiver_factory_argument_fields_equal` | The call receiver must be an immutable compiler place initialized by the rule-declared factory, with the selected aggregate argument containing every declared exact typed field. The proof follows lexical ownership, rejects sibling-scope bindings, spreads, ambiguous factory/configuration facts, and any later receiver or receiver-field assignment. When the rule declares `imports`, the factory binding itself must resolve through one of those exact compiler import aliases; a same-named local factory fails closed. |
 | `keyword_arg_equals: { name, value }` | Named arg equals. |
 | `arg_matches_regex: { index, regex }` | Arg N matches regex. |
 | `arg_not_matches_regex: { index, regex }` | Arg N must NOT match regex (exclude escaped / constant-built args). |
@@ -179,19 +180,21 @@ in traces but cannot satisfy an `arg_tainted` sink constraint.
 
 Source-independent API/config misuse rules should not fake taint
 constraints. Examples include disabled autoescape, permissive resource URL
-configuration, parser entity-processing settings, and weak crypto/random
-API calls. Keep those as local pattern findings; source-to-sink rules for
+configuration, and weak crypto/random API calls. Keep those as local pattern findings; source-to-sink rules for
 injection, path, command, queue, header, XSS, and prototype-pollution data
 sinks should name the vulnerable tainted operand explicitly.
 
 Classify the actual parser boundary. For example, explicitly enabling
 `fast-xml-parser` internal/named entity processing is a medium CWE-776
-entity-expansion configuration hazard. It is not CWE-611 evidence that the
-library resolves external `SYSTEM` entities, and a tainted `.parse(...)` call
-alone must remain negative. The JavaScript and TypeScript rules therefore
-require compiler-decoded constructor arguments containing
-`processEntities: true` or `htmlEntities: true`, with explicit `false`
-configurations covered by negative examples.
+entity-expansion hazard. It is not CWE-611 evidence that the library resolves
+external `SYSTEM` entities, and neither a configured constructor nor a tainted
+`.parse(...)` call alone is sufficient. The JavaScript and TypeScript rules
+therefore join the tainted parse operand to an immutable receiver initialized
+by `XMLParser` with the compiler-decoded exact field
+`processEntities: true`. Explicit `false`, mutable/ambiguous configuration,
+unused configured parsers, and unconfigured tainted parsers remain negative.
+The finding is attributed to the proven configuration span while its code
+flow retains the real parse call and tainted argument.
 
 Do not classify `new XSSFWorkbook(InputStream)` as an Apache POI XXE sink.
 Apache POI's historical CVE-2019-12415 boundary was the versioned

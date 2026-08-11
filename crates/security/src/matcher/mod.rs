@@ -967,6 +967,10 @@ fn call_rule_match_passes_constraints_at_expected_hit(
                     file_decls: &file_index.defs,
                     assignment_values: &file_index.assignment_values,
                     call_argument_values: &file_index.call_argument_values,
+                    factory_import_identity: Some(FactoryImportIdentityContext {
+                        required_imports: &prepared.rule.imports,
+                        alias_map: &facts.alias_map,
+                    }),
                 }),
             }) {
                 return true;
@@ -1052,6 +1056,7 @@ fn write_rule_match_passes_constraints_at_expected_hit(
                     file_decls: &file_index.defs,
                     assignment_values: &file_index.assignment_values,
                     call_argument_values: &file_index.call_argument_values,
+                    factory_import_identity: None,
                 }),
             }) {
                 return true;
@@ -4217,6 +4222,10 @@ fn scan_calls_batch(
                         file_decls: &file_index.defs,
                         assignment_values: &file_index.assignment_values,
                         call_argument_values: &file_index.call_argument_values,
+                        factory_import_identity: Some(FactoryImportIdentityContext {
+                            required_imports: &prepared.rule.imports,
+                            alias_map: &facts.alias_map,
+                        }),
                     }),
                 }) {
                     continue;
@@ -4548,6 +4557,7 @@ fn scan_missing_batch(
                     file_decls: &file_index.defs,
                     assignment_values: &file_index.assignment_values,
                     call_argument_values: &file_index.call_argument_values,
+                    factory_import_identity: None,
                 }),
             }) {
                 continue;
@@ -6382,22 +6392,26 @@ fn typing_imports_allow(
         return false;
     };
     imports.imports.iter().any(|import| {
-        required.iter().any(|wanted| {
-            import.module == *wanted
-                || import.module.strip_prefix(wanted).is_some_and(|suffix| {
-                    suffix
-                        .chars()
-                        .next()
-                        .is_some_and(|ch| matches!(ch, '.' | ':' | '/'))
-                })
-                || wanted.strip_prefix(&import.module).is_some_and(|suffix| {
-                    suffix
-                        .chars()
-                        .next()
-                        .is_some_and(|ch| matches!(ch, '.' | ':' | '/'))
-                })
-        })
+        required
+            .iter()
+            .any(|wanted| import_module_matches(&import.module, wanted))
     })
+}
+
+fn import_module_matches(actual: &str, wanted: &str) -> bool {
+    actual == wanted
+        || actual.strip_prefix(wanted).is_some_and(|suffix| {
+            suffix
+                .chars()
+                .next()
+                .is_some_and(|ch| matches!(ch, '.' | ':' | '/'))
+        })
+        || wanted.strip_prefix(actual).is_some_and(|suffix| {
+            suffix
+                .chars()
+                .next()
+                .is_some_and(|ch| matches!(ch, '.' | ':' | '/'))
+        })
 }
 
 fn callback_type_target_matches(
@@ -7720,6 +7734,7 @@ fn scan_writes_batch(
                         file_decls: &file_index.defs,
                         assignment_values: &file_index.assignment_values,
                         call_argument_values: &file_index.call_argument_values,
+                        factory_import_identity: None,
                     }),
                 }) {
                     continue;
@@ -8798,6 +8813,7 @@ fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> 
             | ConstraintKind::ReceiverTainted { .. }
             | ConstraintKind::AnyArgTainted { .. }
             | ConstraintKind::ReceiverOriginCallbackParamReachesCall { .. }
+            | ConstraintKind::ReceiverFactoryArgumentFieldsEqual { .. }
             | ConstraintKind::FormatArgIndex { .. }
             | ConstraintKind::Namespace { .. }
             | ConstraintKind::TopLevel { .. }
@@ -8849,6 +8865,13 @@ struct StructuralConstraintContext<'a> {
     file_decls: &'a [Decl],
     assignment_values: &'a [bonsai_lang_api::AssignmentValueFact],
     call_argument_values: &'a [bonsai_lang_api::CallArgumentValueFact],
+    factory_import_identity: Option<FactoryImportIdentityContext<'a>>,
+}
+
+#[derive(Clone, Copy)]
+struct FactoryImportIdentityContext<'a> {
+    required_imports: &'a [String],
+    alias_map: &'a std::collections::HashMap<String, AliasTarget>,
 }
 
 #[derive(Copy, Clone)]
@@ -9259,6 +9282,23 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                     return false;
                 }
             }
+            ConstraintKind::ReceiverFactoryArgumentFieldsEqual {
+                receiver_factory_argument_fields_equal,
+            } => {
+                let Some(structural) = ctx.structural_context else {
+                    return false;
+                };
+                if receiver_factory_argument_fields_proof(
+                    ctx.callee,
+                    ctx.span,
+                    structural,
+                    receiver_factory_argument_fields_equal,
+                )
+                .is_none()
+                {
+                    return false;
+                }
+            }
             ConstraintKind::ArgMatchesRegex { arg_matches_regex } => {
                 let idx = arg_matches_regex.index as usize;
                 let Some(arg) = ctx.args.get(idx) else {
@@ -9514,6 +9554,160 @@ fn call_arg_single_value_identity(arg: &CallArg) -> Option<String> {
     Some(only.clone())
 }
 
+struct ReceiverFactoryArgumentFieldsProof {
+    assignment_span: Span,
+    factory_name: String,
+}
+
+fn declaration_is_lexically_visible_from(owner: &Decl, current: &Decl, file_decls: &[Decl]) -> bool {
+    let is_compiler_module = owner.name == bonsai_lang_api::MODULE_DECL_NAME
+        && owner.name_span == owner.span
+        && owner.body_span == Some(owner.span);
+    if owner.symbol == current.symbol || is_compiler_module {
+        return true;
+    }
+    let mut parent = current.parent;
+    while let Some(symbol) = parent {
+        let Some(ancestor) = file_decls.iter().find(|decl| decl.symbol == symbol) else {
+            return false;
+        };
+        if ancestor.symbol == owner.symbol {
+            return true;
+        }
+        parent = ancestor.parent;
+    }
+    false
+}
+
+fn assignment_is_lexically_visible_from(
+    assignment: &bonsai_lang_api::AssignmentValueFact,
+    current: &Decl,
+    file_decls: &[Decl],
+) -> bool {
+    innermost_decl_for_span(file_decls, assignment.assignment_span)
+        .is_some_and(|owner| declaration_is_lexically_visible_from(owner, current, file_decls))
+}
+
+fn factory_import_identity_allows(actual: &str, identity: FactoryImportIdentityContext<'_>) -> bool {
+    if identity.required_imports.is_empty() {
+        return true;
+    }
+    let Some(head) = bonsai_common::qualified_name_segments(actual)
+        .first()
+        .map(|head| normalize_leading_call_punctuation(head).to_string())
+    else {
+        return false;
+    };
+    let mut key = head;
+    let mut visited = AHashSet::new();
+    while visited.insert(key.clone()) {
+        match identity.alias_map.get(&key) {
+            Some(AliasTarget::Member { module, .. } | AliasTarget::Namespace { module }) => {
+                return identity
+                    .required_imports
+                    .iter()
+                    .any(|wanted| import_module_matches(module, wanted));
+            }
+            Some(AliasTarget::Type { type_name }) => {
+                let segments = bonsai_common::qualified_name_segments(type_name);
+                let Some(next) = segments.first() else {
+                    return false;
+                };
+                key = normalize_leading_call_punctuation(next).to_string();
+            }
+            None => return false,
+        }
+    }
+    false
+}
+
+fn receiver_factory_argument_fields_proof(
+    callee: &str,
+    call_span: Span,
+    structural: StructuralConstraintContext<'_>,
+    spec: &crate::rule::ReceiverFactoryArgumentFieldsSpec,
+) -> Option<ReceiverFactoryArgumentFieldsProof> {
+    let receiver = call_receiver_text(callee)?;
+    if spec.required_fields.is_empty()
+        || spec
+            .required_fields
+            .iter()
+            .any(|required| required.path.is_empty())
+    {
+        return None;
+    }
+    let assignment_candidates: Vec<_> = structural
+        .assignment_values
+        .iter()
+        .filter(|assignment| {
+            assignment.target_is_immutable
+                && assignment.assignment_span.start < call_span.start
+                && assignment_is_lexically_visible_from(
+                    assignment,
+                    structural.current_decl,
+                    structural.file_decls,
+                )
+                && assignment.target.as_deref() == Some(receiver)
+                && assignment.direct_call_name.as_deref().is_some_and(|factory| {
+                    structural.factory_import_identity.map_or_else(
+                        || rule_target_matches_call(factory, &[], &spec.factory),
+                        |identity| {
+                            rule_target_matches_call_with_aliases(
+                                factory,
+                                &[],
+                                &spec.factory,
+                                identity.alias_map,
+                            ) && factory_import_identity_allows(factory, identity)
+                        },
+                    )
+                })
+        })
+        .collect();
+    let assignment = assignment_candidates
+        .into_iter()
+        .max_by_key(|assignment| (assignment.assignment_span.start, assignment.assignment_span.end))?;
+    let receiver_projection_prefix = format!("{receiver}.");
+    if structural.assignment_values.iter().any(|later| {
+        assignment.assignment_span.end <= later.assignment_span.start
+            && later.assignment_span.start < call_span.start
+            && later.assignment_span != assignment.assignment_span
+            && assignment_is_lexically_visible_from(later, structural.current_decl, structural.file_decls)
+            && later
+                .target
+                .as_deref()
+                .is_some_and(|target| target == receiver || target.starts_with(&receiver_projection_prefix))
+    }) {
+        return None;
+    }
+    let matching_arguments: Vec<_> = structural
+        .call_argument_values
+        .iter()
+        .filter(|argument| {
+            argument.argument_index == spec.configuration_argument_index
+                && matcher_span_contains(assignment.value_span, argument.call_span)
+        })
+        .filter(|argument| argument.value_flow.spreads.is_empty())
+        .filter(|argument| {
+            spec.required_fields.iter().all(|required| {
+                argument
+                    .exact_static_aggregate_fields
+                    .iter()
+                    .any(|actual| actual.path == required.path && actual.value == required.value)
+            })
+        })
+        .collect();
+    let [argument] = matching_arguments.as_slice() else {
+        return None;
+    };
+    if argument.exact_static_aggregate_fields.is_empty() {
+        return None;
+    }
+    Some(ReceiverFactoryArgumentFieldsProof {
+        assignment_span: assignment.assignment_span,
+        factory_name: assignment.direct_call_name.clone()?,
+    })
+}
+
 fn receiver_origin_callback_param_reaches_call_passes(
     ctx: &ConstraintEval<'_, '_>,
     spec: &ReceiverOriginCallbackParamReachesCallSpec,
@@ -9538,6 +9732,71 @@ fn receiver_origin_callback_param_reaches_call_passes(
         kw: None,
     };
     taint_view.arg_is_tainted(proof.factory_span, &proof.factory_args, &factory_arg, false)
+}
+
+/// Reattribute a tainted configured-receiver call to the immutable factory
+/// configuration that made the call dangerous. Matching and IDG closure stay
+/// anchored at the real tainted call argument; only the reported sink site is
+/// the compiler-proven configuration boundary.
+pub(crate) fn configured_receiver_factory_attribution_match(
+    ws: &Workspace,
+    global: &GlobalIndex,
+    sink: &RuleMatch,
+    rule: &Rule,
+) -> Option<RuleMatch> {
+    if rule.match_spec.kind != MatchKind::Call {
+        return None;
+    }
+    let spec = rule.constraints.0.iter().find_map(|constraint| {
+        let ConstraintKind::ReceiverFactoryArgumentFieldsEqual {
+            receiver_factory_argument_fields_equal,
+        } = constraint
+        else {
+            return None;
+        };
+        Some(receiver_factory_argument_fields_equal.as_ref())
+    })?;
+    let file_index = ws.db().decl_index_remapped_to_headers(global, sink.span.file)?;
+    let current_decl = file_index
+        .defs
+        .iter()
+        .filter(|decl| decl.span.start <= sink.span.start && sink.span.end <= decl.span.end)
+        .min_by_key(|decl| decl.span.end.saturating_sub(decl.span.start))?;
+    let alias_map = file_alias_map_with_retention(ws, sink.span.file, FactRetention::Transient);
+    let proof = receiver_factory_argument_fields_proof(
+        &sink.match_text,
+        sink.span,
+        StructuralConstraintContext {
+            current_decl,
+            file_decls: &file_index.defs,
+            assignment_values: &file_index.assignment_values,
+            call_argument_values: &file_index.call_argument_values,
+            factory_import_identity: Some(FactoryImportIdentityContext {
+                required_imports: &rule.imports,
+                alias_map: &alias_map,
+            }),
+        },
+        spec,
+    )?;
+    let (file, line, column) = resolve_span(ws, proof.assignment_span.file, proof.assignment_span);
+    let enclosing_fn = file_index
+        .defs
+        .iter()
+        .filter(|decl| matcher_span_contains(decl.body_span.unwrap_or(decl.span), proof.assignment_span))
+        .min_by_key(|decl| decl.span.len())
+        .map(|decl| decl.name.clone());
+    let mut attributed = sink.clone();
+    attributed.file = file;
+    attributed.line = line;
+    attributed.column = column;
+    attributed.span = proof.assignment_span;
+    attributed.match_text = proof.factory_name;
+    attributed.enclosing_fn = enclosing_fn;
+    Some(attributed)
+}
+
+fn matcher_span_contains(outer: Span, inner: Span) -> bool {
+    outer.file == inner.file && outer.start <= inner.start && inner.end <= outer.end
 }
 
 struct CallbackExtensionProof {
@@ -9704,6 +9963,7 @@ pub(crate) fn callback_extension_attribution_match(
             file_decls: &file_index.defs,
             assignment_values: &file_index.assignment_values,
             call_argument_values: &file_index.call_argument_values,
+            factory_import_identity: None,
         },
         spec,
     )?;
