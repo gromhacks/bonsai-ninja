@@ -6,59 +6,372 @@ use bonsai_lang_api::{
         call_arg_from_nodes_with_handler, collect_kinds, language_from_pack, node_text,
         normalize_call_name_whitespace, parse_with, span_of,
     },
-    AdapterContext, AdapterError, AssignmentValueIndex, CallArg, CallKind, CharacterClass,
-    CharacterConstraintDomain, CharacterConstraintFact, CharacterConstraintOutput,
-    CharacterSubstitutionDomain, CharacterSubstitutionFact, ConditionEquality, ConditionExpressionFact,
-    ConditionOperandFact, DeclIndex, DeclKind, FiniteLiteralSelectionFact, FlowEvent, GrammarHandler,
-    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    SameOriginPathConstraintFact, StaticScalarValue, StaticStringMapEntry, StringCompositionFact,
-    StringCompositionPart, TypeAliasBinding, Visibility, EMPTY_HANDLER,
+    AdapterContext, AdapterError, AssignmentValueIndex, CallArg, CallKind, CallTargetExtraction,
+    CharacterClass, CharacterConstraintDomain, CharacterConstraintFact, CharacterConstraintOutput,
+    CharacterSubstitutionDomain, CharacterSubstitutionFact, Comment, CommentKind, ConditionEquality,
+    ConditionExpressionFact, ConditionOperandFact, DeclIndex, DeclKind, FiniteLiteralSelectionFact,
+    FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
+    LanguageId, PatternSourceProjection, ProjectedPatternBindingSite, SameOriginPathConstraintFact,
+    StaticScalarValue, StaticStringMapEntry, StringCompositionFact, StringCompositionPart, TypeAliasBinding,
+    Visibility, EMPTY_HANDLER,
 };
 use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("python");
 const PACK_NAME: &str = "python";
 
-/// Python lifecycle transitions: file/socket/lock/task closure forms.
-const PYTHON_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "close",
-        transition: "closed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "shutdown",
-        transition: "closed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "cancel",
-        transition: "cancelled",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "release",
-        transition: "unlocked",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "destroy",
-        transition: "freed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "os.close",
-        transition: "closed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "os.unlink",
-        transition: "freed",
-        arg_index: 0,
-    },
-];
+fn python_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    if node.kind() != "call" {
+        return None;
+    }
+    let target = node.child_by_field_name("function")?;
+    let full_text = node_text(&target, src).trim();
+    (!full_text.is_empty()).then_some(CallTargetExtraction {
+        node: target,
+        full_text: full_text.to_string(),
+    })
+}
+
+fn python_pattern_bindings<'tree>(node: Node<'tree>, src: &[u8]) -> Vec<ProjectedPatternBindingSite<'tree>> {
+    if node.kind() != "match_statement" {
+        return Vec::new();
+    }
+    let Some(source) = node.child_by_field_name("subject") else {
+        return Vec::new();
+    };
+    let mut sites = Vec::new();
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if current.id() != node.id() && current.kind() == "match_statement" {
+            continue;
+        }
+        if current.kind() == "case_clause" {
+            let mut cursor = current.walk();
+            for pattern in current
+                .named_children(&mut cursor)
+                .filter(|child| child.kind() == "case_pattern")
+            {
+                // The capture is established by the pattern header, before
+                // the case body executes.  Using the whole `case_clause`
+                // span would place the synthetic write after calls in its
+                // body when the IDG orders transfers by source span.
+                collect_python_pattern_bindings(pattern, pattern, source, &[], src, &mut sites);
+            }
+            continue;
+        }
+        let mut cursor = current.walk();
+        stack.extend(current.named_children(&mut cursor));
+    }
+    sites
+}
+
+fn collect_python_pattern_bindings<'tree>(
+    pattern: Node<'tree>,
+    span_node: Node<'tree>,
+    source: Node<'tree>,
+    projection: &[PatternSourceProjection],
+    src: &[u8],
+    out: &mut Vec<ProjectedPatternBindingSite<'tree>>,
+) {
+    match pattern.kind() {
+        "case_pattern" => {
+            if let Some(child) = pattern.named_child(0) {
+                collect_python_pattern_bindings(child, span_node, source, projection, src, out);
+            }
+        }
+        "dotted_name" => {
+            let mut cursor = pattern.walk();
+            let identifiers = pattern
+                .named_children(&mut cursor)
+                .filter(|child| child.kind() == "identifier")
+                .collect::<Vec<_>>();
+            if identifiers.len() == 1 {
+                push_python_pattern_binding(identifiers[0], span_node, source, projection, src, out);
+            }
+        }
+        "identifier" => {
+            push_python_pattern_binding(pattern, span_node, source, projection, src, out);
+        }
+        "dict_pattern" => {
+            let mut pending_key = None;
+            let mut cursor = pattern.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    if child.is_named() {
+                        match cursor.field_name() {
+                            Some("key") => {
+                                pending_key = Some(python_static_subscript_key(child, src).map_or(
+                                    PatternSourceProjection::Descendants,
+                                    PatternSourceProjection::Field,
+                                ));
+                            }
+                            Some("value") => {
+                                let mut child_projection = projection.to_vec();
+                                child_projection
+                                    .push(pending_key.take().unwrap_or(PatternSourceProjection::Descendants));
+                                collect_python_pattern_bindings(
+                                    child,
+                                    span_node,
+                                    source,
+                                    &child_projection,
+                                    src,
+                                    out,
+                                );
+                            }
+                            _ if child.kind() == "splat_pattern" => {
+                                let mut child_projection = projection.to_vec();
+                                child_projection.push(PatternSourceProjection::Descendants);
+                                collect_python_pattern_bindings(
+                                    child,
+                                    span_node,
+                                    source,
+                                    &child_projection,
+                                    src,
+                                    out,
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+        "class_pattern" => {
+            let mut cursor = pattern.walk();
+            let children = pattern.named_children(&mut cursor).collect::<Vec<_>>();
+            for child in children.into_iter().skip(1) {
+                let core = child.named_child(0).unwrap_or(child);
+                let child_projection = if core.kind() == "keyword_pattern" {
+                    projection.to_vec()
+                } else {
+                    let mut projected = projection.to_vec();
+                    projected.push(PatternSourceProjection::Descendants);
+                    projected
+                };
+                collect_python_pattern_bindings(child, span_node, source, &child_projection, src, out);
+            }
+        }
+        "keyword_pattern" => {
+            let mut cursor = pattern.walk();
+            let children = pattern.named_children(&mut cursor).collect::<Vec<_>>();
+            if let (Some(label), Some(value)) = (children.first(), children.get(1)) {
+                let label = node_text(label, src).trim();
+                let mut child_projection = projection.to_vec();
+                if label.is_empty() {
+                    child_projection.push(PatternSourceProjection::Descendants);
+                } else {
+                    child_projection.push(PatternSourceProjection::Field(label.to_string()));
+                }
+                collect_python_pattern_bindings(*value, span_node, source, &child_projection, src, out);
+            }
+        }
+        "as_pattern" => {
+            let alias_wrapper = pattern.child_by_field_name("alias");
+            let mut cursor = pattern.walk();
+            for child in pattern.named_children(&mut cursor) {
+                if alias_wrapper.is_some_and(|alias| alias.id() == child.id()) {
+                    if let Some(alias) = first_python_identifier(child) {
+                        push_python_pattern_binding(alias, span_node, source, projection, src, out);
+                    }
+                } else {
+                    collect_python_pattern_bindings(child, span_node, source, projection, src, out);
+                }
+            }
+        }
+        "list_pattern" | "tuple_pattern" => {
+            let mut cursor = pattern.walk();
+            let children = pattern.named_children(&mut cursor).collect::<Vec<_>>();
+            let has_remainder = children.iter().any(|child| {
+                child.kind() == "splat_pattern"
+                    || child
+                        .named_child(0)
+                        .is_some_and(|nested| nested.kind() == "splat_pattern")
+            });
+            for (index, child) in children.into_iter().enumerate() {
+                let mut child_projection = projection.to_vec();
+                if has_remainder {
+                    child_projection.push(PatternSourceProjection::Descendants);
+                } else {
+                    child_projection.push(PatternSourceProjection::Element(index));
+                }
+                collect_python_pattern_bindings(child, span_node, source, &child_projection, src, out);
+            }
+        }
+        "splat_pattern" => {
+            if let Some(target) = first_python_identifier(pattern) {
+                push_python_pattern_binding(target, span_node, source, projection, src, out);
+            }
+        }
+        "union_pattern" => {
+            let mut cursor = pattern.walk();
+            for child in pattern.named_children(&mut cursor) {
+                collect_python_pattern_bindings(child, span_node, source, projection, src, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn first_python_identifier(node: Node<'_>) -> Option<Node<'_>> {
+    if node.kind() == "identifier" {
+        return Some(node);
+    }
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        let mut cursor = current.walk();
+        for child in current.named_children(&mut cursor) {
+            if child.kind() == "identifier" {
+                return Some(child);
+            }
+            stack.push(child);
+        }
+    }
+    None
+}
+
+fn push_python_pattern_binding<'tree>(
+    target: Node<'tree>,
+    span_node: Node<'tree>,
+    source: Node<'tree>,
+    projection: &[PatternSourceProjection],
+    src: &[u8],
+    out: &mut Vec<ProjectedPatternBindingSite<'tree>>,
+) {
+    let name = node_text(&target, src).trim();
+    if !python_match_capture_identifier(name) {
+        return;
+    }
+    let site = ProjectedPatternBindingSite {
+        span_node,
+        target,
+        source,
+        projection: projection.to_vec(),
+    };
+    if !out.iter().any(|existing| {
+        existing.target.id() == site.target.id()
+            && existing.source.id() == site.source.id()
+            && existing.projection == site.projection
+    }) {
+        out.push(site);
+    }
+}
+
+fn python_using_alias(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    if node.kind() != "as_pattern" {
+        return None;
+    }
+    let alias_wrapper = node.child_by_field_name("alias")?;
+    let alias = if alias_wrapper.kind() == "identifier" {
+        alias_wrapper
+    } else {
+        let mut cursor = alias_wrapper.walk();
+        let alias = alias_wrapper
+            .named_children(&mut cursor)
+            .find(|child| child.kind() == "identifier");
+        alias?
+    };
+    let mut cursor = node.walk();
+    let value = node
+        .named_children(&mut cursor)
+        .find(|child| child.id() != alias_wrapper.id());
+    Some((alias, value?))
+}
+
+fn python_comprehension_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    if node.kind() != "for_in_clause" {
+        return None;
+    }
+    // tree-sitter-python assigns the iteration target to `left` and the
+    // evaluated iterable expression to `right`. These roles are semantic:
+    // reversing them turns `[p for p in parts]` into the false overwrite
+    // `parts = p`, which kills the real reaching definition of `parts`.
+    let binding = node.child_by_field_name("left")?;
+    let iterable = node.child_by_field_name("right")?;
+    Some((binding, iterable))
+}
+
+fn python_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    (node.kind() == "for_statement")
+        .then(|| {
+            Some((
+                node.child_by_field_name("left")?,
+                node.child_by_field_name("right")?,
+            ))
+        })
+        .flatten()
+}
 
 const HANDLER: GrammarHandler = GrammarHandler {
+    literal_value_kinds: &["none", "integer", "float", "true", "false"],
+    literal_value_spellings: &[],
+    string_literal_kinds: &["string", "concatenated_string"],
+    comment_kinds: &["comment"],
+    doc_comment_kinds: &[],
+    doc_comment_prefixes: &[],
+    decorator_kinds: &["decorator"],
+    parameter_container_kinds: &["parameters"],
+    parameter_kinds: &[
+        "identifier",
+        "typed_parameter",
+        "default_parameter",
+        "typed_default_parameter",
+        "list_splat_pattern",
+        "dictionary_splat_pattern",
+    ],
+    parameter_modifier_kinds: &[],
+    parameter_annotation_kinds: &["decorator"],
+    parameter_annotation_name_extractor: None,
+    keyword_parameter_kinds: &[],
+    parameter_selector_kinds: &[],
+    implicit_parameter_kinds: &[],
+    self_parameter_kinds: &[],
+    last_identifier_parameter_kinds: &[],
+    binding_identifier_kinds: &["identifier"],
+    non_binding_pattern_kinds: &[],
+    binding_lhs_pattern_kinds: &[],
+    binding_pattern_field_names: &[],
+    pattern_head_value_kinds: &["class_pattern"],
+    multi_segment_value_pattern_kinds: &["dotted_name"],
+    non_binding_pattern_field_names: &["type", "key", "class", "guard"],
+    binding_name_extractor: None,
+    binding_name_filter: None,
+    pattern_binding_extractor: None,
+    projected_pattern_binding_extractor: Some(python_pattern_bindings),
+    anonymous_variadic_token: None,
+    variadic_parameter_kinds: &["list_splat_pattern"],
+    destructured_parameter_kinds: &["list_pattern", "tuple_pattern", "dictionary_pattern"],
+    identifier_kinds: &["identifier"],
+    aggregate_pattern_kinds: &["pattern_list", "list_pattern", "tuple_pattern"],
+    comprehension_kinds: &[
+        "list_comprehension",
+        "dictionary_comprehension",
+        "set_comprehension",
+        "generator_expression",
+    ],
+    comprehension_binding_clause_kinds: &["for_in_clause"],
+    comprehension_binding_extractor: Some(python_comprehension_binding),
+    named_aggregate_kinds: &["dictionary"],
+    positional_aggregate_kinds: &["tuple", "list", "set"],
+    aggregate_pair_kinds: &["pair", "dict_pattern"],
+    two_child_aggregate_pair_kinds: &[],
+    aggregate_pair_extractor: None,
+    aggregate_key_field_names: &["key"],
+    aggregate_value_field_names: &["value"],
+    static_field_name_kinds: &["identifier"],
+    shorthand_field_kinds: &[],
+    spread_kinds: &["list_splat", "dictionary_splat", "parenthesized_list_splat"],
+    spread_value_field_names: &["value"],
+    aggregate_syntax_only_kinds: &[],
+    multi_child_aggregate_pattern_kinds: &[],
+    lambda_value_container_kinds: &["dictionary", "list", "set"],
+    transparent_call_wrapper_kinds: &["attribute", "subscript", "parenthesized_expression", "await"],
+    single_expression_group_kinds: &["expression_list"],
+    assignment_target_wrapper_kinds: &[],
+    binding_declaration_keyword_spellings: &[],
     nested_type_ownership: true,
     fn_kinds: &["function_definition"],
     class_kinds: &["class_definition"],
@@ -68,49 +381,114 @@ const HANDLER: GrammarHandler = GrammarHandler {
     method_owner_barrier_kinds: &[],
     constructor_method_kinds: &[],
     constructor_names: &["__init__"],
+    function_definition_extractor: None,
+    inline_closure_yield_extractor: None,
     if_kinds: &[
         "if_statement",
         "conditional_expression",
         "match_statement",
         "elif_clause",
     ],
-    for_kinds: &["for_statement"],
-    foreach_kinds: &[],
+    branch_then_field_names: &["consequence", "body"],
+    branch_else_field_names: &["alternative"],
+    branch_condition_field_names: &["condition", "subject"],
+    branch_condition_kinds: &[],
+    branch_alias_extractor: None,
+    branch_arm_kinds: &["block", "elif_clause", "else_clause"],
+    additional_alternative_kinds: &["elif_clause", "else_clause"],
+    for_kinds: &[],
+    foreach_kinds: &["for_statement"],
+    foreach_binding_extractor: Some(python_foreach_binding),
     while_kinds: &["while_statement"],
     do_kinds: &[],
     loop_kinds: &[],
+    loop_body_field_names: &["body"],
+    loop_body_kinds: &["block"],
     call_kinds: &["call"],
+    constructor_call_kinds: &[],
     nested_call_component_kinds: &[],
+    call_callee_field_names: &["function"],
+    call_target_extractor: Some(python_call_target),
+    call_receiver_extractor: None,
+    call_receiver_field_names: &[],
+    call_member_field_names: &[],
+    constructor_type_field_names: &[],
+    call_argument_field_names: &["arguments"],
+    call_argument_container_kinds: &["argument_list"],
+    call_argument_wrapper_kinds: &[],
+    call_callee_is_first_named_child: false,
+    argument_wrapper_kinds: &["keyword_argument"],
+    argument_name_field_names: &["name"],
+    argument_value_field_names: &["value"],
+    named_argument_extractor: None,
+    direct_call_info_extractor: None,
+    call_ref_node_filter: None,
+    expression_call_span_extractor: None,
+    writeback_operand_field_names: &[],
+    direct_call_argument_excluded_fields: &[],
+    transparent_expression_wrapper_kinds: &["parenthesized_expression"],
     pseudo_call_extractor: None,
     syntax_event_extractor: None,
+    syntax_events_extractor: None,
+    call_encoded_control_flow_extractor: None,
     pseudo_call_receiver_extractor: None,
     argument_passing_mode_extractor: None,
+    expression_value_kind_extractor: None,
     assignment_kinds: &["assignment", "augmented_assignment", "named_expression"],
+    assignment_semantics_extractor: None,
+    assignment_place_extractor: None,
+    compound_assignment_kinds: &["augmented_assignment"],
+    compound_assignment_operators: &[],
+    type_only_declaration_kinds: &[],
+    positional_aggregate_assignment_kinds: &[],
+    positional_aggregate_value_kinds: &[],
     return_kinds: &["return_statement"],
     throw_kinds: &["raise_statement"],
     lambda_kinds: &["lambda"],
+    inline_closure_kinds: &[],
+    implicit_lambda_parameter_name: None,
+    lambda_body_field_names: &["body"],
+    lambda_body_kinds: &[],
     try_kinds: &["try_statement"],
     catch_kinds: &["except_clause"],
     finally_kinds: &["finally_clause"],
+    try_fallback_body_kinds: &["block"],
+    catch_body_follows_marker: false,
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
+    control_label_field_names: &[],
     yield_kinds: &["yield"],
+    yield_value_field_names: &["value", "expression"],
     await_kinds: &["await"],
     defer_kinds: &[],
+    deferred_body_extractor: None,
     using_kinds: &["with_statement"],
+    using_body_field_names: &["body"],
+    try_body_field_names: &["body"],
+    using_alias_extractor: Some(python_using_alias),
     special_forms: &[],
     runtime_type_guard_calls: &["isinstance"],
     runtime_type_guard_operators: &[],
     runtime_typeof_operators: &[],
     runtime_type_equality_operators: &[],
+    runtime_type_wrapper_kinds: &["parenthesized_expression"],
     value_free_expression_kinds: &[],
     value_free_call_names: &[],
     value_free_unary_operators: &[],
     call_ref_kinds: &["call"],
     member_expression_kinds: &["attribute"],
     subscript_expression_kinds: &["subscript"],
+    member_base_field_names: &["object"],
+    member_name_field_names: &["attribute"],
+    subscript_base_field_names: &["value"],
+    subscript_index_field_names: &["subscript"],
+    static_subscript_key_extractor: Some(python_static_subscript_key),
+    computed_subscript_extractor: None,
     sigil_variable_kinds: &[],
     global_variable_kinds: &[],
+    reference_name_extractor: None,
+    expression_place_extractor: None,
+    indirect_place_operand_extractor: None,
     subscript_base_call_refs: true,
     non_call_ref_names: &[],
     call_name_suffix_tokens: &[],
@@ -118,6 +496,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     callable_reference_kinds: &[],
     callable_reference_extractor: None,
     method_receiver_param_index: Some(0),
+    receiver_presence_extractor: Some(python_function_has_receiver),
     // `self` for ordinary instance methods; `super` so `super().foo()`
     // and `super(Class, self).foo()` resolve to the parent class's
     // `foo` via the engine's `resolve_super_method_candidates`. The adapter
@@ -127,6 +506,58 @@ const HANDLER: GrammarHandler = GrammarHandler {
     tail_expression_returns: EMPTY_HANDLER.tail_expression_returns,
     void_return_type_names: EMPTY_HANDLER.void_return_type_names,
 };
+
+/// Python methods normally bind parameter zero as their receiver, except for
+/// the exact built-in `staticmethod` decorator forms. This syntax belongs to
+/// the Python adapter; shared lowering receives only the resulting boolean.
+fn python_function_has_receiver(node: Node<'_>, src: &[u8]) -> bool {
+    let Some(parent) = node
+        .parent()
+        .filter(|parent| parent.kind() == "decorated_definition")
+    else {
+        return true;
+    };
+    let mut cursor = parent.walk();
+    let is_static = parent
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "decorator")
+        .any(|decorator| python_decorator_is_staticmethod(decorator, src));
+    !is_static
+}
+
+fn python_decorator_is_staticmethod(decorator: Node<'_>, src: &[u8]) -> bool {
+    let mut cursor = decorator.walk();
+    let is_static = decorator
+        .named_children(&mut cursor)
+        .next()
+        .is_some_and(|expression| python_expr_is_staticmethod(expression, src));
+    is_static
+}
+
+fn python_expr_is_staticmethod(node: Node<'_>, src: &[u8]) -> bool {
+    match node.kind() {
+        "identifier" => node_text(&node, src).trim() == "staticmethod",
+        "attribute" => {
+            node.child_by_field_name("attribute")
+                .is_some_and(|attribute| node_text(&attribute, src).trim() == "staticmethod")
+                && node
+                    .child_by_field_name("object")
+                    .is_some_and(|object| node_text(&object, src).trim() == "builtins")
+        }
+        "parenthesized_expression" => {
+            let mut cursor = node.walk();
+            let is_static = node
+                .named_children(&mut cursor)
+                .next()
+                .is_some_and(|inner| python_expr_is_staticmethod(inner, src));
+            is_static
+        }
+        "call" => node
+            .child_by_field_name("function")
+            .is_some_and(|callee| python_expr_is_staticmethod(callee, src)),
+        _ => false,
+    }
+}
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct PythonAdapter;
@@ -244,6 +675,7 @@ impl LanguageAdapter for PythonAdapter {
         // docs/contributing/design-patterns.mdx::Semantic Resolution Always.
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
+            idx.comments.extend(python_docstring_comments(&tree, file, src));
             populate_python_condition_expressions(&mut idx, &tree, file, src);
             idx.string_compositions = python_string_compositions(&tree, file, src);
             idx.finite_literal_selections = python_finite_literal_selections(&idx, &tree, file, src);
@@ -286,7 +718,6 @@ impl LanguageAdapter for PythonAdapter {
                     decl.bases = bases.clone();
                 }
             }
-            let match_pattern_bindings = collect_python_match_pattern_bindings(&tree, file, src);
             let iterable_yield_bindings = collect_python_iterable_yield_bindings(&tree, file, src);
             let property_fn_spans = collect_python_property_function_spans(&tree, file, src);
             let property_aliases = collect_python_property_aliases(&idx, &property_fn_spans);
@@ -309,11 +740,6 @@ impl LanguageAdapter for PythonAdapter {
                 .map(|decl| decl.span)
                 .collect();
             for decl in &mut idx.defs {
-                let owned_match_patterns: Vec<PythonMatchPatternBindings> = match_pattern_bindings
-                    .iter()
-                    .filter(|pattern| python_match_pattern_owned_by_decl(pattern, decl.span, &callable_spans))
-                    .cloned()
-                    .collect();
                 let owned_yield_bindings = iterable_yield_bindings
                     .iter()
                     .filter(|event| {
@@ -323,7 +749,6 @@ impl LanguageAdapter for PythonAdapter {
                     .collect::<Vec<_>>();
                 let comprehension_iterable_calls =
                     collect_python_comprehension_iterable_call_events(&tree, file, src, decl.span);
-                augment_python_match_pattern_flow_events(&mut decl.flow_events, &owned_match_patterns);
                 augment_python_comprehension_flow_events(
                     &mut decl.flow_events,
                     snapshot.text.as_ref(),
@@ -359,12 +784,8 @@ impl LanguageAdapter for PythonAdapter {
                 python_static_scalar,
             );
         }
-        // Append `FlowEvent::Lifecycle` for recognised Python
-        // resource transitions (`f.close()`, `task.cancel()`,
-        // `lock.release()`, `cm.__exit__`).
         for decl in &mut idx.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, PYTHON_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each class's
         // constructor `receiver_field_writes` so receiver-typed
@@ -377,6 +798,48 @@ impl LanguageAdapter for PythonAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+/// Python defines a docstring as the first bare string expression in a
+/// module, function, async function, or class body. This is language syntax,
+/// so the adapter owns the scope and wrapper kinds; shared comment lowering
+/// only consumes explicit comment nodes declared by its active handler.
+fn python_docstring_comments(tree: &Tree, file: FileId, src: &[u8]) -> Vec<Comment> {
+    let mut out = Vec::new();
+    for scope in collect_kinds(
+        tree,
+        &[
+            "module",
+            "function_definition",
+            "class_definition",
+            "async_function_definition",
+        ],
+    ) {
+        let body = scope.child_by_field_name("body").unwrap_or(scope);
+        let Some(first_statement) = body.named_child(0) else {
+            continue;
+        };
+        let value = if first_statement.kind() == "expression_statement" {
+            first_statement.named_child(0).unwrap_or(first_statement)
+        } else {
+            first_statement
+        };
+        if !HANDLER.string_literal_kinds.contains(&value.kind()) {
+            continue;
+        }
+        let text = node_text(&value, src).trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        out.push(Comment {
+            span: span_of(file, &value),
+            kind: CommentKind::classify(&text, true),
+            text,
+        });
+    }
+    out.sort_by_key(|comment| (comment.span.start, comment.span.end));
+    out.dedup_by_key(|comment| comment.span);
+    out
 }
 
 /// Lower Python's boolean-expression grammar into the shared semantic
@@ -598,6 +1061,13 @@ fn python_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue>
         "none" => Some(StaticScalarValue::Null),
         "string" => Some(StaticScalarValue::String(python_static_string(node, src)?)),
         _ => None,
+    }
+}
+
+fn python_static_subscript_key(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match python_static_scalar(node, src)? {
+        StaticScalarValue::String(value) => Some(value),
+        StaticScalarValue::Boolean(_) | StaticScalarValue::Null => None,
     }
 }
 
@@ -3255,10 +3725,45 @@ fn insert_python_iterable_yield_bindings(events: &mut Vec<FlowEvent>, bindings: 
             .iter()
             .filter(|binding| python_flow_event_span(binding) == loop_span)
         {
-            if events.iter().any(|existing| existing == binding) {
+            let mut binding = binding.clone();
+            // Tuple loop bindings are lowered twice at the same statement:
+            // the generic call-result fallback owns an exact synthetic tuple
+            // projection, while this Python refinement adds the generator
+            // yield alternative. Give both facts the same compiler place so
+            // the refinement cannot become a later clean overwrite merely
+            // because the target was destructured.
+            if let FlowEvent::Assign {
+                target,
+                source_names,
+                value_kind: Some(bonsai_lang_api::AssignValueKind::YieldResult),
+                ..
+            } = &mut binding
+            {
+                if let Some(tuple_sources) = events.iter().find_map(|existing| match existing {
+                    FlowEvent::Assign {
+                        span,
+                        target: existing_target,
+                        source_names: existing_sources,
+                        value_kind,
+                        ..
+                    } if *span == loop_span
+                        && existing_target == target
+                        && !matches!(value_kind, Some(bonsai_lang_api::AssignValueKind::YieldResult))
+                        && existing_sources.iter().any(|source| {
+                            source.starts_with(bonsai_lang_api::kit::SYNTHETIC_TUPLE_RESULT_PREFIX)
+                        }) =>
+                    {
+                        Some(existing_sources.clone())
+                    }
+                    _ => None,
+                }) {
+                    *source_names = tuple_sources;
+                }
+            }
+            if events.iter().any(|existing| existing == &binding) {
                 continue;
             }
-            events.insert(insert_at, binding.clone());
+            events.insert(insert_at, binding);
             insert_at += 1;
         }
     }
@@ -3625,177 +4130,6 @@ fn push_python_source_name(out: &mut Vec<String>, value: String) {
     }
 }
 
-#[derive(Clone, Debug)]
-struct PythonMatchPatternBindings {
-    span: Span,
-    subject: String,
-    coarse_targets: Vec<String>,
-    assignments: Vec<bonsai_lang_api::FlowEvent>,
-}
-
-fn collect_python_match_pattern_bindings(
-    tree: &Tree,
-    file: FileId,
-    src: &[u8],
-) -> Vec<PythonMatchPatternBindings> {
-    let mut out = Vec::new();
-    collect_python_match_pattern_bindings_from_node(tree.root_node(), file, src, &mut out);
-    out
-}
-
-fn collect_python_match_pattern_bindings_from_node(
-    node: Node<'_>,
-    file: FileId,
-    src: &[u8],
-    out: &mut Vec<PythonMatchPatternBindings>,
-) {
-    if node.kind() == "match_statement" {
-        if let Some(bindings) = collect_python_match_pattern_bindings_for_statement(node, file, src) {
-            out.push(bindings);
-        }
-    }
-
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        collect_python_match_pattern_bindings_from_node(child, file, src, out);
-    }
-}
-
-fn collect_python_match_pattern_bindings_for_statement(
-    node: Node<'_>,
-    file: FileId,
-    src: &[u8],
-) -> Option<PythonMatchPatternBindings> {
-    let subject_node = node.child_by_field_name("subject")?;
-    let subject = node_text(&subject_node, src).trim();
-    if !python_match_capture_identifier(subject) {
-        return None;
-    }
-
-    let mut bindings = PythonMatchPatternBindings {
-        span: span_of(file, &node),
-        subject: subject.to_string(),
-        coarse_targets: Vec::new(),
-        assignments: Vec::new(),
-    };
-
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        collect_python_case_clause_pattern_bindings(child, subject, file, src, &mut bindings);
-    }
-
-    (!bindings.coarse_targets.is_empty()).then_some(bindings)
-}
-
-fn collect_python_case_clause_pattern_bindings(
-    case_clause: Node<'_>,
-    subject: &str,
-    file: FileId,
-    src: &[u8],
-    bindings: &mut PythonMatchPatternBindings,
-) {
-    if case_clause.kind() == "case_pattern" {
-        collect_python_dict_pattern_bindings(case_clause, subject, file, src, bindings);
-        return;
-    }
-
-    let mut cursor = case_clause.walk();
-    for child in case_clause.named_children(&mut cursor) {
-        if child.kind() == "case_pattern" {
-            collect_python_dict_pattern_bindings(child, subject, file, src, bindings);
-        } else {
-            collect_python_case_clause_pattern_bindings(child, subject, file, src, bindings);
-        }
-    }
-}
-
-fn collect_python_dict_pattern_bindings(
-    node: Node<'_>,
-    subject: &str,
-    file: FileId,
-    src: &[u8],
-    bindings: &mut PythonMatchPatternBindings,
-) {
-    if node.kind() != "dict_pattern" {
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            collect_python_dict_pattern_bindings(child, subject, file, src, bindings);
-        }
-        return;
-    }
-
-    let mut pending_key: Option<String> = None;
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        match child.kind() {
-            "string" => {
-                pending_key = python_static_dict_key(node_text(&child, src));
-            }
-            "case_pattern" => {
-                let Some(field) = pending_key.take() else {
-                    continue;
-                };
-                let Some(target) = python_pattern_binding_identifier(child, src) else {
-                    continue;
-                };
-                push_python_source_name(&mut bindings.coarse_targets, target.clone());
-                let source = format!("{subject}.{field}");
-                if bindings.assignments.iter().any(|event| {
-                    matches!(
-                        event,
-                        bonsai_lang_api::FlowEvent::Assign {
-                            span,
-                            target: existing_target,
-                            source_name: Some(existing_source),
-                            ..
-                        } if *span == span_of(file, &child)
-                            && existing_target == &target
-                            && existing_source == &source
-                    )
-                }) {
-                    continue;
-                }
-                bindings.assignments.push(bonsai_lang_api::FlowEvent::Assign {
-                    span: span_of(file, &child),
-                    target,
-                    source_name: Some(source.clone()),
-                    source_call: None,
-                    source_call_args: Vec::new(),
-                    source_names: vec![source],
-                    declares_new_binding: false,
-                    value_kind: None,
-                });
-            }
-            "splat_pattern" => {
-                if let Some(target) = python_splat_pattern_binding_identifier(child, src) {
-                    push_python_source_name(&mut bindings.coarse_targets, target);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn python_pattern_binding_identifier(node: Node<'_>, src: &[u8]) -> Option<String> {
-    let text = node_text(&node, src).trim();
-    python_match_capture_identifier(text).then(|| text.to_string())
-}
-
-fn python_splat_pattern_binding_identifier(node: Node<'_>, src: &[u8]) -> Option<String> {
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if child.kind() != "identifier" {
-            continue;
-        }
-        let text = node_text(&child, src).trim();
-        if python_match_capture_identifier(text) {
-            return Some(text.to_string());
-        }
-    }
-    let text = node_text(&node, src).trim().trim_start_matches("**").trim();
-    python_match_capture_identifier(text).then(|| text.to_string())
-}
-
 fn python_match_capture_identifier(text: &str) -> bool {
     if matches!(
         text,
@@ -3811,130 +4145,6 @@ fn python_match_capture_identifier(text: &str) -> bool {
         return false;
     }
     chars.all(|ch| ch == '_' || ch.is_alphanumeric())
-}
-
-fn augment_python_match_pattern_flow_events(
-    events: &mut Vec<bonsai_lang_api::FlowEvent>,
-    patterns: &[PythonMatchPatternBindings],
-) {
-    if patterns.is_empty() {
-        return;
-    }
-    let mut inserted_patterns = Vec::new();
-    augment_python_match_pattern_flow_events_inner(events, patterns, &mut inserted_patterns);
-    insert_missing_python_match_pattern_assignments(events, patterns, &inserted_patterns);
-}
-
-fn augment_python_match_pattern_flow_events_inner(
-    events: &mut Vec<bonsai_lang_api::FlowEvent>,
-    patterns: &[PythonMatchPatternBindings],
-    inserted_patterns: &mut Vec<usize>,
-) {
-    for event in events.iter_mut() {
-        match event {
-            bonsai_lang_api::FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                augment_python_match_pattern_flow_events_inner(then_events, patterns, inserted_patterns);
-                augment_python_match_pattern_flow_events_inner(else_events, patterns, inserted_patterns);
-            }
-            bonsai_lang_api::FlowEvent::Loop { body, .. }
-            | bonsai_lang_api::FlowEvent::Defer { body, .. }
-            | bonsai_lang_api::FlowEvent::Using { body, .. } => {
-                augment_python_match_pattern_flow_events_inner(body, patterns, inserted_patterns);
-            }
-            bonsai_lang_api::FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                augment_python_match_pattern_flow_events_inner(body, patterns, inserted_patterns);
-                augment_python_match_pattern_flow_events_inner(catch_events, patterns, inserted_patterns);
-                augment_python_match_pattern_flow_events_inner(finally_events, patterns, inserted_patterns);
-            }
-            _ => {}
-        }
-    }
-
-    let mut rewritten = Vec::with_capacity(events.len());
-    for event in events.drain(..) {
-        let replacement = if let bonsai_lang_api::FlowEvent::Assign {
-            span,
-            target,
-            source_name,
-            source_call,
-            ..
-        } = &event
-        {
-            python_match_pattern_replacement(
-                patterns,
-                *span,
-                target,
-                source_name.as_deref(),
-                source_call.as_deref(),
-            )
-        } else {
-            None
-        };
-
-        if let Some(pattern_idx) = replacement {
-            if !inserted_patterns.contains(&pattern_idx) {
-                rewritten.extend(patterns[pattern_idx].assignments.clone());
-                inserted_patterns.push(pattern_idx);
-            }
-            continue;
-        }
-
-        rewritten.push(event);
-    }
-    *events = rewritten;
-}
-
-fn insert_missing_python_match_pattern_assignments(
-    events: &mut Vec<bonsai_lang_api::FlowEvent>,
-    patterns: &[PythonMatchPatternBindings],
-    inserted_patterns: &[usize],
-) {
-    for (pattern_idx, pattern) in patterns.iter().enumerate() {
-        if inserted_patterns.contains(&pattern_idx) {
-            continue;
-        }
-        let insert_at = events
-            .iter()
-            .position(|event| python_flow_event_span(event).start >= pattern.span.start)
-            .unwrap_or(events.len());
-        for assignment in pattern.assignments.iter().rev() {
-            events.insert(insert_at, assignment.clone());
-        }
-    }
-}
-
-fn python_match_pattern_replacement(
-    patterns: &[PythonMatchPatternBindings],
-    span: Span,
-    target: &str,
-    source_name: Option<&str>,
-    source_call: Option<&str>,
-) -> Option<usize> {
-    if source_call.is_some_and(|source_call| !source_call.is_empty()) {
-        return None;
-    }
-    patterns.iter().position(|pattern| {
-        pattern.span == span
-            && source_name == Some(pattern.subject.as_str())
-            && pattern.coarse_targets.iter().any(|candidate| candidate == target)
-    })
-}
-
-fn python_match_pattern_owned_by_decl(
-    pattern: &PythonMatchPatternBindings,
-    decl_span: Span,
-    callable_spans: &[Span],
-) -> bool {
-    python_span_owned_by_decl(pattern.span, decl_span, callable_spans)
 }
 
 fn python_span_owned_by_decl(span: Span, decl_span: Span, callable_spans: &[Span]) -> bool {
@@ -4947,5 +5157,65 @@ fn rewrite_python_generator_send(events: &mut [bonsai_lang_api::FlowEvent]) {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod pattern_tests {
+    use super::*;
+
+    #[test]
+    fn match_bindings_follow_only_capture_positions_with_exact_projections() {
+        let src = br#"match subject:
+    case {"value": value, "nested": {"item": item}, **rest} if limit:
+        pass
+    case Point(x=px, y=py) as point:
+        pass
+"#;
+        let mut parser = tree_sitter::Parser::new();
+        let language = language_from_pack(PACK_NAME).expect("Python grammar");
+        parser.set_language(&language).expect("Python grammar");
+        let tree = parser.parse(src, None).expect("Python parse");
+        let match_node = tree
+            .root_node()
+            .named_child(0)
+            .expect("top-level match statement");
+        let sites = python_pattern_bindings(match_node, src);
+        let mut facts = sites
+            .iter()
+            .map(|site| {
+                (
+                    node_text(&site.target, src).trim().to_string(),
+                    site.projection.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        facts.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut expected = vec![
+            (
+                "item".to_string(),
+                vec![
+                    PatternSourceProjection::Field("nested".to_string()),
+                    PatternSourceProjection::Field("item".to_string()),
+                ],
+            ),
+            ("point".to_string(), Vec::<PatternSourceProjection>::new()),
+            (
+                "px".to_string(),
+                vec![PatternSourceProjection::Field("x".to_string())],
+            ),
+            (
+                "py".to_string(),
+                vec![PatternSourceProjection::Field("y".to_string())],
+            ),
+            ("rest".to_string(), vec![PatternSourceProjection::Descendants]),
+            (
+                "value".to_string(),
+                vec![PatternSourceProjection::Field("value".to_string())],
+            ),
+        ];
+        expected.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(facts, expected);
     }
 }

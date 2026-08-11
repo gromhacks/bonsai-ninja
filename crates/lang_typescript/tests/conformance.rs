@@ -13,6 +13,40 @@ fn conformance_traced() {
 }
 
 #[test]
+fn lowercase_declared_and_cast_types_remain_receiver_evidence() {
+    use bonsai_lang_api::{FlowEvent, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "app.ts",
+            "class lower { run(value: string): void {} }\n\
+             function handle(input: unknown, value: string): void {\n\
+               const declared: lower = new lower();\n\
+               const casted = input as lower;\n\
+               declared.run(value); casted.run(value);\n\
+             }",
+        )],
+    );
+    let global = ws.db().global_index();
+    let handle = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "handle")
+        .expect("handle declaration");
+    let typed_calls = handle.flow_events.iter().filter(|event| {
+        matches!(
+            event,
+            FlowEvent::Call { name, receiver_types, .. }
+                if name.rsplit('.').next() == Some("run")
+                    && receiver_types.iter().any(|ty| ty == "lower")
+        )
+    });
+    assert_eq!(typed_calls.count(), 2, "events: {:#?}", handle.flow_events);
+}
+
+#[test]
 fn tsx_uses_the_tsx_grammar_and_lowers_component_calls() {
     use bonsai_lang_api::{CallKind, FlowEvent, LanguageAdapter};
 

@@ -66,6 +66,36 @@ fn ruby_decl_events(source: &str, name: &str) -> Vec<FlowEvent> {
     events
 }
 
+#[test]
+fn unbound_identifier_receiver_is_a_zero_arg_call_result() {
+    let events = ruby_decl_events(
+        "def entry\n  value = read_input.to_s\n  local = 'ok'\n  local.to_s\nend\n",
+        "entry",
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Call { name, receiver: None, args, .. }
+            if name == "read_input" && args.is_empty()
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Assign {
+            target,
+            source_call: Some(source_call),
+            value_kind: Some(AssignValueKind::CallResult),
+            ..
+        } if target == "read_input" && source_call == "read_input"
+    )));
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call { name, receiver: None, .. } if name == "local"
+        )),
+        "a method-local receiver must stay a local read: {events:#?}"
+    );
+}
+
 fn contains_branch(events: &[FlowEvent]) -> bool {
     events.iter().any(|event| match event {
         FlowEvent::Branch { .. } => true,
@@ -97,6 +127,31 @@ fn contains_loop(events: &[FlowEvent]) -> bool {
             finally_events,
             ..
         } => contains_loop(body) || contains_loop(catch_events) || contains_loop(finally_events),
+        _ => false,
+    })
+}
+
+fn contains_call(events: &[FlowEvent], expected: &str) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Call { name, .. } => name == expected,
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => contains_call(then_events, expected) || contains_call(else_events, expected),
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            contains_call(body, expected)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            contains_call(body, expected)
+                || contains_call(catch_events, expected)
+                || contains_call(finally_events, expected)
+        }
         _ => false,
     })
 }
@@ -204,7 +259,28 @@ end
 }
 
 #[test]
-fn ruby_each_block_emits_loop_event() {
+fn ruby_for_syntax_emits_loop_event() {
+    let events = ruby_decl_events(
+        r#"
+class Repo
+  def run(items)
+    for it in items
+      handle(it)
+    end
+  end
+end
+"#,
+        "run",
+    );
+
+    assert!(
+        contains_loop(&events),
+        "Ruby `for` syntax should emit a Loop event; events: {events:?}"
+    );
+}
+
+#[test]
+fn ruby_method_block_body_is_analyzed_without_guessing_loop_semantics() {
     let events = ruby_decl_events(
         r#"
 class Repo
@@ -219,8 +295,46 @@ end
     );
 
     assert!(
-        contains_loop(&events),
-        "Ruby `items.each do` should emit a Loop event; events: {events:?}"
+        !contains_loop(&events),
+        "external method identity cannot prove a language loop: {events:?}"
+    );
+    assert!(
+        contains_call(&events, "handle"),
+        "inline block body must remain analyzable: {events:?}"
+    );
+}
+
+#[test]
+fn chained_constructor_receiver_carries_ast_declared_type() {
+    let events = ruby_decl_events(
+        r#"
+class Util
+  def helper(value)
+    sink(value)
+  end
+end
+
+def entry(input)
+  Util.new.helper(input)
+end
+"#,
+        "entry",
+    );
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call {
+                name,
+                receiver: Some(receiver),
+                receiver_types,
+                call_kind: bonsai_lang_api::CallKind::Method,
+                ..
+            } if name == "Util.new.helper"
+                && receiver == "Util.new"
+                && receiver_types == &["Util"]
+        )),
+        "Ruby's constructor selector must type the temporary receiver from its CST: {events:#?}"
     );
 }
 
@@ -305,4 +419,25 @@ end
     assert!(valid_assignment.1.iter().any(|name| name == "envelope"));
     assert!(valid_assignment.1.iter().any(|name| name == "routed"));
     assert!(valid_assignment.1.iter().any(|name| name == "user"));
+}
+
+#[test]
+fn ruby_property_writer_lowers_to_an_assignment_scoped_place() {
+    let events = ruby_decl_events(
+        r#"
+def update(response, value)
+  response.headers = value
+end
+"#,
+        "update",
+    );
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign { target, source_name, .. }
+                if target == "response.headers" && source_name.as_deref() == Some("value")
+        )),
+        "events={events:#?}"
+    );
 }

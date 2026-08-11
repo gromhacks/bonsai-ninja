@@ -160,12 +160,71 @@ Tree-sitter tree or parser handle.
 The object generation exposes independently integrity-checked projections for
 imports, compact syntax targets, function attribution, and normalized browse
 facts. Syntax targets contain adapter-lowered calls, assignment aliases,
-factory assignments, and receiver/type evidence. Rule planning first tests raw
-source anchors, then exact import/package headers, then exact syntax targets.
-Only surviving files decompress declarations and flow events. The full body
-remains the canonical source when a surviving file needs matching, transfer,
-or rendered evidence; this is one compiler IR with staged decoding, not a
-second parser.
+factory assignments, inline-callback argument bindings, typed callable
+bindings, and receiver/type evidence. External callback signatures are typing
+rules: the header proves which source parameter belongs to which callback,
+while YAML supplies the provider call/interface and parameter types. Rule
+planning first tests raw source anchors, then exact import/package headers,
+then exact syntax targets. Only surviving files decompress declarations and
+flow events. The full body remains the canonical source when a surviving file
+needs matching, transfer, or rendered evidence; this is one compiler IR with
+staged decoding, not a second parser.
+
+Declaration linkage headers also retain exact direct-call receiver-field
+initializer facts. An adapter proves only that construction executes an
+assignment such as `self.client = lower()` and records the parsed call shape;
+the workspace linker resolves that call against the complete declaration set.
+It admits a field type only when every surviving candidate is a constructor of
+one semantic class identity. Ordinary functions, ambiguous identities, and
+external calls without a typing rule fail closed. This lets broad callgraph and
+IDG phases resolve cross-file receiver state after bodies have been evicted.
+
+Type and receiver identities are exact, case-sensitive compiler facts.
+Identifier capitalization is never promoted into type evidence. A language
+adapter may use case only when its grammar defines case semantically (for
+example Go export visibility or Erlang variable syntax).
+
+The same contract applies to values. Each adapter uses one expression-value
+classifier for assignments, returns, and complete call arguments; argument
+shape is also stored on `CallArgumentValueFact`. Clean-overwrite accepts only
+exact AST literal or adapter-decoded static-value facts. Missing carriers are
+`Unknown`, never an inferred literal, and rendered argument/return text or an
+ALL_CAPS identifier is never semantic evidence.
+
+When a grammar uses the same CST node for constructors and ordinary calls,
+local declarations and explicit annotations remain adapter facts; external
+constructor identity comes from a structured rulepack `kind: new` target.
+That identity is separate from result typing. Only an explicit non-finding
+`returns_type` rule may type an assigned external result, preventing sink
+rules from leaking types into unrelated receiver analysis. Compact syntax
+headers schedule complete workspace declaration/type resolution only when a
+function-shaped constructor/type candidate survives. The body matcher then
+gives exact workspace values and ordinary callables precedence over external
+typing, enforces the rule's imports, and fails closed on mixed or ambiguous
+identities. This replaces both capitalization and workspace-wide
+constructor-name inventories without loading unrelated bodies.
+
+Rulepack-only receiver typing is compiled before IDG construction through the
+same canonical matcher used for sink inventory. The result is exact
+`(FileId, AST span)` evidence for each admitted receiver-mutating call, after
+import, package, call-kind, workspace-shadowing, and receiver-type constraints
+have all succeeded. Those spans are canonicalized into the transfer-options
+fingerprint and persisted graph identity. IDG transfer consumes the typed span
+evidence; it never interprets the provider, class, or method spelling. This
+keeps external library semantics in YAML while making warm and cold fixed
+points identical.
+
+Compiler-synthesized constructors are language semantics and remain adapter
+owned. Kotlin primary constructors lower only direct property initializers and
+delegates plus `init` blocks, never computed accessors or sibling callable
+bodies. Secondary constructors lower their exact `this(...)` or `super(...)`
+delegation followed by the constructor block; classes that declare only
+secondary constructors do not receive an invented primary constructor. Swift
+lowers memberwise struct initialization, inherited
+designated initializers, and implicit class initializers only when the exact
+CST/declaration facts permit them. Direct instance stored-property
+initializers prefix every designated initializer; static properties, computed
+properties, and sibling callable bodies never become constructor events.
 
 Parser diagnostics carry per-source-snapshot coverage. A successful file with
 zero diagnostics is recorded just as deliberately as a file with an
@@ -264,7 +323,10 @@ the receiver-ancestry payload, enriches the compact syntax-target header, and
 filters exact import and syntax-target facts before body decode. Import
 evidence is read directly from each compiler object even when optional
 workspace-package prewarm has no languages, so a static import cannot be lost
-at that phase boundary. When a selected function needs global flow evidence,
+at that phase boundary. Syntax-target headers include adapter-lowered call and
+return targets plus exact alias/factory/callback/type evidence; return rules
+therefore reject impossible files without a shared HTML/API vocabulary or a
+full body decode. When a selected function needs global flow evidence,
 its exact compiler object is streamed and rebound to the persisted symbol
 table.
 
@@ -289,6 +351,17 @@ time, remap its file-local symbols to the header, and release it after the
 memory-aware batch unless the byte-weighted hot cache retains it. This is the
 large-workspace invariant: body and graph lifetimes do not multiply peak
 memory, while every requested body is still analyzed exactly.
+
+Security header and body work is one continuous CPU worklist guarded by
+source-size-weighted memory permits. Small units can overlap; larger units
+consume more permits and may run alone. After a rule batch survives header
+planning, its exact derived-fact requirements become part of the matcher cache
+identity. The body always retains canonical calls and aliases, but it derives
+decorators, assignment-text chains, receiver counts, must-alias closure,
+runtime narrowing, rulepack types, and lifecycle state only when a retained
+constraint can consult that view. A broader later request rebuilds the exact
+larger projection. Scheduling and recomputation can change; admitted facts and
+matches cannot.
 
 ## Query phase contracts
 
@@ -397,6 +470,11 @@ matrix tracks what each adapter handles precisely versus partially.
 other analysis crate reads from it and writes back through it. Broad
 declaration/import APIs converge on `compiler_file_object_uncached`; a narrow
 uncached query can compile one missing object directly from Tree-sitter.
+Compiler-object publication is cross-process locked. After publishing the
+current generation, maintenance removes only recognized older schema files
+whose own lock can be acquired and abandoned matching FactStore staging
+files. This bounds normal upgrade residue without guessing at unknown/manual
+artifacts or touching an active peer.
 
 The persisted IDG builder lowers each function transfer exactly once. At a
 file boundary it spills the canonical segment plus a compact typed stitch

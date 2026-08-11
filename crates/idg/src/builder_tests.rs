@@ -38,6 +38,7 @@ fn empty_decl(sym: u32, name: &str) -> Decl {
         bases: Vec::new(),
         receiver_param_index: None,
         receiver_field_writes: Vec::new(),
+        receiver_field_initializers: Vec::new(),
         implicit_receiver_names: Vec::new(),
         receiver_state_sources: Vec::new(),
         return_type: None,
@@ -214,6 +215,7 @@ fn single_function_no_calls_creates_one_segment() {
     let mut decl = empty_decl(1, "f");
     decl.params = vec!["x".to_string()];
     decl.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(20, 30),
         value_name: Some("x".to_string()),
         value_text: None,
@@ -239,6 +241,7 @@ fn spooled_stitch_preserves_the_exact_canonical_graph() {
     let mut decl = empty_decl(1, "f");
     decl.params = vec!["x".to_string()];
     decl.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(20, 30),
         value_name: Some("x".to_string()),
         value_text: None,
@@ -328,6 +331,7 @@ fn spooled_sidecar_preserves_cross_segment_calls_byte_for_byte() {
     let mut callee = empty_decl(2, "callee");
     callee.params = vec!["value".to_string()];
     callee.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(40, 50),
         value_name: Some("value".to_string()),
         value_text: None,
@@ -791,6 +795,7 @@ fn two_funcs_in_different_segments_call_creates_cross_file_edges() {
     let mut g = empty_decl(2, "g");
     g.params = vec!["arg".to_string()];
     g.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(50, 60),
         value_name: Some("arg".to_string()),
         value_text: None,
@@ -1939,6 +1944,7 @@ fn syntactic_field_universe_composes_resolved_receiver_selector_demand() {
     let mut getter = empty_decl(2, "cmd");
     getter.kind = DeclKind::Method;
     getter.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(60, 68),
         value_name: Some("self.cmd".to_string()),
         value_text: Some("self.cmd".to_string()),
@@ -2306,6 +2312,7 @@ fn call_return_field_cycle_reaches_only_the_ast_demanded_suffix_closure() {
     let mut callee = empty_decl(2, "grow");
     callee.params = vec!["value".to_string()];
     callee.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(90, 100),
         value_name: Some("value".to_string()),
         value_text: None,
@@ -2819,6 +2826,7 @@ fn parameterless_receiver_accessor_forwards_the_exact_object_field() {
     getter.implicit_receiver_names = vec!["self".to_string(), "super".to_string()];
     getter.receiver_state_sources = vec!["self.cmd".to_string()];
     getter.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(60, 68),
         value_name: Some("self.cmd".to_string()),
         value_text: Some("self.cmd".to_string()),
@@ -2911,6 +2919,7 @@ fn returned_fields_flow_through_a_nested_call_receiver_without_collapsing_siblin
     let mut wrap = empty_decl(2, "wrap");
     wrap.params = vec!["data".to_string()];
     wrap.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(50, 70),
         value_name: None,
         value_text: None,

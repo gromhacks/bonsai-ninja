@@ -103,8 +103,9 @@ Dimensions:
    after `do:` (the condition, before `do:`, is excluded). Now → 1 finding;
    all-literal-branch control correctly stays 0 (no false positive).
 
-Notes: go/c are intentionally excluded from constructor-type inference (uppercase
-exported funcs / no constructor convention); their baselines use direct sinks.
+Notes: Go and C do not opt into ambiguous bare-call constructor syntax. Go
+receiver types come from declarations and exact composite/construction syntax;
+C has no nominal object-constructor form. Their baselines use direct sinks.
 `fqn-no-import = N/A` rows are languages whose probed sink is a global builtin
 (`system`, `os.execute`) with no package qualifier to omit.
 
@@ -177,14 +178,22 @@ declared type is never clobbered, and reads the initializer's DIRECT value so a
 cast nested in a call argument cannot mistype the local; wrong-type casts
 correctly produce 0 findings (verified per lang).
 
-### Factory-return typing — SHIPPED as a first-class `RuleKind::Typing`
+### External typing models — SHIPPED as a first-class `RuleKind::Typing`
 The engine resolves `receiver_type_in` from a factory method's declared
-`returns_type` (`build_factory_returns`, language-scoped; the matcher + finding
+`returns_type` (`build_rulepack_typing`, language-scoped; the matcher + finding
 re-check both consult it). This is now a 4th rule kind with its own `typing/` dir:
-typing rules feed `build_factory_returns` via `all_rules()` but are excluded from
+typing rules feed `build_rulepack_typing` via `all_rules()` but are excluded from
 every source/sink/sanitizer finding + inventory path and from sink-only
-validation/conformance (cwe, severity, sink-doc, golden-SARIF). A typing rule's
-only required metadata is `returns_type`.
+validation/conformance (cwe, severity, sink-doc, golden-SARIF). A typing rule
+declares factory `returns_type`, external `callback_param_types`, and/or
+language-neutral transfer semantics.
+
+Factory and constructor typing retains the rule's import requirements as part
+of its cache fingerprint and match proof. A function-shaped `kind: new` call
+is resolved against exact workspace declarations before external typing can
+apply; same-spelled values/functions and ambiguous candidates fail closed.
+Compact headers request that symbol projection only for surviving candidates,
+so this correctness boundary does not restore a whole-workspace body scan.
 
 Live rule shipped: `python.typing.dbapi_cursor` (`returns_type: cursor` on
 `.cursor()`). A factory-returned cursor `c = sqlite3.connect("db").cursor();
@@ -194,3 +203,11 @@ c.execute(input)` now types `c` and fires the existing receiver-typed
 (no FP). The typing rule itself never produces a finding. Authoring more typing
 rules (other factory chains, per language) is now a pure rulepack-content task —
 add a `<lang>/typing/*.yml` entry whose `match_example` constructs the receiver.
+
+External callback signatures use the same boundary. Adapters lower exact
+inline callback arguments and explicitly typed callable bindings from
+Tree-sitter. YAML selects the provider call/interface and supplies parameter
+types. Compact syntax headers carry those relationships into broad planning,
+so header filtering cannot discard a receiver-typed rule that the exact body
+would match. Java Vert.x, WebFlux, and GraphQL fixtures cover positive flows,
+while local lookalike route and functional-interface fixtures remain negative.

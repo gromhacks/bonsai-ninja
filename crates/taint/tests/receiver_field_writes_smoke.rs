@@ -172,6 +172,35 @@ class Handler(val cmd: String)
 }
 
 #[test]
+fn kotlin_secondary_only_constructor_owns_instance_initializers() {
+    let src = "
+open class Base
+class lower
+class Handler : Base {
+  private val dependency = lower()
+  constructor(input: String) : super()
+}
+";
+    let db = ws(
+        Arc::new(bonsai_lang_kotlin::KotlinAdapter::new()),
+        &[("Handler.kt", src)],
+    );
+    let global = db.global_index();
+    let constructors = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .filter(|decl| decl.name == "Handler" && decl.kind == bonsai_lang_api::DeclKind::Constructor)
+        .collect::<Vec<_>>();
+    assert_eq!(constructors.len(), 1, "no fabricated implicit primary");
+    assert_eq!(constructors[0].params.len(), 1);
+    assert_eq!(constructors[0].params[0], "input");
+    assert!(constructors[0]
+        .receiver_field_initializers
+        .iter()
+        .any(|initializer| initializer.target == "this.dependency" && initializer.call_name == "lower"));
+}
+
+#[test]
 fn scala_constructor_val_populates() {
     let src = "
 class Handler(val cmd: String) {

@@ -14,19 +14,79 @@ use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("c");
 const PACK_NAME: &str = "c";
+
+fn c_indirect_place_operand(node: Node<'_>) -> Option<Node<'_>> {
+    if node.kind() != "pointer_expression" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let has_indirection = node
+        .children(&mut cursor)
+        .any(|child| matches!(child.kind(), "*" | "&"));
+    has_indirection
+        .then(|| node.child_by_field_name("argument"))
+        .flatten()
+}
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    literal_value_kinds: &["null", "true", "false"],
+    string_literal_kinds: &["string_literal", "char_literal"],
+    comment_kinds: &["comment"],
+    doc_comment_prefixes: &["///", "//!", "/**"],
+    decorator_kinds: &["attribute"],
+    parameter_container_kinds: &["parameter_list"],
+    parameter_kinds: &["parameter_declaration", "optional_parameter_declaration"],
+    parameter_annotation_kinds: &["attribute"],
+    variadic_parameter_kinds: &["variadic_parameter"],
+    binding_identifier_kinds: &["identifier"],
+    anonymous_variadic_token: Some("..."),
+    identifier_kinds: &["identifier"],
+    named_aggregate_kinds: &["initializer_list"],
+    positional_aggregate_kinds: &["initializer_list"],
+    aggregate_pair_kinds: &["initializer_pair"],
+    aggregate_key_field_names: &["designator"],
+    aggregate_value_field_names: &["value"],
+    static_field_name_kinds: &["field_identifier"],
+    aggregate_syntax_only_kinds: &["type_identifier"],
+    transparent_call_wrapper_kinds: &["field_expression", "parenthesized_expression"],
+    single_expression_group_kinds: &["expression_list"],
+    assignment_target_wrapper_kinds: &[
+        "init_declarator",
+        "declarator",
+        "function_declarator",
+        "pointer_declarator",
+        "parenthesized_declarator",
+    ],
+    binding_declaration_keyword_spellings: &["auto", "const"],
     fn_kinds: &["function_definition"],
     if_kinds: &["if_statement", "conditional_expression", "switch_statement"],
+    branch_then_field_names: &["consequence", "body"],
+    branch_else_field_names: &["alternative"],
+    branch_condition_field_names: &["condition", "value"],
+    loop_body_field_names: &["body"],
+    loop_body_kinds: &["compound_statement", "expression_statement"],
+    branch_arm_kinds: &["compound_statement", "expression_statement"],
     for_kinds: &["for_statement"],
     while_kinds: &["while_statement"],
     do_kinds: &["do_statement"],
     call_kinds: &["call_expression"],
+    call_callee_field_names: &["function"],
+    call_argument_field_names: &["arguments"],
+    call_argument_container_kinds: &["argument_list"],
+    writeback_operand_field_names: &["argument"],
+    indirect_place_operand_extractor: Some(c_indirect_place_operand),
+    lambda_body_field_names: &["body"],
     argument_passing_mode_extractor: Some(c_argument_passing_mode),
+    expression_value_kind_extractor: Some(c_expression_value_kind),
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     value_free_expression_kinds: &["sizeof_expression", "alignof_expression"],
     call_ref_kinds: &["call_expression"],
     member_expression_kinds: &["field_expression"],
     subscript_expression_kinds: &["subscript_expression"],
+    member_base_field_names: &["argument"],
+    member_name_field_names: &["field"],
+    subscript_base_field_names: &["argument"],
+    subscript_index_field_names: &["index"],
     syntax_error_tolerant_call_names: &["va_arg", "__builtin_va_arg"],
     class_kinds: &["struct_specifier", "union_specifier"],
     class_decl_kinds: &[
@@ -34,12 +94,21 @@ const HANDLER: GrammarHandler = GrammarHandler {
         ("union_specifier", bonsai_lang_api::DeclKind::Struct),
     ],
     assignment_kinds: &["assignment_expression", "init_declarator"],
+    compound_assignment_operators: &["+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "&=", "^=", "|="],
+    positional_aggregate_assignment_kinds: &["init_declarator"],
+    positional_aggregate_value_kinds: &["initializer_list"],
     return_kinds: &["return_statement"],
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
+    control_label_field_names: &[],
     nested_type_ownership: false,
     ..EMPTY_HANDLER
 };
+
+fn c_expression_value_kind(node: Node<'_>, _src: &[u8]) -> Option<bonsai_lang_api::AssignValueKind> {
+    matches!(node.kind(), "string_literal" | "char_literal" | "number_literal")
+        .then_some(bonsai_lang_api::AssignValueKind::Literal)
+}
 
 fn c_argument_passing_mode(argument: Node<'_>, value: Node<'_>) -> ArgumentPassingMode {
     if [argument, value].into_iter().any(|node| {
@@ -196,7 +265,6 @@ impl LanguageAdapter for CAdapter {
                 &["va_start", "__builtin_va_start"],
                 &["va_arg", "__builtin_va_arg"],
             );
-            inject_c_lifecycle_events(&mut decl.flow_events);
         }
         decl_index
     }
@@ -645,72 +713,4 @@ fn extract_function_identifier(node: &Node<'_>, src: &[u8]) -> Option<String> {
 
 fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
     c_family_preproc_imports(tree, src, file)
-}
-
-/// C lifecycle transitions for `inject_lifecycle_events`.
-const C_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "free",
-        transition: "freed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "cfree",
-        transition: "freed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "fclose",
-        transition: "closed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "pclose",
-        transition: "closed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "close",
-        transition: "closed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "closedir",
-        transition: "closed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "fcloseall",
-        transition: "closed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "pthread_mutex_unlock",
-        transition: "unlocked",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "pthread_rwlock_unlock",
-        transition: "unlocked",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "pthread_spin_unlock",
-        transition: "unlocked",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "munmap",
-        transition: "freed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "shmdt",
-        transition: "freed",
-        arg_index: 0,
-    },
-];
-
-fn inject_c_lifecycle_events(events: &mut Vec<bonsai_lang_api::FlowEvent>) {
-    bonsai_lang_api::inject_lifecycle_events(events, C_LIFECYCLE_TRANSITIONS);
 }

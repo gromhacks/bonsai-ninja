@@ -2,12 +2,107 @@
 use bonsai_common::FileId;
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
-    kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, AssignmentValueIndex, DeclIndex, FlowEvent, GrammarHandler, ImportIndex,
-    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, SyntaxSpecialForm,
-    Visibility,
+    kit::{
+        collect_kinds, first_identifier_descendant, first_identifier_like_child, language_from_pack,
+        node_text, parse_with, span_of,
+    },
+    AdapterContext, AdapterError, AssignmentValueIndex, CallTargetExtraction, DeclIndex, FlowEvent,
+    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    PatternBindingSite, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
+
+fn erlang_comprehension_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    if !matches!(node.kind(), "generator" | "b_generator" | "m_generator") {
+        return None;
+    }
+    Some((node.named_child(0)?, node.named_child(1)?))
+}
+
+fn erlang_case_pattern_bindings(node: Node<'_>) -> Vec<PatternBindingSite<'_>> {
+    if node.kind() != "case_expr" {
+        return Vec::new();
+    }
+    let Some(source) = node.child_by_field_name("expr") else {
+        return Vec::new();
+    };
+    let mut sites = Vec::new();
+    let mut cursor = node.walk();
+    for clause in node
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "cr_clause")
+    {
+        let Some(pattern) = clause.child_by_field_name("pat") else {
+            continue;
+        };
+        sites.push(PatternBindingSite {
+            span_node: pattern,
+            pattern,
+            source,
+        });
+    }
+    sites
+}
+
+fn erlang_remote_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    if node.kind() != "remote" {
+        return None;
+    }
+    let module = node.child_by_field_name("module")?;
+    let function = node.child_by_field_name("fun")?;
+    let callee = function
+        .child_by_field_name("expr")
+        .or_else(|| function.child_by_field_name("name"))
+        .or_else(|| first_identifier_like_child(&function))
+        .or_else(|| first_identifier_descendant(function))
+        .unwrap_or(function);
+    let module = node_text(&module, src).trim_end_matches(':').trim();
+    let function = node_text(&callee, src).trim();
+    if module.is_empty() || function.is_empty() {
+        return None;
+    }
+    Some(CallTargetExtraction {
+        node: callee,
+        full_text: format!("{module}:{function}"),
+    })
+}
+
+fn erlang_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    if node.kind() == "remote" {
+        return erlang_remote_target(node, src);
+    }
+    if node.kind() != "call" {
+        return None;
+    }
+    let expression = node.child_by_field_name("expr")?;
+    if let Some(target) = erlang_remote_target(expression, src) {
+        return Some(target);
+    }
+    let callee = expression
+        .child_by_field_name("expr")
+        .or_else(|| expression.child_by_field_name("name"))
+        .or_else(|| first_identifier_like_child(&expression))
+        .or_else(|| first_identifier_descendant(expression))
+        .unwrap_or(expression);
+    let full_text = node_text(&callee, src).trim().to_string();
+    (!full_text.is_empty()).then_some(CallTargetExtraction {
+        node: callee,
+        full_text,
+    })
+}
+
+fn erlang_call_ref_node(node: Node<'_>) -> bool {
+    if node.kind() != "remote" {
+        return true;
+    }
+    let Some(parent) = node.parent() else {
+        return true;
+    };
+    parent.kind() != "call"
+        || parent
+            .child_by_field_name("expr")
+            .is_none_or(|expression| expression.id() != node.id())
+}
 
 pub const LANG_ID: LanguageId = LanguageId::new("erlang");
 const PACK_NAME: &str = "erlang";
@@ -16,6 +111,30 @@ const PACK_NAME: &str = "erlang";
 // This adapter declares the complete production inventory so shared lowering
 // can emit case / if / try / receive flow without a cross-language fallback.
 const HANDLER: GrammarHandler = GrammarHandler {
+    expression_value_kind_extractor: None,
+    literal_value_kinds: &["atom", "char", "float", "integer", "null"],
+    string_literal_kinds: &["string", "macro_string", "multi_string"],
+    comment_kinds: &["comment"],
+    doc_comment_prefixes: &["%% @doc"],
+    decorator_kinds: &["attribute"],
+    parameter_container_kinds: &["expr_args"],
+    parameter_kinds: &["var"],
+    parameter_annotation_name_extractor: None,
+    binding_identifier_kinds: &["var"],
+    identifier_kinds: &["var"],
+    pattern_binding_extractor: Some(erlang_case_pattern_bindings),
+    aggregate_pattern_kinds: &["tuple", "list"],
+    comprehension_kinds: &["list_comprehension", "binary_comprehension", "map_comprehension"],
+    comprehension_binding_clause_kinds: &["generator", "b_generator", "m_generator"],
+    comprehension_binding_extractor: Some(erlang_comprehension_binding),
+    named_aggregate_kinds: &["map_expr"],
+    positional_aggregate_kinds: &["tuple", "list"],
+    aggregate_pair_kinds: &["map_field"],
+    aggregate_key_field_names: &["key"],
+    aggregate_value_field_names: &["value"],
+    static_field_name_kinds: &["atom"],
+    transparent_call_wrapper_kinds: &["remote"],
+    single_expression_group_kinds: &["expressions"],
     nested_type_ownership: true,
     // Erlang functions: `fun_decl` is the umbrella; clauses are
     // `function_clause`. We index both so single- and multi-clause
@@ -29,6 +148,13 @@ const HANDLER: GrammarHandler = GrammarHandler {
     constructor_method_kinds: &[],
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     if_kinds: &["if_expr", "case_expr"],
+    branch_then_field_names: &[],
+    branch_else_field_names: &[],
+    branch_condition_field_names: &["expr"],
+    loop_body_field_names: &["body"],
+    loop_body_kinds: &["clause_body"],
+    branch_arm_kinds: &["cr_clause", "if_clause", "clause_body"],
+    additional_alternative_kinds: &["cr_clause", "if_clause"],
     for_kinds: &[],
     // Comprehensions (`[E || X <- L]`, `<< ... >>`) go through the shared
     // walker's comprehension branch (list_comprehension /
@@ -39,6 +165,14 @@ const HANDLER: GrammarHandler = GrammarHandler {
     do_kinds: &[],
     loop_kinds: &[],
     call_kinds: &["call", "remote"],
+    call_callee_field_names: &["expr", "fun"],
+    call_receiver_field_names: &["module"],
+    call_member_field_names: &["fun"],
+    call_argument_field_names: &["args"],
+    call_argument_container_kinds: &["expr_args"],
+    call_target_extractor: Some(erlang_call_target),
+    call_ref_node_filter: Some(erlang_call_ref_node),
+    lambda_body_field_names: &["body"],
     argument_passing_mode_extractor: None,
     nested_call_component_kinds: &["remote"],
     call_ref_kinds: &["call", "remote"],
@@ -58,10 +192,9 @@ const HANDLER: GrammarHandler = GrammarHandler {
     await_kinds: &[],
     defer_kinds: &[],
     using_kinds: &["receive_expr"],
-    special_forms: &[
-        SyntaxSpecialForm::FunctionalLoopCall,
-        SyntaxSpecialForm::RemoteCallExpression,
-    ],
+    using_body_field_names: &["body"],
+    try_body_field_names: &["body"],
+    special_forms: &[],
     method_receiver_param_index: None,
     implicit_receiver_names: &[],
     implicit_receiver_prefixes: &[],
@@ -148,6 +281,7 @@ impl LanguageAdapter for ErlangAdapter {
                     &mut decl.flow_events,
                     &tree,
                     snapshot.text.as_bytes(),
+                    &HANDLER,
                 );
                 augment_erlang_record_flow_events(
                     &mut decl.flow_events,
@@ -187,40 +321,16 @@ impl LanguageAdapter for ErlangAdapter {
                 decl.has_implicit_returns = true;
             }
         }
-        // Recognised Erlang lifecycle transitions. Remote-call form
-        // (`gen_server:stop`, `ets:delete`) matches what the kit
-        // emits for `module:function` calls; bare `close` covers
-        // local-call shapes (`close(F)`).
-        const ERLANG_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "gen_server:stop",
-                transition: "cancelled",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "ets:delete",
-                transition: "freed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "close",
-                transition: "closed",
-                arg_index: 0,
-            },
-        ];
         for decl in &mut decl_index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
-            augment_erlang_collection_transform_flow_events(&mut decl.flow_events);
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, ERLANG_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
-        // Local constructor-result receiver typing (`new Foo()` / `Foo()` / `Foo::new()` -> typed receiver) so `recv.method(...)` resolves
-        // `receiver_type_in` / `[Type, method]` rules; the constructor heuristic only
-        // types PascalCase callees, so language exported-function calls are unaffected.
+        // Local constructor-result receiver typing follows adapter facts and
+        // declarations; spelling alone is not constructor evidence.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut decl_index);
         bonsai_lang_api::apply_class_field_type_aliases(&mut decl_index);
         decl_index
@@ -440,11 +550,6 @@ fn normalize_erlang_access_events(
                         push_unique_string(source_names, access);
                     }
                 }
-                add_erlang_collection_transform_sources(
-                    source_call.as_deref(),
-                    source_call_args,
-                    source_names,
-                );
                 if let Some(rhs_text) = assignment_values.rendering(*span, src) {
                     for source in erlang_comprehension_generator_sources(rhs_text) {
                         push_unique_string(source_names, source);
@@ -895,14 +1000,15 @@ fn augment_erlang_tail_return_event(
     let Some((value_text, value_name, value_span)) = erlang_tail_return_value(src, span) else {
         return;
     };
-    let value_flow = usize::try_from(value_span.start)
+    let value_node = usize::try_from(value_span.start)
         .ok()
         .zip(usize::try_from(value_span.end).ok())
         // Use the smallest named syntax node for the exact tail span. The
         // generic descendant query may return an enclosing clause when the
         // range begins or ends on trivia, which would incorrectly pull calls
         // from earlier expressions into a literal tail return.
-        .and_then(|(start, end)| tree.root_node().named_descendant_for_byte_range(start, end))
+        .and_then(|(start, end)| tree.root_node().named_descendant_for_byte_range(start, end));
+    let value_flow = value_node
         .map(|value| {
             bonsai_lang_api::kit::expression_flow_from_node_with_handler(
                 value,
@@ -914,6 +1020,7 @@ fn augment_erlang_tail_return_event(
         .unwrap_or_default();
     events.push(FlowEvent::Return {
         span: value_span,
+        value_kind: value_node.and_then(|value| HANDLER.expression_value_kind(value, src.as_bytes())),
         value_text: Some(value_text),
         value_name,
         value_flow,
@@ -929,82 +1036,6 @@ fn erlang_assignment_call_rhs(
 ) -> Option<(String, Vec<String>)> {
     let rhs = assignment_values.rendering(span, src)?;
     erlang_call_expr(rhs.trim_end_matches('.').trim())
-}
-
-/// Add source operands for Erlang stdlib collection transforms whose
-/// result is semantically derived from one collection input.
-fn add_erlang_collection_transform_sources(
-    source_call: Option<&str>,
-    source_call_args: &[String],
-    source_names: &mut Vec<String>,
-) {
-    let Some(callee) = source_call else {
-        return;
-    };
-    let source_arg_index = match normalise_erlang_callee_separator(callee).as_str() {
-        // string:tokens(String, Separators) returns parts of String.
-        "string.tokens" => Some(0),
-        // lists:map(Fun, List) and lists:filter(Pred, List) preserve
-        // element taint from List into the result collection.
-        "lists.map" | "lists.filter" => Some(1),
-        // lists:foldl(Fun, Acc0, List) / foldr derive the result from
-        // the list elements under the callback.
-        "lists.foldl" | "lists.foldr" => Some(2),
-        _ => None,
-    };
-    let Some(source_arg) = source_arg_index.and_then(|idx| source_call_args.get(idx)) else {
-        return;
-    };
-    for source in erlang_value_source_names(source_arg) {
-        push_unique_string(source_names, source);
-    }
-}
-
-fn augment_erlang_collection_transform_flow_events(events: &mut [FlowEvent]) {
-    for event in events {
-        match event {
-            FlowEvent::Assign {
-                source_call,
-                source_call_args,
-                source_names,
-                ..
-            } => {
-                let source_call = source_call.clone();
-                let source_call_args = source_call_args.clone();
-                add_erlang_collection_transform_sources(
-                    source_call.as_deref(),
-                    &source_call_args,
-                    source_names,
-                );
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                augment_erlang_collection_transform_flow_events(then_events);
-                augment_erlang_collection_transform_flow_events(else_events);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                augment_erlang_collection_transform_flow_events(body);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                augment_erlang_collection_transform_flow_events(body);
-                augment_erlang_collection_transform_flow_events(catch_events);
-                augment_erlang_collection_transform_flow_events(finally_events);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn normalise_erlang_callee_separator(callee: &str) -> String {
-    callee.trim().replace(':', ".")
 }
 
 /// Extract source operands from Erlang list/binary comprehension

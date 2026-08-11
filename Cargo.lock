@@ -283,9 +283,12 @@ version = "0.1.0"
 dependencies = [
  "bonsai_adapters",
  "bonsai_common",
+ "bonsai_diagnostics",
  "bonsai_lang_api",
  "bonsai_testkit",
+ "bonsai_vfs",
  "bonsai_workspace",
+ "parking_lot",
  "serde_yaml_ng",
  "tree-sitter",
 ]
@@ -308,6 +311,7 @@ dependencies = [
  "bonsai_parser",
  "bonsai_trace",
  "bonsai_vfs",
+ "fs2",
  "lru",
  "parking_lot",
  "rayon",
@@ -455,6 +459,7 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_db",
  "bonsai_lang_api",
+ "bonsai_testkit",
  "bonsai_vfs",
  "tree-sitter",
 ]
@@ -572,6 +577,7 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_db",
  "bonsai_lang_api",
+ "bonsai_testkit",
  "bonsai_vfs",
  "tree-sitter",
 ]
@@ -597,6 +603,7 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_db",
  "bonsai_lang_api",
+ "bonsai_testkit",
  "bonsai_vfs",
  "tree-sitter",
 ]
@@ -633,6 +640,7 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_diagnostics",
  "bonsai_lang_api",
+ "bonsai_testkit",
  "bonsai_vfs",
  "parking_lot",
  "tree-sitter",

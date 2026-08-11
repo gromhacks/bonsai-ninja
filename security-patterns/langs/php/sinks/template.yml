@@ -207,15 +207,25 @@
       attribute:
       - Twig
       - Environment
+  constraints:
+  - any_arg_matches_regex: "(?i)['\"]autoescape['\"]\\s*=>\\s*false"
   match_examples:
   - name: php.template.twig_environment_autoescape_off example
     code: |
       <?php
       use twig;
-      use twig;
-      function example($input, $url, $id, $payload, $request) {
-        new Twig\Environment(['autoescape' => false]);
+      function example($input, $url, $id, $payload, $request, $loader) {
+        new Twig\Environment($loader, ['autoescape' => false]);
       }
+    expect_match_text: ["Twig\\Environment"]
+  - name: Twig autoescape remains enabled
+    code: |
+      <?php
+      use twig;
+      function example($loader) {
+        new Twig\Environment($loader, ['autoescape' => true]);
+      }
+    expect_no_match: true
   description: new Twig\Environment($loader, ['autoescape' => false]) - global autoescape off.
 - id: php.template.smarty_escape_html_off
   enabled: true

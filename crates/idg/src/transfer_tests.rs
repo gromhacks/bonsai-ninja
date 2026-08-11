@@ -27,6 +27,7 @@ fn empty_decl(sym: u32, name: &str) -> Decl {
         bases: Vec::new(),
         receiver_param_index: None,
         receiver_field_writes: Vec::new(),
+        receiver_field_initializers: Vec::new(),
         implicit_receiver_names: Vec::new(),
         receiver_state_sources: Vec::new(),
         return_type: None,
@@ -154,6 +155,7 @@ fn configured_source_call_binds_inline_callback_parameter_from_compiler_fact() {
         argument_index: 0,
         argument_span: callback_span,
         direct_call_span: None,
+        value_kind: None,
         inline_callback_params: vec!["input".to_string()],
         value_flow: ExpressionFlow::default(),
         static_value: None,
@@ -646,6 +648,7 @@ fn static_subscript_return_bridges_precise_field_read() {
     let mut decl = empty_decl(1, "f");
     decl.params = vec!["env".to_string()];
     decl.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(20, 40),
         value_name: None,
         value_text: Some("env[@\"cmd\"]".to_string()),
@@ -678,6 +681,7 @@ fn php_this_scalar_return_projection_normalizes_receiver_sigil() {
     let mut decl = empty_decl(1, "cmd");
     decl.implicit_receiver_names = vec!["$this".to_string()];
     decl.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(20, 40),
         value_name: None,
         value_text: Some("$this->data['cmd']".to_string()),
@@ -947,6 +951,7 @@ fn returned_container_spread_copies_known_fields_without_root_promotion() {
             value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
         },
         FlowEvent::Return {
+            value_kind: None,
             span: span(40, 70),
             value_name: None,
             value_text: Some("{\"cmd\": clean, **rest}".to_string()),
@@ -986,6 +991,7 @@ fn tuple_return_emits_position_specific_fields() {
     let mut decl = empty_decl(1, "f");
     decl.params = vec!["p".to_string()];
     decl.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(20, 35),
         value_name: None,
         value_text: Some("{p, \"ok\"}".to_string()),
@@ -1518,6 +1524,84 @@ fn configured_call_result_passthrough_is_materialized_for_call_event() {
 
     assert!(incoming.contains(&call_site.call_arg_nodes[0]));
     assert!(incoming.contains(&call_site.receiver_arg_node.expect("receiver node")));
+}
+
+#[test]
+fn self_receiver_call_result_reads_the_pre_assignment_value() {
+    let mut decl = empty_decl(1, "f");
+    let initial_span = span(20, 30);
+    let assign_span = span(40, 70);
+    let call_span = span(50, 60);
+    decl.params = vec!["input".to_string()];
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: initial_span,
+            target: "value".to_string(),
+            source_name: Some("input".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["input".to_string()],
+            declares_new_binding: true,
+            value_kind: Some(AssignValueKind::Compound),
+        },
+        // Adapter walkers emit the enclosing assignment before its nested
+        // call event. Source-language evaluation still reads `value` before
+        // committing the replacement write.
+        FlowEvent::Assign {
+            span: assign_span,
+            target: "value".to_string(),
+            source_name: None,
+            source_call: Some("value.transform".to_string()),
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: Some(AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: call_span,
+            name: "value.transform".to_string(),
+            receiver: Some("value".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        },
+    ];
+    let options = TransferOptions {
+        call_result_passthroughs: vec![CallResultPassthroughSpec {
+            callee: "value.transform".to_string(),
+            receiver_type: None,
+            input_arg_indices: Vec::new(),
+            input_receiver: true,
+        }],
+        ..TransferOptions::default()
+    };
+    let out = transfer_function_for_with_options(&decl, &options);
+    let site = out
+        .call_sites
+        .iter()
+        .find(|site| site.site == CallSiteId(call_span))
+        .expect("method call site");
+    let receiver = site.receiver_arg_node.expect("method receiver node");
+
+    assert!(out.edges.iter().any(|edge| {
+        edge.to == receiver
+            && rendered_place_name(&out, edge.from) == "value"
+            && rendered_write_span(&out, edge.from) == Some(initial_span)
+    }));
+    assert!(
+        !out.edges.iter().any(|edge| {
+            edge.to == receiver
+                && rendered_place_name(&out, edge.from) == "value"
+                && rendered_write_span(&out, edge.from) == Some(assign_span)
+        }),
+        "the result write cannot feed the receiver that produced it: {:#?}",
+        out.edges
+    );
+    assert!(out.edges.iter().any(|edge| {
+        edge.from == site.call_ret_node
+            && rendered_place_name(&out, edge.to) == "value"
+            && rendered_write_span(&out, edge.to) == Some(assign_span)
+    }));
 }
 
 #[test]
@@ -2501,6 +2585,7 @@ fn configured_receiver_state_flow_materializes_argument_to_receiver_writer() {
         receiver_state_propagations: vec![ReceiverStatePropagationSpec {
             method: "add".to_string(),
             receiver_type: Some("Builder".to_string()),
+            resolved_call_sites: Vec::new(),
         }],
         ..TransferOptions::default()
     };
@@ -2543,6 +2628,54 @@ fn configured_receiver_state_flow_materializes_argument_to_receiver_writer() {
         .edges
         .iter()
         .any(|edge| edge.from == receiver_write && edge.to == sink_arg));
+}
+
+#[test]
+fn resolved_rule_call_site_supplies_receiver_type_proof() {
+    let mut decl = empty_decl(1, "f");
+    let mutation_span = span(20, 35);
+    decl.flow_events = vec![FlowEvent::Call {
+        span: mutation_span,
+        name: "add".to_string(),
+        receiver: Some("builder".to_string()),
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Method,
+        args: vec![CallArg {
+            passing_mode: Default::default(),
+            span: span(26, 29),
+            name: None,
+            value_text: "src".to_string(),
+            place: Some("src".to_string()),
+            source_names: vec!["src".to_string()],
+        }],
+    }];
+    let options = TransferOptions {
+        receiver_state_propagations: vec![ReceiverStatePropagationSpec {
+            method: "add".to_string(),
+            receiver_type: Some("ExternalBuilder".to_string()),
+            resolved_call_sites: vec![mutation_span],
+        }],
+        ..TransferOptions::default()
+    };
+
+    let out = transfer_function_for_with_options(&decl, &options);
+    let receiver_write = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(idx, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::Write { span, .. }) if *span == mutation_span
+            )
+            .then_some(NodeId(idx as u32))
+        })
+        .expect("resolved rule site should materialize a receiver writer");
+    assert!(out
+        .edges
+        .iter()
+        .any(|edge| edge.to == receiver_write && rendered_place_name(&out, edge.from) == "src"));
 }
 
 #[test]
@@ -2761,6 +2894,7 @@ fn compound_call_arg_uses_only_ast_derived_sources() {
 fn return_with_value_name_emits_intra_return_edge() {
     let mut decl = empty_decl(1, "f");
     decl.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(40, 50),
         value_name: Some("result".to_string()),
         value_text: Some("result".to_string()),
@@ -2780,6 +2914,7 @@ fn return_with_value_name_emits_intra_return_edge() {
 fn return_without_value_name_emits_no_edge() {
     let mut decl = empty_decl(1, "f");
     decl.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(40, 50),
         value_name: None,
         value_text: None,
@@ -3239,6 +3374,7 @@ fn deep_return_projection_is_not_truncated() {
 fn zero_arg_method_name_is_not_invented_as_a_return_field() {
     let mut decl = empty_decl(1, "returns_call");
     decl.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(10, 40),
         value_name: None,
         value_text: Some("client.arbitrary_method()".to_string()),
@@ -3263,6 +3399,7 @@ fn return_expression_full_span_joins_its_callee_token_call_site() {
             args: Vec::new(),
         },
         FlowEvent::Return {
+            value_kind: None,
             span: span(10, 30),
             value_name: None,
             value_text: Some("factory()".to_string()),
@@ -3294,6 +3431,7 @@ fn zero_arg_calls_require_a_resolved_return_summary() {
         let mut decl = empty_decl(index as u32 + 1, "returns_call");
         decl.implicit_receiver_names = vec!["self".to_string()];
         decl.flow_events = vec![FlowEvent::Return {
+            value_kind: None,
             span: call_span,
             value_name: None,
             value_text: Some(rendered_call.to_string()),
@@ -3369,6 +3507,7 @@ fn defer_body_walks_through() {
     decl.flow_events = vec![FlowEvent::Defer {
         span: span(0, 30),
         body: vec![FlowEvent::Return {
+            value_kind: None,
             span: span(10, 20),
             value_name: Some("x".to_string()),
             value_text: None,
@@ -3557,6 +3696,7 @@ fn each_transfer_output_owns_its_name_pool() {
     // pool, so per-function pool isolation is the contract.
     let mut decl_a = empty_decl(1, "a");
     decl_a.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(0, 10),
         value_name: Some("x".to_string()),
         value_text: None,
@@ -3564,6 +3704,7 @@ fn each_transfer_output_owns_its_name_pool() {
     }];
     let mut decl_b = empty_decl(2, "b");
     decl_b.flow_events = vec![FlowEvent::Return {
+        value_kind: None,
         span: span(0, 10),
         value_name: Some("x".to_string()),
         value_text: None,

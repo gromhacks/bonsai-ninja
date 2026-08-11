@@ -12,6 +12,7 @@ fn node(func: u32, file: u32, start: u64, end: u64, text: &str, kind: ValueFlowN
         span: span(file, start, end),
         value_text: text.to_string(),
         kind,
+        argument_index: None,
     }
 }
 
@@ -144,6 +145,7 @@ fn unknown_string_id_is_typed_error() {
             span_end: 1,
             value_text_id: 99,
             kind: 0,
+            argument_index: None,
         }],
         edges: Vec::new(),
         forward: Vec::new(),
@@ -178,6 +180,7 @@ fn unknown_node_idx_is_typed_error() {
             span_end: 1,
             value_text_id: 0,
             kind: 0,
+            argument_index: None,
         }],
         edges: vec![OnDiskEdge {
             from_idx: 0,

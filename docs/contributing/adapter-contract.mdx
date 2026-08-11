@@ -23,6 +23,15 @@ update syntax; it does not activate defaults. `GENERIC_HANDLER` and
 fixtures. Production adapters may not reference either symbol, and the
 architecture conformance gate rejects such a dependency.
 
+This ownership includes `expression_value_kind_extractor`,
+`literal_value_kinds`, the narrow
+`literal_value_spellings` fallback for grammars that parse a keyword as an
+identifier, `string_literal_kinds`, and `runtime_type_wrapper_kinds`. Literal
+inventories include numeric scalar node kinds as well as null/boolean forms.
+Shared lowering uses those exact adapter inventories for assignment, return,
+call-argument, runtime-guard, place/value, and `strings` classification; it
+does not carry a union of other languages' keywords or grammar node names.
+
 `kit::decl_index_with_handler(pack_name, file, ctx, handler)` is the full
 adapter pipeline (decls + refs + per-function flow events) in a single
 call. Most adapters delegate fully to this helper and add language-
@@ -151,6 +160,15 @@ Existing hooks:
   classifies caller-visible write-back from the owning grammar. Shared
   lowering receives only `Value` or `WriteBack`; it has no cross-language
   inventory of address/ref/out syntax.
+- `indirect_place_operand_extractor(node) -> Option<Node>` — proves that an
+  indirect address expression denotes the storage of one exact parsed
+  operand (`*out`, `&out`, and equivalent grammar forms). Shared write-back
+  lowering recursively resolves only that returned node; it never interprets
+  an operator token or language spelling.
+- `assignment_place_extractor(node, src) -> Option<String>` — lowers a parsed
+  assignment target when the grammar reuses an otherwise call-shaped node for
+  writable property syntax. The hook is consulted only in assignment context,
+  so ordinary zero-argument calls cannot be misclassified as storage reads.
 - `callable_reference_extractor(node, src) -> Option<String>` — lowers a
   grammar-proven callable value without invoking it.
 
@@ -240,8 +258,14 @@ exact, serializable summaries to `DeclIndex`:
   reconstructing an object;
 - `StringCompositionFact` for concatenations, interpolations, accessor calls,
   and language-level literal fallbacks used to reconstruct a value;
-- exact static aggregate/scalar fields on `CallArgumentValueFact` for
-  constructor or call configuration;
+- `FlowEvent::{Assign,Return}::value_kind` and
+  `CallArgumentValueFact::value_kind` for the exact parsed value shape of a
+  complete expression, plus exact static aggregate/scalar fields for constructor
+  or call configuration. A dynamic identifier remains dynamic regardless of
+  capitalization; shared clean-overwrite analysis never reparses rendered
+  argument or return text. The same adapter-owned classifier serves all three
+  surfaces, and an unclassified carrier-free shape remains `Unknown` rather
+  than being promoted to a literal;
 - `CallArgumentValueFact::inline_callback_params` for a complete inline
   callback argument, derived from the callback's parsed parameter/pattern
   nodes. The fact records syntax only; rule data decides whether a callback
@@ -309,6 +333,23 @@ the same rule: Ruby ERB/RHTML synthetic modules expose only Tree-sitter-proven
 instance-variable inputs from template expressions, never a shared list of
 framework variable names.
 
+Compiler-provided constructors follow the same rule. The adapter must model
+only constructors the language actually supplies and must preserve their real
+execution boundary. Kotlin primary constructors include direct property
+initializers and delegates plus `init` blocks; computed accessors and sibling
+callable bodies are excluded. Kotlin secondary constructors preserve their
+mandatory `this(...)` or `super(...)` delegation before the constructor block.
+A class with only secondary constructors has no fabricated implicit primary;
+the direct-`super` path owns its instance-initializer prefix.
+For Swift this means memberwise struct initializers,
+inherited designated initializers, and implicit zero-argument class
+initializers are distinct cases. Each designated initializer begins with the
+class's direct instance stored-property initializer events. Static properties,
+computed getters, and sibling method bodies are not constructor work. When a
+direct receiver-field initializer calls another declaration, record
+`receiver_field_initializers`; shared linkage resolves its type after all
+declaration headers are available and fails closed on functions or ambiguity.
+
 The empty value is meaningful. Shared compiler backends do not substitute a
 cross-language token list, guess from capitalization, or parse source text.
 
@@ -329,6 +370,11 @@ or equivalent:
   method forms are adapter-declared in `constructor_method_names`; an empty
   declaration means no method-name constructor form. Shared resolution has no
   cross-language constructor fallback.
+- **Resolved receiver-field types** — constructor declaration headers retain
+  adapter-proven direct-call field initializer facts. The callgraph linker
+  resolves them against exact class/constructor identities before extending
+  sibling method receiver aliases. A field is not typed from callee spelling,
+  capitalization, or an unresolved external call.
 - **`EnclosingIndex`** — per-file binary-searchable enclosing-decl
   span array. Requires `Decl::body_span` (or `Decl::span`) to be
   monotonically increasing in file-position order; decl bodies in

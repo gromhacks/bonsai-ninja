@@ -32,6 +32,8 @@ use std::sync::Arc;
 /// sidecars are rejected. The workspace-interned factstore format is
 /// produced by [`bonsai_factstore`], whose header and pipeline hash reject
 /// incompatible payloads before decoding.
+// v15 (2026-08-09): call-argument nodes persist the adapter-normalized
+// argument index; rendered argument text is no longer a graph identity.
 // v14 (2026-08-07): snapshot and factstore freshness bind to the compiler
 // frontend ABI so adapter IR changes cannot reuse derived value-flow graphs.
 // v13 (2026-08-03): rebuild exact value flows after compiler-object v50 and
@@ -42,7 +44,7 @@ use std::sync::Arc;
 // v9 (2026-07-16): remove the retired saturation field.
 // v8 (2026-05-27): the value-flow graph derives from the IDG, whose
 // construction and seeding changed enough to reject older sidecars.
-pub const VALUE_FLOW_CACHE_VERSION: u32 = 14;
+pub const VALUE_FLOW_CACHE_VERSION: u32 = 15;
 
 /// Caller-defined table id stamped into the factstore header. Lets
 /// the reader detect "this is the value-flow store" vs other

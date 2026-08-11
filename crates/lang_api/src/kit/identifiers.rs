@@ -41,11 +41,6 @@ pub fn first_named_child_of_kind<'tree>(node: &Node<'tree>, kind: &str) -> Optio
     None
 }
 
-/// True when `node` has at least one direct named child of the given kind.
-pub(crate) fn has_direct_child_kind(node: &Node<'_>, kind: &str) -> bool {
-    first_named_child_of_kind(node, kind).is_some()
-}
-
 /// Pre-order DFS for the first descendant whose kind looks like an
 /// identifier. Visits children in source order (leftmost first), so for
 /// `void f(int x)` the result is `f`, not the parameter's `x`.
@@ -103,35 +98,6 @@ pub fn looks_like_bare_identifier(s: &str) -> bool {
     !s.is_empty()
         && s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
         && s.chars().all(|c| c.is_alphanumeric() || c == '_')
-}
-
-/// True when a node/text pair denotes a language literal keyword, not a
-/// value-bearing place. This is intentionally separate from
-/// [`looks_like_bare_identifier`]: some languages allow uppercase words
-/// like `None` as variables, while Python exposes `None` through a
-/// `none` node kind.
-#[inline]
-#[must_use]
-pub fn looks_like_literal_value(kind: &str, text: &str) -> bool {
-    if matches!(
-        kind,
-        "null"
-            | "nil"
-            | "none"
-            | "undefined"
-            | "true"
-            | "false"
-            | "null_literal"
-            | "nil_literal"
-            | "none_literal"
-            | "boolean_literal"
-    ) {
-        return true;
-    }
-    matches!(
-        text.trim(),
-        "null" | "nil" | "none" | "undefined" | "nullptr" | "true" | "false" | "NULL"
-    )
 }
 
 #[cfg(test)]

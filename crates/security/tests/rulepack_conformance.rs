@@ -303,12 +303,18 @@ fn enabled_rules_keep_required_metadata() {
                 }
             }
             RuleKind::Typing => {
-                // Typing rules either describe a factory return type or a
-                // declarative taint-transfer summary. They carry no finding
-                // metadata (tag/severity/trust/cwe).
-                if rule.enabled && rule.returns_type.is_none() && rule.taint_semantics.is_none() {
+                // Typing rules describe factory returns, omitted callback
+                // parameter types, declarative transfer summaries, or
+                // lifecycle transitions. They carry no finding metadata
+                // (tag/severity/trust/cwe).
+                if rule.enabled
+                    && rule.returns_type.is_none()
+                    && rule.callback_param_types.is_empty()
+                    && rule.taint_semantics.is_none()
+                    && rule.lifecycle_transition.is_none()
+                {
                     missing.push(format!(
-                        "typing rule missing returns_type or taint_semantics: {}",
+                        "typing rule missing returns_type, callback_param_types, taint_semantics, or lifecycle_transition: {}",
                         rule.id
                     ));
                 }

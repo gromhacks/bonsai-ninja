@@ -28,6 +28,7 @@ serde = { workspace = true }
 sha2 = { workspace = true }
 zstd = { workspace = true }
 tempfile = { workspace = true }
+fs2 = { workspace = true }
 
 [dev-dependencies]
 bonsai_lang_python = { workspace = true }

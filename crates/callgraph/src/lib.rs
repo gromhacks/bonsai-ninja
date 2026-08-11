@@ -1732,6 +1732,13 @@ fn resolve_file_call_edges(
 ) -> FileCallgraphResolution {
     let path_lookup = |file| context.file_paths.get(&file).cloned();
     let language_lookup = |file| context.file_languages.get(&file).copied().flatten();
+    let class_field_types = resolved_class_field_types(
+        global,
+        info.file,
+        &info.alias_targets,
+        &path_lookup,
+        info.capabilities,
+    );
     let mut method_candidate_cache =
         MethodCandidateCache::with_peer_class_index(context.peer_class_index.clone());
     let mut workspace_module_cache = WorkspaceModuleTargetCache::default();
@@ -1747,7 +1754,8 @@ fn resolve_file_call_edges(
             continue;
         }
         let from = FuncId::new(decl.symbol.raw());
-        let alias_targets = alias_targets_for_decl(&info.alias_targets, decl);
+        let mut alias_targets = alias_targets_for_decl(&info.alias_targets, decl);
+        extend_alias_targets_with_resolved_class_fields(&mut alias_targets, decl, &class_field_types);
         let local_bindings = collect_local_callable_bindings_with_alias_index(
             &decl.flow_events,
             global,
@@ -1801,6 +1809,195 @@ fn resolve_file_call_edges(
         local_bindings: resolved_bindings,
         unresolved_workspace_sites,
     }
+}
+
+/// Resolve receiver-field initializer calls against exact workspace
+/// constructors, then make the resulting field type available to sibling
+/// methods of the same class.
+///
+/// Adapters lower implicit class-property storage to receiver-qualified
+/// assignments (`this.service = service(...)`). The shared compiler backend
+/// resolves the RHS only after all declaration headers are present. A type is
+/// admitted when every visible callable candidate is a constructor belonging
+/// to one semantic class identity; functions, ambiguity, and external calls
+/// fail closed. This is the cross-file counterpart of adapter-local declared
+/// type aliases and deliberately contains no language names or casing rules.
+fn resolved_class_field_types(
+    global: &GlobalIndex,
+    file: FileId,
+    file_alias_targets: &AHashMap<String, AliasTarget>,
+    path_for_file: &dyn Fn(FileId) -> Option<String>,
+    capabilities: LanguageCapabilities,
+) -> AHashMap<SymbolId, AHashMap<String, String>> {
+    let mut candidates = AHashMap::<(SymbolId, String), Option<String>>::new();
+    for decl in global
+        .decls_in(file)
+        .iter()
+        .filter(|decl| decl.kind == DeclKind::Constructor)
+    {
+        let Some(parent) = decl.parent else {
+            continue;
+        };
+        let alias_targets = alias_targets_for_decl(file_alias_targets, decl);
+        let Some(file) = caller_decl_file(global, decl) else {
+            continue;
+        };
+        let ctx = ResolveContext::new(file, &decl.module_path)
+            .with_alias_map(&alias_targets)
+            .with_file_path_lookup(path_for_file)
+            .with_same_directory_unqualified_calls(capabilities.same_directory_unqualified_calls)
+            .with_module_path_syntax(capabilities.module_path_syntax);
+        for initializer in &decl.receiver_field_initializers {
+            let Some(field) = receiver_field_tail(decl, &initializer.target) else {
+                continue;
+            };
+            let type_name = resolved_initializer_constructor_type(global, &ctx, initializer, capabilities);
+            let Some(type_name) = type_name else {
+                continue;
+            };
+            candidates
+                .entry((parent, field.to_string()))
+                .and_modify(|known| {
+                    if known.as_ref() != Some(&type_name) {
+                        *known = None;
+                    }
+                })
+                .or_insert(Some(type_name));
+        }
+    }
+
+    let mut out = AHashMap::<SymbolId, AHashMap<String, String>>::new();
+    for ((parent, field), type_name) in candidates {
+        if let Some(type_name) = type_name {
+            out.entry(parent).or_default().insert(field, type_name);
+        }
+    }
+    out
+}
+
+fn resolved_initializer_constructor_type(
+    global: &GlobalIndex,
+    ctx: &ResolveContext<'_>,
+    initializer: &bonsai_lang_api::ReceiverFieldInitializer,
+    capabilities: LanguageCapabilities,
+) -> Option<String> {
+    let mut lookup_names = Vec::new();
+    if let Some(receiver) = initializer.call_receiver.as_deref() {
+        lookup_names.push(format!("{receiver}.{}", initializer.call_name));
+    }
+    lookup_names.push(initializer.call_name.clone());
+
+    let mut callables = Vec::new();
+    for name in lookup_names {
+        callables.extend(resolve_callable_with_context(global, &name, ctx));
+        if !callables.is_empty() {
+            break;
+        }
+    }
+    dedup_func_ids(&mut callables);
+    let mut class_symbols = Vec::new();
+    for callable in callables {
+        let candidate = global.decl_of(SymbolId::new(callable.raw()))?;
+        if candidate.kind != DeclKind::Constructor {
+            return None;
+        }
+        let class_decl = enclosing_class_for_decl(global, candidate)?;
+        if !class_symbols.contains(&class_decl.symbol) {
+            class_symbols.push(class_decl.symbol);
+        }
+    }
+
+    // For grammars where a bare constructor and function share one CST call
+    // shape, exact class identity is a fallback only when ordinary callable
+    // resolution found no competing function.
+    if class_symbols.is_empty()
+        && capabilities.bare_call_constructor_syntax
+        && initializer.call_kind == CallKind::Function
+        && initializer.call_receiver.is_none()
+    {
+        class_symbols.extend(resolve_class(global, &initializer.call_name, ctx));
+    }
+    let first = class_symbols.first().copied()?;
+    if !class_symbols
+        .iter()
+        .all(|candidate| class_symbols_share_semantic_identity(global, first, *candidate))
+    {
+        return None;
+    }
+    global.decl_of(first).map(|decl| decl.name.clone())
+}
+
+fn receiver_field_tail<'a>(decl: &Decl, target: &'a str) -> Option<&'a str> {
+    decl.implicit_receiver_names.iter().find_map(|receiver| {
+        let target = target.trim();
+        let suffix = target.strip_prefix(receiver)?.strip_prefix('.')?;
+        (!suffix.is_empty() && !suffix.contains(['.', ':', '[', ']'])).then_some(suffix)
+    })
+}
+
+fn extend_alias_targets_with_resolved_class_fields(
+    alias_targets: &mut AHashMap<String, AliasTarget>,
+    decl: &Decl,
+    class_field_types: &AHashMap<SymbolId, AHashMap<String, String>>,
+) {
+    let Some(parent) = decl.parent else {
+        return;
+    };
+    let Some(fields) = class_field_types.get(&parent) else {
+        return;
+    };
+    for (field, type_name) in fields {
+        let target = AliasTarget::Type {
+            type_name: type_name.clone(),
+        };
+        // Explicit receiver access cannot be shadowed by a local binding.
+        for receiver in &decl.implicit_receiver_names {
+            alias_targets
+                .entry(format!("{receiver}.{field}"))
+                .or_insert_with(|| target.clone());
+        }
+        // A bare field access is valid only when the method does not declare
+        // a parameter/local of the same name. Reject the entire method on a
+        // shadowing declaration rather than guessing statement order.
+        if !decl_binding_shadows_name(decl, field) {
+            alias_targets.entry(field.clone()).or_insert(target);
+        }
+    }
+}
+
+fn decl_binding_shadows_name(decl: &Decl, name: &str) -> bool {
+    if decl.params.iter().any(|param| param == name) {
+        return true;
+    }
+    fn events_shadow(events: &[FlowEvent], name: &str) -> bool {
+        events.iter().any(|event| match event {
+            FlowEvent::Assign {
+                target,
+                declares_new_binding: true,
+                ..
+            } => normalize_receiver_alias_text(target) == name,
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => events_shadow(then_events, name) || events_shadow(else_events, name),
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                events_shadow(body, name)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                events_shadow(body, name)
+                    || events_shadow(catch_events, name)
+                    || events_shadow(finally_events, name)
+            }
+            _ => false,
+        })
+    }
+    events_shadow(&decl.flow_events, name)
 }
 
 #[derive(Default)]
@@ -2071,9 +2268,27 @@ fn collect_ast_bound_call_candidates(
             facts.span,
         );
     }
+    if values.is_empty()
+        && facts.semantic_receiver.is_none()
+        && !facts.alias_qualified
+        && facts.call_kind == CallKind::Function
+        && bonsai_common::qualified_name_owner(facts.name).is_some()
+    {
+        // Some grammars use a qualified value expression to name a function
+        // without supplying an implicit receiver (for example, a function
+        // stored in a namespace/table field). The adapter communicates that
+        // distinction by clearing `receiver` and lowering the call as
+        // `Function`. Resolve the complete compiler identity before any
+        // module/path fallback; never retry its leaf as an unrelated symbol.
+        let caller_file = context.caller_decl.name_span.file;
+        let ctx = ResolveContext::new(caller_file, &context.caller_decl.module_path)
+            .with_alias_map(context.alias_targets)
+            .with_file_path_lookup(context.path_for_file)
+            .with_module_path_syntax(context.caller_capabilities.module_path_syntax);
+        values = resolve_callable_with_context(context.global, facts.name, &ctx);
+    }
     if values.is_empty() && facts.explicit_ancestor_constructor {
-        values =
-            collect_constructor_targets_for_class_call(&constructor_context, facts.name, None, &[], false);
+        values = collect_declared_ancestor_constructor_targets(&constructor_context);
     }
     if values.is_empty() && facts.call_kind == CallKind::Constructor {
         let constructor_tail = short_callee(facts.name);
@@ -2135,6 +2350,28 @@ fn collect_ast_bound_call_candidates(
         from_callable_binding,
         from_dynamic_param_receiver,
     }
+}
+
+/// Resolve an explicit `super`/base-constructor expression from the owning
+/// class declaration. The adapter proves the receiver token and constructor
+/// call kind; shared resolution consumes only the declaration's exact base
+/// identities and never carries source-language tokens or type-name guesses.
+fn collect_declared_ancestor_constructor_targets(
+    resolution: &ConstructorResolutionContext<'_>,
+) -> Vec<FuncId> {
+    let Some(parent) = resolution.caller_decl.parent else {
+        return Vec::new();
+    };
+    let Some(class_decl) = resolution.global.decl_of(parent) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for base in &class_decl.bases {
+        for constructor in collect_constructor_targets_for_class_call(resolution, base, None, &[], false) {
+            push_unique_func(&mut out, constructor);
+        }
+    }
+    out
 }
 
 fn collect_workspace_call_candidates(
@@ -2973,7 +3210,14 @@ fn collect_nested_local_callable_targets(
         .collect()
 }
 
-fn local_value_binding_shadows_callable(events: &[FlowEvent], name: &str, call_span: Span) -> bool {
+/// Return whether an earlier adapter-lowered value assignment shadows a bare
+/// callable at `call_span`.
+///
+/// This is a language-neutral lexical fact used by both call resolution and
+/// rulepack-owned external constructor typing. It deliberately consumes only
+/// compiler IR; provider/API names remain outside the shared engine.
+#[must_use]
+pub fn local_value_binding_shadows_callable(events: &[FlowEvent], name: &str, call_span: Span) -> bool {
     let target_name = normalize_receiver_alias_text(short_callee(name));
     if target_name.is_empty() {
         return false;
@@ -6614,7 +6858,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
         constructor_index: None,
     };
     if targets.is_empty() && explicit_ancestor_constructor {
-        targets = collect_constructor_targets_for_class_call(&constructor_context, name, None, &[], false);
+        targets = collect_declared_ancestor_constructor_targets(&constructor_context);
     }
     if targets.is_empty() && call_kind == CallKind::Constructor {
         targets = collect_constructor_targets_for_class_call(

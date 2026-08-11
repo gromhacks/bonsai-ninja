@@ -242,6 +242,51 @@ fn loader_rejects_unknown_rule_fields() {
 }
 
 #[test]
+fn loader_rejects_callback_typing_fields_outside_typing_rules() {
+    let tmp = tempdir();
+    write(
+        &tmp.path().join("langs/java/sources/remote.yml"),
+        r"- id: java.source.invalid_callback_type
+  enabled: true
+  trust: remote
+  tag: http-input
+  callback_arg_index: 0
+  callback_param_types: [[Request]]
+  match:
+    kind: call
+    callee: {name: route}
+  description: invalid source-owned callback signature",
+    );
+
+    let err = load_rulepack(tmp.path()).unwrap_err();
+    assert!(
+        matches!(err, LoadError::InvalidTypingDeclaration { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn loader_rejects_type_match_without_callback_signature() {
+    let tmp = tempdir();
+    write(
+        &tmp.path().join("langs/java/typing/callback.yml"),
+        r"- id: java.typing.invalid_callable
+  enabled: true
+  returns_type: Wrong
+  match:
+    kind: type
+    target: {name: Handler}
+  description: invalid callable type without parameter signature",
+    );
+
+    let err = load_rulepack(tmp.path()).unwrap_err();
+    assert!(
+        matches!(err, LoadError::InvalidTypingDeclaration { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
 fn loader_accepts_missing_langs_dir_gracefully() {
     let tmp = tempdir();
     let pack = load_rulepack(tmp.path()).expect("empty rulepack root is ok");

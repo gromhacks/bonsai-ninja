@@ -48,16 +48,20 @@ impl ProvenanceMarker {
 /// `TokenSet`. Propagation joins by union.
 pub type ProvenanceSet = AHashSet<ProvenanceMarker>;
 
-/// One node in the unified value-flow graph: a `(function, span, value)`
-/// triple corresponding to a concrete program point where a value is
+/// One node in the unified value-flow graph: a concrete program point where a value is
 /// observed (param binding, assignment target, call argument, return
-/// value).
+/// value). Call arguments additionally carry their adapter-normalized index;
+/// rendered value text is never used to disambiguate them.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ValueFlowNode {
     pub func: FuncId,
     pub span: Span,
     pub value_text: String,
     pub kind: ValueFlowNodeKind,
+    /// Adapter-normalized argument position for `CallArg` nodes. This is the
+    /// semantic call-site identity; `value_text` is display-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_index: Option<usize>,
 }
 
 /// What grammar role this node plays. Lets consumers query "all
@@ -290,24 +294,24 @@ fn build_graph_from_result(
     // parameter P." That's exactly one ValueFlowEdge.
     for propagation in &result.call_records {
         for tainted in &propagation.tainted_args {
-            let from_key = (propagation.caller, tainted.value_text.clone());
-            let from_node = find_call_arg_node(
-                &graph,
-                propagation.caller,
-                propagation.call_span,
-                &tainted.value_text,
-            )
-            .or_else(|| node_index.get(&from_key).cloned())
-            .unwrap_or_else(|| {
-                let synthesised = ValueFlowNode {
-                    func: propagation.caller,
-                    span: propagation.call_span,
-                    value_text: tainted.value_text.clone(),
-                    kind: ValueFlowNodeKind::CallArg,
-                };
-                node_index.insert(from_key.clone(), synthesised.clone());
-                synthesised
-            });
+            let from_node =
+                find_call_arg_node(&graph, propagation.caller, propagation.call_span, tainted.index)
+                    .or_else(|| {
+                        tainted
+                            .place
+                            .iter()
+                            .chain(tainted.source_names.iter())
+                            .find_map(|identity| {
+                                node_index.get(&(propagation.caller, identity.clone())).cloned()
+                            })
+                    })
+                    .unwrap_or_else(|| ValueFlowNode {
+                        func: propagation.caller,
+                        span: propagation.call_span,
+                        value_text: tainted.value_text.clone(),
+                        kind: ValueFlowNodeKind::CallArg,
+                        argument_index: Some(tainted.index),
+                    });
             let to_key = (propagation.callee, tainted.param_name.clone());
             let to_node = node_index.get(&to_key).cloned().unwrap_or_else(|| {
                 let synthesised = ValueFlowNode {
@@ -315,6 +319,7 @@ fn build_graph_from_result(
                     span: propagation.call_span,
                     value_text: tainted.param_name.clone(),
                     kind: ValueFlowNodeKind::Param,
+                    argument_index: None,
                 };
                 node_index.insert(to_key.clone(), synthesised.clone());
                 synthesised
@@ -334,7 +339,7 @@ fn find_call_arg_node(
     graph: &ValueFlowGraph,
     func: FuncId,
     call_span: Span,
-    value_text: &str,
+    argument_index: usize,
 ) -> Option<ValueFlowNode> {
     graph
         .nodes
@@ -342,8 +347,8 @@ fn find_call_arg_node(
         .find(|node| {
             node.func == func
                 && node.span == call_span
-                && node.value_text == value_text
                 && matches!(node.kind, ValueFlowNodeKind::CallArg)
+                && node.argument_index == Some(argument_index)
         })
         .cloned()
 }
@@ -375,6 +380,7 @@ fn build_intra_entry_graph(
             span: entry_span,
             value_text: param.clone(),
             kind: ValueFlowNodeKind::Param,
+            argument_index: None,
         };
         graph.nodes.insert(param_node.clone());
         // First binding wins — later events that read the same name
@@ -406,7 +412,27 @@ fn build_intra_entry_graph(
             span,
             value_text: name.to_string(),
             kind: ValueFlowNodeKind::Read,
+            argument_index: None,
         }]
+    }
+
+    fn expression_source_names(flow: &bonsai_lang_api::ExpressionFlow) -> AHashSet<String> {
+        fn collect(flow: &bonsai_lang_api::ExpressionFlow, out: &mut AHashSet<String>) {
+            if let Some(place) = flow.place.as_ref().filter(|place| !place.is_empty()) {
+                out.insert(place.clone());
+            }
+            out.extend(flow.source_names.iter().filter(|name| !name.is_empty()).cloned());
+            for field in &flow.aggregate_fields {
+                collect(&field.value, out);
+            }
+            for item in flow.tuple_items.iter().chain(flow.spreads.iter()) {
+                collect(item, out);
+            }
+        }
+
+        let mut out = AHashSet::default();
+        collect(flow, &mut out);
+        out
     }
 
     // R3: collect every bare-identifier thrown value reachable in
@@ -463,7 +489,6 @@ fn build_intra_entry_graph(
                     target,
                     source_name,
                     source_names,
-                    source_call_args,
                     ..
                 } => {
                     if target.is_empty() {
@@ -474,6 +499,7 @@ fn build_intra_entry_graph(
                         span: *span,
                         value_text: target.clone(),
                         kind: ValueFlowNodeKind::AssignTarget,
+                        argument_index: None,
                     };
                     graph.nodes.insert(target_node.clone());
 
@@ -484,11 +510,6 @@ fn build_intra_entry_graph(
                         }
                     }
                     for source in source_names {
-                        if !source.is_empty() {
-                            sources.insert(source.clone());
-                        }
-                    }
-                    for source in source_call_args {
                         if !source.is_empty() {
                             sources.insert(source.clone());
                         }
@@ -509,7 +530,7 @@ fn build_intra_entry_graph(
                     env.insert(target.clone(), defs);
                 }
                 FlowEvent::Call { span, args, .. } => {
-                    for arg in args {
+                    for (argument_index, arg) in args.iter().enumerate() {
                         let node_text = if !arg.value_text.is_empty() {
                             arg.value_text.clone()
                         } else {
@@ -526,6 +547,7 @@ fn build_intra_entry_graph(
                             span: *span,
                             value_text: node_text.clone(),
                             kind: ValueFlowNodeKind::CallArg,
+                            argument_index: Some(argument_index),
                         };
                         graph.nodes.insert(arg_node.clone());
 
@@ -539,9 +561,6 @@ fn build_intra_entry_graph(
                             if !source.is_empty() {
                                 sources.insert(source.clone());
                             }
-                        }
-                        if sources.is_empty() {
-                            sources.insert(node_text);
                         }
                         for source in sources {
                             for source_node in source_nodes(&env, func, *span, &source) {
@@ -559,9 +578,9 @@ fn build_intra_entry_graph(
                     span,
                     value_name,
                     value_text,
+                    value_flow,
                     ..
                 } => {
-                    let value = value_name.as_deref().unwrap_or_default();
                     let return_node = ValueFlowNode {
                         func,
                         span: *span,
@@ -571,15 +590,22 @@ fn build_intra_entry_graph(
                             .unwrap_or_default()
                             .to_string(),
                         kind: ValueFlowNodeKind::Return,
+                        argument_index: None,
                     };
                     graph.nodes.insert(return_node.clone());
-                    for from_node in source_nodes(&env, func, *span, value) {
-                        graph.add_edge(ValueFlowEdge {
-                            from: from_node,
-                            to: return_node.clone(),
-                            precision: Precision::Exact,
-                            via_span: *span,
-                        });
+                    let mut sources = expression_source_names(value_flow);
+                    if let Some(value_name) = value_name.as_ref().filter(|name| !name.is_empty()) {
+                        sources.insert(value_name.clone());
+                    }
+                    for source in sources {
+                        for from_node in source_nodes(&env, func, *span, &source) {
+                            graph.add_edge(ValueFlowEdge {
+                                from: from_node,
+                                to: return_node.clone(),
+                                precision: Precision::Exact,
+                                via_span: *span,
+                            });
+                        }
                     }
                 }
                 FlowEvent::Branch {
@@ -621,6 +647,7 @@ fn build_intra_entry_graph(
                                     span: *span,
                                     value_text: param.to_string(),
                                     kind: ValueFlowNodeKind::Catch,
+                                    argument_index: None,
                                 };
                                 graph.nodes.insert(catch_node.clone());
                                 // R3: wire an edge from each tainted value
@@ -657,17 +684,23 @@ fn build_intra_entry_graph(
                 // model it as a Return-kind output node so backward
                 // lineage from the consumer reaches the yielded value's
                 // origins (the catch-all `_` arm used to drop it).
-                FlowEvent::Yield { span, value_text, .. } => {
-                    if let Some(value) = value_text.as_deref() {
-                        if !value.is_empty() {
-                            let yield_node = ValueFlowNode {
-                                func,
-                                span: *span,
-                                value_text: value.to_string(),
-                                kind: ValueFlowNodeKind::Return,
-                            };
-                            graph.nodes.insert(yield_node.clone());
-                            for from_node in source_nodes(&env, func, *span, value) {
+                FlowEvent::Yield {
+                    span,
+                    value_text,
+                    value_flow,
+                } => {
+                    let sources = expression_source_names(value_flow);
+                    if !sources.is_empty() || value_text.as_ref().is_some_and(|value| !value.is_empty()) {
+                        let yield_node = ValueFlowNode {
+                            func,
+                            span: *span,
+                            value_text: value_text.clone().unwrap_or_default(),
+                            kind: ValueFlowNodeKind::Return,
+                            argument_index: None,
+                        };
+                        graph.nodes.insert(yield_node.clone());
+                        for source in sources {
+                            for from_node in source_nodes(&env, func, *span, &source) {
                                 graph.add_edge(ValueFlowEdge {
                                     from: from_node,
                                     to: yield_node.clone(),

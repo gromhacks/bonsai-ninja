@@ -28,7 +28,7 @@ The analyzer is one compiler-style pipeline:
 
 ## Current validation
 
-Validated through 2026-08-08 (dated measurements below retain their run date):
+Validated through 2026-08-10 (dated measurements below retain their run date):
 
 - A direct release-binary audit exercised every documented root, browse,
   navigation, inspect, trace, slice, stable-ID, debug-dump, cache, export, and
@@ -41,12 +41,12 @@ Validated through 2026-08-08 (dated measurements below retain their run date):
   invalid stable IDs and out-of-range pages fail closed; `--page next` reuses
   a validated eager page; selective cache clearing leaves a fresh manifest;
   and token estimates describe the same complete result on every page.
-- The current candidate passed `cargo test --release -p bonsai_cli
-  --all-targets -- --skip elasticsearch_` and the optimized SDK, security,
-  taint, IDG, and conformance package matrix with zero failures. It also
+- The current candidate passed the compact exhaustive CLI, SDK, security,
+  taint, IDG, and conformance package matrix with zero failures, plus the
+  release-optimized Elasticsearch target. It also
   passed strict all-target release Clippy, private-item release rustdoc with
   warnings denied, formatting, diff hygiene, and direct deep rulepack replay
-  of all 9,965 enabled examples from 7,053 rules with zero errors or warnings.
+  of all 10,047 enabled examples from 7,130 rules with zero errors or warnings.
 
 - The ABI-v64 release candidate passed `cargo check --release --workspace
   --all-targets --locked`, strict release all-target Clippy with warnings
@@ -57,9 +57,9 @@ Validated through 2026-08-08 (dated measurements below retain their run date):
   end-to-end taint suites, paging/completeness contracts, output formats, and
   the five-scenario Elasticsearch SLO gate. The standalone adapter `FlowEvent`
   audit also passed after compiling its locked debug harness from a cold cache.
-- The release-binary command matrix passed 1,279 command/switch cases across
-  all 20 languages. Rulepack validation replayed 9,965 enabled examples from
-  7,053 rules with zero misses, errors, or warnings. Self-security completed
+- The release-binary command matrix passed 1,280 command/switch cases across
+  all 20 languages. Rulepack validation replayed 10,047 enabled examples from
+  7,130 rules with zero misses, errors, or warnings. Self-security completed
   with no incomplete reasons or production-threshold findings; SARIF 2.1.0,
   HTML, JSON, and NetworkX output smokes parsed successfully.
 - A FastAPI `15410ee4bfd1` real-repository trial pinned and fixed four compiler
@@ -211,11 +211,11 @@ The current deep rulepack gate is clean:
 
 | Measure | Result |
 |---|---:|
-| Rules | 7,053 |
-| Enabled rules | 5,913 |
+| Rules | 7,130 |
+| Enabled rules | 5,990 |
 | Disabled rules | 1,140 |
-| Match examples | 10,403 |
-| Enabled match examples | 9,965 |
+| Match examples | 10,485 |
+| Enabled match examples | 10,047 |
 | Taint-replay misses | 0 |
 | Errors | 0 |
 | Warnings | 0 |
@@ -262,20 +262,32 @@ seconds with 35,110,912 bytes maximum RSS.
 ## Elasticsearch scale result
 
 The current release pipeline is measured against the sibling 30,055-source
-Elasticsearch checkout. The 2026-08-08 ABI-v68 exact cache-migration gate
-passed 5/5 in 1,822.56 seconds under a 3 GiB scheduling budget. Its required
-one-time compiler-object/IDG generation completed in 1,619.68 seconds and
-immediate fresh-process reuse in 2.35 seconds. Fresh-cache production taint
-completed in 29.51 seconds, warm production taint in 25.42 seconds, default
-inspect in 6.76 seconds, and exact raw-taint inspect in 24.20 seconds.
-Navigation timings were tree 0.03 seconds, search 3.90 seconds, definitions
-13.22 seconds, imports 6.77 seconds, classes 7.40 seconds, entrypoints 25.28
-seconds, calls 3.36 seconds, arguments 3.52 seconds, and scoped `read-file`
-1.71 seconds. Source, sink, sanitizer, and dependency inventories completed in
-3.55, 21.25, 15.94, and 8.63 seconds. The compiler worker remained near 1.04
-GiB RSS and exited before the IDG worker peaked near 2.67 GiB. Every enforced
-SLO passed; the gate completed exact work and did not cap files, graph depth,
-closure, or results. This is the current cache-migration and release reference.
+Elasticsearch checkout. The 2026-08-10 ABI-v83 release gate passed 5/5 in
+233.57 seconds under a 3 GiB scheduling budget. Its one-time exact
+compiler-object/IDG generation completed in 1,618.72 seconds and immediate
+fresh-process reuse in 2.49 seconds. The final warm gate measured fresh-cache
+production taint at 29.42 seconds, warm production taint at 28.31 seconds,
+default inspect at 7.66 seconds, and exact raw-taint inspect at 27.60 seconds.
+Navigation timings were tree 0.03 seconds, search 4.19, definitions 13.65,
+imports 7.69, classes 7.93, entrypoints 28.36, calls 3.69, arguments 3.64,
+and scoped `read-file` 1.37. Source, high-severity sink, sanitizer, and
+dependency inventories completed in 3.95, 24.01, 21.13, and 12.08 seconds.
+The high-severity sink inventory returned the same exact 6,866 matches before
+and after its matcher optimization; its end-to-end latency fell from about 52
+seconds to 24.01 seconds because each surviving rule batch now derives only
+the compiler-secondary views it can consult. Header and body concurrency is
+source-weighted and changes scheduling only. Every enforced SLO passed with
+no cap on files, rules, graph depth, fixed-point work, or results. This is the
+current release reference.
+
+The previous 2026-08-08 ABI-v68 exact cache-migration gate passed 5/5 in
+1,822.56 seconds under a 3 GiB scheduling budget. Its required one-time
+compiler-object/IDG generation completed in 1,619.68 seconds and immediate
+fresh-process reuse in 2.35 seconds. Fresh-cache production taint completed in
+29.51 seconds, warm production taint in 25.42 seconds, default inspect in 6.76
+seconds, and exact raw-taint inspect in 24.20 seconds. Every enforced SLO
+passed without semantic caps. This remains the prior cache-migration
+reference.
 
 The final 2026-08-09 ABI-v68 warm release-candidate repeat passed 5/5 in
 219.44 seconds. Semantic readiness and immediate reuse completed in
@@ -406,7 +418,7 @@ callee-name matching cannot manufacture field flow. Regression tests pin
 scalar-to-receiver mapping, sibling-field isolation, clean output-argument
 overwrites, Java record accessors, and C# expression-bodied properties.
 
-The final gate measured source inventory at 3.85 seconds, the exhaustive
+The historical ABI-v62 gate measured source inventory at 3.85 seconds, the exhaustive
 high-severity sink inventory at 22.63 seconds, credit-bearing sanitizer
 inventory at 18.32 seconds, and dependency inventory at 10.42 seconds. These
 are syntax/compiler and rulepack facts, not Elasticsearch-specific name lists.
@@ -594,8 +606,7 @@ python3 scripts/audit-dependency-licenses.py
   --no-progress
 
 cargo test --workspace --locked --no-fail-fast
-cargo test --release --locked -p bonsai_conformance --test architecture_invariants
-cargo test --release --locked -p bonsai_security --test rulepack_conformance
+bash scripts/audit-build-artifacts.sh
 python3 scripts/sanitizer_credit_audit.py
 python3 scripts/sync_skill.py --check
 python3 scripts/audit-docs.py
@@ -621,3 +632,19 @@ resolver, adapter, query, security, cache, or export semantics change. External
 security benchmarks remain isolated evidence rather than release logic.
 Documentation-only changes still run the documentation, link, formatting, and
 rustdoc checks.
+
+Do not use `cargo test --release --workspace` as an exhaustive correctness
+gate. The workspace has hundreds of integration executables, and applying
+ThinLTO to each duplicates the complete 20-language compiler graph without
+testing a production runtime property. Use `cargo test --workspace` for exact
+correctness, then release-build the CLI and run only named performance/SLO
+targets with `--release`. Development and test profiles disable incremental
+generations and DWARF by default; opt back in through Cargo profile environment
+overrides only for a deliberate debugger session. The artifact audit defaults
+to 32 GiB and fails with an explicit `cargo clean` recovery instruction. On
+2026-08-10 it caught an accumulated 331 GiB local `target/`; removing obsolete
+generations reclaimed about 351 GiB and a clean production working set settled
+near 9.6 GiB. The small post-clean number is the expected state. The source
+profiles now disable incremental output and debug info by default, while the
+external workspace cache independently prunes unlocked older recognized
+compiler-object schemas after atomic publication.

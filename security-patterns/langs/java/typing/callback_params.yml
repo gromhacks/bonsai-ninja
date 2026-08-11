@@ -1,0 +1,68 @@
+- id: java.typing.vertx_route_handler_callback
+  enabled: true
+  language: java
+  imports: [io.vertx.ext.web]
+  callback_arg_index: 0
+  callback_param_types:
+  - [io.vertx.ext.web.RoutingContext, RoutingContext]
+  match:
+    kind: call
+    callee:
+      regex: '(?:route|get|post|put|delete|patch|options|head|connect|trace)\s*\([^)]*\)\.handler$'
+      receiver_type_in: [io.vertx.ext.web.Router, Router]
+  match_examples:
+  - name: Vert.x inferred route callback parameter
+    code: |
+      import io.vertx.ext.web.Router;
+      class App {
+        void routes(Router router) {
+          router.get("/items").handler(ctx -> ctx.request());
+        }
+      }
+    expect_match_text: ['router.get("/items").handler']
+  description: "Vert.x route handler callbacks receive a RoutingContext. Typing-only; the compiler contributes the exact inline callback relationship and this rule supplies the external API signature."
+
+- id: java.typing.webflux_route_callback
+  enabled: true
+  language: java
+  imports: [org.springframework.web.reactive.function.server]
+  callback_arg_index: 1
+  callback_param_types:
+  - [org.springframework.web.reactive.function.server.ServerRequest, ServerRequest]
+  match:
+    kind: call
+    callee:
+      attribute: [org, springframework, web, reactive, function, server, RouterFunctions, route]
+  match_examples:
+  - name: WebFlux inferred route callback parameter
+    code: |
+      import static org.springframework.web.reactive.function.server.RouterFunctions.route;
+      class App {
+        Object routes(Object predicate) {
+          return route(predicate, request -> request.toString());
+        }
+      }
+    expect_match_text: [route]
+  description: "Spring WebFlux RouterFunctions.route callbacks receive a ServerRequest. Typing-only; never a finding."
+
+- id: java.typing.graphql_datafetcher_callback
+  enabled: true
+  language: java
+  imports: [graphql.schema]
+  callback_param_types:
+  - [graphql.schema.DataFetchingEnvironment, DataFetchingEnvironment]
+  match:
+    kind: type
+    target:
+      attribute: [graphql, schema, DataFetcher]
+  match_examples:
+  - name: GraphQL typed functional-interface callback
+    code: |
+      import graphql.schema.DataFetcher;
+      class App {
+        void configure() {
+          DataFetcher<Object> fetcher = environment -> environment.toString();
+        }
+      }
+    expect_match_text: [DataFetcher]
+  description: "graphql-java DataFetcher functional-interface callbacks receive a DataFetchingEnvironment. Typing-only; never a finding."

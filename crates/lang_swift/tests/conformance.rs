@@ -8,6 +8,119 @@ fn conformance_traced() {
 }
 
 #[test]
+fn navigation_calls_emit_one_exact_separator_and_receiver() {
+    use bonsai_lang_api::FlowEvent;
+
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> = Arc::new(bonsai_lang_swift::SwiftAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "App.swift",
+            "func example(task: Task) { task.cancel(); task.result() }",
+        )],
+    );
+    let global = ws.db().global_index();
+    let example = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "example")
+        .expect("example declaration");
+    let calls = example
+        .flow_events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Call { name, receiver, .. } => Some((name.as_str(), receiver.as_deref())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert!(calls.contains(&("task.cancel", Some("task"))), "{calls:?}");
+    assert!(calls.contains(&("task.result", Some("task"))), "{calls:?}");
+    assert!(calls.iter().all(|(name, _)| !name.contains("..")), "{calls:?}");
+}
+
+#[test]
+fn switch_value_binding_uses_the_switch_subject() {
+    use bonsai_lang_api::FlowEvent;
+
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> = Arc::new(bonsai_lang_swift::SwiftAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "A.swift",
+            "func main(_ subject: String) { switch subject { case let value: sink(value) } }\nfunc sink(_ value: String) {}",
+        )],
+    );
+    let global = ws.db().global_index();
+    let main = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "main")
+        .expect("main declaration");
+    let mut facts = Vec::new();
+    collect_assignments(&main.flow_events, &mut facts);
+    assert!(
+        facts
+            .iter()
+            .any(|(target, source)| target == "value" && source.as_deref() == Some("subject")),
+        "missing value <- subject: {facts:#?}"
+    );
+    assert!(facts.iter().all(|(target, _)| target != "String"));
+
+    fn collect_assignments(events: &[FlowEvent], out: &mut Vec<(String, Option<String>)>) {
+        for event in events {
+            match event {
+                FlowEvent::Assign {
+                    target, source_name, ..
+                } => out.push((target.clone(), source_name.clone())),
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    collect_assignments(then_events, out);
+                    collect_assignments(else_events, out);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[test]
+fn lowercase_declared_types_remain_receiver_evidence() {
+    use bonsai_lang_api::{FlowEvent, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_swift::SwiftAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "App.swift",
+            "class lower { func run(_ value: String) {} }\n\
+             func handle(_ value: String) {\n\
+               let declared = lower(); declared.run(value)\n\
+             }",
+        )],
+    );
+    let global = ws.db().global_index();
+    let handle = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "handle")
+        .expect("handle declaration");
+    assert!(
+        handle.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call { name, receiver_types, .. }
+                if name.rsplit('.').next() == Some("run")
+                    && receiver_types.iter().any(|ty| ty == "lower")
+        )),
+        "events: {:#?}",
+        handle.flow_events
+    );
+}
+
+#[test]
 fn function_typed_parameters_do_not_emit_type_nodes_as_params() {
     use bonsai_diagnostics::DiagnosticSink;
     use bonsai_lang_api::{AdapterContext, LanguageAdapter};
@@ -38,6 +151,39 @@ fn function_typed_parameters_do_not_emit_type_nodes_as_params() {
         run_cb.params,
         vec!["cb".to_string(), "value".to_string()],
         "Swift parameter extraction must not treat function/user type annotation nodes as bound params"
+    );
+}
+
+#[test]
+fn parameter_attributes_are_parallel_with_parameter_bindings() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_swift::SwiftAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("App.swift"),
+        "func handle(_ value: String, _ callback: @escaping (String) -> String) -> String { callback(value) }\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        tree_provider: None,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+    let handle = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "handle")
+        .expect("handle declaration");
+    assert_eq!(handle.params, ["value", "callback"]);
+    assert_eq!(
+        handle.param_annotations,
+        [Vec::<String>::new(), vec!["escaping".to_string()]]
     );
 }
 
@@ -336,6 +482,168 @@ func handle(raw: String) {
         }),
         "Swift memberwise constructor assignments must project field writes: {:?}",
         handle.flow_events
+    );
+}
+
+#[test]
+fn implicit_class_initializer_preserves_cross_file_lowercase_constructor_fact() {
+    use bonsai_lang_api::LanguageAdapter;
+    use std::sync::Arc;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_swift::SwiftAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[
+            ("Dependency.swift", "class lower {}\n"),
+            (
+                "Owner.swift",
+                r#"
+class Owner {
+    let dependency = lower()
+    func run() { dependency.work() }
+}
+"#,
+            ),
+        ],
+    );
+    let global = ws.db().global_index();
+    let constructor = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "Owner" && decl.kind == bonsai_lang_api::DeclKind::Constructor)
+        .expect("implicit Owner constructor");
+    assert!(
+        constructor.receiver_field_initializers.iter().any(|initializer| {
+            initializer.target == "self.dependency" && initializer.call_name == "lower"
+        }),
+        "cross-file property construction must remain an exact unresolved header fact: {:#?}",
+        constructor.receiver_field_initializers
+    );
+}
+
+#[test]
+fn explicit_class_initializers_include_only_executable_instance_property_prefixes() {
+    use bonsai_lang_api::{DeclKind, FlowEvent, LanguageAdapter};
+    use std::sync::Arc;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_swift::SwiftAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[
+            (
+                "Dependencies.swift",
+                "class lower {}\nclass static_lower {}\nclass nested_lower {}\n",
+            ),
+            (
+                "Owner.swift",
+                r#"
+class Owner {
+    let dependency = lower()
+    static let shared = static_lower()
+    init(_ seed: String) { _ = seed }
+    func helper() { let ignored = nested_lower() }
+}
+"#,
+            ),
+        ],
+    );
+    let global = ws.db().global_index();
+    let constructor = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "Owner" && decl.kind == DeclKind::Constructor)
+        .expect("explicit Owner constructor");
+
+    assert!(constructor
+        .receiver_field_initializers
+        .iter()
+        .any(|initializer| { initializer.target == "self.dependency" && initializer.call_name == "lower" }));
+    let calls = constructor
+        .flow_events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Call { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        calls.contains(&"lower"),
+        "constructor events: {:#?}",
+        constructor.flow_events
+    );
+    assert!(
+        !calls.contains(&"static_lower") && !calls.contains(&"nested_lower"),
+        "type properties and method bodies do not execute as instance initializer prefixes: {:#?}",
+        constructor.flow_events
+    );
+}
+
+#[test]
+fn implicit_class_initializers_follow_swift_inheritance_and_default_rules() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, DeclKind, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_swift::SwiftAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("Constructors.swift"),
+        r#"
+class Base {
+    let value: String
+    init(_ value: String) { self.value = value }
+}
+class Child: Base {}
+class InvalidRoot { let value: String }
+class DefaultedRoot { let value = "ready" }
+protocol Marker {}
+class DefaultedConformer: Marker { let value = "ready" }
+"#,
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        tree_provider: None,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+    let class_symbol = |name: &str| {
+        idx.defs
+            .iter()
+            .find(|decl| decl.name == name && decl.kind == DeclKind::Class)
+            .map(|decl| decl.symbol)
+            .unwrap_or_else(|| panic!("missing class {name}"))
+    };
+
+    let child = class_symbol("Child");
+    let invalid = class_symbol("InvalidRoot");
+    let defaulted = class_symbol("DefaultedRoot");
+    let conformer = class_symbol("DefaultedConformer");
+    assert!(
+        idx.defs
+            .iter()
+            .all(|decl| decl.kind != DeclKind::Constructor || decl.parent != Some(child)),
+        "a subclass inherits its base designated initializer"
+    );
+    assert!(
+        idx.defs
+            .iter()
+            .all(|decl| decl.kind != DeclKind::Constructor || decl.parent != Some(invalid)),
+        "an uninitialized stored property prevents a synthesized initializer"
+    );
+    assert!(
+        idx.defs
+            .iter()
+            .any(|decl| decl.kind == DeclKind::Constructor && decl.parent == Some(defaulted)),
+        "a root class whose stored properties have defaults receives init()"
+    );
+    assert!(
+        idx.defs
+            .iter()
+            .any(|decl| decl.kind == DeclKind::Constructor && decl.parent == Some(conformer)),
+        "protocol conformance is not superclass inheritance"
     );
 }
 

@@ -37,10 +37,14 @@ Analysis sidecars live in a canonical-path-keyed OS cache directory, not in
 the inspected repository; `cache stats <workspace>` reports it and
 `BONSAI_WORKSPACE_DIR` overrides it. Workspace-local rule overlays remain
 under `<workspace>/.bonsai/rules/` and are not analysis caches.
+Compiler-object publication prunes unlocked older recognized schema
+generations automatically. Use `cache clear <workspace>` only to deliberately
+discard every reusable sidecar; it never modifies source.
 
 Treat the analyzer as a compiler pipeline. Each language adapter owns its
 Tree-sitter grammar, source-syntax recognition, declaration/import lowering,
-and `FlowEvent`/capability facts. Shared analysis consumes that typed IR; do
+literal/value node inventories, and `FlowEvent`/capability facts. Shared
+analysis consumes that typed IR; do
 not add language-id branches, cross-language token inventories, or API-name
 guesses to shared crates. Library/package/framework identities and every
 security-sensitive value belong in `security-patterns/langs/<lang>`, not in
@@ -57,6 +61,16 @@ of per-file compiler objects. Each object is exact adapter-lowered IR plus
 diagnostics, validated by path, adapter, frontend ABI, and SHA-256 source
 content. Later phases stream those objects; persisted IDG construction lowers
 transfer facts once and replays typed stitch records/node maps per segment.
+Exact call/return/callback/type/value-shape headers and direct-call
+receiver-field initializer linkage remain independently decodable; adapters prove syntax and
+workspace linking resolves constructor identity without capitalization or
+callee-name guesses. Shared clean-overwrite analysis consumes exact literal
+facts and never treats identifier capitalization as value evidence.
+Rulepack return typing retains its import constraints, and exact workspace
+values/functions shadow external constructor models; ambiguity fails closed.
+Rulepack-only receiver typing is compiled through the canonical matcher into
+exact AST call spans before IDG construction. Those spans participate in the
+transfer fingerprint; the shared IDG consumes proven sites, never API names.
 Derived semantic pipeline identities include the compiler-object frontend ABI,
 so lowering changes invalidate older callgraph/IDG sidecars even when source
 bytes are unchanged; root-only validation reconstructs the same identity.

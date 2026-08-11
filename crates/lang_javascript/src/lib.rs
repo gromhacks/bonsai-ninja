@@ -6,55 +6,80 @@ use bonsai_lang_api::{
         call_arg_from_nodes_with_handler, collect_kinds, first_named_child_of_kind, language_from_pack,
         node_text, normalize_call_name_whitespace, parse_with, span_of,
     },
-    AdapterContext, AdapterError, CharacterSubstitutionDomain, CharacterSubstitutionFact, ConditionEquality,
-    ConditionExpressionFact, ConditionOperandFact, DeclIndex, DynamicKeyFilterFact,
-    FiniteLiteralSelectionFact, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
-    LanguageCapabilities, LanguageId, SameOriginPathConstraintFact, StaticScalarValue, StaticStringMapEntry,
-    StaticStringMapFact, StringCompositionFact, StringCompositionPart, TypeAliasBinding, Visibility,
-    EMPTY_HANDLER,
+    AdapterContext, AdapterError, CallTargetExtraction, CharacterSubstitutionDomain,
+    CharacterSubstitutionFact, ConditionEquality, ConditionExpressionFact, ConditionOperandFact, DeclIndex,
+    DynamicKeyFilterFact, FiniteLiteralSelectionFact, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
+    LanguageAdapter, LanguageCapabilities, LanguageId, SameOriginPathConstraintFact, StaticScalarValue,
+    StaticStringMapEntry, StaticStringMapFact, StringCompositionFact, StringCompositionPart,
+    TypeAliasBinding, Visibility, EMPTY_HANDLER,
 };
 use bonsai_lang_api::{CallArg, CallKind, DeclKind, FlowEvent};
 use std::collections::{HashMap, HashSet};
 use tree_sitter::{Language, Node, Tree};
 
+fn javascript_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    let target = match node.kind() {
+        "call_expression" => node.child_by_field_name("function")?,
+        "new_expression" => node.child_by_field_name("constructor")?,
+        _ => return None,
+    };
+    let full_text = node_text(&target, src).trim();
+    (!full_text.is_empty()).then_some(CallTargetExtraction {
+        node: target,
+        full_text: full_text.to_string(),
+    })
+}
+
+fn javascript_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    (node.kind() == "for_in_statement")
+        .then(|| {
+            Some((
+                node.child_by_field_name("left")?,
+                node.child_by_field_name("right")?,
+            ))
+        })
+        .flatten()
+}
+
 pub const LANG_ID: LanguageId = LanguageId::new("javascript");
 pub const JS_TS_MODULE_RESOLUTION_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs"];
 const PACK_NAME: &str = "javascript";
-/// Lifecycle transitions shared by JavaScript and TypeScript, which execute
-/// on the same ECMAScript runtime API surface.
-pub const ECMASCRIPT_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "close",
-        transition: "closed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "destroy",
-        transition: "freed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "abort",
-        transition: "cancelled",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "unsubscribe",
-        transition: "cancelled",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "cancel",
-        transition: "cancelled",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "release",
-        transition: "unlocked",
-        arg_index: 0,
-    },
-];
 const HANDLER: GrammarHandler = GrammarHandler {
+    expression_value_kind_extractor: None,
+    literal_value_kinds: &["null", "number", "true", "false"],
+    string_literal_kinds: &["string", "template_string"],
+    comment_kinds: &["comment", "hash_bang_line"],
+    doc_comment_prefixes: &["/**"],
+    decorator_kinds: &["decorator"],
+    parameter_container_kinds: &["formal_parameters"],
+    parameter_kinds: &["identifier", "required_parameter", "optional_parameter"],
+    parameter_annotation_kinds: &["decorator"],
+    variadic_parameter_kinds: &["rest_pattern", "rest_parameter"],
+    destructured_parameter_kinds: &["object_pattern", "array_pattern"],
+    binding_identifier_kinds: &["identifier", "shorthand_property_identifier_pattern"],
+    binding_lhs_pattern_kinds: &["assignment_pattern"],
+    binding_pattern_field_names: &["left"],
+    non_binding_pattern_field_names: &["type", "key", "property"],
+    identifier_kinds: &["identifier", "shorthand_property_identifier", "this", "super"],
+    aggregate_pattern_kinds: &["array_pattern", "object_pattern"],
+    named_aggregate_kinds: &["object"],
+    positional_aggregate_kinds: &["array"],
+    aggregate_pair_kinds: &["pair", "pair_pattern"],
+    aggregate_key_field_names: &["key"],
+    aggregate_value_field_names: &["value"],
+    static_field_name_kinds: &["identifier", "property_identifier"],
+    shorthand_field_kinds: &["shorthand_property_identifier"],
+    spread_kinds: &["spread_element"],
+    spread_value_field_names: &["argument"],
+    lambda_value_container_kinds: &["object", "pair", "array"],
+    transparent_call_wrapper_kinds: &[
+        "member_expression",
+        "parenthesized_expression",
+        "await_expression",
+    ],
+    single_expression_group_kinds: &["expressions"],
+    assignment_target_wrapper_kinds: &["variable_declarator"],
+    binding_declaration_keyword_spellings: &["var", "let", "const"],
     fn_kinds: &[
         "function_declaration",
         "function_expression",
@@ -67,27 +92,59 @@ const HANDLER: GrammarHandler = GrammarHandler {
     method_kinds: &["method_definition"],
     method_context_kinds: &["class_declaration"],
     if_kinds: &["if_statement", "switch_statement"],
+    branch_then_field_names: &["consequence", "body"],
+    branch_else_field_names: &["alternative"],
+    branch_condition_field_names: &["condition", "value"],
+    loop_body_field_names: &["body"],
+    loop_body_kinds: &["statement_block", "expression_statement"],
+    branch_arm_kinds: &[
+        "statement_block",
+        "expression_statement",
+        "switch_case",
+        "switch_default",
+    ],
     for_kinds: &["for_statement"],
     foreach_kinds: &["for_in_statement"],
+    foreach_binding_extractor: Some(javascript_foreach_binding),
     while_kinds: &["while_statement"],
     do_kinds: &["do_statement"],
     call_kinds: &["call_expression", "new_expression"],
+    constructor_call_kinds: &["new_expression"],
+    call_callee_field_names: &["function", "constructor"],
+    constructor_type_field_names: &["constructor"],
+    call_target_extractor: Some(javascript_call_target),
+    call_argument_field_names: &["arguments"],
+    call_argument_container_kinds: &["arguments"],
+    argument_wrapper_kinds: &["pair"],
+    argument_name_field_names: &["key"],
+    argument_value_field_names: &["value"],
+    transparent_expression_wrapper_kinds: &["parenthesized_expression"],
+    lambda_body_field_names: &["body"],
     pseudo_call_extractor: Some(extract_ecmascript_pseudo_call),
     syntax_event_extractor: None,
     argument_passing_mode_extractor: None,
     call_ref_kinds: &["call_expression", "new_expression"],
     member_expression_kinds: &["member_expression"],
     subscript_expression_kinds: &["subscript_expression"],
+    member_base_field_names: &["object"],
+    member_name_field_names: &["property"],
+    subscript_base_field_names: &["object"],
+    subscript_index_field_names: &["index"],
+    static_subscript_key_extractor: Some(ecmascript_static_subscript_key),
     constructor_names: &["constructor"],
     runtime_type_guard_operators: &["instanceof"],
     runtime_typeof_operators: &["typeof"],
     runtime_type_equality_operators: &["==", "==="],
+    runtime_type_wrapper_kinds: &["parenthesized_expression"],
     value_free_unary_operators: &["typeof"],
     assignment_kinds: &[
         "assignment_expression",
         "augmented_assignment_expression",
         "variable_declarator",
         "variable_declaration",
+    ],
+    compound_assignment_operators: &[
+        "+=", "-=", "*=", "/=", "%=", "**=", "<<=", ">>=", ">>>=", "&=", "^=", "|=", "&&=", "||=", "??=",
     ],
     return_kinds: &["return_statement"],
     throw_kinds: &["throw_statement"],
@@ -97,9 +154,13 @@ const HANDLER: GrammarHandler = GrammarHandler {
     finally_kinds: &["finally_clause"],
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
+    control_label_field_names: &["label"],
     yield_kinds: &["yield_expression"],
+    yield_value_field_names: &["argument"],
     await_kinds: &["await_expression"],
     using_kinds: &["with_statement"],
+    using_body_field_names: &["body"],
+    try_body_field_names: &["body"],
     implicit_receiver_names: &["this"],
     ..EMPTY_HANDLER
 };
@@ -261,14 +322,8 @@ impl LanguageAdapter for JavaScriptAdapter {
             rewrite_javascript_super_constructor_invocations(&mut decl_index);
             apply_javascript_getter_property_sources(&mut decl_index, &tree, src, file);
         }
-        // Recognised JavaScript lifecycle transitions. Mirrors the
-        // common Node.js / browser surface: streams (`close`,
-        // `destroy`), `AbortController` (`abort`), RxJS-style
-        // observables (`unsubscribe`), promises / animations
-        // (`cancel`), and pooled resources (`release`).
         for decl in &mut decl_index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, ECMASCRIPT_LIFECYCLE_TRANSITIONS);
         }
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             rewrite_javascript_object_destructuring_sources(
@@ -291,12 +346,9 @@ impl LanguageAdapter for JavaScriptAdapter {
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
         // Local constructor-result receiver typing
-        // (`const c = new Foo()` → `c: Foo`) so `c.method(...)` carries a
-        // resolved receiver type for `receiver_type_in` / `[Type, method]`
-        // rules — the memory-endorsed alternative to loosening the package
-        // gate for receiver-variable calls. JS class names are uppercase
-        // and free functions are camelCase, so the constructor heuristic
-        // is reliable here (unlike Go's uppercase-exported-function form).
+        // (`const c = new Foo()` → `c: Foo`) comes from the `new_expression`
+        // CST node or exact declaration resolution. JavaScript identifiers
+        // are never classified from capitalization conventions.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut decl_index);
         bonsai_lang_api::apply_class_field_type_aliases(&mut decl_index);
         bonsai_lang_api::apply_call_receiver_types(&mut decl_index);
@@ -2733,6 +2785,13 @@ fn ecmascript_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarVa
             node, src,
         )?)),
         _ => None,
+    }
+}
+
+pub fn ecmascript_static_subscript_key(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match ecmascript_static_scalar(node, src)? {
+        StaticScalarValue::String(value) => Some(value),
+        StaticScalarValue::Boolean(_) | StaticScalarValue::Null => None,
     }
 }
 

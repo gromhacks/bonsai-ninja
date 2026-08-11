@@ -520,7 +520,7 @@ fn free_function_string_coercion_preserves_taint() {
 /// receiver that is NOT literally named `cursor` still matches the receiver-typed
 /// `cursor.execute` SQLi sink. Without the typing rule `c.execute` is a miss
 /// (`c` is not named `cursor`). The typing rule itself is never a finding — it
-/// feeds build_factory_returns via all_rules().
+/// feeds build_rulepack_typing via all_rules().
 #[test]
 fn factory_return_cursor_typing_fires() {
     let src = "import sqlite3\ndef example(user_input):\n    c = sqlite3.connect(\"db\").cursor()\n    c.execute(user_input)\n";

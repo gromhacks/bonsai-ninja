@@ -607,7 +607,10 @@ fn return_sink_rulepack(lang: &str) -> Rulepack {
         },
         analysis_semantics: None,
         taint_semantics: None,
+        lifecycle_transition: None,
         returns_type: None,
+        callback_param_types: Vec::new(),
+        callback_arg_index: None,
         constraints: RuleConstraint::default(),
         match_examples: Vec::new(),
         description: "return sink fixture".to_string(),
@@ -796,7 +799,10 @@ fn rule(
         },
         analysis_semantics: None,
         taint_semantics: None,
+        lifecycle_transition: None,
         returns_type: None,
+        callback_param_types: Vec::new(),
+        callback_arg_index: None,
         constraints: RuleConstraint::default(),
         match_examples: Vec::new(),
         description: "source-to-sink security pipeline fixture".to_string(),
@@ -2057,7 +2063,6 @@ fn kotlin_mega_flow_preserves_implicit_getter_receiver_state() {
         .iter()
         .filter_map(|node| idg.resolve_point(*node))
         .collect::<Vec<_>>();
-
     assert!(
         execute_nodes.iter().any(|node| {
             closure.contains(node)
@@ -2105,7 +2110,6 @@ fn swift_mega_flow_preserves_computed_getter_receiver_state() {
         .iter()
         .filter_map(|node| idg.resolve_point(*node))
         .collect::<Vec<_>>();
-
     assert!(
         execute_nodes.iter().any(|node| {
             closure.contains(node)
@@ -2250,6 +2254,53 @@ fn java_mega_flow_preserves_record_and_inherited_receiver_state() {
 }
 
 #[test]
+fn cpp_mega_flow_relevance_matches_the_exact_forward_closure() {
+    let ws = index_real_fixture("cpp", "mega_flow");
+    let global = ws.db().global_index();
+    let idg = ensure_idg_service(ws.db());
+    let main = ws.lookup_function("main").expect("C++ main function");
+    let seed_nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::token_api(main, &TokenSet::from_iter(["argv".to_string()])),
+        global.as_ref(),
+        idg.as_ref(),
+    );
+    let closure = idg.forward_closure(&seed_nodes);
+    let execute = ws.lookup_function("execute").expect("C++ execute function");
+    let sink_span = global
+        .decl_of(bonsai_common::SymbolId::new(execute.raw()))
+        .expect("execute declaration")
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { span, name, .. } if name == "std::system" => Some(*span),
+            _ => None,
+        })
+        .expect("std::system sink call");
+    let sink_nodes = idg.nodes_at_span(execute, sink_span);
+    let points = |nodes: &[bonsai_idg::WsNodeId]| {
+        nodes
+            .iter()
+            .filter_map(|node| idg.resolve_point(*node))
+            .collect::<Vec<_>>()
+    };
+
+    assert!(
+        sink_nodes.iter().any(|node| closure.contains(node)),
+        "argv's exact forward closure must reach the std::system argument; seeds={:#?}; sinks={:#?}; closure={:#?}",
+        points(&seed_nodes),
+        points(&sink_nodes),
+        points(&closure)
+    );
+    let relevance = idg.target_relevance_with_max_precision(&sink_nodes, None, None);
+    assert!(
+        relevance.admits_any(&seed_nodes),
+        "backward target relevance must be a conservative inverse of the exact forward closure; seeds={:#?}; sinks={:#?}",
+        points(&seed_nodes),
+        points(&sink_nodes)
+    );
+}
+
+#[test]
 fn javascript_mega_flow_preserves_constructor_and_getter_state_after_external_transforms() {
     let ws = index_real_fixture("javascript", "mega_flow");
     let global = ws.db().global_index();
@@ -2381,7 +2432,9 @@ fn php_mega_flow_preserves_projected_state_through_a_chained_call_receiver() {
         .flow_events
         .iter()
         .find_map(|event| match event {
-            FlowEvent::Call { span, name, .. } if name.ends_with("->run") => Some(*span),
+            FlowEvent::Call { span, name, .. } if bonsai_common::short_qualified_tail(name) == "run" => {
+                Some(*span)
+            }
             _ => None,
         })
         .expect("chained run call");
@@ -2420,6 +2473,63 @@ fn php_mega_flow_preserves_projected_state_through_a_chained_call_receiver() {
          shell_exec($cmd); receiver_facts={chained_receiver_facts:#?}; \
          persist_names={persist_names:#?}; shell_exec_nodes={shell_exec_nodes:#?}; \
          closure={returned_points:#?}"
+    );
+}
+
+#[test]
+fn php_mega_flow_source_call_reaches_the_exact_sink_argument() {
+    let ws = index_real_fixture("php", "mega_flow");
+    let global = ws.db().global_index();
+    let idg = ensure_idg_service(ws.db());
+    let entry = ws
+        .lookup_function("handle_request")
+        .expect("PHP handle_request function");
+    let source_span = global
+        .decl_of(bonsai_common::SymbolId::new(entry.raw()))
+        .expect("handle_request declaration")
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { span, name, .. } if name == "readline" => Some(*span),
+            _ => None,
+        })
+        .expect("readline source call");
+    let seed_nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::rule_match(
+            entry,
+            &TokenSet::from_iter(["$raw".to_string()]),
+            Some(source_span),
+            &[],
+        ),
+        global.as_ref(),
+        idg.as_ref(),
+    );
+    let closure = idg.forward_closure(&seed_nodes);
+    let execute = ws.lookup_function("execute").expect("PHP execute function");
+    let sink_span = global
+        .decl_of(bonsai_common::SymbolId::new(execute.raw()))
+        .expect("execute declaration")
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { span, name, .. } if name == "shell_exec" => Some(*span),
+            _ => None,
+        })
+        .expect("shell_exec sink call");
+    let sink_nodes = idg.nodes_at_span(execute, sink_span);
+    let points = |nodes: &[bonsai_idg::WsNodeId]| {
+        nodes
+            .iter()
+            .filter_map(|node| idg.resolve_point(*node))
+            .collect::<Vec<_>>()
+    };
+
+    assert!(
+        sink_nodes.iter().any(|node| closure.contains(node)),
+        "readline's anchored CallRet must reach shell_exec's CallArg; seeds={:#?}; sinks={:#?}; closure={:#?}",
+        points(&seed_nodes),
+        points(&sink_nodes),
+        points(&closure)
     );
 }
 
@@ -3210,7 +3320,10 @@ fn sanitizer_wrapping_source_attaches_to_same_function_flow() {
         },
         analysis_semantics: None,
         taint_semantics: None,
+        lifecycle_transition: None,
         returns_type: None,
+        callback_param_types: Vec::new(),
+        callback_arg_index: None,
         constraints: RuleConstraint::default(),
         match_examples: Vec::new(),
         description: "test ESAPI sanitizer".to_string(),
@@ -3292,7 +3405,10 @@ fn nested_fully_qualified_esapi_sanitizer_inside_sink_arg_attaches() {
             output_arg_flows: Vec::new(),
             taint_receiver_from_args: false,
         }),
+        lifecycle_transition: None,
         returns_type: None,
+        callback_param_types: Vec::new(),
+        callback_arg_index: None,
         constraints: RuleConstraint::default(),
         match_examples: Vec::new(),
         description: "test fully qualified ESAPI sanitizer".to_string(),
@@ -3379,7 +3495,10 @@ fn sanitizer_in_helper_return_attaches_after_chain_display_collapse() {
             output_arg_flows: Vec::new(),
             taint_receiver_from_args: false,
         }),
+        lifecycle_transition: None,
         returns_type: None,
+        callback_param_types: Vec::new(),
+        callback_arg_index: None,
         constraints: RuleConstraint::default(),
         match_examples: Vec::new(),
         description: "test ESAPI sanitizer in helper return".to_string(),
@@ -3452,7 +3571,10 @@ fn sanitized_flows_are_hidden_by_default_and_visible_on_request() {
         },
         analysis_semantics: None,
         taint_semantics: None,
+        lifecycle_transition: None,
         returns_type: None,
+        callback_param_types: Vec::new(),
+        callback_arg_index: None,
         constraints: RuleConstraint::default(),
         match_examples: Vec::new(),
         description: "test ESAPI sanitizer".to_string(),

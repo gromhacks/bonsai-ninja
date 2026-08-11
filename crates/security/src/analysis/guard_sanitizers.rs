@@ -244,7 +244,6 @@ pub(super) fn runtime_type_rejection_guard_sanitizer(
         .iter()
         .filter(|arg| arg.index == semantics.filter_arg_index)
         .flat_map(tainted_arg_target_keys)
-        .filter(|target| !looks_like_clean_constant(target))
         .collect();
     if sink_targets.is_empty() {
         return None;
@@ -474,7 +473,6 @@ fn target_is_built_only_from_runtime_safe_values(
         .filter(|call| span_contains(assignment.span, call.span))
         .flat_map(|call| call.args.iter())
         .filter_map(|arg| arg.place.as_deref().and_then(clean_overwrite_target_key))
-        .filter(|place| !looks_like_clean_constant(place))
         .collect();
     if dependencies.is_empty() {
         dependencies.extend(
@@ -482,8 +480,7 @@ fn target_is_built_only_from_runtime_safe_values(
                 .source_name
                 .into_iter()
                 .chain(assignment.source_names.iter().map(String::as_str))
-                .filter_map(clean_overwrite_target_key)
-                .filter(|place| !looks_like_clean_constant(place)),
+                .filter_map(clean_overwrite_target_key),
         );
     }
     dependencies.sort();
@@ -5186,7 +5183,16 @@ fn url_collection_is_static(
     else {
         return false;
     };
-    if assignment.direct_call_name.is_none() && expression_flow_is_literal(&assignment.value_flow) {
+    // Some languages represent typed aggregate literals with constructor-like
+    // syntax (for example a map or record literal). The frontend therefore
+    // retains a `direct_call_name` for type/receiver analysis even though the
+    // exact aggregate value is wholly static. Accept that compiler-proven
+    // aggregate shape, while keeping an empty call-result flow non-static.
+    let has_exact_literal_aggregate =
+        !assignment.value_flow.aggregate_fields.is_empty() || !assignment.value_flow.tuple_items.is_empty();
+    if expression_flow_is_literal(&assignment.value_flow)
+        && (assignment.direct_call_name.is_none() || has_exact_literal_aggregate)
+    {
         return true;
     }
     if assignment.direct_call_name.as_deref().is_some_and(|callee| {

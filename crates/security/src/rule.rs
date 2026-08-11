@@ -1,4 +1,5 @@
-//! Rule schema — the in-memory shape of one `sources/sinks/sanitizers` YAML entry.
+//! Rule schema — the in-memory shape of one
+//! `sources/sinks/sanitizers/typing` YAML entry.
 //!
 //! Fields mirror `docs/security-spec.mdx § Rule schema` exactly. Unknown YAML
 //! fields are rejected by the loader so rulepacks catch typos at load time
@@ -7,23 +8,22 @@
 use bonsai_lang_api::{DeclKind, StaticScalarValue, Visibility};
 use serde::{de, Deserialize, Deserializer, Serialize};
 
-/// Which of the three rule families a rule belongs to. Derived from the
+/// Which of the four rule families a rule belongs to. Derived from the
 /// directory the YAML file is loaded from (`sources/`, `sinks/`,
-/// `sanitizers/`) — never declared inside the rule itself.
+/// `sanitizers/`, `typing/`) — never declared inside the rule itself.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleKind {
     Source,
     Sink,
     Sanitizer,
-    /// Typing-only rules (`typing/` dir). They declare a factory
-    /// method's return type via `returns_type` so the matcher can
-    /// resolve `receiver_type_in` on locals assigned from that factory
-    /// (`c = engine.connect().cursor()` → `c: Cursor`). They NEVER
-    /// produce findings — `build_factory_returns` reads them via
-    /// `all_rules()`, but they are excluded from every source/sink/
-    /// sanitizer finding + inventory path, and from sink-only
-    /// validation/conformance checks (cwe, severity, sink-doc, SARIF).
+    /// Typing-only rules (`typing/` dir). They declare external compiler
+    /// models such as factory return types, callback parameter signatures,
+    /// and library transfer semantics. They NEVER produce findings —
+    /// `build_rulepack_typing` reads them via `all_rules()`, but they are
+    /// excluded from every source/sink/sanitizer finding and inventory path,
+    /// and from sink-only validation/conformance checks (CWE, severity,
+    /// sink documentation, and SARIF).
     Typing,
 }
 
@@ -52,7 +52,7 @@ impl RuleKind {
 }
 
 /// Source trust classes per spec.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TrustClass {
     Remote,
@@ -165,10 +165,13 @@ impl PayloadType {
 }
 
 /// A match kind — the browse-fact family the rule narrows.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchKind {
     Call,
+    /// Match an exact compiler-declared callable/interface type. This kind
+    /// is consumed only by typing rules; it never emits a finding.
+    Type,
     Read,
     Write,
     New,
@@ -392,6 +395,32 @@ pub struct TaintSemantics {
     /// engine never owns a central method-name list.
     #[serde(default, skip_serializing_if = "is_false")]
     pub taint_receiver_from_args: bool,
+}
+
+/// Which compiler binding a rule-declared lifecycle call changes.
+///
+/// Provider and API identities stay in the typing rule's structured
+/// `match` target. This enum describes only the language-neutral transfer:
+/// a method changes its receiver, or a function changes one positional
+/// argument.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LifecycleBindingTarget {
+    Receiver,
+    Argument { index: u32 },
+}
+
+/// Non-finding lifecycle transfer compiled from a `typing/` rule.
+///
+/// For example, a rule can match `close` and declare that its receiver moves
+/// to `closed`, while a `free` rule declares argument zero `freed`. The
+/// matcher consumes exact adapter-emitted call facts; neither adapters nor
+/// shared analysis own provider API spellings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleTransitionSemantics {
+    pub state: String,
+    pub binding: LifecycleBindingTarget,
 }
 
 /// Language-independent semantic classes used only when selecting the
@@ -1904,6 +1933,12 @@ pub struct Rule {
     pub analysis_semantics: Option<AnalysisSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taint_semantics: Option<TaintSemantics>,
+    /// Typing-only rulepack declaration for a call that changes the
+    /// lifecycle state of its receiver or one positional argument. External
+    /// API spellings remain in `match`; shared analysis consumes only this
+    /// generic transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_transition: Option<LifecycleTransitionSemantics>,
     /// Rulepack-declared factory-method return type. When a rule names
     /// a factory method via its structured `match` callee (`name:
     /// cursor` or `attribute: [Connection, cursor]`) and sets
@@ -1914,6 +1949,16 @@ pub struct Rule {
     /// `taint_receiver_from_args`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returns_type: Option<String>,
+    /// Rulepack-declared parameter types for an otherwise untyped inline
+    /// callback. The outer vector follows callback parameter order; each
+    /// inner vector may carry both qualified and short aliases for that one
+    /// parameter. For `match.kind: call`, `callback_arg_index` selects the
+    /// callback argument. For `match.kind: type`, the target selects the
+    /// compiler-declared functional-interface/callable type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub callback_param_types: Vec<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_arg_index: Option<u32>,
     #[serde(default, skip_serializing_if = "RuleConstraint::is_empty")]
     pub constraints: RuleConstraint,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -13,10 +13,9 @@
 /// expression node, which can leave `source_name = Some(callee)` and
 /// `source_names = [callee, arg, ...]`. That duplicates the
 /// source-to-target path and can fabricate self-loop or overtainted
-/// chains. Keep semantic receiver tokens because method receivers can
-/// be data-bearing (`target.call(payload)`), and keep uppercase
-/// receiver factory tails (`Logger.getLogger`) for existing type
-/// inference heuristics.
+/// chains. Keep semantic receiver tokens because method receivers can be
+/// data-bearing (`target.call(payload)`), but always remove the callee tail.
+/// Capitalization is not static/type evidence.
 pub fn normalize_call_result_assignment_sources(events: &mut [crate::FlowEvent]) {
     for event_index in 0..events.len() {
         let adjacent_call_args = adjacent_call_args_for_call_result_assignment(events, event_index);
@@ -127,7 +126,7 @@ fn prune_call_result_source_names(
         {
             return false;
         }
-        let Some((receiver, tail, receiver_is_type)) = receiver_and_tail else {
+        let Some((receiver, tail)) = receiver_and_tail else {
             return !arg_identifiers
                 .iter()
                 .any(|arg| call_result_identifier_names_match(arg, name));
@@ -136,7 +135,7 @@ fn prune_call_result_source_names(
             return true;
         }
         if name == tail {
-            return receiver_is_type;
+            return false;
         }
         !arg_identifiers
             .iter()
@@ -162,17 +161,13 @@ fn call_result_names_match(left: &str, right: &str) -> bool {
     call_result_short_tail(left) == call_result_short_tail(right)
 }
 
-fn call_receiver_and_tail(call: &str) -> Option<(&str, &str, bool)> {
+fn call_receiver_and_tail(call: &str) -> Option<(&str, &str)> {
     let receiver = bonsai_common::qualified_name_owner(call)?.trim();
     let tail = bonsai_common::short_qualified_tail(call).trim();
     if receiver.is_empty() || tail.is_empty() {
         return None;
     }
-    Some((
-        receiver,
-        tail,
-        receiver.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()),
-    ))
+    Some((receiver, tail))
 }
 
 fn call_result_short_tail(name: &str) -> &str {

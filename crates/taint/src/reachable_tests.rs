@@ -48,6 +48,28 @@ fn call_summary_cache_for(
 }
 
 #[test]
+fn receiver_state_exact_site_evidence_accepts_public_config_ordering() {
+    let file = FileId::new(7);
+    let first = Span::new(file, 10, 20);
+    let matched = Span::new(file, 30, 40);
+    let configured = vec![crate::idg_api::ReceiverStatePropagation {
+        method: "append".to_string(),
+        receiver_type: Some("ExternalBuffer".to_string()),
+        // Deliberately reverse-sorted: callers of the public config type do
+        // not owe the query facade an internal canonicalization step.
+        resolved_call_sites: vec![matched, first],
+    }];
+
+    assert!(receiver_state_matches(&configured, matched, "buffer.append", &[],));
+    assert!(!receiver_state_matches(
+        &configured,
+        Span::new(file, 50, 60),
+        "buffer.append",
+        &[],
+    ));
+}
+
+#[test]
 fn sentinel_argument_uses_ast_receiver_but_return_does_not() {
     let call_span = Span::new(FileId::new(0), 10, 20);
     let summary = CallEventSummary {
@@ -939,6 +961,7 @@ fn rulepack_declared_receiver_result_passthrough_seeds_call_return() {
             bases: Vec::new(),
             receiver_param_index: None,
             receiver_field_writes: Vec::new(),
+            receiver_field_initializers: Vec::new(),
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
             return_type: None,
@@ -1094,6 +1117,7 @@ fn rulepack_declared_arg_result_passthrough_accepts_descendant_container_input()
             bases: Vec::new(),
             receiver_param_index: None,
             receiver_field_writes: Vec::new(),
+            receiver_field_initializers: Vec::new(),
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
             return_type: None,

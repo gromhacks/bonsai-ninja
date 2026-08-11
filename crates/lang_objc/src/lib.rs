@@ -11,14 +11,62 @@ use bonsai_lang_api::{
         c_family_preproc_imports, collect_kinds, first_named_child_of_kind, language_from_pack, node_text,
         package_module_segments_with_workspace_prefix, parse_with, span_of,
     },
-    AdapterContext, AdapterError, ArgumentPassingMode, AssignValueKind, DeclIndex, DeclKind, FieldWrite,
-    FlowEvent, GrammarHandler, ImportIndex, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    ModulePath, SyntaxSpecialForm, TypeAliasBinding,
+    AdapterContext, AdapterError, ArgumentPassingMode, AssignValueKind, DeclIndex, DeclKind,
+    ExpressionPlaceExtraction, FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportSpec,
+    LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, SyntaxSpecialForm, TypeAliasBinding,
 };
 use tree_sitter::{Language, Node, Tree};
 
+fn objc_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    if node.kind() == "for_in_statement" {
+        let binding = node
+            .child_by_field_name("left")
+            .or_else(|| node.child_by_field_name("declarator"))?;
+        let iterable = node
+            .child_by_field_name("right")
+            .or_else(|| node.child_by_field_name("value"))?;
+        return Some((binding, iterable));
+    }
+    if node.kind() != "for_statement" {
+        return None;
+    }
+
+    // tree-sitter-objc represents both C-style `for (;;)` and Objective-C
+    // fast enumeration as `for_statement`.  The `in` token is the exact CST
+    // discriminator.  Its nearest named siblings are the declarator pattern
+    // and iterable expression; the preceding type node is intentionally not
+    // treated as a binding.
+    let child_count = u32::try_from(node.child_count()).ok()?;
+    let in_index =
+        (0..child_count).find(|index| node.child(*index).is_some_and(|child| child.kind() == "in"))?;
+    let binding = (0..in_index)
+        .rev()
+        .filter_map(|index| node.child(index))
+        .find(Node::is_named)?;
+    let iterable = ((in_index + 1)..child_count)
+        .filter_map(|index| node.child(index))
+        .find(Node::is_named)?;
+    Some((binding, iterable))
+}
+
 pub const LANG_ID: LanguageId = LanguageId::new("objc");
 const PACK_NAME: &str = "objc";
+
+fn objc_indirect_place_operand(node: Node<'_>) -> Option<Node<'_>> {
+    if !matches!(node.kind(), "pointer_expression" | "unary_expression") {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let has_indirection = node
+        .children(&mut cursor)
+        .any(|child| matches!(child.kind(), "*" | "&"));
+    has_indirection
+        .then(|| {
+            node.child_by_field_name("argument")
+                .or_else(|| node.child_by_field_name("operand"))
+        })
+        .flatten()
+}
 
 // Objective-C handler. Mixes C-style functions with Objective-C
 // methods. `*_method_declaration` covers `@interface` headers (no body)
@@ -28,6 +76,41 @@ const PACK_NAME: &str = "objc";
 // `using` (resource-managed scope) since `body` then runs under the
 // managed lock / pool.
 const HANDLER: GrammarHandler = GrammarHandler {
+    literal_value_kinds: &["null", "true", "false"],
+    string_literal_kinds: &["string_literal", "char_literal", "concatenated_string"],
+    comment_kinds: &["comment"],
+    doc_comment_prefixes: &["///", "//!", "/**"],
+    decorator_kinds: &["attribute"],
+    parameter_container_kinds: &["parameter_list"],
+    parameter_kinds: &["parameter", "method_parameter", "parameter_declaration"],
+    parameter_annotation_kinds: &["attribute"],
+    parameter_annotation_name_extractor: None,
+    keyword_parameter_kinds: &["keyword_argument", "keyword_declarator"],
+    parameter_selector_kinds: &["keyword", "selector_keyword", "identifier"],
+    last_identifier_parameter_kinds: &["method_parameter"],
+    binding_identifier_kinds: &["identifier"],
+    anonymous_variadic_token: Some("..."),
+    identifier_kinds: &["identifier"],
+    named_aggregate_kinds: &["initializer_list", "dictionary_literal"],
+    positional_aggregate_kinds: &["initializer_list", "array_literal"],
+    aggregate_pair_kinds: &["initializer_pair"],
+    two_child_aggregate_pair_kinds: &["dictionary_pair"],
+    aggregate_key_field_names: &["designator"],
+    aggregate_value_field_names: &["value"],
+    static_field_name_kinds: &["field_identifier"],
+    static_subscript_key_extractor: Some(objc_static_string_key),
+    aggregate_syntax_only_kinds: &["type_identifier"],
+    transparent_call_wrapper_kinds: &["field_expression", "parenthesized_expression"],
+    single_expression_group_kinds: &["expression_list"],
+    assignment_target_wrapper_kinds: &[
+        "init_declarator",
+        "declarator",
+        "function_declarator",
+        "pointer_declarator",
+        "parenthesized_declarator",
+        "block_pointer_declarator",
+    ],
+    binding_declaration_keyword_spellings: &["auto", "const"],
     nested_type_ownership: true,
     fn_kinds: &[
         "function_definition",
@@ -55,18 +138,42 @@ const HANDLER: GrammarHandler = GrammarHandler {
     constructor_method_kinds: &[],
     constructor_names: &["init"],
     if_kinds: &["if_statement"],
+    branch_then_field_names: &["consequence", "body"],
+    branch_else_field_names: &["alternative"],
+    branch_condition_field_names: &["condition"],
+    loop_body_field_names: &["body"],
+    loop_body_kinds: &["compound_statement", "expression_statement"],
+    branch_arm_kinds: &["compound_statement", "expression_statement"],
     for_kinds: &["for_statement"],
-    foreach_kinds: &["for_in_statement"],
+    foreach_kinds: &[],
+    foreach_binding_extractor: Some(objc_foreach_binding),
     while_kinds: &["while_statement"],
     do_kinds: &["do_statement"],
     loop_kinds: &[],
     call_kinds: &["call_expression", "message_expression"],
+    call_callee_field_names: &["function"],
+    call_receiver_field_names: &["receiver"],
+    call_member_field_names: &["method"],
+    call_argument_field_names: &["arguments"],
+    call_argument_container_kinds: &["argument_list"],
+    direct_call_argument_excluded_fields: &["receiver", "method"],
+    lambda_body_field_names: &["body"],
     argument_passing_mode_extractor: Some(objc_argument_passing_mode),
+    indirect_place_operand_extractor: Some(objc_indirect_place_operand),
+    expression_value_kind_extractor: Some(objc_expression_value_kind),
     call_ref_kinds: &["call_expression", "message_expression"],
     member_expression_kinds: &["field_expression"],
     subscript_expression_kinds: &["subscript_expression"],
+    member_base_field_names: &["argument"],
+    member_name_field_names: &["field"],
+    subscript_base_field_names: &["argument"],
+    subscript_index_field_names: &["index"],
+    expression_place_extractor: Some(objc_expression_places),
     syntax_error_tolerant_call_names: &["va_arg", "__builtin_va_arg"],
     assignment_kinds: &["assignment_expression", "init_declarator"],
+    compound_assignment_operators: &["+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "&=", "^=", "|="],
+    positional_aggregate_assignment_kinds: &["init_declarator"],
+    positional_aggregate_value_kinds: &["initializer_list"],
     return_kinds: &["return_statement"],
     throw_kinds: &["throw_statement"],
     // Current tree-sitter-objc emits `block_literal`; keep the older
@@ -77,10 +184,13 @@ const HANDLER: GrammarHandler = GrammarHandler {
     finally_kinds: &["finally_clause"],
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
+    control_label_field_names: &[],
     yield_kinds: &[],
     await_kinds: &[],
     defer_kinds: &[],
     using_kinds: &["synchronized_statement", "autoreleasepool_statement"],
+    using_body_field_names: &["body"],
+    try_body_field_names: &["body"],
     special_forms: &[SyntaxSpecialForm::DirectCallArguments],
     value_free_expression_kinds: &["sizeof_expression", "alignof_expression", "typeof_specifier"],
     method_receiver_param_index: None,
@@ -90,6 +200,11 @@ const HANDLER: GrammarHandler = GrammarHandler {
     void_return_type_names: &[],
     ..bonsai_lang_api::EMPTY_HANDLER
 };
+
+fn objc_expression_value_kind(node: Node<'_>, _src: &[u8]) -> Option<AssignValueKind> {
+    matches!(node.kind(), "string_literal" | "char_literal" | "number_literal")
+        .then_some(AssignValueKind::Literal)
+}
 
 fn objc_argument_passing_mode(argument: Node<'_>, value: Node<'_>) -> ArgumentPassingMode {
     if [argument, value].into_iter().any(|node| {
@@ -184,6 +299,18 @@ impl LanguageAdapter for ObjCAdapter {
             .filter(|decl| decl.kind == DeclKind::Constructor)
             .map(|decl| decl.name.clone())
             .collect::<std::collections::HashSet<_>>();
+        let declared_class_names = decl_index
+            .defs
+            .iter()
+            .filter(|decl| {
+                matches!(
+                    decl.kind,
+                    DeclKind::Class | DeclKind::Interface | DeclKind::Trait | DeclKind::Struct
+                )
+            })
+            .flat_map(|decl| std::iter::once(decl.name.clone()).chain(decl.qualified_name.clone()))
+            .map(|name| bonsai_common::short_qualified_tail(&name).to_string())
+            .collect::<std::collections::HashSet<_>>();
         // Per-decl `type_aliases` from typed parameters
         // (`(NSString *)name`, `(HTTPRequest *)req`). Objective-C
         // method signatures and C-style function parameters both
@@ -253,57 +380,18 @@ impl LanguageAdapter for ObjCAdapter {
                 augment_objc_dictionary_flow_events(&mut decl.flow_events, &tree, src);
             }
         }
-        // Recognised Objective-C lifecycle transitions. Manual
-        // retain/release (`release`, `autorelease`), explicit
-        // `dealloc`, Core Foundation (`CFRelease`), C `free`,
-        // resource `close`, and async `cancel` patterns. All map
-        // to the canonical lattice states.
-        const OBJC_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "release",
-                transition: "freed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "dealloc",
-                transition: "freed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "close",
-                transition: "closed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "CFRelease",
-                transition: "freed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "free",
-                transition: "freed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "autorelease",
-                transition: "freed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "cancel",
-                transition: "cancelled",
-                arg_index: 0,
-            },
-        ];
         for decl in &mut decl_index.defs {
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, OBJC_LIFECYCLE_TRANSITIONS);
             enrich_objc_receiver_field_writes(decl);
             // Tag `[[Class alloc] init...]` / `[[Class new] ...]`
             // chains with the constructed class so the engine's
             // receiver-type dispatch recognises the alloc-init
             // pattern without re-implementing the ObjC message-
             // syntax shape.
-            tag_objc_alloc_receiver_types(&mut decl.flow_events, &constructor_selectors);
+            tag_objc_alloc_receiver_types(
+                &mut decl.flow_events,
+                &constructor_selectors,
+                &declared_class_names,
+            );
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
         }
         // Repair catch-param bindings: the kit's generic extractor
@@ -321,9 +409,8 @@ impl LanguageAdapter for ObjCAdapter {
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
-        // Local constructor-result receiver typing (`new Foo()` / `Foo()` / `Foo::new()` -> typed receiver) so `recv.method(...)` resolves
-        // `receiver_type_in` / `[Type, method]` rules; the constructor heuristic only
-        // types PascalCase callees, so language exported-function calls are unaffected.
+        // Local constructor-result receiver typing follows Objective-C
+        // message/constructor facts and declarations, not capitalization.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut decl_index);
         bonsai_lang_api::apply_class_field_type_aliases(&mut decl_index);
         decl_index
@@ -342,7 +429,7 @@ fn apply_objc_class_semantic_identity(decl_index: &mut DeclIndex, ctx: &AdapterC
             continue;
         }
         let segments =
-            package_module_segments_with_workspace_prefix(decl_index.file, ctx, [decl.name.clone()]);
+            package_module_segments_with_workspace_prefix(decl_index.file, ctx, [decl.name.clone()], &[]);
         let prefix = segments.join("::");
         decl.module_path = ModulePath::from_segments(segments);
         decl.qualified_name = Some(format!("{prefix}::{}", decl.name));
@@ -367,6 +454,7 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
 fn tag_objc_alloc_receiver_types(
     events: &mut [bonsai_lang_api::FlowEvent],
     constructor_selectors: &std::collections::HashSet<String>,
+    declared_class_names: &std::collections::HashSet<String>,
 ) {
     for event in events {
         match event {
@@ -386,7 +474,7 @@ fn tag_objc_alloc_receiver_types(
                     .as_deref()
                     .and_then(objc_alloc_class_name)
                     .or_else(|| objc_alloc_class_name_from_call_name(name));
-                if let Some(class_name) = class_name {
+                if let Some(class_name) = class_name.filter(|name| declared_class_names.contains(name)) {
                     if !receiver_types.iter().any(|existing| existing == &class_name) {
                         receiver_types.push(class_name);
                     }
@@ -405,11 +493,11 @@ fn tag_objc_alloc_receiver_types(
                 else_events,
                 ..
             } => {
-                tag_objc_alloc_receiver_types(then_events, constructor_selectors);
-                tag_objc_alloc_receiver_types(else_events, constructor_selectors);
+                tag_objc_alloc_receiver_types(then_events, constructor_selectors, declared_class_names);
+                tag_objc_alloc_receiver_types(else_events, constructor_selectors, declared_class_names);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                tag_objc_alloc_receiver_types(body, constructor_selectors);
+                tag_objc_alloc_receiver_types(body, constructor_selectors, declared_class_names);
             }
             FlowEvent::Try {
                 body,
@@ -417,9 +505,9 @@ fn tag_objc_alloc_receiver_types(
                 finally_events,
                 ..
             } => {
-                tag_objc_alloc_receiver_types(body, constructor_selectors);
-                tag_objc_alloc_receiver_types(catch_events, constructor_selectors);
-                tag_objc_alloc_receiver_types(finally_events, constructor_selectors);
+                tag_objc_alloc_receiver_types(body, constructor_selectors, declared_class_names);
+                tag_objc_alloc_receiver_types(catch_events, constructor_selectors, declared_class_names);
+                tag_objc_alloc_receiver_types(finally_events, constructor_selectors, declared_class_names);
             }
             _ => {}
         }
@@ -733,6 +821,20 @@ fn objc_place_name(node: Node<'_>, src: &[u8]) -> Option<String> {
             let field = node_text(&field, src).trim();
             (!field.is_empty()).then(|| format!("{base}.{field}"))
         }
+        "message_expression" => {
+            let receiver = node.child_by_field_name("receiver")?;
+            let method = node.child_by_field_name("method")?;
+            let mut cursor = node.walk();
+            let has_value_arguments = node
+                .named_children(&mut cursor)
+                .any(|child| child.id() != receiver.id() && child.id() != method.id());
+            if has_value_arguments {
+                return None;
+            }
+            let receiver = objc_place_name(receiver, src)?;
+            let method = node_text(&method, src).trim();
+            (!method.is_empty()).then(|| format!("{receiver}.{method}"))
+        }
         "subscript_expression" => {
             let base = node
                 .child_by_field_name("argument")
@@ -752,6 +854,22 @@ fn objc_place_name(node: Node<'_>, src: &[u8]) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Decode Objective-C property selection after a zero-argument message send,
+/// such as `[NSProcessInfo processInfo].arguments`. Tree-sitter owns the
+/// receiver/method/field roles; shared analysis receives only the canonical
+/// place and never interprets framework names.
+fn objc_expression_places(node: Node<'_>, src: &[u8]) -> ExpressionPlaceExtraction {
+    if node.kind() != "field_expression" {
+        return ExpressionPlaceExtraction::default();
+    }
+    objc_place_name(node, src).map_or_else(ExpressionPlaceExtraction::default, |place| {
+        ExpressionPlaceExtraction {
+            places: vec![place],
+            consumed_node_ids: vec![node.id()],
+        }
+    })
 }
 
 fn objc_identifier_is_value(text: &str) -> bool {
@@ -999,14 +1117,20 @@ fn objc_alloc_class_name_from_call_name(name: &str) -> Option<String> {
     None
 }
 
-/// Match `[<Class> alloc]` / `[<Class> new]` (with optional
-/// surrounding whitespace) and return `Class`. Returns `None` for
-/// any other receiver shape so non-constructor message receivers
-/// don't get a bogus type.
+/// Match the source-shaped or compiler-canonical identity of an Objective-C
+/// allocation message and return its class. Calls are normalized to
+/// `Class.alloc` by the adapter, while older/synthetic paths may still carry
+/// `[Class alloc]`; both encode the same grammar-proven message syntax.
 fn objc_alloc_class_name(receiver: &str) -> Option<String> {
     let trimmed = receiver.trim();
-    let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?.trim();
-    let (class, selector) = inner.rsplit_once(char::is_whitespace)?;
+    let (class, selector) = if let Some(inner) = trimmed
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+    {
+        inner.trim().rsplit_once(char::is_whitespace)?
+    } else {
+        trimmed.rsplit_once('.')?
+    };
     let class = class.trim();
     let selector = selector.trim();
     if !matches!(selector, "alloc" | "new") {
@@ -1016,8 +1140,11 @@ fn objc_alloc_class_name(receiver: &str) -> Option<String> {
     if class.is_empty() {
         return None;
     }
-    let first = class.chars().next()?;
-    if !(first.is_ascii_uppercase() || first == '_') {
+    let mut chars = class.chars();
+    let first = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_')
+        || !chars.all(|character| character.is_alphanumeric() || character == '_')
+    {
         return None;
     }
     Some(class.to_string())

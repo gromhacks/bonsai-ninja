@@ -1,0 +1,38 @@
+- id: dart.typing.lifecycle_closed_receiver
+  enabled: true
+  language: dart
+  match: { kind: call, callee: { name: close } }
+  lifecycle_transition:
+    state: closed
+    binding: { kind: receiver }
+  match_examples:
+  - name: close changes the receiver state
+    code: 'void f(dynamic sink) { sink.close(); }'
+    expect_match_text: [sink.close]
+  description: "Dart close moves the receiver to closed. Typing-only; never a finding."
+
+- id: dart.typing.lifecycle_cancelled_receiver
+  enabled: true
+  language: dart
+  match: { kind: call, callee: { name: cancel } }
+  lifecycle_transition:
+    state: cancelled
+    binding: { kind: receiver }
+  match_examples:
+  - name: cancel changes the receiver state
+    code: 'void f(dynamic subscription) { subscription.cancel(); }'
+    expect_match_text: [subscription.cancel]
+  description: "Dart cancel moves the receiver to cancelled. Typing-only; never a finding."
+
+- id: dart.typing.lifecycle_disposed_receiver
+  enabled: true
+  language: dart
+  match: { kind: call, callee: { name: dispose } }
+  lifecycle_transition:
+    state: freed
+    binding: { kind: receiver }
+  match_examples:
+  - name: dispose changes the receiver state
+    code: 'void f(dynamic resource) { resource.dispose(); }'
+    expect_match_text: [resource.dispose]
+  description: "Dart dispose moves the receiver to freed. Typing-only; never a finding."

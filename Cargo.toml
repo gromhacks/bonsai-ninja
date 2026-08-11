@@ -202,15 +202,27 @@ needless_raw_string_hashes = "allow"
 lto = "thin"
 codegen-units = 1
 opt-level = 3
+incremental = false
+
+# This workspace links a large 20-language compiler graph. Keeping incremental
+# object generations for ordinary development causes old frontend-ABI and
+# rustflag variants to accumulate without bound. Cargo still reuses complete,
+# unchanged crate artifacts; intentional debugger sessions can opt back in
+# with CARGO_PROFILE_DEV_DEBUG=2 and CARGO_PROFILE_DEV_INCREMENTAL=true.
+[profile.dev]
+debug = 0
+incremental = false
 
 # The workspace has hundreds of standalone integration-test executables, each
 # linking the complete 20-language analysis graph. Embedded debug information
-# makes those artifacts hundreds of MiB and turns macOS policy scanning into a
-# multi-minute cost per batch. Panic locations and test names remain available
-# without DWARF; use `CARGO_PROFILE_TEST_DEBUG=2` for an intentional debugger
-# session.
+# and per-edit incremental generations make those artifacts machine-scale.
+# Panic locations and test names remain available without DWARF; use
+# `CARGO_PROFILE_TEST_DEBUG=2` and `CARGO_PROFILE_TEST_INCREMENTAL=true` only
+# for an intentional debugger session. Exhaustive correctness uses this
+# profile; ThinLTO release tests are reserved for measured production SLOs.
 [profile.test]
 debug = 0
+incremental = false
 
 [profile.bench]
 lto = "thin"

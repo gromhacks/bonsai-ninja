@@ -77,7 +77,12 @@ fn implicit_argument_foreach_is_a_variadic_ast_binding() {
         .iter()
         .find(|decl| decl.name == "helper")
         .expect("helper declaration");
-    assert_eq!(helper.params, vec!["@_".to_string()]);
+    assert_eq!(
+        helper.params,
+        vec!["@_".to_string()],
+        "events={:?}",
+        helper.flow_events
+    );
     assert!(helper.is_variadic);
     assert!(
         helper.flow_events.iter().any(|event| {

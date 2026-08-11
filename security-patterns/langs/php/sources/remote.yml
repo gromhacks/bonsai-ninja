@@ -292,7 +292,7 @@
   match:
     kind: call
     callee:
-      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*->getClientOriginalName$"
+      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*\\.getClientOriginalName$"
   constraints:
   - max_args: 0
   match_examples:
@@ -306,7 +306,7 @@
         return $file->getClientOriginalName();
       }
     expect_match_text:
-    - "$file->getClientOriginalName"
+    - "$file.getClientOriginalName"
   - name: php.source.uploaded_file_client_original_name negative arity boundary
     code: |
       <?php
@@ -335,7 +335,7 @@
   match:
     kind: call
     callee:
-      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*->getClientFilename$"
+      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*\\.getClientFilename$"
   constraints:
   - max_args: 0
   match_examples:
@@ -349,7 +349,7 @@
         return $uploadedFile->getClientFilename();
       }
     expect_match_text:
-    - "$uploadedFile->getClientFilename"
+    - "$uploadedFile.getClientFilename"
   - name: php.source.psr7_uploaded_file_client_filename negative arity boundary
     code: |
       <?php
@@ -429,7 +429,7 @@
   match:
     kind: call
     callee:
-      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*->getContent$"
+      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*\\.getContent$"
   constraints:
   - max_args: 1
   match_examples:
@@ -443,7 +443,7 @@
         return $request->getContent();
       }
     expect_match_text:
-    - "$request->getContent"
+    - "$request.getContent"
   - name: php.source.symfony_request_get_content negative arity boundary
     code: |
       <?php
@@ -467,7 +467,7 @@
   match:
     kind: call
     callee:
-      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*->getPayload$"
+      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*\\.getPayload$"
   constraints:
   - max_args: 0
   match_examples:
@@ -480,7 +480,7 @@
         return $request->getPayload();
       }
     expect_match_text:
-    - "$request->getPayload"
+    - "$request.getPayload"
   - name: php.source.symfony_request_get_payload negative arity boundary
     code: |
       <?php
@@ -690,7 +690,7 @@
   match:
     kind: call
     callee:
-      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*->getQueryParams$"
+      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*\\.getQueryParams$"
   constraints:
   - max_args: 0
   match_examples:
@@ -703,7 +703,7 @@
         return $request->getQueryParams();
       }
     expect_match_text:
-    - "$request->getQueryParams"
+    - "$request.getQueryParams"
   - name: php.source.slim_request_get_params negative arity boundary
     code: |
       <?php
@@ -742,7 +742,7 @@
   match:
     kind: call
     callee:
-      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*->getParsedBody$"
+      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*\\.getParsedBody$"
   constraints:
   - max_args: 0
   match_examples:
@@ -755,7 +755,7 @@
         return $request->getParsedBody();
       }
     expect_match_text:
-    - "$request->getParsedBody"
+    - "$request.getParsedBody"
   - name: php.source.slim_request_parsed negative arity boundary
     code: |
       <?php

@@ -23,7 +23,7 @@
         $xpath = new DOMXPath($doc);
         return $xpath->query($q);
       }
-    expect_match_text: ["$xpath->query"]
+    expect_match_text: ["$xpath.query"]
   - name: domxpath query literal negative
     code: |
       <?php
@@ -56,7 +56,7 @@
         $xpath = new DOMXPath($doc);
         return $xpath->evaluate($q);
       }
-    expect_match_text: ["$xpath->evaluate"]
+    expect_match_text: ["$xpath.evaluate"]
   - name: domxpath evaluate literal negative
     code: |
       <?php

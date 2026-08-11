@@ -485,7 +485,12 @@ impl Wrapper {
         _ => None,
     });
 
-    assert_eq!(self_call, Some(CallKind::Constructor));
+    assert_eq!(
+        self_call,
+        Some(CallKind::Constructor),
+        "Self tuple construction events: {:#?}",
+        factory.flow_events
+    );
     assert_eq!(declared_factory_call, Some(CallKind::Constructor));
     assert!(
         factory

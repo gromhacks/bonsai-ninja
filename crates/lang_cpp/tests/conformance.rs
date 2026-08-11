@@ -11,6 +11,232 @@ fn conformance_traced() {
     );
 }
 
+#[test]
+fn cpp_call_arguments_use_ast_value_kinds_not_identifier_spelling() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, AssignValueKind, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_cpp::CppAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("values.cpp"),
+        "void emit(const char*, const char*, bool, void*);\n\
+         void run(const char *USER_VALUE) { emit(\"literal\", USER_VALUE, true, nullptr); }\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let index = adapter.extract_declarations(
+        file,
+        &AdapterContext {
+            vfs: &vfs,
+            diagnostics: &diagnostics,
+            tree_provider: None,
+            workspace_root: None,
+        },
+    );
+    let kind = |argument_index| {
+        index
+            .call_argument_values
+            .iter()
+            .find(|fact| fact.argument_index == argument_index)
+            .and_then(|fact| fact.value_kind)
+    };
+
+    assert_eq!(kind(0), Some(AssignValueKind::Literal));
+    assert_eq!(kind(1), None, "ALL_CAPS is still a dynamic parameter");
+    assert_eq!(kind(2), Some(AssignValueKind::Literal));
+    assert_eq!(kind(3), Some(AssignValueKind::Literal));
+}
+
+#[test]
+fn reference_declarator_call_result_binds_the_declared_name() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_cpp::CppAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("reference.cpp"),
+        r#"
+#include <string>
+
+struct Repository {
+    const std::string& cmd() const;
+};
+
+void execute(const std::string& value);
+
+void run(const Repository& repo) {
+    const std::string& c = repo.cmd();
+    execute(c);
+}
+"#,
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let index = adapter.extract_declarations(
+        file,
+        &AdapterContext {
+            vfs: &vfs,
+            diagnostics: &diagnostics,
+            tree_provider: None,
+            workspace_root: None,
+        },
+    );
+    let run = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "run")
+        .expect("run declaration");
+
+    assert!(
+        run.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign {
+                target,
+                source_name: None,
+                source_call: Some(source_call),
+                source_call_args,
+                source_names,
+                ..
+            } if target == "c"
+                && bonsai_common::short_qualified_tail(source_call) == "cmd"
+                && source_call_args.is_empty()
+                && source_names == &["repo"]
+        )),
+        "a reference declarator must unwrap to its identifier and retain the exact call-result and receiver binding: {:#?}",
+        run.flow_events
+    );
+    assert!(
+        !run.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign { target, .. }
+                if matches!(target.as_str(), "Repository" | "repo" | "cmd")
+        )),
+        "type, initializer receiver, and callee identifiers must not become assignment targets: {:#?}",
+        run.flow_events
+    );
+}
+
+#[test]
+fn same_type_brace_copy_is_not_lowered_as_one_positional_field() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_cpp::CppAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("copies.cpp"),
+        r#"
+struct Envelope { int kind; const char* cmd; };
+
+void use(Envelope env, int kind, const char* cmd) {
+    Envelope valid{env};
+    Envelope built{kind, cmd};
+}
+"#,
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let index = adapter.extract_declarations(
+        file,
+        &AdapterContext {
+            vfs: &vfs,
+            diagnostics: &diagnostics,
+            tree_provider: None,
+            workspace_root: None,
+        },
+    );
+    let use_decl = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "use")
+        .expect("use declaration");
+
+    assert!(use_decl.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Assign {
+            target,
+            source_names,
+            ..
+        } if target == "valid" && source_names == &["env"]
+    )));
+    assert!(
+        !use_decl.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::AggregateAssign { target, .. } if target == "valid"
+        )),
+        "same-type direct-list initialization copies the complete object: {:#?}",
+        use_decl.flow_events
+    );
+    assert!(
+        use_decl.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::AggregateAssign { target, value_flow, .. }
+                if target == "built" && value_flow.tuple_items.len() == 2
+        )),
+        "a real positional aggregate initializer must remain field-precise: {:#?}",
+        use_decl.flow_events
+    );
+}
+
+#[test]
+fn template_arguments_do_not_change_callable_identity() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_cpp::CppAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("templates.cpp"),
+        r#"
+template <typename T> T convert(int value) { return T{value}; }
+
+void use(int value) {
+    convert<long>(value);
+    ns::factory<Item>(value);
+}
+"#,
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let index = adapter.extract_declarations(
+        file,
+        &AdapterContext {
+            vfs: &vfs,
+            diagnostics: &diagnostics,
+            tree_provider: None,
+            workspace_root: None,
+        },
+    );
+    let use_decl = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "use")
+        .expect("use declaration");
+    let calls = use_decl
+        .flow_events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Call { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert!(calls.contains(&"convert"), "calls={calls:#?}");
+    assert!(calls.contains(&"ns::factory"), "calls={calls:#?}");
+    assert!(
+        calls
+            .iter()
+            .all(|name| !name.contains('<') && !name.contains('>')),
+        "parsed template arguments select a specialization, not a different declaration identity: {calls:#?}"
+    );
+}
+
 /// Drift guard for the semantic-identity contract
 /// (`docs/contributing/design-patterns.mdx::Semantic Resolution Always`). The C++
 /// adapter must:
@@ -173,7 +399,8 @@ fn cpp_adapter_lowers_direct_initialization_as_a_constructor_call() {
                 ..
             } if name == "Model"
                 && args.len() == 1
-                && args[0].place.as_deref() == Some("value")
+                && args[0].place.is_none()
+                && args[0].source_names.iter().any(|source| source == "value")
         )),
         "direct initialization must retain its grammar-owned constructor boundary: {build:#?}"
     );

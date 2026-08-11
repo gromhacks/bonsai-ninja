@@ -1,7 +1,8 @@
 use super::super::{
-    emit_using_as_pattern_assigns, extract_catch_param, extract_return_value_flow_with_handler,
-    extract_return_value_name_with_handler, extract_return_value_text, extract_throw_value_name,
-    extract_yield_value_flow_with_handler, looks_like_bare_identifier, node_text, span_of, FlowEvent, Node,
+    emit_using_alias_assigns, extract_catch_param, extract_return_value_flow_with_handler,
+    extract_return_value_kind_with_handler, extract_return_value_name_with_handler,
+    extract_return_value_text, extract_throw_value_name, extract_yield_value_flow_with_handler,
+    looks_like_bare_identifier, node_text, span_of, FlowEvent, Node,
 };
 use super::{walk_into, LoweringContext};
 
@@ -18,8 +19,10 @@ pub(super) fn lower_control_and_scope(
     } = context;
     let kind = node.kind();
     if handler.is_break(kind) {
-        let label = node
-            .child_by_field_name("label")
+        let label = handler
+            .control_label_field_names
+            .iter()
+            .find_map(|field| node.child_by_field_name(field))
             .map(|n| node_text(&n, src).trim().to_string())
             .filter(|s| !s.is_empty());
         out.push(FlowEvent::Break {
@@ -30,8 +33,10 @@ pub(super) fn lower_control_and_scope(
     }
 
     if handler.is_continue(kind) {
-        let label = node
-            .child_by_field_name("label")
+        let label = handler
+            .control_label_field_names
+            .iter()
+            .find_map(|field| node.child_by_field_name(field))
             .map(|n| node_text(&n, src).trim().to_string())
             .filter(|s| !s.is_empty());
         out.push(FlowEvent::Continue {
@@ -42,19 +47,18 @@ pub(super) fn lower_control_and_scope(
     }
 
     if handler.is_yield(kind) {
-        let value_text = {
-            let full = node_text(&node, src).trim();
-            let stripped = full
-                .strip_prefix("yield from ")
-                .or_else(|| full.strip_prefix("yield "))
-                .unwrap_or(full)
-                .trim();
-            if stripped.is_empty() || stripped == "yield" {
-                None
-            } else {
-                Some(stripped.to_string())
-            }
-        };
+        let value_node = handler
+            .yield_value_field_names
+            .iter()
+            .find_map(|field| node.child_by_field_name(field))
+            .or_else(|| {
+                let mut cursor = node.walk();
+                let value = node.named_children(&mut cursor).next();
+                value
+            });
+        let value_text = value_node
+            .map(|value| node_text(&value, src).trim().to_string())
+            .filter(|value| !value.is_empty());
         out.push(FlowEvent::Yield {
             span: span_of(file, &node),
             value_text,
@@ -115,9 +119,10 @@ pub(super) fn lower_control_and_scope(
     }
 
     if handler.is_using(kind) {
-        let body_node = node
-            .child_by_field_name("body")
-            .or_else(|| node.child_by_field_name("block"));
+        let body_node = handler
+            .using_body_field_names
+            .iter()
+            .find_map(|field| node.child_by_field_name(field));
         let mut body = Vec::new();
         if let Some(b) = body_node {
             walk_into(b, file, src, handler, class_names, &mut body, false);
@@ -132,13 +137,13 @@ pub(super) fn lower_control_and_scope(
                 if child.id() == body_id {
                     continue;
                 }
-                emit_using_as_pattern_assigns(child, file, src, out);
+                emit_using_alias_assigns(child, file, src, handler, out);
                 walk_into(child, file, src, handler, class_names, out, false);
             }
         } else {
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
-                emit_using_as_pattern_assigns(child, file, src, &mut body);
+                emit_using_alias_assigns(child, file, src, handler, &mut body);
                 walk_into(child, file, src, handler, class_names, &mut body, false);
             }
         }
@@ -166,9 +171,10 @@ pub(super) fn lower_try(node: Node<'_>, context: LoweringContext<'_>, out: &mut 
         let mut finally_events = Vec::new();
         // Prefer the `body` / `block` field for the try body; otherwise the
         // first named block-like child that isn't itself a catch/finally.
-        let body_node = node
-            .child_by_field_name("body")
-            .or_else(|| node.child_by_field_name("block"));
+        let body_node = handler
+            .try_body_field_names
+            .iter()
+            .find_map(|field| node.child_by_field_name(field));
         let body_id = body_node.map(|n| n.id());
         let mut pre_body_child_ids = Vec::new();
         if let Some(b) = body_node {
@@ -178,7 +184,7 @@ pub(super) fn lower_try(node: Node<'_>, context: LoweringContext<'_>, out: &mut 
                     break;
                 }
                 let ck = child.kind();
-                if handler.is_catch(ck) || handler.is_finally(ck) || ck == "on_part" {
+                if handler.is_catch(ck) || handler.is_finally(ck) {
                     continue;
                 }
                 walk_into(child, file, src, handler, class_names, &mut body, false);
@@ -190,11 +196,6 @@ pub(super) fn lower_try(node: Node<'_>, context: LoweringContext<'_>, out: &mut 
         let mut saw_catch_kind = false;
         let mut saw_finally_kind = false;
         let mut block_children: Vec<Node<'_>> = Vec::new();
-        // Dart parses `catch (e) { body }` as TWO siblings: a catch_clause
-        // (containing only the parameters) followed by a sibling `block`
-        // that IS the catch body. Same for `on E catch (e) { body }`.
-        // Track whether the previous named sibling was a catch/on marker
-        // so the following block gets routed into catch_events.
         let mut prev_was_catch_marker = false;
         for child in node.named_children(&mut cursor) {
             if pre_body_child_ids.contains(&child.id()) {
@@ -202,7 +203,7 @@ pub(super) fn lower_try(node: Node<'_>, context: LoweringContext<'_>, out: &mut 
                 continue;
             }
             let ck = child.kind();
-            if handler.is_catch(ck) || ck == "on_part" {
+            if handler.is_catch(ck) {
                 saw_catch_kind = true;
                 walk_into(child, file, src, handler, class_names, &mut catch_events, false);
                 prev_was_catch_marker = true;
@@ -212,9 +213,10 @@ pub(super) fn lower_try(node: Node<'_>, context: LoweringContext<'_>, out: &mut 
                 walk_into(child, file, src, handler, class_names, &mut finally_events, false);
                 prev_was_catch_marker = false;
                 continue;
-            } else if prev_was_catch_marker && (ck == "block" || ck == "compound_statement") {
-                // Dart: the block right after a catch_clause/on_part is the
-                // catch body. Route it into catch_events.
+            } else if handler.catch_body_follows_marker
+                && prev_was_catch_marker
+                && handler.try_fallback_body_kinds.contains(&ck)
+            {
                 walk_into(child, file, src, handler, class_names, &mut catch_events, false);
                 prev_was_catch_marker = false;
                 continue;
@@ -228,12 +230,12 @@ pub(super) fn lower_try(node: Node<'_>, context: LoweringContext<'_>, out: &mut 
                 // Walking them into `body` here as well would duplicate the
                 // catch block, which the fallback below also routes into
                 // `catch_events` (Perl-shape grammars with no catch kind).
-                if ck == "block" || ck == "compound_statement" {
+                if handler.try_fallback_body_kinds.contains(&ck) {
                     block_children.push(child);
                 } else {
                     walk_into(child, file, src, handler, class_names, &mut body, false);
                 }
-            } else if ck == "block" || ck == "compound_statement" {
+            } else if handler.try_fallback_body_kinds.contains(&ck) {
                 block_children.push(child);
             } else {
                 // A grammar may parse the protected expression as a sibling
@@ -326,6 +328,7 @@ pub(super) fn lower_function_exit(
         } else {
             out.push(FlowEvent::Return {
                 span: span_of(file, &node),
+                value_kind: extract_return_value_kind_with_handler(&node, src, handler),
                 value_text: extract_return_value_text(&node, src),
                 value_name: extract_return_value_name_with_handler(&node, src, handler),
                 value_flow: extract_return_value_flow_with_handler(&node, file, src, handler),

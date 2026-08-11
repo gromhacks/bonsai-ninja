@@ -12,6 +12,7 @@ fn node(func: u32, start: u64, text: &str, kind: ValueFlowNodeKind) -> ValueFlow
         span: span(FileId::new(0), start, start + text.len() as u64),
         value_text: text.to_string(),
         kind,
+        argument_index: None,
     }
 }
 
@@ -31,6 +32,7 @@ fn assign(start: u64, target: &str, source: &str) -> FlowEvent {
 fn ret(start: u64, value: &str) -> FlowEvent {
     FlowEvent::Return {
         span: span(FileId::new(0), start, start + 1),
+        value_kind: None,
         value_text: Some(value.to_string()),
         value_name: Some(value.to_string()),
         value_flow: bonsai_lang_api::ExpressionFlow::from_place(value),
@@ -76,6 +78,7 @@ fn decl(params: &[&str], flow_events: Vec<FlowEvent>) -> Decl {
         bases: Vec::new(),
         receiver_param_index: None,
         receiver_field_writes: Vec::new(),
+        receiver_field_initializers: Vec::new(),
         implicit_receiver_names: Vec::new(),
         receiver_state_sources: Vec::new(),
         return_type: None,
@@ -262,7 +265,7 @@ fn call_arg_edges_merge_branch_definitions_at_call_site() {
     );
     let (graph, _) = build_intra_entry_graph(FuncId::new(1), &decl);
     let call_arg =
-        find_call_arg_node(&graph, FuncId::new(1), span(FileId::new(0), 40, 41), "x").expect("call arg node");
+        find_call_arg_node(&graph, FuncId::new(1), span(FileId::new(0), 40, 41), 0).expect("call arg node");
     let back = graph.backward_closure(&call_arg);
 
     for source in ["a", "b"] {
@@ -282,6 +285,69 @@ fn call_arg_edges_merge_branch_definitions_at_call_site() {
             "call arg should include x definition at {start}: {back:?}"
         );
     }
+}
+
+#[test]
+fn call_argument_identity_is_span_and_normalized_index() {
+    let call_span = span(FileId::new(0), 40, 41);
+    let repeated = bonsai_lang_api::CallArg {
+        passing_mode: Default::default(),
+        span: call_span,
+        name: None,
+        value_text: "x".to_string(),
+        place: Some("x".to_string()),
+        source_names: Vec::new(),
+    };
+    let decl = decl(
+        &["x"],
+        vec![FlowEvent::Call {
+            span: call_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![repeated.clone(), repeated],
+        }],
+    );
+    let (graph, _) = build_intra_entry_graph(FuncId::new(1), &decl);
+    let first = find_call_arg_node(&graph, FuncId::new(1), call_span, 0).expect("first call arg");
+    let second = find_call_arg_node(&graph, FuncId::new(1), call_span, 1).expect("second call arg");
+    assert_ne!(
+        first, second,
+        "equal renderings at one call remain distinct values"
+    );
+    assert_eq!(first.argument_index, Some(0));
+    assert_eq!(second.argument_index, Some(1));
+}
+
+#[test]
+fn carrier_free_literal_argument_does_not_synthesize_a_variable_read() {
+    let call_span = span(FileId::new(0), 40, 41);
+    let decl = decl(
+        &[],
+        vec![FlowEvent::Call {
+            span: call_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
+                span: call_span,
+                name: None,
+                value_text: "\"literal\"".to_string(),
+                place: None,
+                source_names: Vec::new(),
+            }],
+        }],
+    );
+    let (graph, _) = build_intra_entry_graph(FuncId::new(1), &decl);
+    let literal = find_call_arg_node(&graph, FuncId::new(1), call_span, 0).expect("literal call arg");
+    assert!(graph.backward_closure(&literal).is_empty());
+    assert!(graph
+        .nodes
+        .iter()
+        .all(|node| node.kind != ValueFlowNodeKind::Read));
 }
 
 // audit re-apply: R3

@@ -213,6 +213,16 @@ pub struct Decl {
     /// names or parse target syntax.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub receiver_field_writes: Vec<FieldWrite>,
+    /// Direct receiver-field initializers whose right-hand side is a call.
+    ///
+    /// This is a compact compiler linkage fact, not an inferred type:
+    /// adapters identify the field storage and call expression from their
+    /// Tree-sitter grammar, while workspace resolution later decides whether
+    /// the callee is a constructor. Keeping it on the declaration header lets
+    /// sparse semantic passes type a field without retaining the constructor
+    /// body or reparsing source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub receiver_field_initializers: Vec<ReceiverFieldInitializer>,
     /// Adapter-declared receiver aliases that are valid inside this
     /// declaration when the language has an implicit receiver. Examples
     /// include the grammar tokens for current/super receiver forms. This
@@ -263,6 +273,20 @@ pub struct FieldWrite {
     /// parameters are excluded by the adapter.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_param_indices: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverFieldInitializer {
+    pub span: Span,
+    /// Adapter-normalized receiver field (`this.client`, `self.client`, ...).
+    pub target: String,
+    /// Exact direct RHS callee identity from the parsed call expression.
+    pub call_name: String,
+    pub call_kind: CallKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_receiver: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_receiver_types: Vec<String>,
 }
 
 /// AST-derived value dependencies for a return/yield expression.
@@ -509,6 +533,11 @@ pub enum FlowEvent {
     },
     Return {
         span: Span,
+        /// Adapter-owned shape of the complete returned expression. A
+        /// literal proof must come from the parsed operand; `None`/`Unknown`
+        /// never becomes a clean-overwrite proof by absence of carriers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value_kind: Option<AssignValueKind>,
         /// Verbatim return expression text when available. Used by
         /// semantic taint summaries for compound returns such as
         /// `return {"cmd": v}` or `return f"{x}"`, where no single
@@ -593,8 +622,8 @@ pub enum FlowEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
     },
-    /// `yield` / `yield from` — a suspend-and-emit edge. Tracked with the
-    /// yielded expression as text so consumers can show the flow.
+    /// `yield` / `yield from` — a suspend-and-emit edge. `value_text` is for
+    /// rendering; semantic consumers use the adapter-lowered `value_flow`.
     Yield {
         span: Span,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -647,7 +676,8 @@ pub enum FlowEvent {
 /// This is a scheduling header, not a second semantic representation. It is
 /// derived only from [`DeclIndex`] facts emitted by the owning language
 /// adapter and lets broad consumers reject files that cannot contain a
-/// requested call before inflating declaration bodies and flow events.
+/// requested syntax target before inflating declaration bodies and flow
+/// events.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompilerSyntaxHeader {
     /// Every adapter-emitted call shape in the file. Spans and arguments stay
@@ -655,6 +685,12 @@ pub struct CompilerSyntaxHeader {
     /// target has selected the file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub calls: Vec<CompilerCallHeader>,
+    /// Exact adapter-lowered return targets. Security and browse consumers may
+    /// use these only to reject impossible files before opening a compiler
+    /// body; the owning adapter remains the sole authority for what the
+    /// language considers a return value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub returns: Vec<CompilerReturnHeader>,
     /// Exact assignment aliases (`target = source`) from the adapter's flow
     /// tree. Consumers may use these to extend import aliases to a fixed point
     /// before deciding that a call target is impossible.
@@ -665,6 +701,17 @@ pub struct CompilerSyntaxHeader {
     /// never from parsing assignment text.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub factory_assignments: Vec<CompilerFactoryCallAssignment>,
+    /// Exact inline callback arguments retained for rulepack-declared
+    /// external callback signatures. The adapter owns the call and callback
+    /// syntax; provider/API type meanings remain outside compiler IR.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub callback_arguments: Vec<CompilerCallbackArgumentHeader>,
+    /// Exact typed callable bindings (`Interface<T> f = value -> ...`). The
+    /// adapter supplies only the declared type and callback parameters. A
+    /// typing rule decides whether that external interface assigns parameter
+    /// types.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub typed_callables: Vec<CompilerTypedCallableHeader>,
     /// Adapter-derived type aliases visible somewhere in the file. This is an
     /// intentional over-approximation for header planning; declaration-local
     /// scope and ordering remain enforced by the full matcher body.
@@ -709,6 +756,20 @@ pub struct CompilerCallHeader {
     pub call_kind: CallKind,
 }
 
+/// Compact return target retained in [`CompilerSyntaxHeader`].
+///
+/// Both spellings are copied verbatim from the canonical [`FlowEvent::Return`]
+/// emitted by the language adapter. They are scheduling evidence, not a
+/// parallel source parser or a security classification.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerReturnHeader {
+    pub span: Span,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_name: Option<String>,
+}
+
 /// One adapter-proven assignment alias retained in a syntax header.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompilerAssignmentAlias {
@@ -723,6 +784,26 @@ pub struct CompilerFactoryCallAssignment {
     pub call_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_receiver: Option<String>,
+}
+
+/// One adapter-proven inline callback argument retained in a syntax header.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerCallbackArgumentHeader {
+    pub call_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_receiver: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_receiver_types: Vec<String>,
+    pub argument_index: usize,
+    pub params: Vec<String>,
+}
+
+/// One adapter-proven callable binding with an explicit source type.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerTypedCallableHeader {
+    pub name: String,
+    pub params: Vec<String>,
+    pub type_names: Vec<String>,
 }
 
 /// Independently decodable call/write attribution projected from one exact
@@ -794,15 +875,6 @@ impl CompilerAttribution {
     /// Project call, return, and write evidence from canonical adapter IR.
     #[must_use]
     pub fn from_decl_index(index: &DeclIndex) -> Self {
-        fn is_bare_identifier(text: &str) -> bool {
-            let mut chars = text.chars();
-            let Some(first) = chars.next() else {
-                return false;
-            };
-            (first.is_ascii_alphabetic() || first == '_')
-                && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
-        }
-
         fn collect_expression_carriers(flow: &ExpressionFlow, out: &mut ahash::AHashSet<String>) {
             if let Some(place) = flow.place.as_deref() {
                 let place = place.trim();
@@ -896,13 +968,16 @@ impl CompilerAttribution {
                                     .iter()
                                     .map(|argument| {
                                         let argument = argument.trim();
-                                        let carrier =
-                                            is_bare_identifier(argument).then(|| argument.to_string());
                                         CompilerCallArgumentAttribution {
                                             span: *span,
                                             value_text: argument.to_string(),
-                                            place: carrier.clone(),
-                                            source_names: carrier.into_iter().collect(),
+                                            // Assignment-only compatibility calls retain
+                                            // rendering and arity, but have no adapter-owned
+                                            // argument node. Do not recover a value identity
+                                            // from its rendered text. An exact FlowEvent::Call
+                                            // at the same span replaces this entry.
+                                            place: None,
+                                            source_names: Vec::new(),
                                         }
                                     })
                                     .collect(),
@@ -1003,7 +1078,8 @@ impl CompilerAttribution {
 }
 
 impl CompilerSyntaxHeader {
-    /// Project the complete file-local call surface from canonical adapter IR.
+    /// Project the complete file-local scheduling surface from canonical
+    /// adapter IR.
     #[must_use]
     pub fn from_decl_index(index: &DeclIndex) -> Self {
         fn push_unique(values: &mut Vec<String>, value: &str) {
@@ -1013,27 +1089,47 @@ impl CompilerSyntaxHeader {
             }
         }
 
-        fn walk(
-            events: &[FlowEvent],
-            assignment_values: &ahash::AHashMap<Span, &AssignmentValueFact>,
-            calls: &mut Vec<CompilerCallHeader>,
-            assignment_aliases: &mut Vec<CompilerAssignmentAlias>,
-            factory_assignments: &mut Vec<CompilerFactoryCallAssignment>,
-        ) {
+        struct Projection<'a> {
+            assignment_values: &'a ahash::AHashMap<Span, &'a AssignmentValueFact>,
+            call_argument_values: &'a ahash::AHashMap<Span, Vec<&'a CallArgumentValueFact>>,
+            out: &'a mut CompilerSyntaxHeader,
+        }
+
+        fn walk(events: &[FlowEvent], projection: &mut Projection<'_>) {
             for event in events {
                 match event {
                     FlowEvent::Call {
+                        span,
                         name,
                         receiver,
                         receiver_types,
                         call_kind,
                         ..
-                    } => calls.push(CompilerCallHeader {
-                        name: name.clone(),
-                        receiver: receiver.clone(),
-                        receiver_types: receiver_types.clone(),
-                        call_kind: *call_kind,
-                    }),
+                    } => {
+                        projection.out.calls.push(CompilerCallHeader {
+                            name: name.clone(),
+                            receiver: receiver.clone(),
+                            receiver_types: receiver_types.clone(),
+                            call_kind: *call_kind,
+                        });
+                        if let Some(arguments) = projection.call_argument_values.get(span) {
+                            for argument in arguments
+                                .iter()
+                                .filter(|argument| !argument.inline_callback_params.is_empty())
+                            {
+                                projection
+                                    .out
+                                    .callback_arguments
+                                    .push(CompilerCallbackArgumentHeader {
+                                        call_name: name.clone(),
+                                        call_receiver: receiver.clone(),
+                                        call_receiver_types: receiver_types.clone(),
+                                        argument_index: argument.argument_index,
+                                        params: argument.inline_callback_params.clone(),
+                                    });
+                            }
+                        }
+                    }
                     FlowEvent::Assign {
                         span,
                         target,
@@ -1041,12 +1137,12 @@ impl CompilerSyntaxHeader {
                         source_call,
                         ..
                     } => {
-                        let indexed = assignment_values.get(span).copied();
+                        let indexed = projection.assignment_values.get(span).copied();
                         if let Some(source) = source_name.as_deref() {
                             let target = target.trim();
                             let source = source.trim();
                             if !target.is_empty() && !source.is_empty() {
-                                assignment_aliases.push(CompilerAssignmentAlias {
+                                projection.out.assignment_aliases.push(CompilerAssignmentAlias {
                                     target: target.to_string(),
                                     source: source.to_string(),
                                 });
@@ -1057,7 +1153,7 @@ impl CompilerSyntaxHeader {
                             .map(str::trim)
                             .filter(|name| !name.is_empty())
                         {
-                            calls.push(CompilerCallHeader {
+                            projection.out.calls.push(CompilerCallHeader {
                                 name: name.to_string(),
                                 receiver: indexed
                                     .and_then(|fact| fact.direct_call_receiver.as_deref())
@@ -1074,46 +1170,41 @@ impl CompilerSyntaxHeader {
                         if let Some(call_name) = call_name {
                             let target = target.trim();
                             if !target.is_empty() {
-                                factory_assignments.push(CompilerFactoryCallAssignment {
-                                    target: target.to_string(),
-                                    call_name: call_name.to_string(),
-                                    call_receiver: indexed
-                                        .and_then(|fact| fact.direct_call_receiver.as_deref())
-                                        .map(str::to_string),
-                                });
+                                projection
+                                    .out
+                                    .factory_assignments
+                                    .push(CompilerFactoryCallAssignment {
+                                        target: target.to_string(),
+                                        call_name: call_name.to_string(),
+                                        call_receiver: indexed
+                                            .and_then(|fact| fact.direct_call_receiver.as_deref())
+                                            .map(str::to_string),
+                                    });
                             }
                         }
                     }
+                    FlowEvent::Return {
+                        span,
+                        value_text,
+                        value_name,
+                        ..
+                    } => projection.out.returns.push(CompilerReturnHeader {
+                        span: *span,
+                        value_text: value_text.clone(),
+                        value_name: value_name.clone(),
+                    }),
                     FlowEvent::Branch {
                         then_events,
                         else_events,
                         ..
                     } => {
-                        walk(
-                            then_events,
-                            assignment_values,
-                            calls,
-                            assignment_aliases,
-                            factory_assignments,
-                        );
-                        walk(
-                            else_events,
-                            assignment_values,
-                            calls,
-                            assignment_aliases,
-                            factory_assignments,
-                        );
+                        walk(then_events, projection);
+                        walk(else_events, projection);
                     }
                     FlowEvent::Loop { body, .. }
                     | FlowEvent::Defer { body, .. }
                     | FlowEvent::Using { body, .. } => {
-                        walk(
-                            body,
-                            assignment_values,
-                            calls,
-                            assignment_aliases,
-                            factory_assignments,
-                        );
+                        walk(body, projection);
                     }
                     FlowEvent::Try {
                         body,
@@ -1121,27 +1212,9 @@ impl CompilerSyntaxHeader {
                         finally_events,
                         ..
                     } => {
-                        walk(
-                            body,
-                            assignment_values,
-                            calls,
-                            assignment_aliases,
-                            factory_assignments,
-                        );
-                        walk(
-                            catch_events,
-                            assignment_values,
-                            calls,
-                            assignment_aliases,
-                            factory_assignments,
-                        );
-                        walk(
-                            finally_events,
-                            assignment_values,
-                            calls,
-                            assignment_aliases,
-                            factory_assignments,
-                        );
+                        walk(body, projection);
+                        walk(catch_events, projection);
+                        walk(finally_events, projection);
                     }
                     _ => {}
                 }
@@ -1154,13 +1227,18 @@ impl CompilerSyntaxHeader {
             .iter()
             .map(|fact| (fact.assignment_span, fact))
             .collect::<ahash::AHashMap<_, _>>();
+        let mut call_argument_values = ahash::AHashMap::<Span, Vec<&CallArgumentValueFact>>::new();
+        for fact in &index.call_argument_values {
+            call_argument_values.entry(fact.call_span).or_default().push(fact);
+        }
         for decl in &index.defs {
             walk(
                 &decl.flow_events,
-                &assignment_values,
-                &mut out.calls,
-                &mut out.assignment_aliases,
-                &mut out.factory_assignments,
+                &mut Projection {
+                    assignment_values: &assignment_values,
+                    call_argument_values: &call_argument_values,
+                    out: &mut out,
+                },
             );
             for alias in &decl.type_aliases {
                 if !alias.name.trim().is_empty()
@@ -1168,6 +1246,23 @@ impl CompilerSyntaxHeader {
                     && !out.type_aliases.iter().any(|existing| existing == alias)
                 {
                     out.type_aliases.push(alias.clone());
+                }
+            }
+            if !decl.params.is_empty() {
+                let mut type_names = decl
+                    .type_aliases
+                    .iter()
+                    .filter(|alias| alias.name == decl.name)
+                    .map(|alias| alias.type_name.clone())
+                    .collect::<Vec<_>>();
+                type_names.sort();
+                type_names.dedup();
+                if !type_names.is_empty() {
+                    out.typed_callables.push(CompilerTypedCallableHeader {
+                        name: decl.name.clone(),
+                        params: decl.params.clone(),
+                        type_names,
+                    });
                 }
             }
         }
@@ -1193,6 +1288,18 @@ impl CompilerSyntaxHeader {
                 .then_with(|| left.receiver_types.cmp(&right.receiver_types))
         });
         out.calls.dedup_by(|left, right| left == right);
+        out.returns.sort_by(|left, right| {
+            left.span
+                .start
+                .cmp(&right.span.start)
+                .then_with(|| left.span.end.cmp(&right.span.end))
+                .then_with(|| {
+                    left.value_text
+                        .cmp(&right.value_text)
+                        .then_with(|| left.value_name.cmp(&right.value_name))
+                })
+        });
+        out.returns.dedup();
         out.assignment_aliases.sort_by(|left, right| {
             left.target
                 .cmp(&right.target)
@@ -1206,6 +1313,22 @@ impl CompilerSyntaxHeader {
                 .then_with(|| left.call_receiver.cmp(&right.call_receiver))
         });
         out.factory_assignments.dedup();
+        out.callback_arguments.sort_by(|left, right| {
+            left.call_name
+                .cmp(&right.call_name)
+                .then_with(|| left.argument_index.cmp(&right.argument_index))
+                .then_with(|| left.call_receiver.cmp(&right.call_receiver))
+                .then_with(|| left.call_receiver_types.cmp(&right.call_receiver_types))
+                .then_with(|| left.params.cmp(&right.params))
+        });
+        out.callback_arguments.dedup();
+        out.typed_callables.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.type_names.cmp(&right.type_names))
+                .then_with(|| left.params.cmp(&right.params))
+        });
+        out.typed_callables.dedup();
         out.type_aliases.sort_by(|left, right| {
             left.name
                 .cmp(&right.name)
@@ -1304,8 +1427,10 @@ pub enum AssignValueKind {
     CallResult,
     /// RHS is delivered to a call-site block / closure by the
     /// callee's `yield`, not by the callee's ordinary return value.
-    /// Engines should require a resolved yield summary rather than
-    /// treating tainted call arguments as enough evidence.
+    /// Resolved callees use their exact yield summaries. If a language
+    /// adapter proves an inline-yield binding but the callee is external,
+    /// the IDG may conservatively connect only the adapter-declared explicit
+    /// inputs to that binding at narrowed precision.
     YieldResult,
     /// A binding projected from an aggregate pattern. The bound value is
     /// reachable from both the aggregate and the exact selected field, so
@@ -1704,14 +1829,14 @@ fn collect_operations(events: &[FlowEvent], out: &mut Vec<Operation>) {
             }
             FlowEvent::Return {
                 span,
-                value_text,
                 value_name,
                 value_flow,
+                ..
             } => {
                 let target = value_name
                     .as_ref()
                     .filter(|s| !s.trim().is_empty())
-                    .or_else(|| value_text.as_ref().filter(|s| !s.trim().is_empty()))
+                    .or_else(|| value_flow.place.as_ref().filter(|s| !s.trim().is_empty()))
                     .cloned();
                 let sources = expression_flow_source_names(value_flow);
                 let operands = sources
@@ -2654,6 +2779,12 @@ pub struct CallArgumentValueFact {
     /// not populate this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_call_span: Option<Span>,
+    /// Exact value-shape classification supplied by the owning language
+    /// adapter for this argument expression. `Literal` is sufficient for
+    /// value-independent clean-overwrite proofs without parsing
+    /// [`CallArg::value_text`]; absent or non-literal facts fail closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_kind: Option<AssignValueKind>,
     /// Adapter-lowered parameter bindings when the complete argument is an
     /// inline callback/lambda expression. Indices use the same flattened,
     /// source-ordered binding convention as [`Decl::params`]. API/provider
@@ -3432,6 +3563,7 @@ mod compiler_attribution_tests {
             bases: Vec::new(),
             receiver_param_index: None,
             receiver_field_writes: Vec::new(),
+            receiver_field_initializers: Vec::new(),
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
             return_type: None,
@@ -3471,6 +3603,7 @@ mod compiler_attribution_tests {
                             condition: None,
                             then_events: vec![FlowEvent::Return {
                                 span: span(21, 27),
+                                value_kind: Some(AssignValueKind::Compound),
                                 value_text: Some("payload".to_string()),
                                 value_name: Some("payload".to_string()),
                                 value_flow: ExpressionFlow::from_place("payload"),
@@ -3539,7 +3672,7 @@ mod compiler_attribution_tests {
         assert_eq!(function.writes.len(), 1);
         assert_eq!(function.writes[0].source_names, ["payload", "fallback"]);
         assert_eq!(function.calls[1].name, "transform");
-        assert_eq!(function.calls[1].args[0].place.as_deref(), Some("payload"));
+        assert_eq!(function.calls[1].args[0].place, None);
         assert!(
             function.calls[1].args[1].source_names.is_empty(),
             "rendered compound text must not be split into invented carriers"
@@ -3670,6 +3803,7 @@ mod operation_tests {
                 }],
                 finally_events: vec![FlowEvent::Return {
                     span: span(34),
+                    value_kind: Some(AssignValueKind::Compound),
                     value_text: None,
                     value_name: Some("result".to_string()),
                     value_flow: ExpressionFlow::from_place("result"),

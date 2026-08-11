@@ -56,6 +56,7 @@ pub fn collect_local_callable_bindings(
 pub fn collect_local_callable_bindings_with_aliases(
 pub fn collect_workspace_local_callable_bindings(
 pub fn find_call_span_resolved(
+pub fn local_value_binding_shadows_callable(events: &[FlowEvent], name: &str, call_span: Span) -> bool {
 pub fn short_callee(name: &str) -> &str {
 pub mod chains;
 pub struct BuildTargetIndex {
@@ -95,6 +96,7 @@ pub use names::{
 pub use path_filter::{
 pub use policy::MATCHER_POLICY_FINGERPRINT;
 pub use precision::Precision;
+pub use resources::SyntaxMemoryPermitPool;
 pub use resources::callgraph_worker_count;
 pub use resources::candidate_index_worker_count;
 pub use resources::compiler_weighted_batches;
@@ -255,12 +257,12 @@ pub const LANG_ID: LanguageId = LanguageId::new("java");
 pub struct JavaAdapter;
 
 === lang_javascript ===
-pub const ECMASCRIPT_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
 pub const JS_TS_MODULE_RESOLUTION_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs"];
 pub const LANG_ID: LanguageId = LanguageId::new("javascript");
 pub fn apply_javascript_getter_property_sources(
 pub fn apply_js_ts_commonjs_named_export_aliases(
 pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tree, src: &[u8], file: FileId) {
+pub fn ecmascript_static_subscript_key(node: Node<'_>, src: &[u8]) -> Option<String> {
 pub fn extract_ecmascript_pseudo_call(
 pub fn js_ts_imports(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<ImportSpec> {
 pub fn js_ts_module_segments(path: &std::path::Path) -> Vec<String> {
@@ -483,6 +485,7 @@ pub enum TraceEdgeKind {
 pub enum TraceQueryKind {
 pub enum TraceStepKind {
 pub fn finalize(raw: RawTrace, ctx: FinalizeCtx<'_>, vfs: &Vfs) -> TraceResult {
+pub fn mark_last_step_termination(result: &mut TraceResult, termination: PathTermination) {
 pub fn summarize_incomplete_reasons(reasons: &[String], sample_limit: usize) -> String {
 pub fn truncate_after_step(result: &mut TraceResult, step_index: usize) {
 pub mod render;

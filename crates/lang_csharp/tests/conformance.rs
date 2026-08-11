@@ -13,6 +13,55 @@ fn conformance_traced() {
 }
 
 #[test]
+fn is_pattern_binds_the_designation_not_the_type() {
+    use bonsai_lang_api::FlowEvent;
+
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        Arc::new(bonsai_lang_csharp::CSharpAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "A.cs",
+            "class A { void Main(object subject) { if (subject is string value) Sink(value); } void Sink(string value) {} }",
+        )],
+    );
+    let global = ws.db().global_index();
+    let main = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "Main")
+        .expect("Main declaration");
+    let mut facts = Vec::new();
+    collect_assignments(&main.flow_events, &mut facts);
+    assert!(
+        facts
+            .iter()
+            .any(|(target, source)| target == "value" && source.as_deref() == Some("subject")),
+        "missing value <- subject: {facts:#?}"
+    );
+    assert!(facts.iter().all(|(target, _)| target != "string"));
+
+    fn collect_assignments(events: &[FlowEvent], out: &mut Vec<(String, Option<String>)>) {
+        for event in events {
+            match event {
+                FlowEvent::Assign {
+                    target, source_name, ..
+                } => out.push((target.clone(), source_name.clone())),
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    collect_assignments(then_events, out);
+                    collect_assignments(else_events, out);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[test]
 fn base_constructor_compound_arg_uses_ast_facts() {
     use bonsai_lang_api::{DeclKind, FlowEvent, LanguageAdapter};
 
@@ -80,4 +129,38 @@ fn expression_bodied_property_return_keeps_exact_projection_and_call_site() {
     assert_eq!(projection.base, "this");
     assert_eq!(projection.path, ["Data", "Cmd"]);
     assert_eq!(value_flow.call_sites.len(), 1);
+}
+
+#[test]
+fn lowercase_declared_and_cast_types_remain_receiver_evidence() {
+    use bonsai_lang_api::{FlowEvent, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_csharp::CSharpAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "A.cs",
+            "class lower { public void Run(string value) {} }\n\
+             class App { public void Handle(object input, string value) {\n\
+               lower declared = new lower();\n\
+               var casted = (lower)input;\n\
+               declared.Run(value); casted.Run(value);\n\
+             } }",
+        )],
+    );
+    let global = ws.db().global_index();
+    let handle = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "Handle")
+        .expect("Handle declaration");
+    let typed_calls = handle.flow_events.iter().filter(|event| {
+        matches!(
+            event,
+            FlowEvent::Call { name, receiver_types, .. }
+                if name.rsplit('.').next() == Some("Run")
+                    && receiver_types.iter().any(|ty| ty == "lower")
+        )
+    });
+    assert_eq!(typed_calls.count(), 2, "events: {:#?}", handle.flow_events);
 }

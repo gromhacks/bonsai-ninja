@@ -21,7 +21,7 @@ bonsai-ninja does not require a project config file for normal scans. Workspace-
 |---|---|---|---|
 | `.bonsai/rules/` | directory | Absent | Optional workspace-local rule overlay. |
 | `$CACHE_DIR/manifest.json` | generated file | `index --semantic`, SDK semantic/full-prewarm facades, or `cache rebuild` | JSON inventory of cache coverage, producer fingerprints, sidecar paths, missing reasons, and the versioned exact source ledger. Unchanged path/size/mtime entries reuse their recorded SHA-256 digest; a metadata change forces content rehashing. Do not use as the analysis payload path; commands validate and read the binary sidecars. |
-| `$CACHE_DIR/compiler-objects.v*.factstore` | generated file | first phase of `index --semantic`, SDK semantic prewarm, or `cache rebuild` | Atomic generation of per-file adapter-lowered compiler objects and diagnostics, validated by relative path, adapter, frontend ABI, SHA-256 source digest, and payload digest. Import indexes and compact syntax-target facts (calls, assignment aliases, factory assignments, and receiver/type evidence) are independently integrity-checked headers that decode without declaration/flow bodies. |
+| `$CACHE_DIR/compiler-objects.v*.factstore` | generated file | first phase of `index --semantic`, SDK semantic prewarm, or `cache rebuild` | Atomic generation of per-file adapter-lowered compiler objects and diagnostics, validated by relative path, adapter, frontend ABI, SHA-256 source digest, and payload digest. Import indexes, declaration linkage facts (including direct-call receiver-field initializers), and compact syntax targets (calls, exact return targets, assignment aliases, factory assignments, inline callbacks, typed callables, and receiver/type evidence) remain independently decodable without retaining declaration/flow bodies. Publication holds a cross-process lock and removes only unlocked older recognized compiler-object schemas plus abandoned matching staging files; unknown/manual files are preserved. |
 | `$CACHE_DIR/dataflow.v3.factstore` | generated file | SDK full prewarm, explicit dataflow prewarm, or exact query commands | Persisted dataflow sidecar. Do not edit manually. |
 | `$CACHE_DIR/value_flow.v*.factstore` | generated file | explicit compatibility prewarm/save APIs | Persisted legacy `ValueFlowGraph` projection. Canonical security/export semantics live in the IDG; do not edit manually. |
 | `$CACHE_DIR/flow_ids.v*.factstore` | generated file | SDK full prewarm or exact render/query commands | Persisted flow-id sidecar. Do not edit manually. |
@@ -65,7 +65,13 @@ import/package headers, and exact syntax-target headers in that order, then
 decodes bodies only for surviving files. Import headers are loaded directly
 from the compiler-object generation even when no workspace-package prewarm is
 needed; static imports must never disappear merely because that optional
-prewarm is empty. The linkage generation stores symbol headers, receiver
+prewarm is empty. Independent header decoding runs concurrently behind the
+same source-size-weighted memory permits as exact bodies. A surviving body
+derives only secondary views that its retained rules can inspect—such as
+decorators, assignment text, must-alias closure, runtime narrowing, or
+lifecycle state—and that projection is part of the derived-fact cache key.
+Eviction or a later larger projection causes exact recomputation, never a
+missing match. The linkage generation stores symbol headers, receiver
 ancestry, and call linkage as independent payloads so each command loads only
 its required compiler product. The IDG persistence phase replays typed stitch
 records from its first transfer pass instead of running transfer lowering
@@ -126,7 +132,7 @@ paths.
 | `BONSAI_DEBUG` | comma-separated categories | unset | Emit selected diagnostic categories to stderr; `*` enables all categories. Equivalent to global `--debug`. Common categories include `idg-closure`, `idg-resolve`, `recv-state`, `find-group`, `taint-graph`, and `xcall`; security progress notes also use categories such as `security-progress` and `security-phase`. |
 | `BONSAI_COMPILER_JOBS` | positive integer | available CPU count | Upper bound on compiler-object workers before file-size/memory weighting. Every file is still compiled. |
 | `BONSAI_IDG_TRANSFER_BATCH_SEGMENTS` | positive integer | available Rayon workers | Upper bound on concurrently lowered IDG source-file segments before exact VFS-size/memory weighting. Every segment and transfer fact is still compiled. |
-| `BONSAI_SECURITY_JOBS` | positive integer | available CPU count | Upper bound on concurrent Tree-sitter matcher units before the shared syntax-memory scheduler. It changes throughput only, never the scanned file or rule set. |
+| `BONSAI_SECURITY_JOBS` | positive integer | available CPU count | Upper bound on the continuous security header/body CPU worklist. Source-size-weighted permits independently bound memory overlap, so small files can use available CPUs while a large file consumes more of the scheduling budget. It changes throughput only, never the scanned file, rule set, or derived evidence. |
 | `BONSAI_SOURCE_ANALYSIS_JOBS` | positive integer | available CPU count | Upper bound on concurrent source-analysis compiler units before the shared memory scheduler. |
 | `BONSAI_TAINT_ANALYSIS_JOBS` | positive integer | `RAYON_NUM_THREADS` or available CPU count | Upper bound on concurrent exact source closures. Constrained machines run the same closures serially. |
 | `BONSAI_SECURITY_STACK_BYTES` | integer bytes, at least 1 MiB | 16 MiB | Stack size for security matcher workers. |

@@ -1,15 +1,8 @@
 use super::{
-    build_dart_cascade_events, build_dart_object_expression_call, build_dart_selector_call_event,
-    elixir_unwrap_def, emit_elixir_control_flow_call, emit_erlang_functional_loop_call,
-    emit_ruby_block_loop_call, extract_comprehension_for_clause_assigns, extract_foreach_binding_assigns,
-    extract_match_binding_assigns, extract_rhs_expr_operands, extract_rust_let_condition_bindings,
-    first_identifier_like_child, first_named_child_of_kind, has_direct_child_kind,
-    is_comprehension_binding_clause, is_comprehension_kind, is_initializer_list_kind,
-    is_large_data_declaration_node, is_large_literal_initializer_node, is_swift_defer_call,
-    looks_like_bare_identifier, next_named_sibling_within, node_text, pseudo_call_event,
-    repair_branch_events_by_else_keyword, span_of, swift_trailing_lambdas,
-    walk_deep_sequence_executable_nodes, walk_lambda_body, FileId, FlowEvent, GrammarHandler, LoopKind, Node,
-    SyntaxSpecialForm,
+    extract_comprehension_for_clause_assigns, extract_foreach_binding_assigns, extract_match_binding_assigns,
+    extract_rhs_expr_operands, first_identifier_like_child, is_comprehension_binding_clause,
+    is_comprehension_kind, looks_like_bare_identifier, next_named_sibling_within, node_text,
+    pseudo_call_event, span_of, walk_lambda_body, FileId, FlowEvent, GrammarHandler, LoopKind, Node,
 };
 
 mod assignment;
@@ -55,45 +48,19 @@ pub(super) fn walk_into(
     {
         out.push(event);
     }
-    if is_large_literal_initializer_node(kind, &node) {
-        return;
-    }
-    if is_initializer_list_kind(kind) || kind == "comma_expression" {
-        walk_deep_sequence_executable_nodes(node, file, src, handler, class_names, out);
-        return;
-    }
-    if is_large_data_declaration_node(kind, &node) {
-        // Large static/data declarations skip recursive expression walking,
-        // but their direct grammar children may still carry an
-        // adapter-classified executable event. Preserve those exact facts
-        // without descending through the potentially enormous initializer.
-        if let Some(extract) = handler.syntax_event_extractor {
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                if let Some(event) = extract(child, file, src, handler) {
-                    out.push(event);
-                }
-            }
-        }
-        return;
+    if let Some(extract) = handler.syntax_events_extractor {
+        out.extend(extract(node, file, src, handler));
     }
 
     // Skip over nested function/class definitions — their flow belongs to
     // their own decls. But do walk into their *declarators* to catch inline
     // default-arg expressions (rare; best-effort).
     //
-    // Elixir exception: `call` is in its FN_KINDS (Elixir function defs
-    // are `def foo do ... end` parsed as a `call`), but the same `call`
-    // kind also covers ordinary runtime calls. Only skip the call when
-    // it's actually a def-macro; let runtime calls fall through to the
-    // call handler below.
-    let is_skippable_nested_fn = if !is_root && kind == "call" {
-        // Only treat a nested call as a skippable function decl when
-        // its target identifier is one of Elixir's def macros.
-        elixir_unwrap_def(&node, src).is_some()
-    } else {
-        !is_root && handler.is_fn(kind)
-    };
+    let is_skippable_nested_fn = !is_root
+        && handler.is_fn(kind)
+        && handler
+            .function_definition_extractor
+            .is_none_or(|extract| extract(node, src).is_some());
     if is_skippable_nested_fn || (!is_root && (handler.is_class(kind) || handler.is_lambda(kind))) {
         return;
     }
@@ -159,19 +126,26 @@ fn lower_branch(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<Flow
     } = context;
     let kind = node.kind();
     if handler.is_if(kind) {
-        let then_node = node
-            .child_by_field_name("consequence")
-            .or_else(|| node.child_by_field_name("then"))
-            .or_else(|| node.child_by_field_name("body"))
-            .or_else(|| first_named_child_of_kind(&node, "statements"));
-        let else_node = node
-            .child_by_field_name("alternative")
-            .or_else(|| node.child_by_field_name("else"))
+        let then_node = handler
+            .branch_then_field_names
+            .iter()
+            .find_map(|field| node.child_by_field_name(field))
+            .or_else(|| {
+                let mut cursor = node.walk();
+                let selected = node
+                    .named_children(&mut cursor)
+                    .find(|child| handler.branch_arm_kinds.contains(&child.kind()));
+                selected
+            });
+        let else_node = handler
+            .branch_else_field_names
+            .iter()
+            .find_map(|field| node.child_by_field_name(field))
             // Some grammars expose both arms with the same `body` field.
             // `child_by_field_name("body")` returns the first arm only, so
             // recover the second body-like sibling when no explicit
             // alternative field exists.
-            .or_else(|| then_node.and_then(|then| next_named_sibling_within(&node, then)));
+            .or_else(|| then_node.and_then(|then| next_named_sibling_within(&node, then, handler)));
         let mut then_events = Vec::new();
         if let Some(n) = then_node {
             walk_into(n, file, src, handler, class_names, &mut then_events, false);
@@ -180,17 +154,11 @@ fn lower_branch(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<Flow
         if let Some(n) = else_node {
             walk_into(n, file, src, handler, class_names, &mut else_events, false);
         }
-        // Python's if/elif/elif/else lays out additional elif_clause
-        // and else_clause nodes as SIBLINGS inside the if_statement
-        // (not as nested alternatives), so the single `alternative`
-        // field only exposes the first elif. Walk every remaining
-        // elif_clause / else_clause named child so later branches'
-        // calls still surface. Lua is the same shape but names the
-        // siblings `elseif_statement` / `else_statement` (all carried on
-        // the repeated `alternative` field, of which `child_by_field_name`
-        // returns only the first) — without them, every branch after the
-        // first `elseif`, plus the trailing `else`, was dropped along
-        // with its calls.
+        // A branch may have more than two direct AST arms: switch/match/case
+        // constructs and grammars with repeated alternative fields are the
+        // common examples. Walk every remaining adapter-declared arm into
+        // the joined alternative set. This is exact CST ownership, not a
+        // source-text repair, and prevents third/later cases from vanishing.
         let then_id = then_node.map(|n| n.id());
         let else_id = else_node.map(|n| n.id());
         let mut cursor = node.walk();
@@ -198,10 +166,9 @@ fn lower_branch(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<Flow
             if Some(child.id()) == then_id || Some(child.id()) == else_id {
                 continue;
             }
-            if matches!(
-                child.kind(),
-                "elif_clause" | "else_clause" | "elseif_statement" | "else_statement"
-            ) {
+            if handler.additional_alternative_kinds.contains(&child.kind())
+                || handler.branch_arm_kinds.contains(&child.kind())
+            {
                 walk_into(child, file, src, handler, class_names, &mut else_events, false);
             }
         }
@@ -212,21 +179,26 @@ fn lower_branch(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<Flow
         // the OUTER flow below; walking it here too double-emits its calls
         // (`if (check(x)) {}` with empty arms emitted two `check` events).
         if then_events.is_empty() && else_events.is_empty() {
-            let discriminant_ids: [Option<usize>; 4] = [
-                node.child_by_field_name("condition").map(|n| n.id()),
-                node.child_by_field_name("subject").map(|n| n.id()),
-                node.child_by_field_name("value").map(|n| n.id()),
-                node.child_by_field_name("discriminant").map(|n| n.id()),
-            ];
+            let discriminant_ids = handler
+                .branch_condition_field_names
+                .iter()
+                .filter_map(|field| node.child_by_field_name(field).map(|child| child.id()))
+                .chain({
+                    let mut cursor = node.walk();
+                    node.named_children(&mut cursor)
+                        .filter(|child| handler.branch_condition_kinds.contains(&child.kind()))
+                        .map(|child| child.id())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
-                if discriminant_ids.iter().any(|id| *id == Some(child.id())) {
+                if discriminant_ids.contains(&child.id()) {
                     continue;
                 }
                 walk_into(child, file, src, handler, class_names, &mut then_events, false);
             }
         }
-        repair_branch_events_by_else_keyword(&mut then_events, &mut else_events, &node, src);
         // Go type switch `switch t := v.(type) { ... }` binds `t` to the
         // switched value `v` inside every arm. tree-sitter-go exposes the
         // bound name as an `alias` field and the value as a `value` field,
@@ -234,10 +206,7 @@ fn lower_branch(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<Flow
         // links to `v` and the switched value's taint is lost. Prepend the
         // `t <- v` binding to both arms.
         let mut type_switch_binding: Vec<FlowEvent> = Vec::new();
-        if let (Some(alias), Some(value)) = (
-            node.child_by_field_name("alias"),
-            node.child_by_field_name("value"),
-        ) {
+        if let Some((alias, value)) = handler.branch_alias_extractor.and_then(|extract| extract(node)) {
             let alias_text = first_identifier_like_child(&alias)
                 .map(|id| node_text(&id, src))
                 .unwrap_or_else(|| node_text(&alias, src));
@@ -281,8 +250,22 @@ fn lower_branch(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<Flow
         //   * match / switch (Python, Rust): `subject` / `value`
         //   * when-expression (Kotlin):       `subject`
         let mut condition = None;
-        for field in ["condition", "subject", "value", "discriminant"] {
+        for field in handler.branch_condition_field_names {
             if let Some(cond) = node.child_by_field_name(field) {
+                condition.get_or_insert_with(|| node_text(&cond, src).trim().to_string());
+                walk_into(cond, file, src, handler, class_names, out, false);
+            }
+        }
+        let field_condition_ids = handler
+            .branch_condition_field_names
+            .iter()
+            .filter_map(|field| node.child_by_field_name(field).map(|child| child.id()))
+            .collect::<Vec<_>>();
+        let mut cursor = node.walk();
+        for cond in node.named_children(&mut cursor) {
+            if handler.branch_condition_kinds.contains(&cond.kind())
+                && !field_condition_ids.contains(&cond.id())
+            {
                 condition.get_or_insert_with(|| node_text(&cond, src).trim().to_string());
                 walk_into(cond, file, src, handler, class_names, out, false);
             }
@@ -307,7 +290,7 @@ fn lower_comprehension(node: Node<'_>, context: LoweringContext<'_>, out: &mut V
         class_names,
     } = context;
     let kind = node.kind();
-    if is_comprehension_kind(kind) {
+    if is_comprehension_kind(kind, handler) {
         // Emit the loop-variable bindings BEFORE the body, regardless of
         // AST order (python lays the body out first). This gives the
         // natural flow order — bindings then body — so a NESTED
@@ -327,7 +310,7 @@ fn lower_comprehension(node: Node<'_>, context: LoweringContext<'_>, out: &mut V
         while let Some(current) = stack.pop() {
             let mut cursor = current.walk();
             for child in current.named_children(&mut cursor) {
-                if is_comprehension_binding_clause(child.kind()) {
+                if is_comprehension_binding_clause(child.kind(), handler) {
                     clauses.push(child);
                 } else {
                     stack.push(child);
@@ -342,7 +325,7 @@ fn lower_comprehension(node: Node<'_>, context: LoweringContext<'_>, out: &mut V
         }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            if !is_comprehension_binding_clause(child.kind()) {
+            if !is_comprehension_binding_clause(child.kind(), handler) {
                 walk_into(child, file, src, handler, class_names, out, false);
             }
         }
@@ -363,21 +346,20 @@ fn lower_loop(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<FlowEv
     if handler.is_for(kind)
         || handler.is_foreach(kind)
         || handler.is_while(kind)
-        || (handler.is_do(kind) && !has_direct_child_kind(&node, "catch_block"))
+        || handler.is_do(kind)
         || handler.is_loop(kind)
     {
-        let body_node = node
-            .child_by_field_name("body")
-            .or_else(|| node.child_by_field_name("consequence"))
+        let body_node = handler
+            .loop_body_field_names
+            .iter()
+            .find_map(|field| node.child_by_field_name(field))
             .or_else(|| {
                 let mut cursor = node.walk();
                 let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
-                children.into_iter().rev().find(|child| {
-                    matches!(
-                        child.kind(),
-                        "block" | "compound_statement" | "statement" | "expression_statement"
-                    )
-                })
+                children
+                    .into_iter()
+                    .rev()
+                    .find(|child| handler.loop_body_kinds.contains(&child.kind()))
             });
         let mut body = Vec::new();
         if let Some(n) = body_node {
@@ -395,7 +377,10 @@ fn lower_loop(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<FlowEv
                 walk_into(child, file, src, handler, class_names, &mut body, false);
             }
         }
-        let loop_kind = if handler.is_foreach(kind) {
+        let has_foreach_binding = handler
+            .foreach_binding_extractor
+            .is_some_and(|extract| extract(node).is_some());
+        let loop_kind = if handler.is_foreach(kind) || has_foreach_binding {
             LoopKind::ForEach
         } else if handler.is_for(kind) {
             LoopKind::For
@@ -406,10 +391,10 @@ fn lower_loop(node: Node<'_>, context: LoweringContext<'_>, out: &mut Vec<FlowEv
         } else {
             LoopKind::While
         };
-        if matches!(loop_kind, LoopKind::ForEach | LoopKind::For) {
+        if loop_kind == LoopKind::ForEach {
             out.extend(extract_foreach_binding_assigns(file, &node, src, handler));
         }
-        out.extend(extract_rust_let_condition_bindings(file, &node, src, handler));
+        out.extend(extract_match_binding_assigns(file, &node, src, handler));
         out.push(FlowEvent::Loop {
             span: span_of(file, &node),
             loop_kind,
@@ -429,95 +414,12 @@ fn lower_special_form(node: Node<'_>, context: LoweringContext<'_>, out: &mut Ve
         class_names,
     } = context;
     let kind = node.kind();
-    // Dart-specific: tree-sitter-dart (UserNobody14) models calls as
-    // `identifier` followed by a sibling `selector` (which contains
-    // `argument_part > arguments > argument*`), rather than a unified
-    // call node. We synthesize a Call event when we see a selector
-    // whose previous named sibling is an identifier-like callee.
-    // Re-run for `dotted` receivers: `receiver.method(args)` parses as
-    // `identifier.identifier selector`, so the prev sibling is a `.`
-    // followed by the method identifier; we walk back as needed.
-    if handler.has_special_form(SyntaxSpecialForm::SplitSelectorCall) && kind == "selector" {
-        if let Some(event) = build_dart_selector_call_event(node, file, src, handler) {
-            out.push(event);
-            // Descend into arguments for nested calls.
-            if let Some(arg_part) = first_named_child_of_kind(&node, "argument_part") {
-                if let Some(args) = first_named_child_of_kind(&arg_part, "arguments") {
-                    let mut cursor = args.walk();
-                    for arg in args.named_children(&mut cursor) {
-                        walk_into(arg, file, src, handler, class_names, out, false);
-                    }
-                }
-            }
-            return true;
-        }
-    }
-
-    // Dart cascades: `w..configure(cmd)..enable()` (method form) and
-    // `b..name = cmd` (field-write form). tree-sitter-dart emits each
-    // `..segment` as a `cascade_section` sibling of the base expression —
-    // neither a call node nor an assignment node — so without this branch
-    // the idiomatic Flutter builder pattern is invisible to sink rules
-    // (no Call) and cascade field writes vanish (no Assign).
-    if handler.has_special_form(SyntaxSpecialForm::CascadeSection) && kind == "cascade_section" {
-        if let Some(events) = build_dart_cascade_events(node, file, src, handler) {
-            out.extend(events);
-            // Descend into call arguments / the written value for
-            // nested calls, mirroring the selector branch above.
-            if let Some(arg_part) = first_named_child_of_kind(&node, "argument_part") {
-                if let Some(args) = first_named_child_of_kind(&arg_part, "arguments") {
-                    let mut cursor = args.walk();
-                    for arg in args.named_children(&mut cursor) {
-                        walk_into(arg, file, src, handler, class_names, out, false);
-                    }
-                }
-            } else {
-                let mut cursor = node.walk();
-                for child in node.named_children(&mut cursor) {
-                    if child.kind() != "cascade_selector" {
-                        walk_into(child, file, src, handler, class_names, out, false);
-                    }
-                }
-            }
-            return true;
-        }
-    }
-
-    // Dart explicit constructor invocations: `new T(args)` /
-    // `const T(args)`. These node kinds are not call-shaped (no
-    // callee/arguments fields the generic builder recognises), so the
-    // implicit `T(args)` form worked while the explicit forms emitted
-    // nothing. Gated on `!handler.is_call(kind)` so grammars that DO
-    // model `new_expression` as a call (JS/TS list it in `call_kinds`)
-    // fall through to the generic call branch below — which inlines
-    // closure arguments (`new Promise((r) => { sink(x) })`). Dart's
-    // `call_kinds` is empty, so only Dart takes this branch.
-    if handler.has_special_form(SyntaxSpecialForm::ObjectConstructionExpression)
-        && (kind == "new_expression" || kind == "const_object_expression")
-        && !handler.is_call(kind)
-    {
-        if let Some(event) = build_dart_object_expression_call(node, file, src, handler) {
-            out.push(event);
-            if let Some(args) = first_named_child_of_kind(&node, "arguments") {
-                let mut cursor = args.walk();
-                for arg in args.named_children(&mut cursor) {
-                    walk_into(arg, file, src, handler, class_names, out, false);
-                }
-            }
-            return true;
-        }
-    }
-
-    // Swift-specific: `defer { body }` parses as a `call_expression`
-    // with callee `defer` and a trailing `lambda_literal`. Convert to
-    // a Defer event BEFORE the generic call handler would turn it
-    // into a regular Call (which would lose the body's contents).
-    if handler.has_special_form(SyntaxSpecialForm::TrailingClosureDefer)
-        && kind == "call_expression"
-        && is_swift_defer_call(&node, src)
-    {
+    let deferred_bodies = handler
+        .deferred_body_extractor
+        .map_or_else(Vec::new, |extract| extract(node, src));
+    if !deferred_bodies.is_empty() {
         let mut body = Vec::new();
-        for lambda in swift_trailing_lambdas(node) {
+        for lambda in deferred_bodies {
             walk_lambda_body(lambda, file, src, handler, class_names, &mut body);
         }
         out.push(FlowEvent::Defer {
@@ -527,15 +429,14 @@ fn lower_special_form(node: Node<'_>, context: LoweringContext<'_>, out: &mut Ve
         return true;
     }
 
-    if kind == "call"
-        && ((handler.has_special_form(SyntaxSpecialForm::CallEncodedControlFlow)
-            && emit_elixir_control_flow_call(&node, file, src, handler, class_names, out))
-            || (handler.has_special_form(SyntaxSpecialForm::FunctionalLoopCall)
-                && emit_erlang_functional_loop_call(&node, file, src, handler, class_names, out))
-            || (handler.has_special_form(SyntaxSpecialForm::BlockLoopCall)
-                && emit_ruby_block_loop_call(&node, file, src, handler, class_names, out)))
-    {
-        return true;
+    if handler.is_call(kind) {
+        if let Some(events) = handler
+            .call_encoded_control_flow_extractor
+            .and_then(|extract| extract(node, file, src, handler, class_names))
+        {
+            out.extend(events);
+            return true;
+        }
     }
 
     false

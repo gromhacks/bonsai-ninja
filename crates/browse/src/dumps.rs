@@ -469,6 +469,7 @@ mod tests {
             bases: Vec::new(),
             receiver_param_index: None,
             receiver_field_writes: Vec::new(),
+            receiver_field_initializers: Vec::new(),
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
             return_type: None,

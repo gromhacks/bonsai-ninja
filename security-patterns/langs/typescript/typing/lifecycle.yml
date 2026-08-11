@@ -1,0 +1,54 @@
+- id: typescript.typing.lifecycle_closed_receiver
+  enabled: true
+  language: typescript
+  match: { kind: call, callee: { name: close } }
+  lifecycle_transition:
+    state: closed
+    binding: { kind: receiver }
+  match_examples:
+  - name: close changes the receiver state
+    code: 'function f(resource: { close(): void }) { resource.close(); }'
+    expect_match_text: [resource.close]
+  description: "TypeScript close moves the receiver to closed. Typing-only; never a finding."
+
+- id: typescript.typing.lifecycle_destroyed_receiver
+  enabled: true
+  language: typescript
+  match: { kind: call, callee: { name: destroy } }
+  lifecycle_transition:
+    state: freed
+    binding: { kind: receiver }
+  match_examples:
+  - name: destroy changes the receiver state
+    code: 'function f(stream: { destroy(): void }) { stream.destroy(); }'
+    expect_match_text: [stream.destroy]
+  description: "TypeScript destroy moves the receiver to freed. Typing-only; never a finding."
+
+- id: typescript.typing.lifecycle_cancelled_receiver
+  enabled: true
+  language: typescript
+  match:
+    kind: call
+    callee:
+      regex: '(?:^|\.)(?:abort|unsubscribe|cancel)$'
+  lifecycle_transition:
+    state: cancelled
+    binding: { kind: receiver }
+  match_examples:
+  - name: abort changes the receiver state
+    code: 'function f(controller: { abort(): void }) { controller.abort(); }'
+    expect_match_text: [controller.abort]
+  description: "TypeScript abort/unsubscribe/cancel moves the receiver to cancelled. Typing-only; never a finding."
+
+- id: typescript.typing.lifecycle_unlocked_receiver
+  enabled: true
+  language: typescript
+  match: { kind: call, callee: { name: release } }
+  lifecycle_transition:
+    state: unlocked
+    binding: { kind: receiver }
+  match_examples:
+  - name: release changes the receiver state
+    code: 'function f(lock: { release(): void }) { lock.release(); }'
+    expect_match_text: [lock.release]
+  description: "TypeScript release moves the receiver to unlocked. Typing-only; never a finding."

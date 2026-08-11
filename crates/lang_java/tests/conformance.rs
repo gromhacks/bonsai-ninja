@@ -12,6 +12,54 @@ fn conformance_traced() {
 }
 
 #[test]
+fn instanceof_pattern_binds_the_declared_name_not_the_type() {
+    use bonsai_lang_api::FlowEvent;
+
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "A.java",
+            "class A { void main(Object subject) { if (subject instanceof String value) sink(value); } void sink(String value) {} }",
+        )],
+    );
+    let global = ws.db().global_index();
+    let main = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "main")
+        .expect("main declaration");
+    let mut facts = Vec::new();
+    collect_assignments(&main.flow_events, &mut facts);
+    assert!(
+        facts
+            .iter()
+            .any(|(target, source)| target == "value" && source.as_deref() == Some("subject")),
+        "missing value <- subject: {facts:#?}"
+    );
+    assert!(facts.iter().all(|(target, _)| target != "String"));
+
+    fn collect_assignments(events: &[FlowEvent], out: &mut Vec<(String, Option<String>)>) {
+        for event in events {
+            match event {
+                FlowEvent::Assign {
+                    target, source_name, ..
+                } => out.push((target.clone(), source_name.clone())),
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    collect_assignments(then_events, out);
+                    collect_assignments(else_events, out);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[test]
 fn fully_qualified_type_use_is_local_package_evidence() {
     use bonsai_lang_api::{ImportScope, LanguageAdapter};
 
@@ -191,6 +239,33 @@ class Storage {
     );
     let file = ws.db().vfs().all_files()[0];
     let index = ws.db().decl_index(file).expect("Java declaration index");
+
+    let constructor = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "Storage" && decl.kind == bonsai_lang_api::DeclKind::Constructor)
+        .expect("Storage constructor");
+    assert_eq!(constructor.params, ["data"]);
+    assert!(
+        constructor
+            .receiver_field_writes
+            .iter()
+            .any(|write| { write.target == "this.data" && write.source_param_indices == [0] }),
+        "constructor assignment must be lowered as exact receiver state: {constructor:#?}"
+    );
+    assert_eq!(
+        constructor.receiver_field_writes.len(),
+        1,
+        "local or type-qualified writes must not become receiver state: {constructor:#?}"
+    );
+    assert!(
+        constructor
+            .flow_events
+            .iter()
+            .all(|event| !matches!(event, FlowEvent::Return { .. })),
+        "a Java constructor cannot return a value: {:#?}",
+        constructor.flow_events
+    );
 
     let receiver_for = |decl_name: &str| {
         let decl = index

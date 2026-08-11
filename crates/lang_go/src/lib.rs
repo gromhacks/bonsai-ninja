@@ -6,14 +6,101 @@ use bonsai_lang_api::{
         call_arg_from_node_with_handler, collect_kinds, first_named_child_of_kind, language_from_pack,
         node_text, parse_with, span_of,
     },
-    AdapterContext, AdapterError, ArgumentPassingMode, CallKind, CharacterConstraintDomain,
-    CharacterConstraintFact, CharacterConstraintOutput, CompilerGuardFact, ConditionEquality,
-    ConditionExpressionFact, ConditionOperandFact, DeclIndex, ExpressionField, ExpressionFlow, FlowEvent,
-    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    SameOriginPathConstraintFact, StaticScalarValue, StaticStringMapEntry, StringCompositionFact,
-    StringCompositionPart, TypeAliasBinding, Visibility,
+    AdapterContext, AdapterError, ArgumentPassingMode, CallKind, CallTargetExtraction,
+    CharacterConstraintDomain, CharacterConstraintFact, CharacterConstraintOutput, CompilerGuardFact,
+    ConditionEquality, ConditionExpressionFact, ConditionOperandFact, DeclIndex, ExpressionField,
+    ExpressionFlow, ExpressionPlaceExtraction, FlowEvent, GrammarHandler, ImportIndex, ImportScope,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, SameOriginPathConstraintFact,
+    StaticScalarValue, StaticStringMapEntry, StringCompositionFact, StringCompositionPart, TypeAliasBinding,
+    Visibility,
 };
 use tree_sitter::Node;
+
+fn go_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    let target = match node.kind() {
+        "call_expression" => node.child_by_field_name("function")?,
+        "composite_literal" => node.child_by_field_name("type")?,
+        _ => return None,
+    };
+    let full_text = node_text(&target, src).trim();
+    (!full_text.is_empty()).then_some(CallTargetExtraction {
+        node: target,
+        full_text: full_text.to_string(),
+    })
+}
+
+/// Lower a selector whose receiver includes a zero-argument call into its
+/// canonical compiler place (`c.Request().Body`). The adapter owns the CST
+/// fields and punctuation; shared matching never learns provider/API names.
+fn go_expression_places(node: Node<'_>, src: &[u8]) -> ExpressionPlaceExtraction {
+    fn place(node: Node<'_>, src: &[u8]) -> Option<String> {
+        match node.kind() {
+            "identifier" => {
+                let value = node_text(&node, src).trim();
+                (!value.is_empty()).then(|| value.to_string())
+            }
+            "selector_expression" | "field_expression" => {
+                let base = place(node.child_by_field_name("operand")?, src)?;
+                let field = node_text(&node.child_by_field_name("field")?, src).trim();
+                (!field.is_empty()).then(|| format!("{base}.{field}"))
+            }
+            "call_expression" => {
+                let function = node.child_by_field_name("function")?;
+                let arguments = node.child_by_field_name("arguments")?;
+                let mut cursor = arguments.walk();
+                if arguments.named_children(&mut cursor).next().is_some() {
+                    return None;
+                }
+                place(function, src).map(|callee| format!("{callee}()"))
+            }
+            "parenthesized_expression" => {
+                let mut cursor = node.walk();
+                let mut children = node.named_children(&mut cursor);
+                let child = children.next()?;
+                children.next().is_none().then(|| place(child, src)).flatten()
+            }
+            _ => None,
+        }
+    }
+
+    if !matches!(node.kind(), "selector_expression" | "field_expression") {
+        return ExpressionPlaceExtraction::default();
+    }
+    place(node, src).map_or_else(ExpressionPlaceExtraction::default, |place| {
+        ExpressionPlaceExtraction {
+            places: vec![place],
+            consumed_node_ids: vec![node.id()],
+        }
+    })
+}
+
+fn go_type_switch_alias(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    (node.kind() == "type_switch_statement")
+        .then(|| {
+            Some((
+                node.child_by_field_name("alias")?,
+                node.child_by_field_name("value")?,
+            ))
+        })
+        .flatten()
+}
+
+fn go_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    if node.kind() != "for_statement" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let range = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "range_clause")?;
+    let binding = range
+        .child_by_field_name("left")
+        .or_else(|| range.named_child(0))?;
+    let iterable = range
+        .child_by_field_name("right")
+        .or_else(|| range.named_child(1))?;
+    Some((binding, iterable))
+}
 use tree_sitter::{Language, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("go");
@@ -28,40 +115,18 @@ const PACK_NAME: &str = "go";
 // would mis-extract the channel as the callee.
 const GO_CALL_KINDS: &[&str] = &["call_expression", "composite_literal"];
 
-/// Go lifecycle transitions: stdlib `Close` / `Unlock` / `Cancel` /
-/// `Stop` and the cgo `C.free` bridge.
-const GO_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "Close",
-        transition: "closed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "Unlock",
-        transition: "unlocked",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "RUnlock",
-        transition: "unlocked",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "Cancel",
-        transition: "cancelled",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "Stop",
-        transition: "cancelled",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "C.free",
-        transition: "freed",
-        arg_index: 0,
-    },
-];
+fn go_indirect_place_operand(node: Node<'_>) -> Option<Node<'_>> {
+    if node.kind() != "unary_expression" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let has_indirection = node
+        .children(&mut cursor)
+        .any(|child| matches!(child.kind(), "*" | "&"));
+    has_indirection
+        .then(|| node.child_by_field_name("operand"))
+        .flatten()
+}
 
 type GoRangeAssignments = Vec<FlowEvent>;
 type GoRangeLoopAssignments = Vec<(Span, GoRangeAssignments)>;
@@ -86,6 +151,36 @@ fn apply_go_type_declaration_kinds(index: &mut DeclIndex, tree: &Tree, file: Fil
 }
 
 const HANDLER: GrammarHandler = GrammarHandler {
+    expression_value_kind_extractor: None,
+    literal_value_kinds: &[
+        "nil",
+        "int_literal",
+        "float_literal",
+        "imaginary_literal",
+        "true",
+        "false",
+    ],
+    string_literal_kinds: &["interpreted_string_literal", "raw_string_literal", "rune_literal"],
+    comment_kinds: &["comment"],
+    doc_comment_prefixes: &["///", "/**"],
+    parameter_container_kinds: &["parameter_list"],
+    parameter_kinds: &["parameter_declaration", "variadic_parameter_declaration"],
+    parameter_annotation_name_extractor: None,
+    variadic_parameter_kinds: &["variadic_parameter"],
+    binding_identifier_kinds: &["identifier"],
+    identifier_kinds: &["identifier"],
+    aggregate_pattern_kinds: &["expression_list"],
+    named_aggregate_kinds: &["literal_value"],
+    positional_aggregate_kinds: &["literal_value"],
+    aggregate_pair_kinds: &["keyed_element"],
+    aggregate_key_field_names: &["key"],
+    aggregate_value_field_names: &["value"],
+    static_field_name_kinds: &["identifier", "field_identifier"],
+    aggregate_syntax_only_kinds: &["type_identifier"],
+    transparent_call_wrapper_kinds: &["selector_expression", "parenthesized_expression"],
+    single_expression_group_kinds: &["expression_list"],
+    assignment_target_wrapper_kinds: &["var_spec"],
+    binding_declaration_keyword_spellings: &["var", "const", "type"],
     fn_kinds: &["function_declaration", "method_declaration"],
     class_kinds: &["type_spec"],
     class_decl_kinds: &[("type_spec", bonsai_lang_api::DeclKind::TypeAlias)],
@@ -95,15 +190,38 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "expression_switch_statement",
         "type_switch_statement",
     ],
+    branch_then_field_names: &["consequence", "body"],
+    branch_else_field_names: &["alternative"],
+    branch_condition_field_names: &["condition", "value"],
+    branch_alias_extractor: Some(go_type_switch_alias),
+    loop_body_field_names: &["body"],
+    loop_body_kinds: &["block", "expression_statement"],
+    branch_arm_kinds: &["block", "expression_case", "type_case", "default_case"],
     for_kinds: &["for_statement"],
+    foreach_binding_extractor: Some(go_foreach_binding),
     call_kinds: GO_CALL_KINDS,
+    constructor_call_kinds: &["composite_literal"],
+    call_callee_field_names: &["function", "type"],
+    constructor_type_field_names: &["type"],
+    call_target_extractor: Some(go_call_target),
+    call_argument_field_names: &["arguments"],
+    call_argument_container_kinds: &["argument_list", "literal_value"],
+    lambda_body_field_names: &["body"],
+    special_forms: &[],
     pseudo_call_extractor: Some(extract_go_pseudo_call),
     syntax_event_extractor: None,
     pseudo_call_receiver_extractor: Some(extract_go_pseudo_call_receiver),
     argument_passing_mode_extractor: Some(go_argument_passing_mode),
+    indirect_place_operand_extractor: Some(go_indirect_place_operand),
     call_ref_kinds: GO_CALL_KINDS,
     member_expression_kinds: &["selector_expression", "field_expression"],
     subscript_expression_kinds: &["index_expression"],
+    member_base_field_names: &["operand"],
+    member_name_field_names: &["field"],
+    subscript_base_field_names: &["operand"],
+    subscript_index_field_names: &["index"],
+    static_subscript_key_extractor: Some(go_static_subscript_key),
+    expression_place_extractor: Some(go_expression_places),
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     method_receiver_param_index: Some(0),
     assignment_kinds: &[
@@ -118,10 +236,15 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "var_spec",
         "const_spec",
     ],
+    compound_assignment_operators: &[
+        "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "&=", "^=", "|=", "&^=",
+    ],
+    type_only_declaration_kinds: &["var_spec", "const_spec"],
     return_kinds: &["return_statement"],
     lambda_kinds: &["func_literal"],
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
+    control_label_field_names: &["label"],
     defer_kinds: &["defer_statement"],
     ..bonsai_lang_api::EMPTY_HANDLER
 };
@@ -354,14 +477,8 @@ impl LanguageAdapter for GoAdapter {
             // escaped literals and adapter-synthesized calls invisible.
             idx.character_constraints = go_character_constraints(&idx, &tree, file, src);
         }
-        // Append `FlowEvent::Lifecycle` for recognised Go
-        // resource transitions (`f.Close()`, `mu.Unlock()`,
-        // `cancel()`, `C.free`). Receiver-style calls land with
-        // `name = "Close"` and `args[0] = "f"`, so arg_index 0
-        // points at the receiver text.
         for decl in &mut idx.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, GO_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
@@ -932,6 +1049,13 @@ fn go_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
             Some(StaticScalarValue::String(go_static_string_literal(node, src)?))
         }
         _ => None,
+    }
+}
+
+fn go_static_subscript_key(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match go_static_scalar(node, src)? {
+        StaticScalarValue::String(value) => Some(value),
+        StaticScalarValue::Boolean(_) | StaticScalarValue::Null => None,
     }
 }
 
@@ -2836,7 +2960,7 @@ fn go_range_value_assignment(
         None
     };
     let source_names = if source_call.is_none() {
-        go_range_value_source_names(right_text, source_name.as_deref())
+        go_range_value_source_names(right, span.file, src, source_name.as_deref())
     } else {
         Vec::new()
     };
@@ -2953,7 +3077,7 @@ fn go_initializer_assignment_events(init: Node<'_>, file: FileId, src: &[u8]) ->
                     source_name.clone(),
                     None,
                     Vec::new(),
-                    go_range_value_source_names(rhs_text, source_name.as_deref()),
+                    go_range_value_source_names(rhs, span.file, src, source_name.as_deref()),
                     Some(bonsai_lang_api::AssignValueKind::Compound),
                 )
             };
@@ -3022,8 +3146,13 @@ fn go_call_event_from_node(call: Node<'_>, file: FileId, src: &[u8]) -> Option<F
     })
 }
 
-fn go_range_value_source_names(right_text: &str, source_name: Option<&str>) -> Vec<String> {
-    let mut names = go_value_source_names(right_text);
+fn go_range_value_source_names(
+    right: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    source_name: Option<&str>,
+) -> Vec<String> {
+    let mut names = go_expression_flow_source_names(&lower_go_value_expression(right, file, src));
     if let Some(source_name) = source_name {
         names.retain(|name| name != source_name);
     }
@@ -3441,39 +3570,6 @@ fn go_var_spec_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
 fn go_bare_value_name(value: &str) -> Option<String> {
     let value = value.trim();
     go_identifier_like(value).then(|| value.to_string())
-}
-
-fn go_value_source_names(value: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut token = String::new();
-    let mut quote = None;
-    let mut escaped = false;
-    for ch in value.chars().chain(std::iter::once(' ')) {
-        if let Some(quote_ch) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == quote_ch {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '"' | '\'' | '`') {
-            push_unique_string(&mut out, token.trim_matches('.').to_string());
-            token.clear();
-            quote = Some(ch);
-            continue;
-        }
-        if ch == '.' || ch == '_' || ch.is_ascii_alphanumeric() {
-            token.push(ch);
-            continue;
-        }
-        push_unique_string(&mut out, token.trim_matches('.').to_string());
-        token.clear();
-    }
-    out.retain(|name| !name.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()));
-    out
 }
 
 fn first_go_composite_literal_type(node: Node<'_>, src: &[u8]) -> Option<String> {

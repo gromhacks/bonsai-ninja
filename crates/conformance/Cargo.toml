@@ -15,6 +15,9 @@ bonsai_testkit = { workspace = true }
 
 [dev-dependencies]
 bonsai_adapters = { workspace = true }
+bonsai_diagnostics = { workspace = true }
+bonsai_vfs = { workspace = true }
+parking_lot = { workspace = true }
 serde_yaml = { workspace = true }
 tree-sitter = { workspace = true }
 

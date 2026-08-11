@@ -34,30 +34,30 @@ pub(super) fn tainted_arg_info_from_events(
     TaintedArgInfo {
         index: arg.index,
         value_text: arg.value_text.clone(),
-        place: structured.and_then(|call_arg| call_arg.place.clone()),
+        place: structured
+            .and_then(|call_arg| call_arg.place.clone())
+            .or_else(|| arg.place.clone()),
         source_names: structured
             .map(|call_arg| call_arg.source_names.clone())
-            .unwrap_or_default(),
+            .filter(|sources| !sources.is_empty())
+            .unwrap_or_else(|| arg.source_names.clone()),
     }
 }
 
 pub(super) fn tainted_arg_target_keys(arg: &TaintedArgInfo) -> Vec<String> {
-    semantic_target_keys(arg.place.as_deref(), &arg.source_names, &arg.value_text)
+    semantic_target_keys(arg.place.as_deref(), &arg.source_names)
 }
 
 pub(super) fn call_arg_target_keys(arg: &bonsai_lang_api::CallArg) -> Vec<String> {
-    semantic_target_keys(arg.place.as_deref(), &arg.source_names, &arg.value_text)
+    semantic_target_keys(arg.place.as_deref(), &arg.source_names)
 }
 
-fn semantic_target_keys(place: Option<&str>, source_names: &[String], fallback_text: &str) -> Vec<String> {
+fn semantic_target_keys(place: Option<&str>, source_names: &[String]) -> Vec<String> {
     let mut out: Vec<String> = source_names
         .iter()
         .filter_map(|source| clean_overwrite_target_key(source))
         .collect();
     out.extend(place.and_then(clean_overwrite_target_key));
-    if out.is_empty() {
-        out.extend(clean_overwrite_target_key(fallback_text));
-    }
     out.sort();
     out.dedup();
     out
@@ -82,7 +82,7 @@ pub(super) fn same_function_clean_overwrite_kills_sink_arg(
         .iter()
         .flat_map(|arg| {
             find_call_arg_at(&decl.flow_events, sink_span, arg.index).map_or_else(
-                || clean_overwrite_target_key(&arg.value_text).into_iter().collect(),
+                || semantic_target_keys(arg.place.as_deref(), &arg.source_names),
                 call_arg_target_keys,
             )
         })
@@ -203,9 +203,11 @@ fn clean_overwrite_targets_for_edge_arg(
         targets.extend(call_arg_target_keys(arg));
     }
     if targets.is_empty() {
-        targets.extend(clean_overwrite_target_key(&tainted_arg.value_text));
+        targets.extend(semantic_target_keys(
+            tainted_arg.place.as_deref(),
+            &tainted_arg.source_names,
+        ));
     }
-    targets.retain(|target| !looks_like_clean_constant(target));
     targets.sort();
     targets.dedup();
     targets
@@ -276,9 +278,7 @@ fn clean_overwrite_between(
             FlowEvent::Assign {
                 span,
                 target,
-                source_name,
                 source_call,
-                source_names,
                 source_call_args,
                 value_kind,
                 ..
@@ -292,9 +292,7 @@ fn clean_overwrite_between(
                             && assignment_cleanly_overwrites_target(
                                 policy,
                                 *span,
-                                source_name.as_deref(),
                                 source_call.as_deref(),
-                                source_names,
                                 source_call_args,
                                 *value_kind,
                             )
@@ -550,7 +548,6 @@ fn assignment_source_names_are_clean_before(
     let mut source_keys: Vec<String> = source_names
         .iter()
         .filter_map(|name| clean_overwrite_target_key(name))
-        .filter(|name| !looks_like_clean_constant(name))
         .collect();
     source_keys.sort();
     source_keys.dedup();
@@ -616,9 +613,7 @@ fn collect_target_write_cleanliness(
             FlowEvent::Assign {
                 span,
                 target,
-                source_name,
                 source_call,
-                source_names,
                 source_call_args,
                 value_kind,
                 ..
@@ -631,9 +626,7 @@ fn collect_target_write_cleanliness(
                     if assignment_cleanly_overwrites_target(
                         policy,
                         *span,
-                        source_name.as_deref(),
                         source_call.as_deref(),
-                        source_names,
                         source_call_args,
                         *value_kind,
                     ) {
@@ -770,9 +763,7 @@ fn target_written_between(
 fn assignment_cleanly_overwrites_target(
     policy: CleanOverwritePolicy<'_>,
     span: Span,
-    source_name: Option<&str>,
     source_call: Option<&str>,
-    source_names: &[String],
     source_call_args: &[String],
     value_kind: Option<AssignValueKind>,
 ) -> bool {
@@ -781,7 +772,6 @@ fn assignment_cleanly_overwrites_target(
         && (value_kind
             .as_ref()
             .is_some_and(|kind| matches!(kind, AssignValueKind::Literal))
-            || clean_constant_assignment(source_name, source_names)
             || assignment_rhs_is_clean_conditional(policy.ws, span)))
         || local_call_returns_clean_value(policy, span, source_call)
 }
@@ -819,24 +809,30 @@ fn function_returns_clean_value(policy: CleanOverwritePolicy<'_>, decl: &bonsai_
     let mut returns = Vec::new();
     collect_return_values(&decl.flow_events, &mut returns);
     !returns.is_empty()
-        && returns.iter().all(|(span, value_text, value_name)| {
-            return_value_is_clean(policy, decl, *span, *value_text, *value_name)
+        && returns.iter().all(|(span, value_kind, value_name, value_flow)| {
+            return_value_is_clean(policy, decl, *span, *value_kind, *value_name, value_flow)
         })
 }
 
 fn collect_return_values<'a>(
     events: &'a [bonsai_lang_api::FlowEvent],
-    out: &mut Vec<(Span, Option<&'a str>, Option<&'a str>)>,
+    out: &mut Vec<(
+        Span,
+        Option<AssignValueKind>,
+        Option<&'a str>,
+        &'a bonsai_lang_api::ExpressionFlow,
+    )>,
 ) {
     use bonsai_lang_api::FlowEvent;
     for event in events {
         match event {
             FlowEvent::Return {
                 span,
-                value_text,
+                value_kind,
                 value_name,
+                value_flow,
                 ..
-            } => out.push((*span, value_text.as_deref(), value_name.as_deref())),
+            } => out.push((*span, *value_kind, value_name.as_deref(), value_flow)),
             FlowEvent::Branch {
                 then_events,
                 else_events,
@@ -867,25 +863,66 @@ fn return_value_is_clean(
     policy: CleanOverwritePolicy<'_>,
     decl: &bonsai_lang_api::Decl,
     return_span: Span,
-    value_text: Option<&str>,
+    value_kind: Option<AssignValueKind>,
     value_name: Option<&str>,
+    value_flow: &bonsai_lang_api::ExpressionFlow,
 ) -> bool {
-    let Some(target) = value_name
-        .and_then(clean_overwrite_target_key)
-        .or_else(|| value_text.and_then(clean_overwrite_target_key))
-    else {
+    if matches!(value_kind, Some(AssignValueKind::Literal)) {
+        return true;
+    }
+    let mut names = Vec::new();
+    if let Some(value_name) = value_name {
+        names.push(value_name);
+    }
+    let mut has_nested_call = false;
+    collect_expression_flow_names(value_flow, &mut names, &mut has_nested_call);
+    if has_nested_call {
         return false;
-    };
+    }
+    let mut targets = names
+        .into_iter()
+        .filter_map(clean_overwrite_target_key)
+        .collect::<Vec<_>>();
+    targets.sort();
+    targets.dedup();
+    if targets.is_empty() {
+        return false;
+    }
     let entry_span = Span::empty(return_span.file, decl.span.start);
-    clean_overwrite_between(
-        policy,
-        &decl.flow_events,
-        &decl.flow_events,
-        entry_span,
-        return_span,
-        std::slice::from_ref(&target),
-        true,
-    ) || target_only_has_clean_writes_between(policy, &decl.flow_events, entry_span, return_span, &target)
+    targets.iter().all(|target| {
+        clean_overwrite_between(
+            policy,
+            &decl.flow_events,
+            &decl.flow_events,
+            entry_span,
+            return_span,
+            std::slice::from_ref(target),
+            true,
+        ) || target_only_has_clean_writes_between(policy, &decl.flow_events, entry_span, return_span, target)
+    })
+}
+
+fn collect_expression_flow_names<'a>(
+    flow: &'a bonsai_lang_api::ExpressionFlow,
+    out: &mut Vec<&'a str>,
+    has_nested_call: &mut bool,
+) {
+    if !flow.call_sites.is_empty() {
+        *has_nested_call = true;
+    }
+    if let Some(place) = flow.place.as_deref() {
+        out.push(place);
+    }
+    out.extend(flow.source_names.iter().map(String::as_str));
+    for field in &flow.aggregate_fields {
+        collect_expression_flow_names(&field.value, out, has_nested_call);
+    }
+    for item in &flow.tuple_items {
+        collect_expression_flow_names(item, out, has_nested_call);
+    }
+    for spread in &flow.spreads {
+        collect_expression_flow_names(spread, out, has_nested_call);
+    }
 }
 
 fn branch_arm_clean_overwrites_target(
@@ -898,9 +935,7 @@ fn branch_arm_clean_overwrites_target(
         FlowEvent::Assign {
             span,
             target: assigned,
-            source_name,
             source_call,
-            source_names,
             source_call_args,
             value_kind,
             ..
@@ -909,9 +944,7 @@ fn branch_arm_clean_overwrites_target(
                 && assignment_cleanly_overwrites_target(
                     policy,
                     *span,
-                    source_name.as_deref(),
                     source_call.as_deref(),
-                    source_names,
                     source_call_args,
                     *value_kind,
                 )
@@ -925,8 +958,20 @@ fn branch_arm_clean_overwrites_target(
                 && branch_arm_clean_overwrites_target(policy, then_events, target)
                 && branch_arm_clean_overwrites_target(policy, else_events, target)
         }
-        FlowEvent::Call { name, args, .. } => {
-            clean_output_call_overwrites_target(policy.clean_output_overwrites, name, args, target)
+        FlowEvent::Call { span, name, args, .. } => {
+            policy
+                .ws
+                .exact_decl_index_shared(span.file)
+                .is_some_and(|file_index| {
+                    clean_output_call_overwrites_target(
+                        policy.clean_output_overwrites,
+                        *span,
+                        &file_index.call_argument_values,
+                        name,
+                        args,
+                        target,
+                    )
+                })
         }
         FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
             branch_arm_clean_overwrites_target(policy, body, target)
@@ -955,6 +1000,8 @@ pub(super) fn try_region_clean_overwrites_target(
 
 pub(super) fn clean_output_call_overwrites_target(
     clean_output_overwrites: &[CleanOutputOverwrite],
+    call_span: Span,
+    argument_values: &[bonsai_lang_api::CallArgumentValueFact],
     name: &str,
     args: &[bonsai_lang_api::CallArg],
     target: &str,
@@ -966,16 +1013,28 @@ pub(super) fn clean_output_call_overwrites_target(
         let Some(output) = args.get(shape.output_arg_index) else {
             return false;
         };
-        if clean_overwrite_target_key(&output.value_text).as_deref() != Some(target) {
+        if output
+            .place
+            .as_deref()
+            .and_then(clean_overwrite_target_key)
+            .as_deref()
+            != Some(target)
+        {
             return false;
         }
         let Some(value_args) = args.get(shape.value_start_arg_index..) else {
             return false;
         };
         !value_args.is_empty()
-            && value_args
-                .iter()
-                .all(|arg| clean_output_overwrite_arg_is_clean(arg, target))
+            && value_args.iter().enumerate().all(|(offset, arg)| {
+                clean_output_overwrite_arg_is_clean(
+                    call_span,
+                    shape.value_start_arg_index + offset,
+                    argument_values,
+                    arg,
+                    target,
+                )
+            })
     })
 }
 
@@ -998,52 +1057,26 @@ pub(super) fn clean_overwrite_callee_tail(name: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn clean_output_overwrite_arg_is_clean(arg: &bonsai_lang_api::CallArg, target: &str) -> bool {
+fn clean_output_overwrite_arg_is_clean(
+    call_span: Span,
+    argument_index: usize,
+    argument_values: &[bonsai_lang_api::CallArgumentValueFact],
+    arg: &bonsai_lang_api::CallArg,
+    target: &str,
+) -> bool {
     if arg
         .place
         .as_deref()
         .and_then(clean_overwrite_target_key)
         .as_deref()
         == Some(target)
-        || arg.source_names.iter().any(|source| {
-            clean_overwrite_target_key(source).as_deref() == Some(target)
-                || !looks_like_clean_constant(source)
-        })
+        || !arg.source_names.is_empty()
     {
         return false;
     }
-    let trimmed = arg.value_text.trim();
-    if trimmed.is_empty() {
-        return true;
-    }
-    if quoted_literal(trimmed) || numeric_literal(trimmed) {
-        return true;
-    }
-    clean_overwrite_target_key(trimmed).as_deref() != Some(target) && looks_like_clean_constant(trimmed)
-}
-
-pub(super) fn quoted_literal(value: &str) -> bool {
-    let trimmed = value.trim();
-    trimmed.len() >= 2
-        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
-            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
-}
-
-pub(super) fn numeric_literal(value: &str) -> bool {
-    let trimmed = value.trim();
-    !trimmed.is_empty()
-        && trimmed
-            .chars()
-            .all(|ch| ch.is_ascii_digit() || matches!(ch, '_' | 'x' | 'X' | 'a'..='f' | 'A'..='F'))
-        && trimmed.chars().any(|ch| ch.is_ascii_digit())
-}
-
-fn clean_constant_assignment(source_name: Option<&str>, source_names: &[String]) -> bool {
-    source_name
-        .into_iter()
-        .chain(source_names.iter().map(String::as_str))
-        .all(looks_like_clean_constant)
-        && (source_name.is_some() || !source_names.is_empty())
+    bonsai_lang_api::call_argument_value_fact(argument_values, call_span, argument_index).is_some_and(
+        |fact| fact.static_value.is_some() || matches!(fact.value_kind, Some(AssignValueKind::Literal)),
+    )
 }
 
 fn assignment_rhs_is_clean_conditional(ws: &Workspace, span: Span) -> bool {
@@ -1051,15 +1084,6 @@ fn assignment_rhs_is_clean_conditional(ws: &Workspace, span: Span) -> bool {
         bonsai_lang_api::finite_literal_selection_for_assignment(&file_index.finite_literal_selections, span)
             .is_some()
     })
-}
-
-pub(super) fn looks_like_clean_constant(text: &str) -> bool {
-    let trimmed = text.trim();
-    !trimmed.is_empty()
-        && trimmed
-            .chars()
-            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
-        && trimmed.chars().any(|ch| ch.is_ascii_uppercase())
 }
 
 pub(super) fn clean_overwrite_target_key(text: &str) -> Option<String> {
@@ -1797,15 +1821,6 @@ mod retired_rendered_source_regressions {
                 | "String"
                 | "string"
         )
-    }
-
-    pub(super) fn looks_like_clean_constant(text: &str) -> bool {
-        let trimmed = text.trim();
-        !trimmed.is_empty()
-            && trimmed
-                .chars()
-                .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
-            && trimmed.chars().any(|ch| ch.is_ascii_uppercase())
     }
 
     pub(super) fn clean_overwrite_target_key(text: &str) -> Option<String> {

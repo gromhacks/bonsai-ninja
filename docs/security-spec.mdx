@@ -38,7 +38,7 @@ Required for every rule:
 - `id` - globally unique within (language, kind).
 - `language` - one of the 20 supported languages.
 - `match.kind` - `call`, `new`, `read`, `write`, `return`, `param`, or
-  `missing`.
+  `missing`; typing rules may additionally use `type`.
 - `match.callee` (call/new) or `match.target` (read/write/return/param)
   - at least one structural selector such as `name`, `attribute`, `regex`,
     `annotation`, `default_call`, or `call_kind_in`.
@@ -51,11 +51,32 @@ Use source `tag` values to describe the trust boundary, not the sink
 class; for example `network-input`, `archive-input`, `graphql-input`,
 `env-input`, or `cli-input`.
 
-Typing rules require `returns_type` and a structured call/new match. They
-declare a factory or constructor's result type so `receiver_type_in` can
-resolve a later local receiver. Typing rules never emit findings, source/sink
-inventory rows, or SARIF results; API names and types remain rulepack data
-rather than a hardcoded engine list.
+Typing rules declare at least one non-finding compiler model:
+
+- `returns_type` plus a structured call/new match declares a factory or
+  constructor result type.
+- `callback_param_types` plus `match.kind: call` and
+  `callback_arg_index` declares an external signature for an inline callback
+  argument.
+- `callback_param_types` plus `match.kind: type` declares an external
+  functional-interface/callable signature; `callback_arg_index` is omitted.
+- `taint_semantics` declares a library transfer summary.
+
+Typing rules never emit findings, source/sink inventory rows, or SARIF
+results. Adapters provide exact callback bindings and declared source types;
+API names and external parameter types remain rulepack data rather than a
+hardcoded engine list. Type matching is exact and case-sensitive.
+
+A structured `match.kind: new` target is also the rulepack's exact declaration
+that the selected external call is a constructor. This matters for grammars
+such as Kotlin where constructors and functions share one CST call shape.
+Constructor identity does not implicitly type the result: add `returns_type`
+in a non-finding typing rule when a later receiver needs that type. Shared
+matching never treats capitalization as constructor or type evidence. The
+typing rule's import/package constraints remain mandatory for result typing.
+Exact workspace resolution runs before an external constructor model: values,
+ordinary functions, mixed candidates, and ambiguity shadow or reject that
+model, while an unresolved provider call may use the structured YAML identity.
 
 `call_kind_in` selects a typed operation lowered by the active Tree-sitter
 adapter. For example, `[index_write]` represents `receiver[key] = value`
@@ -208,6 +229,15 @@ is not simply "return value is tainted" or "arg N is tainted."
 | `taint_semantics.output_arg_flows` | source/sink/sanitizer/passthrough | Treat selected value arguments as flowing into a listed output argument. Use for formatter/copy APIs that write a tainted payload into a caller-owned buffer. |
 | `taint_semantics.clean_output_overwrite` | sanitizer | Treat an output argument as clean when the configured value inputs are clean. |
 | `taint_semantics.taint_receiver_from_args: true` | sink | Treat tainted arguments as mutating the receiver state for later `receiver_tainted` sinks, using the rule's structured callee target. |
+
+For a receiver-mutating rule with an external `receiver_type_in` constraint,
+security first compiles the rule through the canonical AST matcher. A call is
+admitted only after its imports, package evidence, call kind, exact external
+typing, and workspace-shadowing checks succeed. The resulting exact call span
+is part of the IDG transfer fingerprint; the IDG does not match the library
+name itself. This rule match proves the receiver identity only—the fixed point
+must still prove that the configured argument is tainted before receiver state
+changes.
 
 `source_output_args` is intentionally narrow. It prevents source calls
 from tainting unrelated operands such as file descriptors, size

@@ -4,13 +4,15 @@ use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
         canonical_simple_type_name, collect_kinds, collect_receiver_field_writes,
-        collect_receiver_state_sources, first_named_child_of_kind, language_from_pack, node_text, parse_with,
-        span_of, walk_flow_events,
+        collect_receiver_state_sources, first_identifier_like_child, first_named_child_of_kind,
+        language_from_pack, node_text, parse_with, pattern_binding_sites_from_arms, span_of,
+        walk_flow_events,
     },
-    AdapterContext, AdapterError, ArgumentPassingMode, CallKind, Decl, DeclIndex, DeclKind, FlowEvent,
-    GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
-    LanguageCapabilities, LanguageId, ModifierVocabulary, SyntaxSpecialForm, TypeAliasBinding,
-    TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
+    AdapterContext, AdapterError, ArgumentPassingMode, AssignmentNodeSemantics, CallKind,
+    CallTargetExtraction, Decl, DeclIndex, DeclKind, ExpressionPlaceExtraction, FlowEvent, GrammarHandler,
+    ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
+    LanguageId, ModifierVocabulary, PatternBindingSite, TypeAliasBinding, TypeAliasVocabulary, Visibility,
+    EMPTY_HANDLER,
 };
 use tree_sitter::Node;
 
@@ -47,19 +49,246 @@ const SWIFT_VOCAB: ModifierVocabulary = ModifierVocabulary {
     // module, not across unrelated modules.
     default_visibility: Visibility::Module,
 };
+
+fn swift_pattern_bindings(node: Node<'_>) -> Vec<PatternBindingSite<'_>> {
+    if node.kind() != "switch_statement" {
+        return Vec::new();
+    }
+    pattern_binding_sites_from_arms(node, &["expr"], &["switch_entry"], &[], &["switch_pattern"])
+}
 use tree_sitter::{Language, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("swift");
 const PACK_NAME: &str = "swift";
+
+fn swift_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    (node.kind() == "for_statement")
+        .then(|| {
+            Some((
+                node.child_by_field_name("item")?,
+                node.child_by_field_name("collection")?,
+            ))
+        })
+        .flatten()
+}
+
+/// Swift call targets are complete first-child navigation expressions.
+/// Reading that grammar node directly avoids reconstructing its `target` and
+/// `navigation_suffix` fields as `receiver..member` in shared lowering.
+fn swift_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    if node.kind() != "call_expression" {
+        return None;
+    }
+    let target = node.named_child(0)?;
+    if !matches!(
+        target.kind(),
+        "simple_identifier" | "navigation_expression" | "qualified_access_expression" | "postfix_expression"
+    ) {
+        return None;
+    }
+    let full_text = node_text(&target, src).trim();
+    (!full_text.is_empty()).then_some(CallTargetExtraction {
+        node: target,
+        full_text: full_text.to_string(),
+    })
+}
+
+/// Decode Swift lvalue/member wrappers from their Tree-sitter structure.
+/// `directly_assignable_expression` is the grammar's write-side wrapper, and
+/// `navigation_suffix` includes the leading dot in its rendered text. Keeping
+/// this in the adapter gives shared lowering one canonical place without
+/// teaching it Swift punctuation.
+fn swift_expression_places(node: Node<'_>, src: &[u8]) -> ExpressionPlaceExtraction {
+    fn identifier_text(node: Node<'_>, src: &[u8]) -> Option<String> {
+        let text = node_text(&node, src).trim();
+        (!text.is_empty()).then(|| text.to_string())
+    }
+
+    fn first_simple_identifier(node: Node<'_>, src: &[u8]) -> Option<String> {
+        if node.kind() == "simple_identifier" {
+            return identifier_text(node, src);
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if let Some(identifier) = first_simple_identifier(child, src) {
+                return Some(identifier);
+            }
+        }
+        None
+    }
+
+    fn place(node: Node<'_>, src: &[u8]) -> Option<String> {
+        match node.kind() {
+            "simple_identifier" | "self_expression" => identifier_text(node, src),
+            "directly_assignable_expression" | "postfix_expression" => {
+                let mut cursor = node.walk();
+                let mut children = node.named_children(&mut cursor);
+                let child = children.next()?;
+                children.next().is_none().then(|| place(child, src)).flatten()
+            }
+            "navigation_expression" | "qualified_access_expression" => {
+                let base = node
+                    .child_by_field_name("target")
+                    .or_else(|| node.child_by_field_name("expression"))
+                    .or_else(|| node.child_by_field_name("receiver"))
+                    .or_else(|| node.named_child(0))?;
+                let suffix = node
+                    .child_by_field_name("suffix")
+                    .or_else(|| node.child_by_field_name("name"))
+                    .or_else(|| {
+                        let mut cursor = node.walk();
+                        node.named_children(&mut cursor).last()
+                    })?;
+                if suffix.id() == base.id() {
+                    return None;
+                }
+                let base = place(base, src)?;
+                let member = first_simple_identifier(suffix, src)?;
+                Some(format!("{base}.{member}"))
+            }
+            _ => None,
+        }
+    }
+
+    place(node, src).map_or_else(ExpressionPlaceExtraction::default, |place| {
+        ExpressionPlaceExtraction {
+            places: vec![place],
+            consumed_node_ids: vec![node.id()],
+        }
+    })
+}
+
+/// Swift uses `property_declaration` for both stored/type-only declarations
+/// and initialized bindings. The grammar exposes initialized forms through an
+/// exact `value` field, so the adapter can classify them without source-text
+/// inference.
+fn swift_assignment_semantics(node: Node<'_>, _src: &[u8]) -> AssignmentNodeSemantics {
+    if node.kind() != "property_declaration" || node.child_by_field_name("value").is_some() {
+        AssignmentNodeSemantics::Assignment
+    } else {
+        AssignmentNodeSemantics::Other
+    }
+}
+
+fn swift_deferred_bodies<'tree>(node: Node<'tree>, src: &[u8]) -> Vec<Node<'tree>> {
+    if node.kind() != "call_expression" {
+        return Vec::new();
+    }
+    let Some(callee) = node
+        .child_by_field_name("function")
+        .or_else(|| first_identifier_like_child(&node))
+    else {
+        return Vec::new();
+    };
+    if node_text(&callee, src).trim() != "defer" {
+        return Vec::new();
+    }
+    let mut bodies = Vec::new();
+    let mut pending = vec![node];
+    while let Some(current) = pending.pop() {
+        let mut cursor = current.walk();
+        for child in current.named_children(&mut cursor) {
+            if child.kind() == "lambda_literal" {
+                bodies.push(child);
+            } else if child.kind() == "call_suffix" {
+                pending.push(child);
+            }
+        }
+    }
+    bodies.sort_by_key(Node::start_byte);
+    bodies
+}
+
+fn swift_static_key(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() == "simple_identifier" {
+        let key = node_text(&node, src).trim();
+        return (!key.is_empty()).then(|| key.to_string());
+    }
+    if !matches!(
+        node.kind(),
+        "line_string_literal" | "multi_line_string_literal" | "raw_string_literal"
+    ) {
+        return None;
+    }
+    let raw = node_text(&node, src).trim();
+    let quoted = raw
+        .strip_prefix("\"\"\"")
+        .and_then(|value| value.strip_suffix("\"\"\""))
+        .or_else(|| raw.strip_prefix('"').and_then(|value| value.strip_suffix('"')))?;
+    (!quoted.contains('\\') && !quoted.contains('#') && !quoted.is_empty()).then(|| quoted.to_string())
+}
 const HANDLER: GrammarHandler = GrammarHandler {
+    expression_value_kind_extractor: None,
+    literal_value_kinds: &[
+        "nil",
+        "boolean_literal",
+        "integer_literal",
+        "real_literal",
+        "bin_literal",
+        "hex_literal",
+        "oct_literal",
+        "true",
+        "false",
+    ],
+    string_literal_kinds: &[
+        "line_string_literal",
+        "multi_line_string_literal",
+        "raw_string_literal",
+    ],
+    comment_kinds: &["comment", "multiline_comment"],
+    doc_comment_prefixes: &["///", "/**"],
+    decorator_kinds: &["attribute"],
+    parameter_container_kinds: &["function_value_parameters", "lambda_function_type_parameters"],
+    parameter_kinds: &["parameter", "lambda_parameter"],
+    parameter_annotation_kinds: &["attribute"],
+    variadic_parameter_kinds: &["variadic_parameter"],
+    binding_identifier_kinds: &["simple_identifier"],
+    non_binding_pattern_field_names: &["name"],
+    pattern_binding_extractor: Some(swift_pattern_bindings),
+    identifier_kinds: &["simple_identifier"],
+    multi_child_aggregate_pattern_kinds: &["pattern"],
+    aggregate_pattern_kinds: &["tuple_pattern"],
+    named_aggregate_kinds: &["dictionary_literal"],
+    positional_aggregate_kinds: &["array_literal", "tuple_expression"],
+    aggregate_pair_kinds: &["dictionary_literal"],
+    aggregate_key_field_names: &["key"],
+    aggregate_value_field_names: &["value"],
+    static_field_name_kinds: &["simple_identifier"],
+    aggregate_syntax_only_kinds: &["type"],
+    transparent_call_wrapper_kinds: &[
+        "navigation_expression",
+        "qualified_access_expression",
+        "postfix_expression",
+        "parenthesized_expression",
+        "await_expression",
+    ],
+    assignment_target_wrapper_kinds: &["value_binding_pattern", "pattern"],
+    binding_declaration_keyword_spellings: &["let", "var"],
     fn_kinds: &["function_declaration"],
     call_kinds: &["call_expression"],
+    call_argument_container_kinds: &["value_arguments"],
+    call_argument_wrapper_kinds: &["call_suffix"],
+    call_callee_is_first_named_child: true,
+    call_target_extractor: Some(swift_call_target),
+    argument_wrapper_kinds: &["tuple_expression", "value_argument"],
+    argument_name_field_names: &["name"],
+    argument_value_field_names: &["value"],
+    transparent_expression_wrapper_kinds: &["parenthesized_expression"],
+    lambda_body_field_names: &["body"],
+    lambda_body_kinds: &["lambda_literal"],
     argument_passing_mode_extractor: Some(swift_argument_passing_mode),
     constructor_names: &["init"],
     runtime_type_guard_operators: &["is"],
+    runtime_type_wrapper_kinds: &["parenthesized_expression"],
     call_ref_kinds: &["call_expression"],
     member_expression_kinds: &["navigation_expression", "qualified_access_expression"],
     subscript_expression_kinds: &["subscript_expression"],
+    member_base_field_names: &["target", "expression", "receiver"],
+    member_name_field_names: &["name", "field", "suffix"],
+    subscript_base_field_names: &["target", "expression"],
+    subscript_index_field_names: &["index", "arguments"],
+    static_subscript_key_extractor: Some(swift_static_key),
+    expression_place_extractor: Some(swift_expression_places),
     class_kinds: &[
         "class_declaration",
         "struct_declaration",
@@ -83,16 +312,29 @@ const HANDLER: GrammarHandler = GrammarHandler {
     ],
     constructor_method_kinds: &["init_declaration"],
     if_kinds: &["if_statement", "switch_statement", "guard_statement"],
-    for_kinds: &["for_statement"],
+    branch_then_field_names: &[],
+    branch_else_field_names: &[],
+    branch_condition_field_names: &["condition"],
+    loop_body_field_names: &["body"],
+    loop_body_kinds: &["statements"],
+    branch_arm_kinds: &["statements", "switch_entry"],
+    for_kinds: &[],
+    foreach_kinds: &["for_statement"],
+    foreach_binding_extractor: Some(swift_foreach_binding),
     while_kinds: &["while_statement"],
-    do_kinds: &["do_statement", "repeat_while_statement"],
+    do_kinds: &["repeat_while_statement"],
     assignment_kinds: &["assignment", "property_declaration"],
+    assignment_semantics_extractor: Some(swift_assignment_semantics),
+    compound_assignment_operators: &["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="],
+    type_only_declaration_kinds: &[],
     return_kinds: &["control_transfer_statement"],
     lambda_kinds: &["lambda_literal"],
     try_kinds: &["try_expression", "do_statement"],
+    try_body_field_names: &["body"],
     catch_kinds: &["catch_block"],
     await_kinds: &["await_expression"],
-    special_forms: &[SyntaxSpecialForm::TrailingClosureDefer],
+    deferred_body_extractor: Some(swift_deferred_bodies),
+    special_forms: &[],
     implicit_receiver_names: &["self", "super"],
     ..EMPTY_HANDLER
 };
@@ -149,6 +391,10 @@ impl LanguageAdapter for SwiftAdapter {
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["self"],
             same_directory_unqualified_calls: true,
+            // Swift construction has no `new` token. A bare call is treated
+            // as construction only after exact workspace class identity is
+            // available; the shared resolver never uses type-name casing.
+            bare_call_constructor_syntax: true,
             ..LanguageCapabilities::partial_baseline()
         }
     }
@@ -169,9 +415,30 @@ impl LanguageAdapter for SwiftAdapter {
             let src = snapshot.text.as_bytes();
             let vis_map = collect_modifier_visibility(tree.root_node(), file, src, &SWIFT_VOCAB);
             let alias_map = collect_param_type_aliases(&tree, file, src, &SWIFT_TYPE_ALIASES);
+            let param_annotations = collect_swift_param_annotations(&tree, file, src);
             for decl in &mut idx.defs {
                 if let Some(vis) = vis_map.get(&decl.span).copied() {
                     decl.visibility = vis;
+                }
+                if let Some(annotations) = param_annotations.get(&decl.span) {
+                    decl.param_annotations.clone_from(annotations);
+                }
+            }
+            // Constructor synthesis needs inheritance before it decides
+            // whether a class receives a local implicit initializer or
+            // inherits its superclass initializers. Populate this exact CST
+            // fact before synthesizing constructors; doing it afterwards can
+            // fabricate `Child.init()` and shadow `Base.init(_:)`.
+            let bases_by_span = collect_swift_class_bases(&tree, file, src);
+            for decl in &mut idx.defs {
+                if !is_class_like(decl.kind) {
+                    continue;
+                }
+                if let Some(bases) = bases_by_span
+                    .iter()
+                    .find_map(|(span, bases)| (*span == decl.span).then_some(bases))
+                {
+                    decl.bases = bases.clone();
                 }
             }
             // Class-level property type bindings — `let
@@ -179,7 +446,15 @@ impl LanguageAdapter for SwiftAdapter {
             // AuthService` available inside every method of the
             // enclosing class so receiver dispatch reaches the real
             // method decl.
-            let class_field_aliases = collect_swift_class_field_aliases(&tree, file, src);
+            let declared_type_names = idx
+                .defs
+                .iter()
+                .filter(|decl| is_class_like(decl.kind))
+                .flat_map(|decl| std::iter::once(decl.name.clone()).chain(decl.qualified_name.clone()))
+                .filter_map(|name| swift_canonical_type(&name))
+                .collect::<std::collections::HashSet<_>>();
+            let class_field_aliases =
+                collect_swift_class_field_aliases(&tree, file, src, &declared_type_names);
             let function_param_names = collect_swift_function_param_names(file, &tree, src);
             synthesize_swift_constructor_decls(&mut idx, file, &tree, src);
             // Swift structs (`struct Envelope { var kind, var cmd, ... }`)
@@ -254,56 +529,7 @@ impl LanguageAdapter for SwiftAdapter {
                 }
                 normalize_swift_parameter_names(decl);
             }
-            // Per-class `bases`: `class Echo: WebSocketHandler, Mixin`
-            // → ["WebSocketHandler", "Mixin"]. Swift exposes each
-            // parent type as a separate `inheritance_specifier`
-            // child of the class node, with `inherits_from:` field
-            // pointing at a `user_type`.
-            let bases_by_span = collect_swift_class_bases(&tree, file, src);
-            for decl in &mut idx.defs {
-                if !is_class_like(decl.kind) {
-                    continue;
-                }
-                if let Some(bases) = bases_by_span
-                    .iter()
-                    .find_map(|(span, bases)| (*span == decl.span).then_some(bases))
-                {
-                    decl.bases = bases.clone();
-                }
-            }
         }
-        // Recognised Swift lifecycle transitions. `cancel` for
-        // tasks / publishers / network requests, `close` for
-        // streams, `release` for manual ARC reach-arounds,
-        // `deinit` for the destructor, and `invalidate` for
-        // timers / observers.
-        const SWIFT_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "cancel",
-                transition: "cancelled",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "close",
-                transition: "closed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "release",
-                transition: "freed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "deinit",
-                transition: "freed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "invalidate",
-                transition: "cancelled",
-                arg_index: 0,
-            },
-        ];
         let constructor_field_params = swift_constructor_field_params(&idx);
         for decl in &mut idx.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
@@ -313,7 +539,6 @@ impl LanguageAdapter for SwiftAdapter {
                     &constructor_field_params,
                 );
             }
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, SWIFT_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
@@ -321,9 +546,8 @@ impl LanguageAdapter for SwiftAdapter {
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
         // Local constructor-result receiver typing (`let c = Foo()` →
-        // `c: Foo`) so `c.method(...)` carries a resolved receiver type
-        // for `receiver_type_in` / `[Type, method]` rules. Swift type
-        // names are UpperCamelCase; the constructor heuristic is reliable.
+        // `c: Foo`) requires exact declaration/CST evidence. Swift naming
+        // conventions are not part of the language's type system.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
@@ -335,6 +559,53 @@ impl LanguageAdapter for SwiftAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+/// Lower Swift parameter attributes such as `@escaping` from the exact
+/// `parameter_modifiers > parameter_modifier` CST shape. Tree-sitter Swift
+/// places parameters directly under the callable declaration rather than in a
+/// shared list node, so this stays in the owning adapter instead of teaching
+/// the language-neutral extractor a Swift node inventory.
+fn collect_swift_param_annotations(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> std::collections::HashMap<Span, Vec<Vec<String>>> {
+    let mut by_decl = std::collections::HashMap::new();
+    for callable in collect_kinds(
+        tree,
+        &["function_declaration", "init_declaration", "deinit_declaration"],
+    ) {
+        let mut per_param = Vec::new();
+        let mut cursor = callable.walk();
+        for parameter in callable
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() == "parameter")
+        {
+            let mut annotations = Vec::new();
+            let mut parameter_cursor = parameter.walk();
+            for modifiers in parameter
+                .named_children(&mut parameter_cursor)
+                .filter(|child| child.kind() == "parameter_modifiers")
+            {
+                let mut modifier_cursor = modifiers.walk();
+                for modifier in modifiers
+                    .named_children(&mut modifier_cursor)
+                    .filter(|child| child.kind() == "parameter_modifier")
+                {
+                    let name = node_text(&modifier, src).trim().trim_start_matches('@');
+                    if !name.is_empty() && !annotations.iter().any(|existing| existing == name) {
+                        annotations.push(name.to_string());
+                    }
+                }
+            }
+            per_param.push(annotations);
+        }
+        if per_param.iter().any(|annotations| !annotations.is_empty()) {
+            by_decl.insert(span_of(file, &callable), per_param);
+        }
+    }
+    by_decl
 }
 
 fn apply_swift_semantic_identity(idx: &mut DeclIndex, ctx: &AdapterContext<'_>) {
@@ -581,7 +852,22 @@ fn synthesize_swift_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: &
         .defs
         .iter()
         .filter(|decl| is_class_like(decl.kind))
-        .map(|decl| (decl.span, decl.symbol, decl.name.clone(), decl.name_span))
+        .map(|decl| {
+            let has_possible_superclass = decl.bases.first().is_some_and(|base| {
+                idx.defs
+                    .iter()
+                    .find(|candidate| is_class_like(candidate.kind) && candidate.name == *base)
+                    .is_none_or(|candidate| candidate.kind != DeclKind::Interface)
+            });
+            (
+                decl.span,
+                decl.symbol,
+                decl.kind,
+                decl.name.clone(),
+                decl.name_span,
+                has_possible_superclass,
+            )
+        })
         .collect::<Vec<_>>();
     let mut next = idx
         .defs
@@ -596,13 +882,18 @@ fn synthesize_swift_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: &
             continue;
         };
         let class_span = span_of(file, &class_node);
-        let Some((_, class_symbol, class_name, class_name_span)) =
-            classes.iter().find(|(span, _, _, _)| *span == class_span)
+        let Some((_, class_symbol, _, class_name, class_name_span, _)) =
+            classes.iter().find(|(span, _, _, _, _, _)| *span == class_span)
         else {
             continue;
         };
         let body = first_named_child_of_kind(&init, "function_body").unwrap_or(init);
-        let flow_events = walk_flow_events(body, file, src, &HANDLER, &class_names);
+        // Stored-property initializers execute before every designated
+        // initializer body. Lower only direct property declarations from the
+        // class body, then the selected `init` body; never walk sibling
+        // methods as constructor work.
+        let mut flow_events = swift_stored_property_initializer_events(class_node, file, src, &class_names);
+        flow_events.extend(walk_flow_events(body, file, src, &HANDLER, &class_names));
         idx.defs.push(swift_constructor_decl(
             bonsai_common::SymbolId::new(next),
             *class_symbol,
@@ -617,6 +908,237 @@ fn synthesize_swift_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: &
         ));
         next = next.saturating_add(1);
     }
+
+    // A Swift class whose stored properties all have initial values receives
+    // an implicit zero-argument initializer even when no `init` declaration
+    // appears. Lower that compiler-synthesized constructor so property
+    // initializer calls remain available to cross-file receiver resolution.
+    for class_node in collect_kinds(tree, &["class_declaration"]) {
+        let class_span = span_of(file, &class_node);
+        let Some((_, class_symbol, class_kind, class_name, class_name_span, has_possible_superclass)) =
+            classes.iter().find(|(span, _, _, _, _, _)| *span == class_span)
+        else {
+            continue;
+        };
+        if *class_kind != DeclKind::Class
+            || !swift_node_declares_reference_class(class_node, src)
+            // A subclass with no designated initializer inherits the
+            // superclass's designated initializers; it does not acquire an
+            // unrelated zero-argument initializer. Preserve that exact
+            // language rule so `Child(value)` resolves to the inherited
+            // constructor rather than a fabricated local overload.
+            || *has_possible_superclass
+            || !swift_class_stored_properties_have_defaults(class_node, src)
+            || idx
+                .defs
+                .iter()
+                .any(|decl| decl.kind == DeclKind::Constructor && decl.parent == Some(*class_symbol))
+        {
+            continue;
+        }
+        let Some(body) = first_named_child_of_kind(&class_node, "class_body") else {
+            continue;
+        };
+        let flow_events = swift_stored_property_initializer_events(class_node, file, src, &class_names);
+        idx.defs.push(swift_constructor_decl(
+            bonsai_common::SymbolId::new(next),
+            *class_symbol,
+            class_name,
+            SwiftConstructorSpans {
+                name: *class_name_span,
+                decl: class_span,
+                body: span_of(file, &body),
+            },
+            Vec::new(),
+            flow_events,
+        ));
+        next = next.saturating_add(1);
+    }
+}
+
+/// Lower the instance stored-property initializers that Swift executes as the
+/// prefix of every designated class initializer. The class body is not itself
+/// executable: walking it wholesale would incorrectly pull method/getter
+/// bodies into construction. Direct property CST nodes are the exact boundary.
+fn swift_stored_property_initializer_events(
+    class_node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    class_names: &[String],
+) -> Vec<bonsai_lang_api::FlowEvent> {
+    let Some(body) = first_named_child_of_kind(&class_node, "class_body") else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    let mut cursor = body.walk();
+    for property in body.named_children(&mut cursor) {
+        if property.kind() != "property_declaration"
+            || swift_property_is_computed(property)
+            || swift_property_is_type_member(property, src)
+            || !swift_property_has_initializer(property)
+        {
+            continue;
+        }
+        events.extend(walk_flow_events(property, file, src, &HANDLER, class_names));
+    }
+    qualify_swift_constructor_property_assignments(&mut events, class_node, file, src);
+    events
+}
+
+fn swift_property_is_computed(property: Node<'_>) -> bool {
+    let mut cursor = property.walk();
+    let computed = property
+        .named_children(&mut cursor)
+        .any(|node| node.kind() == "computed_property");
+    computed
+}
+
+fn swift_class_stored_properties_have_defaults(class_node: Node<'_>, src: &[u8]) -> bool {
+    let Some(body) = first_named_child_of_kind(&class_node, "class_body") else {
+        return true;
+    };
+    let mut cursor = body.walk();
+    for property in body.named_children(&mut cursor) {
+        if property.kind() != "property_declaration" {
+            continue;
+        }
+        if swift_property_is_computed(property) || swift_property_is_type_member(property, src) {
+            continue;
+        }
+        if !swift_property_has_initializer(property) {
+            return false;
+        }
+    }
+    true
+}
+
+fn swift_property_is_type_member(property: Node<'_>, src: &[u8]) -> bool {
+    let Some(name) = property.child_by_field_name("name") else {
+        return false;
+    };
+    let Some(prefix) = src.get(property.start_byte()..name.start_byte()) else {
+        return false;
+    };
+    let Ok(prefix) = std::str::from_utf8(prefix) else {
+        return false;
+    };
+    prefix
+        .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .any(|token| matches!(token, "static" | "class"))
+}
+
+fn swift_property_has_initializer(property: Node<'_>) -> bool {
+    if property.child_by_field_name("value").is_some() {
+        return true;
+    }
+
+    fn contains_initializer_token(node: Node<'_>) -> bool {
+        let mut cursor = node.walk();
+        if !cursor.goto_first_child() {
+            return false;
+        }
+        loop {
+            let child = cursor.node();
+            if !child.is_named() && child.kind() == "=" {
+                return true;
+            }
+            if !cursor.goto_next_sibling() {
+                return false;
+            }
+        }
+    }
+
+    if contains_initializer_token(property) {
+        return true;
+    }
+    let mut cursor = property.walk();
+    let has_wrapped_initializer = property
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "pattern_initializer")
+        .any(contains_initializer_token);
+    has_wrapped_initializer
+}
+
+fn swift_node_declares_reference_class(node: Node<'_>, src: &[u8]) -> bool {
+    let Some(name) = node.child_by_field_name("name") else {
+        return false;
+    };
+    let Some(prefix) = src.get(node.start_byte()..name.start_byte()) else {
+        return false;
+    };
+    let Ok(prefix) = std::str::from_utf8(prefix) else {
+        return false;
+    };
+    prefix
+        .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .any(|token| token == "class")
+}
+
+fn qualify_swift_constructor_property_assignments(
+    events: &mut [bonsai_lang_api::FlowEvent],
+    class_node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+) {
+    let Some(body) = first_named_child_of_kind(&class_node, "class_body") else {
+        return;
+    };
+    let mut properties = std::collections::HashMap::new();
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        if child.kind() != "property_declaration" {
+            continue;
+        }
+        if swift_property_is_computed(child) || swift_property_is_type_member(child, src) {
+            continue;
+        }
+        let Some(name) = swift_property_name(child, src) else {
+            continue;
+        };
+        properties.insert(span_of(file, &child), name);
+    }
+
+    fn qualify(
+        events: &mut [bonsai_lang_api::FlowEvent],
+        properties: &std::collections::HashMap<Span, String>,
+    ) {
+        for event in events {
+            match event {
+                bonsai_lang_api::FlowEvent::Assign { span, target, .. } => {
+                    let Some(name) = properties.get(span) else {
+                        continue;
+                    };
+                    if target == name {
+                        *target = format!("self.{name}");
+                    }
+                }
+                bonsai_lang_api::FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    qualify(then_events, properties);
+                    qualify(else_events, properties);
+                }
+                bonsai_lang_api::FlowEvent::Loop { body, .. }
+                | bonsai_lang_api::FlowEvent::Defer { body, .. }
+                | bonsai_lang_api::FlowEvent::Using { body, .. } => qualify(body, properties),
+                bonsai_lang_api::FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    qualify(body, properties);
+                    qualify(catch_events, properties);
+                    qualify(finally_events, properties);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    qualify(events, &properties);
 }
 
 fn nearest_swift_class_node(mut node: Node<'_>) -> Option<Node<'_>> {
@@ -648,6 +1170,8 @@ fn swift_constructor_decl(
 ) -> Decl {
     let receiver_field_writes =
         collect_receiver_field_writes(&flow_events, &params, None, &["self", "super"], &[]);
+    let receiver_field_initializers =
+        bonsai_lang_api::collect_receiver_field_initializers(&flow_events, &["self"]);
     Decl {
         symbol,
         kind: DeclKind::Constructor,
@@ -668,6 +1192,7 @@ fn swift_constructor_decl(
         bases: Vec::new(),
         receiver_param_index: None,
         receiver_field_writes,
+        receiver_field_initializers,
         implicit_receiver_names: vec!["self".to_string(), "super".to_string()],
         receiver_state_sources: Vec::new(),
         return_type: None,
@@ -728,6 +1253,7 @@ fn collect_swift_class_field_aliases(
     tree: &Tree,
     file: FileId,
     src: &[u8],
+    declared_type_names: &std::collections::HashSet<String>,
 ) -> Vec<(Span, Vec<TypeAliasBinding>)> {
     let class_kinds = &[
         "class_declaration",
@@ -755,7 +1281,7 @@ fn collect_swift_class_field_aliases(
                 continue;
             }
             if node.kind() == "property_declaration" {
-                if let Some(binding) = swift_property_alias(node, src) {
+                if let Some(binding) = swift_property_alias(node, src, declared_type_names) {
                     if !aliases.contains(&binding) {
                         aliases.push(binding);
                     }
@@ -774,9 +1300,13 @@ fn collect_swift_class_field_aliases(
 }
 
 /// Extract a `name: Type` binding from a Swift `property_declaration`.
-/// Handles both `let x: T = ...` (explicit type) and `let x = T()`
-/// (type-inferred from a PascalCase constructor-style initializer).
-fn swift_property_alias(node: Node<'_>, src: &[u8]) -> Option<TypeAliasBinding> {
+/// Handles both `let x: T = ...` (explicit type) and `let x = T()` when
+/// `T` resolves to an exact declaration in this compiler object.
+fn swift_property_alias(
+    node: Node<'_>,
+    src: &[u8],
+    declared_type_names: &std::collections::HashSet<String>,
+) -> Option<TypeAliasBinding> {
     let pattern = node.child_by_field_name("name").or_else(|| {
         let mut cursor = node.walk();
         let mut found = None;
@@ -796,7 +1326,7 @@ fn swift_property_alias(node: Node<'_>, src: &[u8]) -> Option<TypeAliasBinding> 
         .child_by_field_name("type")
         .map(|t| node_text(&t, src).to_string())
         .and_then(|t| swift_canonical_type(&t))
-        .or_else(|| swift_property_constructor_type(node, src))?;
+        .or_else(|| swift_property_constructor_type(node, src, declared_type_names))?;
     if name == type_short {
         return None;
     }
@@ -809,8 +1339,12 @@ fn swift_property_alias(node: Node<'_>, src: &[u8]) -> Option<TypeAliasBinding> 
 /// Find a constructor-shaped initializer (`= Foo()` / `= Foo.bar()`)
 /// inside a Swift property_declaration whose static type is
 /// `Foo`. Returns the canonical short type, or `None` when the
-/// initializer isn't a PascalCase call.
-fn swift_property_constructor_type(node: Node<'_>, src: &[u8]) -> Option<String> {
+/// initializer's callee is not a declared type.
+fn swift_property_constructor_type(
+    node: Node<'_>,
+    src: &[u8],
+    declared_type_names: &std::collections::HashSet<String>,
+) -> Option<String> {
     let mut cursor = node.walk();
     let mut value: Option<Node<'_>> = node.child_by_field_name("value");
     if value.is_none() {
@@ -854,11 +1388,7 @@ fn swift_property_constructor_type(node: Node<'_>, src: &[u8]) -> Option<String>
         found
     })?;
     let canonical = swift_canonical_type(node_text(&callee, src))?;
-    canonical
-        .chars()
-        .next()
-        .filter(|first| first.is_ascii_uppercase())?;
-    Some(canonical)
+    declared_type_names.contains(&canonical).then_some(canonical)
 }
 
 fn swift_canonical_type(raw: &str) -> Option<String> {
@@ -1134,6 +1664,7 @@ fn synthesize_swift_computed_property_decls(idx: &mut DeclIndex, file: FileId, t
                     },
                     FlowEvent::Return {
                         span: body_span,
+                        value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
                         value_text: Some(format!("{call_name}()")),
                         value_name: None,
                         value_flow: bonsai_lang_api::ExpressionFlow {
@@ -1150,6 +1681,7 @@ fn synthesize_swift_computed_property_decls(idx: &mut DeclIndex, file: FileId, t
                 };
                 vec![FlowEvent::Return {
                     span: body_span,
+                    value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
                     value_text: Some(qualified.clone()),
                     value_name: Some(qualified.clone()),
                     value_flow: bonsai_lang_api::ExpressionFlow::from_place(qualified),
@@ -1185,6 +1717,7 @@ fn synthesize_swift_computed_property_decls(idx: &mut DeclIndex, file: FileId, t
             bases: Vec::new(),
             receiver_param_index: None,
             receiver_field_writes: Vec::new(),
+            receiver_field_initializers: Vec::new(),
             implicit_receiver_names: vec!["self".to_string(), "super".to_string()],
             receiver_state_sources,
             return_type: None,
@@ -1510,6 +2043,7 @@ fn synthesize_swift_memberwise_struct_inits(idx: &mut DeclIndex, file: FileId, t
             bases: Vec::new(),
             receiver_param_index: None,
             receiver_field_writes,
+            receiver_field_initializers: Vec::new(),
             implicit_receiver_names: vec!["self".to_string()],
             receiver_state_sources: Vec::new(),
             return_type: None,
@@ -1546,6 +2080,7 @@ fn synthesize_swift_memberwise_struct_inits(idx: &mut DeclIndex, file: FileId, t
                 body_span: Some(*span),
                 flow_events: vec![FlowEvent::Return {
                     span: *span,
+                    value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
                     value_text: Some(field.clone()),
                     value_name: Some(field.clone()),
                     value_flow: bonsai_lang_api::ExpressionFlow::from_place(field.clone()),
@@ -1558,6 +2093,7 @@ fn synthesize_swift_memberwise_struct_inits(idx: &mut DeclIndex, file: FileId, t
                 bases: Vec::new(),
                 receiver_param_index: None,
                 receiver_field_writes: Vec::new(),
+                receiver_field_initializers: Vec::new(),
                 implicit_receiver_names: vec!["self".to_string()],
                 receiver_state_sources: vec![field],
                 return_type: None,
@@ -1596,6 +2132,7 @@ fn synthesize_swift_constructor_implicit_returns(index: &mut DeclIndex) {
         let span = decl.body_span.unwrap_or(decl.span);
         decl.flow_events.push(FlowEvent::Return {
             span,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
             value_text: Some(value_text),
             value_name: None,
             value_flow: bonsai_lang_api::ExpressionFlow::from_source_names(decl.params.clone()),

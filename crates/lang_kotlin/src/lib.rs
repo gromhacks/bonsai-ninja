@@ -4,16 +4,216 @@ use bonsai_lang_api::{
     collect_modifier_visibility, decl_index_with_handler, extract_imports_via,
     kit::{
         collect_kinds, collect_receiver_field_writes, first_named_child_of_kind, language_from_pack,
-        node_text, package_module_segments_with_workspace_prefix, parse_with, span_of, walk_flow_events,
+        named_child_call_args_with_handler, node_text, package_module_segments_with_workspace_prefix,
+        parse_with, span_of, walk_flow_events,
     },
-    AdapterContext, AdapterError, CallKind, Decl, DeclIndex, DeclKind, FieldWrite, FlowEvent, GrammarHandler,
-    ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
-    LanguageId, ModifierVocabulary, TypeAliasBinding, Visibility, EMPTY_HANDLER,
+    AdapterContext, AdapterError, AssignmentNodeSemantics, CallKind, CallTargetExtraction, Decl, DeclIndex,
+    DeclKind, ExpressionPlaceExtraction, FieldWrite, FlowEvent, GrammarHandler, ImplicitMemberReadCall,
+    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    ModifierVocabulary, PatternBindingSite, ReceiverFieldInitializer, TypeAliasBinding, Visibility,
+    EMPTY_HANDLER,
 };
 use tree_sitter::{Language, Node, Tree};
 
+fn kotlin_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    if node.kind() != "for_statement" {
+        return None;
+    }
+    let binding = node
+        .child_by_field_name("variable")
+        .or_else(|| node.child_by_field_name("left"))
+        .or_else(|| node.named_child(0))?;
+    let iterable = node
+        .child_by_field_name("range")
+        .or_else(|| node.child_by_field_name("right"))
+        .or_else(|| node.named_child(1))?;
+    Some((binding, iterable))
+}
+
+/// Extract Kotlin's callee expression from its grammar-owned call shape.
+///
+/// `call_expression` does not expose a named `function` field. Its first
+/// named child is instead either a `simple_identifier` or a complete
+/// `navigation_expression` such as `stream.close`; the following
+/// `call_suffix` owns the arguments. Keeping that distinction here prevents
+/// shared lowering from learning Kotlin CST node names or guessing callees
+/// from source tokens.
+fn kotlin_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    let target = if node.kind() == "constructor_invocation" {
+        node.child_by_field_name("type").or_else(|| node.named_child(0))?
+    } else if node.kind() == "call_expression" {
+        node.named_child(0)?
+    } else {
+        return None;
+    };
+    if !matches!(
+        target.kind(),
+        "simple_identifier" | "navigation_expression" | "constructor_invocation" | "user_type"
+    ) {
+        return None;
+    }
+    let full_text = node_text(&target, src).trim();
+    (!full_text.is_empty()).then_some(CallTargetExtraction {
+        node: target,
+        full_text: full_text.to_string(),
+    })
+}
+
+/// Kotlin call receivers are positional inside the call target's
+/// `navigation_expression`. The first named child is the exact receiver
+/// expression and may itself be a call in a method chain.
+fn kotlin_call_receiver<'tree>(node: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
+    let target = kotlin_call_target(node, src)?.node;
+    (target.kind() == "navigation_expression")
+        .then(|| target.named_child(0))
+        .flatten()
+}
+
+/// Lower Kotlin's sibling-based navigation CST into one canonical place.
+/// Each `navigation_suffix` contributes exactly one parsed identifier; calls
+/// are handled separately by `kotlin_call_target` and never acquire library
+/// or security meaning here.
+fn kotlin_expression_places(node: Node<'_>, src: &[u8]) -> ExpressionPlaceExtraction {
+    fn collect(node: Node<'_>, src: &[u8], parts: &mut Vec<String>) -> bool {
+        if node.kind() == "simple_identifier" {
+            let name = node_text(&node, src).trim();
+            if name.is_empty() {
+                return false;
+            }
+            parts.push(name.to_string());
+            return true;
+        }
+        if !matches!(
+            node.kind(),
+            "navigation_expression" | "directly_assignable_expression"
+        ) {
+            return false;
+        }
+        let mut cursor = node.walk();
+        let children = node.named_children(&mut cursor).collect::<Vec<_>>();
+        let Some(base) = children.first().copied() else {
+            return false;
+        };
+        if !collect(base, src, parts) {
+            return false;
+        }
+        for suffix in children.iter().copied().skip(1) {
+            if suffix.kind() != "navigation_suffix" {
+                return false;
+            }
+            let Some(identifier) = first_named_child_of_kind(&suffix, "simple_identifier") else {
+                return false;
+            };
+            if !collect(identifier, src, parts) {
+                return false;
+            }
+        }
+        true
+    }
+
+    if !matches!(
+        node.kind(),
+        "navigation_expression" | "directly_assignable_expression"
+    ) {
+        return ExpressionPlaceExtraction::default();
+    }
+    let mut parts = Vec::new();
+    if !collect(node, src, &mut parts) || parts.len() < 2 {
+        return ExpressionPlaceExtraction::default();
+    }
+    ExpressionPlaceExtraction {
+        places: vec![parts.join(".")],
+        consumed_node_ids: vec![node.id()],
+    }
+}
+
+/// Kotlin uses `property_declaration` and `variable_declaration` for both
+/// initialized and type-only bindings. The grammar leaves the initializer
+/// unfielded, so classify the declaration from its direct `=` terminal here
+/// instead of making shared lowering infer Kotlin token semantics.
+fn kotlin_assignment_semantics(node: Node<'_>, _src: &[u8]) -> AssignmentNodeSemantics {
+    if !matches!(node.kind(), "property_declaration" | "variable_declaration") {
+        return AssignmentNodeSemantics::Assignment;
+    }
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return AssignmentNodeSemantics::Other;
+    }
+    loop {
+        let child = cursor.node();
+        if !child.is_named() && child.kind() == "=" {
+            return AssignmentNodeSemantics::Assignment;
+        }
+        if !cursor.goto_next_sibling() {
+            return AssignmentNodeSemantics::Other;
+        }
+    }
+}
+
+fn kotlin_parameter_annotation_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() != "annotation" {
+        return None;
+    }
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "type_identifier" {
+            let name = node_text(&current, src).trim();
+            return (!name.is_empty()).then(|| name.to_string());
+        }
+        let mut cursor = current.walk();
+        let children: Vec<_> = current.named_children(&mut cursor).collect();
+        stack.extend(children.into_iter().rev());
+    }
+    None
+}
+
+fn kotlin_pattern_bindings(node: Node<'_>) -> Vec<PatternBindingSite<'_>> {
+    if node.kind() != "when_expression" {
+        return Vec::new();
+    }
+    let mut cursor = node.walk();
+    let Some(subject) = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "when_subject")
+    else {
+        return Vec::new();
+    };
+    let mut cursor = subject.walk();
+    let Some(declaration) = subject
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "variable_declaration")
+    else {
+        return Vec::new();
+    };
+    let mut cursor = declaration.walk();
+    let Some(pattern) = declaration
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "simple_identifier")
+    else {
+        return Vec::new();
+    };
+    let mut cursor = subject.walk();
+    let source = subject
+        .named_children(&mut cursor)
+        .find(|child| child.id() != declaration.id() && !matches!(child.kind(), "annotation" | "type"));
+    source
+        .map(|source| {
+            vec![PatternBindingSite {
+                span_node: subject,
+                pattern,
+                source,
+            }]
+        })
+        .unwrap_or_default()
+}
+
 pub const LANG_ID: LanguageId = LanguageId::new("kotlin");
 const PACK_NAME: &str = "kotlin";
+const MODULE_SOURCE_ROOTS: &[&[&str]] = &[
+    &["src", "main", "kotlin"],
+    &["src", "test", "kotlin"],
+    &["src", "kotlin"],
+];
 
 fn extract_kotlin_syntax_event(
     node: Node<'_>,
@@ -47,6 +247,7 @@ fn extract_kotlin_syntax_event(
             });
             Some(FlowEvent::Return {
                 span: span_of(file, &node),
+                value_kind: value.and_then(|value| handler.expression_value_kind(value, src)),
                 value_text: value.map(|value| node_text(&value, src).trim().to_string()),
                 value_name: single_kotlin_value_source(&value_flow, Vec::new()),
                 value_flow,
@@ -83,6 +284,29 @@ fn single_kotlin_value_source(
         })
         .flatten()
 }
+
+fn kotlin_named_argument<'tree>(node: Node<'tree>, src: &[u8]) -> Option<(String, Node<'tree>)> {
+    if node.kind() != "value_argument" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    if !node
+        .children(&mut cursor)
+        .any(|child| !child.is_named() && child.kind() == "=")
+    {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let children = node.named_children(&mut cursor).collect::<Vec<_>>();
+    let [name, value] = children.as_slice() else {
+        return None;
+    };
+    if name.kind() != "simple_identifier" {
+        return None;
+    }
+    let name = node_text(name, src).trim();
+    (!name.is_empty()).then(|| (name.to_string(), *value))
+}
 // `getter` and `setter` are property accessor bodies in
 // tree-sitter-kotlin. Treating them as function-declaration kinds
 // gives each accessor its own Decl with its own flow_events, so
@@ -91,6 +315,46 @@ fn single_kotlin_value_source(
 // into a single Field decl and accessor body events disappear
 // (audit task #131).
 const HANDLER: GrammarHandler = GrammarHandler {
+    expression_value_kind_extractor: None,
+    // Names are owned by the bundled Tree-sitter Kotlin grammar.  Keeping
+    // this inventory adapter-local lets shared lowering classify values
+    // without knowing Kotlin token kinds.
+    literal_value_kinds: &["integer_literal", "real_literal", "null_literal"],
+    literal_value_spellings: &["null", "true", "false"],
+    string_literal_kinds: &["string_literal", "multiline_string_literal", "character_literal"],
+    comment_kinds: &["line_comment", "multiline_comment"],
+    doc_comment_prefixes: &["/**"],
+    decorator_kinds: &["annotation"],
+    parameter_container_kinds: &[
+        "function_value_parameters",
+        "lambda_parameters",
+        "lambda_function_type_parameters",
+    ],
+    parameter_kinds: &["parameter", "lambda_parameter"],
+    parameter_modifier_kinds: &["modifiers", "parameter_modifiers"],
+    parameter_annotation_kinds: &["annotation"],
+    parameter_annotation_name_extractor: Some(kotlin_parameter_annotation_name),
+    binding_identifier_kinds: &["simple_identifier"],
+    pattern_binding_extractor: Some(kotlin_pattern_bindings),
+    // Tree-sitter Kotlin gives the `$name` form in a string template its own
+    // named node. It is an expression read (never a binding), so keep it in
+    // the value-carrier inventory without admitting it as a declaration name.
+    identifier_kinds: &["simple_identifier", "interpolated_identifier"],
+    expression_place_extractor: Some(kotlin_expression_places),
+    aggregate_pattern_kinds: &["destructuring_declaration", "multi_variable_declaration"],
+    positional_aggregate_kinds: &["collection_literal"],
+    spread_kinds: &["spread_expression"],
+    spread_value_field_names: &["expression"],
+    transparent_call_wrapper_kinds: &["navigation_expression", "parenthesized_expression"],
+    assignment_target_wrapper_kinds: &[
+        "variable_declaration",
+        "multi_variable_declaration",
+        // The current grammar wraps the LHS of `x = value` and `x += value`
+        // in this node.  It is an addressable target wrapper, not a value or
+        // declaration of its own.
+        "directly_assignable_expression",
+    ],
+    binding_declaration_keyword_spellings: &["val", "var"],
     fn_kinds: &["function_declaration", "getter", "setter"],
     // A primary-constructor delegation (`class Child(x) : Base(x)`) is a
     // real constructor call in Kotlin's grammar, represented by
@@ -99,14 +363,31 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // this node kind exposes the exact base call without pulling class-header
     // syntax into ordinary method bodies.
     call_kinds: &["call_expression", "constructor_invocation"],
+    constructor_call_kinds: &["constructor_invocation"],
+    constructor_type_field_names: &["type"],
+    call_argument_container_kinds: &["value_arguments"],
+    call_argument_wrapper_kinds: &["call_suffix"],
+    call_callee_is_first_named_child: true,
+    call_target_extractor: Some(kotlin_call_target),
+    call_receiver_extractor: Some(kotlin_call_receiver),
+    argument_wrapper_kinds: &["value_argument"],
+    named_argument_extractor: Some(kotlin_named_argument),
+    transparent_expression_wrapper_kinds: &["expression", "parenthesized_expression"],
+    lambda_body_field_names: &["body"],
+    lambda_body_kinds: &["lambda_literal", "anonymous_function"],
     syntax_event_extractor: Some(extract_kotlin_syntax_event),
     argument_passing_mode_extractor: None,
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     runtime_type_guard_operators: &["is"],
+    runtime_type_wrapper_kinds: &["parenthesized_expression"],
     call_ref_kinds: &["call_expression", "constructor_invocation", "callable_reference"],
     callable_reference_kinds: &["callable_reference"],
     member_expression_kinds: &["navigation_expression"],
     subscript_expression_kinds: &["indexing_expression", "indexing_suffix"],
+    member_base_field_names: &["expression", "receiver"],
+    member_name_field_names: &["navigation_suffix", "name"],
+    subscript_base_field_names: &["expression", "receiver"],
+    subscript_index_field_names: &["index", "indices"],
     class_kinds: &["class_declaration", "object_declaration", "interface_declaration"],
     class_decl_kinds: &[
         ("class_declaration", DeclKind::Class),
@@ -116,14 +397,28 @@ const HANDLER: GrammarHandler = GrammarHandler {
     method_kinds: &["getter", "setter"],
     method_context_kinds: &["class_declaration", "object_declaration", "interface_declaration"],
     if_kinds: &["if_expression", "when_expression"],
-    for_kinds: &["for_statement"],
+    branch_then_field_names: &["consequence"],
+    branch_else_field_names: &["alternative"],
+    branch_condition_field_names: &["condition", "subject"],
+    branch_condition_kinds: &["when_subject"],
+    loop_body_field_names: &["body"],
+    loop_body_kinds: &["control_structure_body", "statements"],
+    branch_arm_kinds: &["control_structure_body", "statements", "when_entry"],
+    for_kinds: &[],
+    foreach_kinds: &["for_statement"],
+    foreach_binding_extractor: Some(kotlin_foreach_binding),
     while_kinds: &["while_statement"],
     do_kinds: &["do_while_statement"],
     assignment_kinds: &["assignment", "property_declaration", "variable_declaration"],
+    assignment_semantics_extractor: Some(kotlin_assignment_semantics),
+    compound_assignment_operators: &["+=", "-=", "*=", "/=", "%="],
+    type_only_declaration_kinds: &[],
     return_kinds: &["return_expression"],
     throw_kinds: &["throw_expression"],
     lambda_kinds: &["anonymous_function", "lambda_literal", "annotated_lambda"],
+    implicit_lambda_parameter_name: Some("it"),
     try_kinds: &["try_expression"],
+    try_body_field_names: &["body"],
     catch_kinds: &["catch_block"],
     finally_kinds: &["finally_block"],
     implicit_receiver_names: &["this", "super"],
@@ -185,6 +480,11 @@ impl LanguageAdapter for KotlinAdapter {
             exceptions: bonsai_lang_api::CapabilityLevel::Exact,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+            // Kotlin has no `new` keyword: `Widget(...)` is parsed with the
+            // same call-expression shape as a top-level function call. The
+            // workspace resolver must therefore use exact class/constructor
+            // identity to distinguish the two forms.
+            bare_call_constructor_syntax: true,
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["this"],
             receiver_type_syntax: bonsai_lang_api::ReceiverTypeSyntax {
@@ -227,7 +527,8 @@ impl LanguageAdapter for KotlinAdapter {
             // Module path from `package com.foo.bar` declaration; falls
             // back to file-stem when absent.
             if let Some(segments) = extract_kotlin_package(tree.root_node(), src) {
-                let segments = package_module_segments_with_workspace_prefix(file, ctx, segments);
+                let segments =
+                    package_module_segments_with_workspace_prefix(file, ctx, segments, MODULE_SOURCE_ROOTS);
                 bonsai_lang_api::apply_module_path_semantic_identity(&mut idx, segments);
             } else {
                 bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
@@ -240,14 +541,22 @@ impl LanguageAdapter for KotlinAdapter {
             }
             // type_aliases for `[Type, method]` rule resolution.
             // Per-method walk for `name: Type` parameter shapes.
-            let aliases_by_span = collect_kotlin_type_aliases(&tree, file, src);
+            let declared_type_names = idx
+                .defs
+                .iter()
+                .filter(|decl| is_class_like(decl.kind))
+                .flat_map(|decl| std::iter::once(decl.name.clone()).chain(decl.qualified_name.clone()))
+                .map(|name| kotlin_call_tail(&name).to_string())
+                .collect::<std::collections::HashSet<_>>();
+            let aliases_by_span = collect_kotlin_type_aliases(&tree, file, src, &declared_type_names);
             for decl in &mut idx.defs {
                 if let Some(aliases) = aliases_by_span.get(&decl.span) {
                     decl.type_aliases = aliases.clone();
                 }
                 classify_kotlin_constructor_calls(&mut decl.flow_events, &decl.type_aliases);
             }
-            let class_aliases_by_span = collect_kotlin_class_type_aliases(&tree, file, src);
+            let class_aliases_by_span =
+                collect_kotlin_class_type_aliases(&tree, file, src, &declared_type_names);
             let class_spans_by_symbol: std::collections::HashMap<_, _> = idx
                 .defs
                 .iter()
@@ -299,43 +608,9 @@ impl LanguageAdapter for KotlinAdapter {
             // module paths.
             bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
         }
-        // Same JVM library surface as Java.
-        const KOTLIN_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "close",
-                transition: "closed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "shutdown",
-                transition: "closed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "cancel",
-                transition: "cancelled",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "unlock",
-                transition: "unlocked",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "release",
-                transition: "freed",
-                arg_index: 0,
-            },
-            bonsai_lang_api::LifecycleTransition {
-                call_match: "dispose",
-                transition: "freed",
-                arg_index: 0,
-            },
-        ];
         for decl in &mut idx.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             synthesize_kotlin_data_copy_fields(&mut decl.flow_events, &decl.type_aliases);
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, KOTLIN_LIFECYCLE_TRANSITIONS);
         }
         qualify_kotlin_implicit_member_reads(&mut idx);
         bonsai_lang_api::kit::qualify_bare_hierarchy_member_calls(&mut idx);
@@ -345,9 +620,8 @@ impl LanguageAdapter for KotlinAdapter {
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
         // Local constructor-result receiver typing (`val c = Foo()` →
-        // `c: Foo`) so `c.method(...)` carries a resolved receiver type
-        // for `receiver_type_in` / `[Type, method]` rules. Kotlin class
-        // names are PascalCase; the constructor heuristic is reliable.
+        // `c: Foo`) requires an exactly declared type or a call already
+        // classified as a constructor. Capitalization is not semantic proof.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
         idx
@@ -835,6 +1109,7 @@ fn collect_kotlin_type_aliases(
     tree: &Tree,
     file: bonsai_common::FileId,
     src: &[u8],
+    declared_type_names: &std::collections::HashSet<String>,
 ) -> std::collections::HashMap<bonsai_common::Span, Vec<TypeAliasBinding>> {
     let mut aliases_by_span = std::collections::HashMap::new();
     for fn_node in collect_kinds(tree, &["function_declaration"]) {
@@ -859,7 +1134,7 @@ fn collect_kotlin_type_aliases(
                 node.kind(),
                 "parameter" | "class_parameter" | "property_declaration"
             ) {
-                if let Some(binding) = kotlin_param_alias(node, src) {
+                if let Some(binding) = kotlin_param_alias(node, src, declared_type_names) {
                     if !aliases.contains(&binding) {
                         aliases.push(binding);
                     }
@@ -952,6 +1227,7 @@ fn synthesize_kotlin_object_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree
             bases: Vec::new(),
             receiver_param_index: None,
             receiver_field_writes: Vec::new(),
+            receiver_field_initializers: Vec::new(),
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
             return_type: None,
@@ -1005,7 +1281,15 @@ fn synthesize_kotlin_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: 
         .defs
         .iter()
         .filter(|decl| is_class_like(decl.kind))
-        .map(|decl| (decl.span, decl.symbol, decl.name.clone(), decl.name_span))
+        .map(|decl| {
+            (
+                decl.span,
+                decl.symbol,
+                decl.kind,
+                decl.name.clone(),
+                decl.name_span,
+            )
+        })
         .collect::<Vec<_>>();
     let mut next = idx
         .defs
@@ -1017,25 +1301,40 @@ fn synthesize_kotlin_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: 
 
     for class_node in collect_kinds(tree, &["class_declaration"]) {
         let class_span = span_of(file, &class_node);
-        let Some((_, class_symbol, class_name, class_name_span)) =
-            classes.iter().find(|(span, _, _, _)| *span == class_span)
+        let Some((_, class_symbol, class_kind, class_name, class_name_span)) =
+            classes.iter().find(|(span, _, _, _, _)| *span == class_span)
         else {
             continue;
         };
-        if let Some(primary) = first_named_child_of_kind(&class_node, "primary_constructor") {
-            let body = first_named_child_of_kind(&class_node, "class_body");
+        // Interfaces and annotation declarations use the same broad CST
+        // declaration shape but are not constructible runtime classes.
+        if !matches!(class_kind, DeclKind::Class | DeclKind::Enum) {
+            continue;
+        }
+        let primary = first_named_child_of_kind(&class_node, "primary_constructor");
+        let body = first_named_child_of_kind(&class_node, "class_body");
+        let secondary_constructors = kotlin_direct_secondary_constructors(class_node);
+        // Kotlin supplies an implicit primary constructor only when the class
+        // declares no secondary constructors. A class with secondary
+        // constructors and no explicit primary has no callable zero-argument
+        // constructor; its instance initializer prefix belongs to the
+        // secondary path that delegates directly to `super`.
+        if primary.is_some() || secondary_constructors.is_empty() {
             let mut flow_events =
                 kotlin_primary_constructor_delegation_events(class_node, file, src, &class_names);
-            flow_events.extend(
-                body.map(|body| walk_flow_events(body, file, src, &HANDLER, &class_names))
-                    .unwrap_or_default(),
-            );
-            let params = constructor_param_names(primary, src);
-            let receiver_field_writes = kotlin_primary_constructor_field_writes(primary, file, src, &params);
-            // A primary constructor exists semantically even when it has no
-            // property parameters or body initializers. Keep the declaration
-            // so constructor calls resolve through the class hierarchy; the
-            // delegation events above model the AST-proven base invocation.
+            flow_events.extend(kotlin_instance_initialization_events(
+                class_node,
+                file,
+                src,
+                &class_names,
+            ));
+            qualify_kotlin_constructor_property_assignments(&mut flow_events, class_node, file, src);
+            let receiver_field_initializers =
+                bonsai_lang_api::collect_receiver_field_initializers(&flow_events, &["this"]);
+            let params = primary.map_or_else(Vec::new, |primary| constructor_param_names(primary, src));
+            let receiver_field_writes = primary.map_or_else(Vec::new, |primary| {
+                kotlin_primary_constructor_field_writes(primary, file, src, &params)
+            });
             idx.defs.push(kotlin_constructor_decl(
                 bonsai_common::SymbolId::new(next),
                 *class_symbol,
@@ -1043,20 +1342,38 @@ fn synthesize_kotlin_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: 
                 KotlinConstructorSpans {
                     name: *class_name_span,
                     decl: class_span,
-                    body: body.map_or_else(|| span_of(file, &primary), |body| span_of(file, &body)),
+                    body: body
+                        .map(|body| span_of(file, &body))
+                        .or_else(|| primary.map(|primary| span_of(file, &primary)))
+                        .unwrap_or(class_span),
                 },
-                params,
-                flow_events,
-                receiver_field_writes,
+                KotlinConstructorFacts {
+                    params,
+                    flow_events,
+                    receiver_field_writes,
+                    receiver_field_initializers,
+                },
             ));
             next = next.saturating_add(1);
         }
-        for secondary in collect_descendant_kinds(class_node, &["secondary_constructor"]) {
-            let body = first_named_child_of_kind(&secondary, "statements").unwrap_or(secondary);
-            let flow_events = walk_flow_events(body, file, src, &HANDLER, &class_names);
+        for secondary in secondary_constructors {
+            let body = first_named_child_of_kind(&secondary, "statements")
+                .or_else(|| first_named_child_of_kind(&secondary, "block"))
+                .unwrap_or(secondary);
+            let (mut flow_events, delegates_to_super) =
+                kotlin_secondary_constructor_delegation_events(secondary, file, src, class_name);
+            if primary.is_none() && delegates_to_super {
+                let mut initializers =
+                    kotlin_instance_initialization_events(class_node, file, src, &class_names);
+                qualify_kotlin_constructor_property_assignments(&mut initializers, class_node, file, src);
+                flow_events.extend(initializers);
+            }
+            flow_events.extend(walk_flow_events(body, file, src, &HANDLER, &class_names));
             let params = constructor_param_names(secondary, src);
             let receiver_field_writes =
                 collect_receiver_field_writes(&flow_events, &params, None, &["this", "super"], &[]);
+            let receiver_field_initializers =
+                bonsai_lang_api::collect_receiver_field_initializers(&flow_events, &["this"]);
             idx.defs.push(kotlin_constructor_decl(
                 bonsai_common::SymbolId::new(next),
                 *class_symbol,
@@ -1066,13 +1383,202 @@ fn synthesize_kotlin_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: 
                     decl: span_of(file, &secondary),
                     body: span_of(file, &body),
                 },
-                params,
-                flow_events,
-                receiver_field_writes,
+                KotlinConstructorFacts {
+                    params,
+                    flow_events,
+                    receiver_field_writes,
+                    receiver_field_initializers,
+                },
             ));
             next = next.saturating_add(1);
         }
     }
+}
+
+fn kotlin_direct_secondary_constructors<'tree>(class_node: Node<'tree>) -> Vec<Node<'tree>> {
+    let Some(body) = first_named_child_of_kind(&class_node, "class_body") else {
+        return Vec::new();
+    };
+    let mut cursor = body.walk();
+    let constructors = body
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "secondary_constructor")
+        .collect();
+    constructors
+}
+
+/// Lower the mandatory `this(args)` / `super(args)` delegation of a Kotlin
+/// secondary constructor. Tree-sitter gives this construct its own
+/// `constructor_delegation_call` node rather than a `call_expression`, so the
+/// adapter must preserve the edge explicitly. `this` is replaced by the
+/// exact enclosing class identity; `super` remains an adapter-declared
+/// ancestor receiver so shared resolution can select constructors from the
+/// class's declared bases.
+fn kotlin_secondary_constructor_delegation_events(
+    secondary: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    class_name: &str,
+) -> (Vec<FlowEvent>, bool) {
+    let Some(delegation) = first_named_child_of_kind(&secondary, "constructor_delegation_call") else {
+        return (Vec::new(), false);
+    };
+    let Some(keyword) = delegation.child(0).map(|child| child.kind()) else {
+        return (Vec::new(), false);
+    };
+    let Some(arguments) = first_named_child_of_kind(&delegation, "value_arguments") else {
+        return (Vec::new(), false);
+    };
+    let (name, receiver, delegates_to_super) = match keyword {
+        "this" => (class_name.to_string(), None, false),
+        "super" => ("super".to_string(), Some("super".to_string()), true),
+        _ => return (Vec::new(), false),
+    };
+    (
+        vec![FlowEvent::Call {
+            span: span_of(file, &delegation),
+            name,
+            receiver,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Constructor,
+            args: named_child_call_args_with_handler(&arguments, file, src, &HANDLER),
+        }],
+        delegates_to_super,
+    )
+}
+
+/// Lower the executable class-body prefix of a Kotlin primary constructor.
+/// Only direct property initializer expressions/delegates and `init {}`
+/// blocks execute during construction. Walking the complete class body would
+/// incorrectly pull computed accessors and sibling method bodies into every
+/// constructor.
+fn kotlin_instance_initialization_events(
+    class_node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    class_names: &[String],
+) -> Vec<FlowEvent> {
+    let Some(body) = first_named_child_of_kind(&class_node, "class_body") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        let executable = match child.kind() {
+            "anonymous_initializer" => true,
+            "property_declaration" => kotlin_property_initializer_node(child).is_some(),
+            _ => false,
+        };
+        if executable {
+            out.extend(walk_flow_events(child, file, src, &HANDLER, class_names));
+        }
+    }
+    out
+}
+
+/// Return the executable initializer of one direct Kotlin property.
+/// Tree-sitter's `expression` supertype appears at runtime as the concrete
+/// expression kind (`call_expression`, `string_literal`, and so on), so node
+/// kind matching cannot identify this boundary. The grammar exposes the
+/// initializer after the property's direct `=` token; delegated properties
+/// use the distinct `property_delegate` node. Accessor-local `=` tokens are
+/// nested under `getter`/`setter` and therefore cannot be mistaken for the
+/// property's initializer.
+fn kotlin_property_initializer_node(property: Node<'_>) -> Option<Node<'_>> {
+    let mut after_initializer_token = false;
+    for index in 0..property.child_count() {
+        let Ok(index) = u32::try_from(index) else {
+            return None;
+        };
+        let child = property.child(index)?;
+        if !child.is_named() {
+            if child.kind() == "=" {
+                after_initializer_token = true;
+            }
+            continue;
+        }
+        if child.kind() == "property_delegate" || after_initializer_token {
+            return Some(child);
+        }
+    }
+    None
+}
+
+/// Mark direct class-property initializers as receiver-field writes in the
+/// constructor's flow tree.
+///
+/// Kotlin permits an implicit receiver for a property declaration inside a
+/// class body (`private val service = Service()`). Tree-sitter correctly
+/// exposes the declaration as a `property_declaration`, but the generic flow
+/// walker necessarily lowers its target as the bare binding `service`.
+/// Qualifying only direct class-body properties here preserves the language's
+/// storage semantics while leaving locals inside `init` blocks and methods
+/// untouched.
+fn qualify_kotlin_constructor_property_assignments(
+    events: &mut [FlowEvent],
+    class_node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+) {
+    let Some(body) = first_named_child_of_kind(&class_node, "class_body") else {
+        return;
+    };
+    let mut properties = std::collections::HashMap::new();
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        if child.kind() != "property_declaration" {
+            continue;
+        }
+        let Some(name_node) = kotlin_property_name_node(child) else {
+            continue;
+        };
+        let name = node_text(&name_node, src).trim();
+        if !name.is_empty() {
+            properties.insert(span_of(file, &child), name.to_string());
+        }
+    }
+    if properties.is_empty() {
+        return;
+    }
+
+    fn qualify(events: &mut [FlowEvent], properties: &std::collections::HashMap<Span, String>) {
+        for event in events {
+            match event {
+                FlowEvent::Assign { span, target, .. } => {
+                    let Some(name) = properties.get(span) else {
+                        continue;
+                    };
+                    if target == name {
+                        *target = format!("this.{name}");
+                    }
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    qualify(then_events, properties);
+                    qualify(else_events, properties);
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => qualify(body, properties),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    qualify(body, properties);
+                    qualify(catch_events, properties);
+                    qualify(finally_events, properties);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    qualify(events, &properties);
 }
 
 /// Lower direct superclass constructor invocations from the class header into
@@ -1180,6 +1686,7 @@ fn synthesize_kotlin_property_getter_decls(idx: &mut DeclIndex, file: FileId, tr
                 let expression_node = body.named_child(0).unwrap_or(body);
                 flow_events.push(FlowEvent::Return {
                     span: body_span,
+                    value_kind: HANDLER.expression_value_kind(expression_node, src),
                     value_text: Some(expr.clone()),
                     value_name: kotlin_bare_identifier(&expr),
                     value_flow: bonsai_lang_api::kit::expression_flow_from_node_with_handler(
@@ -1214,6 +1721,7 @@ fn synthesize_kotlin_property_getter_decls(idx: &mut DeclIndex, file: FileId, tr
             bases: Vec::new(),
             receiver_param_index: None,
             receiver_field_writes: Vec::new(),
+            receiver_field_initializers: Vec::new(),
             implicit_receiver_names: vec!["this".to_string(), "super".to_string()],
             receiver_state_sources: Vec::new(),
             return_type: None,
@@ -1260,14 +1768,19 @@ struct KotlinConstructorSpans {
     body: bonsai_common::Span,
 }
 
+struct KotlinConstructorFacts {
+    params: Vec<String>,
+    flow_events: Vec<FlowEvent>,
+    receiver_field_writes: Vec<FieldWrite>,
+    receiver_field_initializers: Vec<ReceiverFieldInitializer>,
+}
+
 fn kotlin_constructor_decl(
     symbol: bonsai_common::SymbolId,
     parent: bonsai_common::SymbolId,
     class_name: &str,
     spans: KotlinConstructorSpans,
-    params: Vec<String>,
-    flow_events: Vec<FlowEvent>,
-    receiver_field_writes: Vec<FieldWrite>,
+    facts: KotlinConstructorFacts,
 ) -> Decl {
     Decl {
         symbol,
@@ -1280,15 +1793,16 @@ fn kotlin_constructor_decl(
         visibility: Visibility::Public,
         parent: Some(parent),
         body_span: Some(spans.body),
-        flow_events,
+        flow_events: facts.flow_events,
         has_implicit_returns: false,
-        params,
+        params: facts.params,
         param_annotations: Vec::new(),
         param_default_calls: Vec::new(),
         type_aliases: Vec::new(),
         bases: Vec::new(),
         receiver_param_index: None,
-        receiver_field_writes,
+        receiver_field_writes: facts.receiver_field_writes,
+        receiver_field_initializers: facts.receiver_field_initializers,
         implicit_receiver_names: vec!["this".to_string(), "super".to_string()],
         receiver_state_sources: Vec::new(),
         return_type: None,
@@ -1387,11 +1901,12 @@ fn collect_kotlin_class_type_aliases(
     tree: &Tree,
     file: bonsai_common::FileId,
     src: &[u8],
+    declared_type_names: &std::collections::HashSet<String>,
 ) -> Vec<(bonsai_common::Span, Vec<TypeAliasBinding>)> {
     let mut out = Vec::new();
     for class_node in collect_kinds(tree, &["class_declaration", "object_declaration"]) {
         let mut aliases = Vec::new();
-        collect_kotlin_class_aliases_from_node(class_node, src, &mut aliases);
+        collect_kotlin_class_aliases_from_node(class_node, src, declared_type_names, &mut aliases);
         if !aliases.is_empty() {
             out.push((span_of(file, &class_node), aliases));
         }
@@ -1399,11 +1914,16 @@ fn collect_kotlin_class_type_aliases(
     out
 }
 
-fn collect_kotlin_class_aliases_from_node(node: Node<'_>, src: &[u8], aliases: &mut Vec<TypeAliasBinding>) {
+fn collect_kotlin_class_aliases_from_node(
+    node: Node<'_>,
+    src: &[u8],
+    declared_type_names: &std::collections::HashSet<String>,
+    aliases: &mut Vec<TypeAliasBinding>,
+) {
     match node.kind() {
         "function_declaration" | "getter" | "setter" | "secondary_constructor" => return,
         "class_parameter" | "property_declaration" => {
-            if let Some(binding) = kotlin_param_alias(node, src) {
+            if let Some(binding) = kotlin_param_alias(node, src, declared_type_names) {
                 if !aliases.contains(&binding) {
                     aliases.push(binding);
                 }
@@ -1413,14 +1933,18 @@ fn collect_kotlin_class_aliases_from_node(node: Node<'_>, src: &[u8], aliases: &
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_kotlin_class_aliases_from_node(child, src, aliases);
+        collect_kotlin_class_aliases_from_node(child, src, declared_type_names, aliases);
     }
 }
 
 /// Extract a single `name: Type` pair from a `parameter` /
 /// `class_parameter` node. Returns `None` when either side is missing
 /// or when the binding name happens to equal the type (no useful alias).
-fn kotlin_param_alias(node: Node<'_>, src: &[u8]) -> Option<TypeAliasBinding> {
+fn kotlin_param_alias(
+    node: Node<'_>,
+    src: &[u8],
+    declared_type_names: &std::collections::HashSet<String>,
+) -> Option<TypeAliasBinding> {
     // tree-sitter-kotlin's `parameter` exposes the binding identifier
     // and type as unnamed `simple_identifier` and `user_type`
     // children rather than `name`/`type` fields. Walk by kind so
@@ -1475,18 +1999,15 @@ fn kotlin_param_alias(node: Node<'_>, src: &[u8]) -> Option<TypeAliasBinding> {
     let type_short = if let Some(type_node) = type_node {
         canonical_short_type(node_text(&type_node, src))?
     } else {
-        // Type-inferred property (`val x = Y()`): tree-sitter does not
-        // resolve types, so fall back to constructor-shape inference
-        // when the RHS is a `call_expression` whose callee is a
-        // PascalCase identifier — that's a constructor call by Kotlin
-        // convention and binds the property's type for receiver
-        // dispatch. Without this, classes that use idiomatic
-        // type-inferred field initialization (`private val authService
-        // = AuthService()`) lose receiver-type info downstream.
+        // Type-inferred property (`val x = Y()`): the CST uses the same call
+        // shape for functions and constructors, so bind only when `Y` is an
+        // exactly declared type in this compiler object. Imported/library
+        // factory return types belong in typing rules.
         // WS2: `val c = make() as Foo` / `as?` — the cast on the RHS is
         // the only type signal for an inferred local; prefer it, then fall
         // back to the constructor-shape inference.
-        kotlin_property_cast_type(node, src).or_else(|| kotlin_property_constructor_type(node, src))?
+        kotlin_property_cast_type(node, src)
+            .or_else(|| kotlin_property_constructor_type(node, src, declared_type_names))?
     };
     if name == type_short {
         return None;
@@ -1523,11 +2044,13 @@ fn kotlin_property_cast_type(node: Node<'_>, src: &[u8]) -> Option<String> {
 
 /// When a `property_declaration` lacks an explicit type annotation,
 /// look at its `expression` (RHS) for a `call_expression` whose
-/// callee is a PascalCase identifier — that's a constructor call by
-/// Kotlin convention, so the property's static type is the callee
-/// name. Returns the canonical short type, or `None` when the RHS
-/// isn't a constructor-shaped expression.
-fn kotlin_property_constructor_type(node: Node<'_>, src: &[u8]) -> Option<String> {
+/// callee resolves to a type declaration in this compiler object. Returns the
+/// canonical short type, or `None` when the RHS is ambiguous.
+fn kotlin_property_constructor_type(
+    node: Node<'_>,
+    src: &[u8],
+    declared_type_names: &std::collections::HashSet<String>,
+) -> Option<String> {
     let rhs = node.child_by_field_name("expression").or_else(|| {
         let mut cursor = node.walk();
         let mut found = None;
@@ -1558,16 +2081,7 @@ fn kotlin_property_constructor_type(node: Node<'_>, src: &[u8]) -> Option<String
     })?;
     let callee_text = node_text(&callee, src);
     let canonical = canonical_short_type(callee_text)?;
-    // Pascal-case head identifies a constructor — Kotlin requires
-    // class names to be capitalized, while regular function names are
-    // lowercase by convention. Without the capital-letter check we'd
-    // bind every typed local to the function it was initialized from,
-    // which is not the same fact at all.
-    canonical
-        .chars()
-        .next()
-        .filter(|first| first.is_ascii_uppercase())?;
-    Some(canonical)
+    declared_type_names.contains(&canonical).then_some(canonical)
 }
 
 /// Strip a Kotlin type literal down to its bare class name. Drops

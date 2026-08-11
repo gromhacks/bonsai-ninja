@@ -141,6 +141,7 @@ jobs:
           python3 scripts/fp_audit.py
           python3 scripts/category_audit.py
           scripts/audit-loop.sh --quick
+          scripts/audit-build-artifacts.sh
 
       - name: Verify self-security and output contracts
         shell: bash
@@ -272,6 +273,9 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --locked -p bonsai_cli --target ${{ matrix.target }}
+
+      - name: Enforce build-artifact budget
+        run: scripts/audit-build-artifacts.sh
 
       - name: Verify CLI smoke tests (Unix)
         if: matrix.package == 'tar'

@@ -742,11 +742,15 @@ struct SymbolicRuntimeIndex {
     field_demands: Mutex<AHashMap<Option<Precision>, Arc<SymbolicFieldDemand>>>,
 }
 
+// Version 5 retains the exact positional argument/parameter slots on
+// projected call-boundary rows. Earlier accelerators preserved reachability
+// but rendered those proven calls with sentinel slots, breaking diagnostic
+// call-chain continuity for aggregate fields.
 // Version 4 adds the compiler-proven whole-aggregate consumer relation.
 // Older accelerators remain semantically valid as IDG bodies, but must rebuild
 // this derived query product before symbolic closure can distinguish a real
 // `sink(record)` read from a scalar carrier used by a resolved local call.
-const SYMBOLIC_RUNTIME_ACCELERATOR_VERSION: u32 = 4;
+const SYMBOLIC_RUNTIME_ACCELERATOR_VERSION: u32 = 5;
 
 #[derive(serde::Serialize)]
 struct PersistedSymbolicRuntimeRef<'a> {
@@ -7476,6 +7480,7 @@ impl IdgQueryService {
         // scalar InterCallArg / InterReturn / InterThrow edges remain exact
         // stack boundaries.
         let mut heap_rows = Vec::new();
+        let mut field_cross_call_index = FieldCrossCallIndex::default();
         // Only compatibility boundaries whose synthetic endpoint is not the
         // canonical formal/return place need same-site structural remapping.
         // Retaining every ordinary call boundary made this sparse repair
@@ -7516,12 +7521,35 @@ impl IdgQueryService {
                             (IdgEdgeKind::InterFieldCallArg, Some(caller), Some(callee))
                                 if caller != callee =>
                             {
+                                let (arg_idx, param_idx) = self
+                                    .workspace
+                                    .segment_view(from_segment)
+                                    .zip(self.workspace.segment_view(to_segment))
+                                    .and_then(|(from_segment_view, to_segment_view)| {
+                                        let from_node = from_segment_view.nodes.get(edge.from)?;
+                                        let to_node = to_segment_view.nodes.get(edge.to)?;
+                                        let from_place = from_segment_view.places.get(from_node.place)?;
+                                        let to_place = to_segment_view.places.get(to_node.place)?;
+                                        field_cross_call_arg_and_param_indices(
+                                            &mut field_cross_call_index,
+                                            from_segment,
+                                            &from_segment_view,
+                                            to_segment,
+                                            &to_segment_view,
+                                            caller,
+                                            callee,
+                                            edge.meta.via_span,
+                                            from_place,
+                                            to_place,
+                                        )
+                                    })
+                                    .unwrap_or((u32::MAX, u32::MAX));
                                 Some(CrossCallEdge {
                                     caller,
                                     callee,
                                     call_span: edge.meta.via_span,
-                                    arg_idx: u32::MAX,
-                                    param_idx: u32::MAX,
+                                    arg_idx,
+                                    param_idx,
                                     precision: edge.meta.precision,
                                     call_kind: edge.meta.call_kind,
                                     relation: CrossCallRelation::Argument,

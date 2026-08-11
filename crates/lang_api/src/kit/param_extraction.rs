@@ -26,11 +26,57 @@
 
 use tree_sitter::Node;
 
-use super::{
-    extract_direct_call_info, first_identifier_descendant, first_identifier_like_child,
-    first_named_child_of_kind, looks_like_identifier, node_text, short_name_of, GrammarHandler,
-    SYNTHETIC_VARARGS_PARAM,
-};
+use super::{extract_direct_call_info, node_text, short_name_of, GrammarHandler, SYNTHETIC_VARARGS_PARAM};
+
+/// Locate the active grammar's parsed parameter container without carrying a
+/// union of other languages' node kinds in shared lowering. Tree-sitter field
+/// names are tried first; the bounded structural walk then selects only a kind
+/// explicitly declared by the adapter and never enters a callable body.
+pub(super) fn parameter_container<'tree>(
+    fn_node: &Node<'tree>,
+    handler: &GrammarHandler,
+) -> Option<Node<'tree>> {
+    for field in ["parameters", "args", "parameter"] {
+        if let Some(node) = fn_node.child_by_field_name(field) {
+            return Some(node);
+        }
+    }
+    let mut pending: Vec<(Node<'tree>, u8)> = Vec::new();
+    let mut cursor = fn_node.walk();
+    let mut direct_children: Vec<Node<'tree>> = fn_node.named_children(&mut cursor).collect();
+    direct_children.reverse();
+    pending.extend(direct_children.into_iter().map(|child| (child, 0_u8)));
+    while let Some((node, depth)) = pending.pop() {
+        if handler.parameter_container_kinds.contains(&node.kind()) {
+            return Some(node);
+        }
+        if depth >= 4
+            || handler.fn_kinds.contains(&node.kind())
+            || handler.lambda_kinds.contains(&node.kind())
+            // A parameter type may itself contain a callable signature
+            // (Objective-C block pointers are one example). Its nested
+            // parameter list belongs to the type, not to the enclosing
+            // function, so it cannot be the outer declaration's container.
+            || handler.parameter_kinds.contains(&node.kind())
+            || handler.keyword_parameter_kinds.contains(&node.kind())
+        {
+            continue;
+        }
+        for index in (0..node.child_count()).rev() {
+            let Ok(index) = u32::try_from(index) else {
+                continue;
+            };
+            let Some(child) = node.child(index).filter(Node::is_named) else {
+                continue;
+            };
+            if matches!(node.field_name_for_child(index), Some("body" | "block")) {
+                continue;
+            }
+            pending.push((child, depth + 1));
+        }
+    }
+    None
+}
 
 /// Per-parameter annotation/decorator names, parallel-indexed with
 /// `extract_param_names`.
@@ -60,12 +106,9 @@ pub fn extract_param_annotations(
         let mut annotation_search_roots: Vec<Node<'_>> = Vec::new();
         let mut cursor = param.walk();
         for child in param.named_children(&mut cursor) {
-            if matches!(child.kind(), "modifiers" | "annotation_list" | "attribute_list") {
+            if handler.parameter_modifier_kinds.contains(&child.kind()) {
                 annotation_search_roots.push(child);
-            } else if matches!(
-                child.kind(),
-                "marker_annotation" | "annotation" | "attribute" | "decorator"
-            ) {
+            } else if handler.parameter_annotation_kinds.contains(&child.kind()) {
                 // TypeScript and several C-family grammars place parameter
                 // decorators directly beside the name/type rather than in a
                 // wrapper. Keep those exact syntax nodes while still
@@ -112,20 +155,12 @@ pub fn extract_param_annotations(
     }
     // Locate the parameter container — every grammar uses a different
     // field/kind name, so we try them in the order most likely to match.
-    let parameters_container = fn_node
-        .child_by_field_name("parameters")
-        .or_else(|| fn_node.child_by_field_name("args"))
-        .or_else(|| first_named_child_of_kind(fn_node, "parameters"))
-        .or_else(|| first_named_child_of_kind(fn_node, "formal_parameters"))
-        .or_else(|| first_named_child_of_kind(fn_node, "parameter_list"))
-        .or_else(|| first_named_child_of_kind(fn_node, "function_value_parameters"))
-        .or_else(|| first_named_child_of_kind(fn_node, "expr_args"))
-        .or_else(|| first_named_child_of_kind(fn_node, "formal_parameter_list"));
+    let parameters_container = parameter_container(fn_node, handler);
     if let Some(parameters_container) = parameters_container {
         let mut cursor = parameters_container.walk();
         let mut pending_annotations: Vec<String> = Vec::new();
         for param in parameters_container.named_children(&mut cursor) {
-            if is_parameter_modifier_container(param.kind()) {
+            if handler.parameter_modifier_kinds.contains(&param.kind()) {
                 collect_param_annotation_names(param, src, handler, &mut pending_annotations);
                 continue;
             }
@@ -141,32 +176,29 @@ pub fn extract_param_annotations(
     // under the function. Track the previously-seen
     // identifier so ObjC method_parameter siblings inherit their
     // selector piece as a pseudo-annotation.
-    let mut cursor = fn_node.walk();
-    let mut previous_identifier_text: Option<String> = None;
-    for child in fn_node.named_children(&mut cursor) {
-        let already_visited = parameters_container.is_some_and(|p| child_in(child, p));
-        if matches!(
-            child.kind(),
-            "parameter" | "method_parameter" | "formal_parameter"
-        ) && !already_visited
-        {
-            if child.kind() == "method_parameter" {
-                // ObjC method param — its selector piece is the
-                // identifier immediately preceding it (`openURL` →
-                // applies to the next method_parameter).
-                let mut selector_annotations = Vec::new();
-                if let Some(selector_piece) = previous_identifier_text.clone() {
-                    selector_annotations.push(selector_piece);
+    if parameters_container.is_none() {
+        let mut cursor = fn_node.walk();
+        let mut previous_identifier_text: Option<String> = None;
+        for child in fn_node.named_children(&mut cursor) {
+            if handler.parameter_kinds.contains(&child.kind()) {
+                if handler.last_identifier_parameter_kinds.contains(&child.kind()) {
+                    // ObjC method param — its selector piece is the
+                    // identifier immediately preceding it (`openURL` →
+                    // applies to the next method_parameter).
+                    let mut selector_annotations = Vec::new();
+                    if let Some(selector_piece) = previous_identifier_text.clone() {
+                        selector_annotations.push(selector_piece);
+                    }
+                    per_param_annotations.push(selector_annotations);
+                } else {
+                    visit_param(child, &mut per_param_annotations);
                 }
-                per_param_annotations.push(selector_annotations);
-            } else {
-                visit_param(child, &mut per_param_annotations);
             }
-        }
-        if child.kind() == "identifier" {
-            let identifier_text = node_text(&child, src).trim().trim_end_matches(':').to_string();
-            if !identifier_text.is_empty() {
-                previous_identifier_text = Some(identifier_text);
+            if handler.parameter_selector_kinds.contains(&child.kind()) {
+                let identifier_text = node_text(&child, src).trim().trim_end_matches(':').to_string();
+                if !identifier_text.is_empty() {
+                    previous_identifier_text = Some(identifier_text);
+                }
             }
         }
     }
@@ -176,13 +208,13 @@ pub fn extract_param_annotations(
     // selector piece.
     let mut cursor = fn_node.walk();
     for child in fn_node.named_children(&mut cursor) {
-        if !matches!(child.kind(), "keyword_argument" | "keyword_declarator") {
+        if !handler.keyword_parameter_kinds.contains(&child.kind()) {
             continue;
         }
         let mut selector_piece: Option<String> = None;
         let mut piece_cursor = child.walk();
         for piece_child in child.named_children(&mut piece_cursor) {
-            if matches!(piece_child.kind(), "keyword" | "selector_keyword" | "identifier") {
+            if handler.parameter_selector_kinds.contains(&piece_child.kind()) {
                 let piece_text = node_text(&piece_child, src)
                     .trim()
                     .trim_end_matches(':')
@@ -202,17 +234,6 @@ pub fn extract_param_annotations(
     per_param_annotations
 }
 
-/// True when `child` is a direct named child of `container`.
-fn child_in(child: Node<'_>, container: Node<'_>) -> bool {
-    let mut cursor = container.walk();
-    for candidate in container.named_children(&mut cursor) {
-        if candidate == child {
-            return true;
-        }
-    }
-    false
-}
-
 /// Walk `root` collecting annotation/decorator/attribute names. Stops
 /// recursing into a matched annotation node so we don't double-count nested
 /// arguments (e.g. `@MyAnn(@Other)`).
@@ -225,18 +246,45 @@ fn collect_param_annotation_names(
     let mut work_stack = vec![root];
     while let Some(node) = work_stack.pop() {
         // Recognized annotation node — pull out its name and stop recursing.
-        if matches!(
-            node.kind(),
-            "marker_annotation" | "annotation" | "attribute" | "decorator"
-        ) {
-            if let Some(name_node) = node
-                .child_by_field_name("name")
-                .or_else(|| first_identifier_descendant(node))
-            {
-                let annotation_name = node_text(&name_node, src).trim().to_string();
-                if !annotation_name.is_empty() {
-                    collected_names.push(annotation_name);
+        if handler.parameter_annotation_kinds.contains(&node.kind()) {
+            let direct_name = handler
+                .parameter_annotation_name_extractor
+                .and_then(|extract| extract(node, src))
+                .or_else(|| {
+                    node.child_by_field_name("name")
+                        .or_else(|| first_identifier_descendant_for_handler(node, handler))
+                        .map(|name_node| node_text(&name_node, src).trim().to_string())
+                        .filter(|name| !name.is_empty())
+                });
+            let constructor_name = direct_name.or_else(|| {
+                // Some grammars wrap annotation syntax around a constructor
+                // call whose type identifier is intentionally not a value
+                // identifier (Kotlin is one example). Follow only the first
+                // adapter-classified call below the annotation and let the
+                // adapter's call-target extractor identify its parsed name.
+                let mut pending = Vec::new();
+                let mut cursor = node.walk();
+                let mut children = node.named_children(&mut cursor).collect::<Vec<_>>();
+                children.reverse();
+                pending.extend(children);
+                while let Some(candidate) = pending.pop() {
+                    if handler.is_call(candidate.kind()) {
+                        return extract_direct_call_info(&candidate, src, handler)
+                            .and_then(|(callee, _)| callee)
+                            .map(|callee| short_name_of(&callee).to_string());
+                    }
+                    if handler.parameter_annotation_kinds.contains(&candidate.kind()) {
+                        continue;
+                    }
+                    let mut cursor = candidate.walk();
+                    let mut children = candidate.named_children(&mut cursor).collect::<Vec<_>>();
+                    children.reverse();
+                    pending.extend(children);
                 }
+                None
+            });
+            if let Some(annotation_name) = constructor_name {
+                collected_names.push(annotation_name);
             }
             continue;
         }
@@ -269,7 +317,7 @@ fn collect_param_annotation_names(
 ///   1. Receiver-as-field (Go: `func (r *T) m()`).
 ///   2. Parameter container (Python `parameters`, Java `formal_parameters`, ...).
 ///   3. Flat siblings of the function node (Objective-C selectors).
-pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String> {
+pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> Vec<String> {
     let mut param_names = Vec::new();
     // Receivers come first so their slot is index 0.
     if let Some(receiver) = fn_node.child_by_field_name("receiver") {
@@ -277,98 +325,39 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String>
         let mut visited_named_child = false;
         for param in receiver.named_children(&mut cursor) {
             visited_named_child = true;
-            push_param_name(param, src, &mut param_names);
+            push_param_name(param, src, handler, &mut param_names);
         }
         // Receiver itself is the param when no nested children exist.
         if !visited_named_child {
-            push_param_name(receiver, src, &mut param_names);
+            push_param_name(receiver, src, handler, &mut param_names);
         }
     }
     // Most languages wrap params in a single container node; the lookup
     // tries every known field/kind name, falling back to a declarator
     // chain for C-family grammars and an `arguments` child for Elixir.
-    let parameters_container = fn_node
-        .child_by_field_name("parameters")
-        .or_else(|| fn_node.child_by_field_name("args")) // Erlang: args: expr_args
-        // JS permits an unparenthesized arrow parameter (`x => body`) and
-        // exposes it through a singular `parameter` field.
-        .or_else(|| {
-            matches!(fn_node.kind(), "arrow_function" | "lambda_expression")
-                .then(|| fn_node.child_by_field_name("parameter"))
-                .flatten()
-        })
-        .or_else(|| first_named_child_of_kind(fn_node, "parameters"))
-        .or_else(|| first_named_child_of_kind(fn_node, "formal_parameters"))
-        .or_else(|| first_named_child_of_kind(fn_node, "parameter_list"))
-        .or_else(|| first_named_child_of_kind(fn_node, "function_value_parameters"))
-        .or_else(|| first_named_child_of_kind(fn_node, "lambda_parameters"))
-        .or_else(|| first_named_child_of_kind(fn_node, "lambda_function_type_parameters"))
-        // Swift nests the parameter container under the lambda's parsed
-        // function-type node. Follow that grammar edge explicitly instead
-        // of scanning or splitting the closure text.
-        .or_else(|| {
-            first_named_child_of_kind(fn_node, "lambda_function_type").and_then(|function_type| {
-                first_named_child_of_kind(&function_type, "lambda_function_type_parameters")
-            })
-        })
-        .or_else(|| first_named_child_of_kind(fn_node, "expr_args")) // Erlang flat
-        // Dart: `formal_parameter_list` wraps `formal_parameter` children.
-        .or_else(|| first_named_child_of_kind(fn_node, "formal_parameter_list"))
-        // C / C++ / Objective-C: walk the nested declarator chain
-        // (`function_declarator > parameters > parameter_list`) until we
-        // find a `parameters` field. Stop on the first hit so we don't
-        // descend past it into the inner identifier.
-        .or_else(|| {
-            let mut declarator = fn_node.child_by_field_name("declarator");
-            while let Some(decl_node) = declarator {
-                if let Some(parameters) = decl_node
-                    .child_by_field_name("parameters")
-                    .or_else(|| first_named_child_of_kind(&decl_node, "parameter_list"))
-                {
-                    return Some(parameters);
-                }
-                declarator = decl_node.child_by_field_name("declarator");
-            }
-            None
-        })
-        // Elixir: `def foo(x, y) do ... end` parses as a `call` whose
-        // child `arguments` holds the params as identifier siblings.
-        .or_else(|| {
-            if fn_node.kind() == "call" {
-                first_named_child_of_kind(fn_node, "arguments")
-            } else {
-                None
-            }
-        })
-        // Elixir anonymous functions place their parameters in the left
-        // `arguments` child of the first parsed `stab_clause`.
-        .or_else(|| {
-            (fn_node.kind() == "anonymous_function")
-                .then(|| {
-                    first_named_child_of_kind(fn_node, "stab_clause")
-                        .and_then(|clause| clause.child_by_field_name("left"))
-                })
-                .flatten()
-        });
+    let parameters_container = parameter_container(fn_node, handler);
     if let Some(parameters_container) = parameters_container {
         // C# implicit single-parameter lambda `x => body`: the
         // `parameters` field is a lone `implicit_parameter` leaf whose
         // TEXT is the name, not a list and not an `identifier`-kind node
         // that `push_param_name` recognises — take its text directly.
-        if parameters_container.kind() == "implicit_parameter" {
+        if handler
+            .implicit_parameter_kinds
+            .contains(&parameters_container.kind())
+        {
             let text = node_text(&parameters_container, src).trim();
             if !text.is_empty() {
                 param_names.push(text.to_string());
             }
-        } else if looks_like_identifier(parameters_container.kind()) {
-            push_param_name(parameters_container, src, &mut param_names);
+        } else if handler.identifier_kinds.contains(&parameters_container.kind()) {
+            push_param_name(parameters_container, src, handler, &mut param_names);
         } else {
             let mut cursor = parameters_container.walk();
             for param in parameters_container.named_children(&mut cursor) {
-                if is_parameter_modifier_container(param.kind()) {
+                if handler.parameter_modifier_kinds.contains(&param.kind()) {
                     continue;
                 }
-                push_param_name(param, src, &mut param_names);
+                push_param_name(param, src, handler, &mut param_names);
             }
         }
         // C/C++ represent a bare variadic collector as the anonymous `...`
@@ -378,7 +367,11 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String>
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if !child.is_named() && node_text(&child, src).trim() == "..." {
+                if !child.is_named()
+                    && handler
+                        .anonymous_variadic_token
+                        .is_some_and(|token| node_text(&child, src).trim() == token)
+                {
                     if !param_names.iter().any(|name| name == SYNTHETIC_VARARGS_PARAM) {
                         param_names.push(SYNTHETIC_VARARGS_PARAM.to_string());
                     }
@@ -391,21 +384,16 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String>
         }
     }
     // Flat-shape grammars such as Objective-C emit parameter nodes as direct
-    // siblings of the function. Run the flat scan even after the
-    // container scan succeeded — grammars rarely mix shapes, so usually
-    // exactly one path fires. Skip params already counted inside the
-    // container (mirrors `extract_param_annotations`'s guard) so a
-    // grammar that exposes a param at both levels can't double-count and
-    // desync the parallel `params` / `param_annotations` indexing.
-    let mut cursor = fn_node.walk();
-    for child in fn_node.named_children(&mut cursor) {
-        let already_visited = parameters_container.is_some_and(|p| child_in(child, p));
-        if matches!(
-            child.kind(),
-            "parameter" | "method_parameter" | "formal_parameter"
-        ) && !already_visited
-        {
-            push_param_name(child, src, &mut param_names);
+    // siblings of the function and have no parameter container. Once a
+    // container exists it is the exact syntax boundary: scanning its sibling
+    // declaration name as though it were a bare parameter corrupts positional
+    // identity in grammars where both nodes share an identifier kind.
+    if parameters_container.is_none() {
+        let mut cursor = fn_node.walk();
+        for child in fn_node.named_children(&mut cursor) {
+            if handler.parameter_kinds.contains(&child.kind()) {
+                push_param_name(child, src, handler, &mut param_names);
+            }
         }
     }
     // ObjC: each `keyword_argument` sibling holds the bound parameter
@@ -414,19 +402,16 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String>
     // parallel-indexed.
     let mut cursor = fn_node.walk();
     for child in fn_node.named_children(&mut cursor) {
-        if !matches!(child.kind(), "keyword_argument" | "keyword_declarator") {
+        if !handler.keyword_parameter_kinds.contains(&child.kind()) {
             continue;
         }
         let mut bound_name: Option<String> = None;
         let mut piece_cursor = child.walk();
         for piece_child in child.named_children(&mut piece_cursor) {
-            if matches!(
-                piece_child.kind(),
-                "parameter" | "method_parameter" | "formal_parameter"
-            ) {
+            if handler.parameter_kinds.contains(&piece_child.kind()) {
                 if let Some(name_node) = piece_child
                     .child_by_field_name("name")
-                    .or_else(|| first_identifier_descendant(piece_child))
+                    .or_else(|| first_identifier_descendant_for_handler(piece_child, handler))
                 {
                     let name_text = node_text(&name_node, src).trim().to_string();
                     if !name_text.is_empty() {
@@ -441,13 +426,6 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String>
         param_names.push(bound_name.unwrap_or_default());
     }
     param_names
-}
-
-fn is_parameter_modifier_container(kind: &str) -> bool {
-    matches!(
-        kind,
-        "parameter_modifiers" | "modifiers" | "annotation_list" | "attribute_list"
-    )
 }
 
 /// Push a single parameter's name onto `out`, handling:
@@ -470,13 +448,22 @@ fn is_parameter_modifier_container(kind: &str) -> bool {
 ///
 /// Receiver parameters stay in the vector — they're identified separately
 /// via `Decl.receiver_param_index`, not by string-matching `self`/`this`.
-fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
-    if param.kind() == "self_parameter" {
-        param_names.push("self".to_string());
+fn push_param_name(param: Node<'_>, src: &[u8], handler: &GrammarHandler, param_names: &mut Vec<String>) {
+    if handler.self_parameter_kinds.contains(&param.kind()) {
+        // Receiver modifiers (`&self`, `&mut self`) are type/borrowing
+        // syntax, not part of the binding identity. The adapter has declared
+        // this exact grammar kind as a self parameter, so select its parsed
+        // binding identifier and use the whole node only for grammars that
+        // expose no such child.
+        let name_node = first_identifier_descendant_for_handler(param, handler).unwrap_or(param);
+        let name = node_text(&name_node, src).trim();
+        if !name.is_empty() {
+            param_names.push(name.to_string());
+        }
         return;
     }
 
-    let repeated_field_names = repeated_named_field_values(param, src, "name");
+    let repeated_field_names = repeated_named_field_values(param, src, "name", handler);
     if repeated_field_names.len() > 1 {
         param_names.extend(repeated_field_names);
         return;
@@ -487,16 +474,14 @@ fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
     // property keys, default expressions, and type annotations are excluded
     // by CST fields rather than by tokenizing the pattern's source text.
     let mut pattern_node = param;
-    if matches!(
-        pattern_node.kind(),
-        "assignment_pattern" | "object_assignment_pattern"
-    ) {
-        if let Some(left) = pattern_node.child_by_field_name("left") {
-            pattern_node = left;
-        }
+    if let Some(left) = pattern_node.child_by_field_name("left") {
+        pattern_node = left;
     }
-    if matches!(pattern_node.kind(), "object_pattern" | "array_pattern") {
-        let pattern_bindings = binding_names_from_pattern(pattern_node, src);
+    if handler
+        .destructured_parameter_kinds
+        .contains(&pattern_node.kind())
+    {
+        let pattern_bindings = binding_names_from_pattern(pattern_node, src, handler);
         if !pattern_bindings.is_empty() {
             param_names.extend(pattern_bindings);
             return;
@@ -504,7 +489,7 @@ fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
     }
 
     // Bare identifier params: the param node itself carries the name.
-    let bare_identifier_text = if looks_like_identifier(param.kind()) {
+    let bare_identifier_text = if handler.binding_identifier_kinds.contains(&param.kind()) {
         Some(node_text(&param, src).to_string())
     } else {
         None
@@ -517,7 +502,7 @@ fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
         let mut current_declarator = param.child_by_field_name("declarator");
         let mut innermost_identifier: Option<Node<'_>> = None;
         while let Some(declarator_node) = current_declarator {
-            if looks_like_identifier(declarator_node.kind()) {
+            if handler.binding_identifier_kinds.contains(&declarator_node.kind()) {
                 innermost_identifier = Some(declarator_node);
                 break;
             }
@@ -526,7 +511,7 @@ fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
             } else {
                 // Last declarator level — fall back to a DFS for any
                 // identifier descendant.
-                innermost_identifier = first_identifier_descendant(declarator_node);
+                innermost_identifier = first_identifier_descendant_for_handler(declarator_node, handler);
                 break;
             }
         }
@@ -535,29 +520,32 @@ fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
     // ObjC method_parameter wraps `(Type)name` — the bound name is the
     // last identifier by source position, since the type identifier
     // appears earlier in the subtree.
-    let method_param_bound_name = (param.kind() == "method_parameter")
-        .then(|| last_identifier_descendant_by_position(param))
+    let method_param_bound_name = handler
+        .last_identifier_parameter_kinds
+        .contains(&param.kind())
+        .then(|| last_identifier_descendant_by_position(param, handler))
         .flatten();
     let name_node = declarator_chain_name
         .or(method_param_bound_name)
         .or_else(|| param.child_by_field_name("pattern"))
         .or_else(|| param.child_by_field_name("name"))
-        .or_else(|| direct_non_type_identifier_child(param))
+        .or_else(|| direct_non_type_identifier_child(param, handler))
         // For parameter-shaped nodes without a name field, take the last
         // identifier-shaped descendant — usually the bound name in
         // `Type<Generic> name` shapes.
         .or_else(|| {
-            if param.kind().contains("parameter") {
-                last_identifier_descendant_by_position(param)
+            if handler.parameter_kinds.contains(&param.kind())
+                || handler.variadic_parameter_kinds.contains(&param.kind())
+            {
+                last_identifier_descendant_by_position(param, handler)
             } else {
                 None
             }
         })
-        .or_else(|| first_identifier_like_child(&param))
-        .or_else(|| first_identifier_descendant(param));
+        .or_else(|| first_identifier_descendant_for_handler(param, handler));
     if let Some(name_node) = name_node {
-        if is_binding_pattern_kind(name_node.kind()) {
-            let pattern_bindings = binding_names_from_pattern(name_node, src);
+        if handler.destructured_parameter_kinds.contains(&name_node.kind()) {
+            let pattern_bindings = binding_names_from_pattern(name_node, src, handler);
             if !pattern_bindings.is_empty() {
                 param_names.extend(pattern_bindings);
                 return;
@@ -567,7 +555,7 @@ fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
     let raw_name_text = match (bare_identifier_text, name_node) {
         (Some(text), _) => text,
         (None, Some(node)) => node_text(&node, src).trim().to_string(),
-        _ if is_unnamed_variadic_parameter(param.kind()) => {
+        _ if handler.variadic_parameter_kinds.contains(&param.kind()) => {
             param_names.push(SYNTHETIC_VARARGS_PARAM.to_string());
             return;
         }
@@ -581,25 +569,14 @@ fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
     }
 }
 
-fn is_unnamed_variadic_parameter(kind: &str) -> bool {
-    matches!(
-        kind,
-        "variadic_parameter" | "variadic_declaration" | "variadic_placeholder" | "vararg_expression"
-    )
-}
-
-fn is_binding_pattern_kind(kind: &str) -> bool {
-    kind.contains("pattern") || matches!(kind, "tuple" | "list" | "parameters" | "destructuring_declarator")
-}
-
-fn binding_names_from_pattern(pattern: Node<'_>, src: &[u8]) -> Vec<String> {
+fn binding_names_from_pattern(pattern: Node<'_>, src: &[u8], handler: &GrammarHandler) -> Vec<String> {
     let mut bindings = Vec::new();
-    collect_binding_names(pattern, src, &mut bindings);
+    collect_binding_names(pattern, src, handler, &mut bindings);
     bindings
 }
 
-fn collect_binding_names(node: Node<'_>, src: &[u8], bindings: &mut Vec<String>) {
-    if binding_identifier_kind(node.kind()) {
+fn collect_binding_names(node: Node<'_>, src: &[u8], handler: &GrammarHandler, bindings: &mut Vec<String>) {
+    if handler.binding_identifier_kinds.contains(&node.kind()) {
         let name = node_text(&node, src).trim();
         if !name.is_empty() && !bindings.iter().any(|existing| existing == name) {
             bindings.push(name.to_string());
@@ -607,13 +584,13 @@ fn collect_binding_names(node: Node<'_>, src: &[u8], bindings: &mut Vec<String>)
         return;
     }
 
-    let structural_child = match node.kind() {
-        "pair_pattern" => node.child_by_field_name("value"),
-        "assignment_pattern" | "object_assignment_pattern" => node.child_by_field_name("left"),
-        _ => None,
-    };
+    let structural_child = node
+        .child_by_field_name("left")
+        .or_else(|| node.child_by_field_name("pattern"))
+        .or_else(|| node.child_by_field_name("name"))
+        .or_else(|| node.child_by_field_name("value"));
     if let Some(child) = structural_child {
-        collect_binding_names(child, src, bindings);
+        collect_binding_names(child, src, handler, bindings);
         return;
     }
 
@@ -627,29 +604,21 @@ fn collect_binding_names(node: Node<'_>, src: &[u8], bindings: &mut Vec<String>)
         if matches!(
             node.field_name_for_child(index),
             Some("type" | "key" | "right" | "value" | "default" | "path" | "constructor")
-        ) || child.kind().contains("type")
-        {
+        ) {
             continue;
         }
-        collect_binding_names(child, src, bindings);
+        collect_binding_names(child, src, handler, bindings);
     }
-}
-
-fn binding_identifier_kind(kind: &str) -> bool {
-    kind == "shorthand_property_identifier_pattern"
-        || (looks_like_identifier(kind)
-            && !kind.contains("type")
-            && !matches!(
-                kind,
-                "property_identifier" | "private_property_identifier" | "field_identifier"
-            ))
 }
 
 /// First direct identifier-like child that is not itself type syntax.
 /// This covers grammars such as Kotlin where `parameter` is
 /// `simple_identifier user_type`; grouped parameter wrappers fall
 /// through to the descendant-by-position fallback below.
-fn direct_non_type_identifier_child<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
+fn direct_non_type_identifier_child<'tree>(
+    node: Node<'tree>,
+    handler: &GrammarHandler,
+) -> Option<Node<'tree>> {
     let mut cursor = node.walk();
     if !cursor.goto_first_child() {
         return None;
@@ -657,8 +626,7 @@ fn direct_non_type_identifier_child<'tree>(node: Node<'tree>) -> Option<Node<'tr
     loop {
         let child = cursor.node();
         if child.is_named()
-            && looks_like_identifier(child.kind())
-            && !child.kind().contains("type")
+            && handler.binding_identifier_kinds.contains(&child.kind())
             && cursor.field_name() != Some("type")
         {
             return Some(child);
@@ -669,7 +637,37 @@ fn direct_non_type_identifier_child<'tree>(node: Node<'tree>) -> Option<Node<'tr
     }
 }
 
-fn repeated_named_field_values(node: Node<'_>, src: &[u8], field: &str) -> Vec<String> {
+fn first_identifier_descendant_for_handler<'tree>(
+    node: Node<'tree>,
+    handler: &GrammarHandler,
+) -> Option<Node<'tree>> {
+    let mut pending = vec![node];
+    while let Some(current) = pending.pop() {
+        if current != node && handler.binding_identifier_kinds.contains(&current.kind()) {
+            return Some(current);
+        }
+        for index in (0..current.child_count()).rev() {
+            let Ok(index) = u32::try_from(index) else {
+                continue;
+            };
+            let Some(child) = current.child(index).filter(Node::is_named) else {
+                continue;
+            };
+            if current.field_name_for_child(index) == Some("type") {
+                continue;
+            }
+            pending.push(child);
+        }
+    }
+    None
+}
+
+fn repeated_named_field_values(
+    node: Node<'_>,
+    src: &[u8],
+    field: &str,
+    handler: &GrammarHandler,
+) -> Vec<String> {
     let mut out = Vec::new();
     for idx in 0..node.child_count() {
         let Ok(idx) = u32::try_from(idx) else {
@@ -681,7 +679,7 @@ fn repeated_named_field_values(node: Node<'_>, src: &[u8], field: &str) -> Vec<S
         if node.field_name_for_child(idx) != Some(field) {
             continue;
         }
-        if !looks_like_identifier(child.kind()) {
+        if !handler.binding_identifier_kinds.contains(&child.kind()) {
             continue;
         }
         let value = node_text(&child, src).trim();
@@ -695,12 +693,15 @@ fn repeated_named_field_values(node: Node<'_>, src: &[u8], field: &str) -> Vec<S
 /// Last identifier-shaped descendant of `node` by source position
 /// (largest start byte wins). Used for ObjC method_parameter where the
 /// bound variable name appears textually after the type identifier.
-fn last_identifier_descendant_by_position<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
+fn last_identifier_descendant_by_position<'tree>(
+    node: Node<'tree>,
+    handler: &GrammarHandler,
+) -> Option<Node<'tree>> {
     let mut latest_by_position: Option<Node<'tree>> = None;
     let mut work_stack = vec![node];
     while let Some(current) = work_stack.pop() {
         if current != node
-            && looks_like_identifier(current.kind())
+            && handler.binding_identifier_kinds.contains(&current.kind())
             && latest_by_position.is_none_or(|tracked| current.start_byte() > tracked.start_byte())
         {
             latest_by_position = Some(current);
@@ -716,7 +717,7 @@ fn last_identifier_descendant_by_position<'tree>(node: Node<'tree>) -> Option<No
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kit::language_from_pack;
+    use crate::kit::{language_from_pack, GENERIC_HANDLER};
 
     fn params_for(pack: &str, function_kind: &str, src: &str) -> Vec<String> {
         let language = language_from_pack(pack).unwrap_or_else(|error| panic!("{pack}: {error}"));
@@ -724,7 +725,7 @@ mod tests {
         parser.set_language(&language).expect("set language");
         let tree = parser.parse(src.as_bytes(), None).expect("parse source");
         let function = find_kind(tree.root_node(), function_kind).expect("function node");
-        extract_param_names(&function, src.as_bytes())
+        extract_param_names(&function, src.as_bytes(), &GENERIC_HANDLER)
     }
 
     fn find_kind<'tree>(root: Node<'tree>, kind: &str) -> Option<Node<'tree>> {

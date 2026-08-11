@@ -177,7 +177,7 @@ class C {
 }
 
 #[test]
-fn inline_constructor_receiver_supplies_receiver_type() {
+fn inline_constructor_receiver_preserves_qualified_type() {
     let db = db_with(
         r#"
 class C {
@@ -200,9 +200,8 @@ class C {
         calls
             .iter()
             .any(|(name, receiver_types)| name.ends_with("nextFloat")
-                && receiver_types.iter().any(|ty| ty == "Random")
-                && receiver_types.iter().any(|ty| ty == "java.util.Random")),
-        "inline constructor receiver type should include simple and qualified Random evidence, got {calls:?}"
+                && receiver_types.as_slice() == ["java.util.Random"]),
+        "inline constructor receiver type should preserve exact java.util.Random evidence; rule matching owns constrained simple-tail matching, got {calls:?}"
     );
 }
 
@@ -241,7 +240,7 @@ class Pipeline {
 }
 
 #[test]
-fn securerandom_factory_refines_random_declared_receiver_type() {
+fn factory_calls_do_not_override_declared_types_in_the_compiler_frontend() {
     let db = db_with(
         r#"
 class C {
@@ -265,10 +264,46 @@ class C {
         calls.iter().any(|(name, receiver_types)| {
             name == "generator.nextDouble"
                 && receiver_types.iter().any(|ty| ty == "Random")
-                && receiver_types.iter().any(|ty| ty == "SecureRandom")
-                && receiver_types.iter().any(|ty| ty == "java.security.SecureRandom")
+                && receiver_types.iter().any(|ty| ty == "java.util.Random")
+                && receiver_types.iter().all(|ty| !ty.contains("SecureRandom"))
         }),
-        "SecureRandom.getInstance assigned to Random should retain concrete receiver evidence, got {calls:?}"
+        "the frontend must retain the declared Random type and leave API factory-return refinement to typing rules, got {calls:?}"
+    );
+}
+
+#[test]
+fn lowercase_declared_and_cast_types_remain_receiver_evidence() {
+    let db = db_with(
+        r#"
+class lower { void run(String value) {} }
+class App {
+  void handle(Object input, String value) {
+    lower declared = new lower();
+    var casted = (lower) input;
+    declared.run(value);
+    casted.run(value);
+  }
+}
+"#,
+    );
+    let global = db.global_index();
+    let mut calls = Vec::new();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if decl.name == "handle" {
+                collect_calls(&decl.flow_events, &mut calls);
+            }
+        }
+    }
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|(name, types)| {
+                name.rsplit('.').next() == Some("run") && types.iter().any(|ty| ty == "lower")
+            })
+            .count(),
+        2,
+        "calls: {calls:?}"
     );
 }
 
@@ -386,7 +421,7 @@ class C {
 }
 
 #[test]
-fn vertx_route_handler_lambda_param_is_routing_context() {
+fn vertx_route_handler_lambda_keeps_provider_types_out_of_the_adapter() {
     let db = db_with(
         r#"
 import io.vertx.ext.web.Router;
@@ -404,18 +439,15 @@ class C extends AbstractVerticle {
     );
     let aliases = decl_type_aliases(&db, "start");
     assert!(
-        aliases
-            .iter()
-            .any(|(name, ty)| name == "ctx" && ty == "RoutingContext")
-            && aliases
-                .iter()
-                .any(|(name, ty)| name == "ctx" && ty == "io.vertx.ext.web.RoutingContext"),
-        "Vert.x route handler lambda param should be typed as RoutingContext, got {aliases:?}"
+        aliases.iter().all(|(name, ty)| {
+            name != "ctx" || (!ty.contains("RoutingContext") && !ty.contains("ServerRequest"))
+        }),
+        "external callback signatures belong to rulepack typing, not Java syntax lowering: {aliases:?}"
     );
 }
 
 #[test]
-fn webflux_route_lambda_param_is_server_request() {
+fn webflux_route_lambda_keeps_provider_types_out_of_the_adapter() {
     let db = db_with(
         r#"
 import static org.springframework.web.reactive.function.server.RouterFunctions.route;
@@ -438,16 +470,13 @@ class Service {
     assert!(
         aliases
             .iter()
-            .any(|(name, ty)| name == "req" && ty == "ServerRequest")
-            && aliases.iter().any(|(name, ty)| {
-                name == "req" && ty == "org.springframework.web.reactive.function.server.ServerRequest"
-            }),
-        "WebFlux route lambda param should be typed as ServerRequest, got {aliases:?}"
+            .all(|(name, ty)| name != "req" || !ty.contains("ServerRequest")),
+        "external callback signatures belong to rulepack typing, not Java syntax lowering: {aliases:?}"
     );
 }
 
 #[test]
-fn graphql_datafetcher_lambda_param_is_datafetching_environment() {
+fn typed_lambda_preserves_callable_type_without_inventing_parameter_type() {
     let db = db_with(
         r#"
 import graphql.schema.DataFetcher;
@@ -470,11 +499,14 @@ class UserRepo {
     assert!(
         aliases
             .iter()
-            .any(|(name, ty)| name == "env" && ty == "DataFetchingEnvironment")
-            && aliases
-                .iter()
-                .any(|(name, ty)| name == "env" && ty == "graphql.schema.DataFetchingEnvironment"),
-        "GraphQL DataFetcher lambda param should be typed as DataFetchingEnvironment, got {aliases:?}"
+            .any(|(name, ty)| name == "byName" && ty == "DataFetcher"),
+        "the exact declared callable type must remain compiler IR: {aliases:?}"
+    );
+    assert!(
+        aliases
+            .iter()
+            .all(|(name, ty)| name != "env" || !ty.contains("DataFetchingEnvironment")),
+        "the adapter must not invent an external functional-interface signature: {aliases:?}"
     );
     assert!(
         aliases

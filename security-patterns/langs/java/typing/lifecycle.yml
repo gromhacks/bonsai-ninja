@@ -1,0 +1,57 @@
+- id: java.typing.lifecycle_closed_receiver
+  enabled: true
+  language: java
+  match:
+    kind: call
+    callee:
+      regex: '(?:^|\.)(?:close|shutdown)$'
+  lifecycle_transition:
+    state: closed
+    binding: { kind: receiver }
+  match_examples:
+  - name: close changes the receiver state
+    code: 'class C { void f(java.io.InputStream stream) throws Exception { stream.close(); } }'
+    expect_match_text: [stream.close]
+  description: "Java close/shutdown moves the receiver to closed. Typing-only; never a finding."
+
+- id: java.typing.lifecycle_cancelled_receiver
+  enabled: true
+  language: java
+  match: { kind: call, callee: { name: cancel } }
+  lifecycle_transition:
+    state: cancelled
+    binding: { kind: receiver }
+  match_examples:
+  - name: cancel changes the receiver state
+    code: 'class C { void f(java.util.concurrent.Future<?> future) { future.cancel(true); } }'
+    expect_match_text: [future.cancel]
+  description: "Java cancel moves the receiver to cancelled. Typing-only; never a finding."
+
+- id: java.typing.lifecycle_unlocked_receiver
+  enabled: true
+  language: java
+  match: { kind: call, callee: { name: unlock } }
+  lifecycle_transition:
+    state: unlocked
+    binding: { kind: receiver }
+  match_examples:
+  - name: unlock changes the receiver state
+    code: 'class C { void f(java.util.concurrent.locks.Lock lock) { lock.unlock(); } }'
+    expect_match_text: [lock.unlock]
+  description: "Java unlock moves the receiver to unlocked. Typing-only; never a finding."
+
+- id: java.typing.lifecycle_released_receiver
+  enabled: true
+  language: java
+  match:
+    kind: call
+    callee:
+      regex: '(?:^|\.)(?:release|dispose|destroy)$'
+  lifecycle_transition:
+    state: freed
+    binding: { kind: receiver }
+  match_examples:
+  - name: release changes the receiver state
+    code: 'class C { void f(Resource resource) { resource.release(); } }'
+    expect_match_text: [resource.release]
+  description: "Java release/dispose/destroy moves the receiver to freed. Typing-only; never a finding."

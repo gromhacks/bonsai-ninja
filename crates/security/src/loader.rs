@@ -3,7 +3,7 @@
 //!
 //! Hard rules enforced here:
 //!   * `sources/` rules get `kind = Source`, `sinks/` gets `Sink`,
-//!     `sanitizers/` gets `Sanitizer`. The `kind` is always
+//!     `sanitizers/` gets `Sanitizer`, and `typing/` gets `Typing`. The `kind` is always
 //!     directory-derived — rules can't lie about their family.
 //!   * Language can come from either the `langs/<lang>/` directory
 //!     wrapper OR a YAML `language:` field (custom rulepack projects
@@ -29,9 +29,10 @@ pub struct LanguagePack {
     pub sources: Vec<Rule>,
     pub sinks: Vec<Rule>,
     pub sanitizers: Vec<Rule>,
-    /// Typing-only rules (`typing/` dir, `RuleKind::Typing`). They feed
-    /// `build_factory_returns` via `all_rules()` but never appear in any
-    /// finding/inventory path. See [`RuleKind::Typing`].
+    /// Typing-only rules (`typing/` dir, `RuleKind::Typing`). They feed the
+    /// rulepack-owned compiler model via `build_rulepack_typing` and
+    /// `all_rules()`, but never appear in a finding/inventory path. See
+    /// [`RuleKind::Typing`].
     pub typing: Vec<Rule>,
 }
 
@@ -675,6 +676,12 @@ pub enum LoadError {
         path: String,
         kind: MatchKind,
     },
+    #[error("rule `{id}` in `{path}`: invalid typing declaration: {detail}")]
+    InvalidTypingDeclaration {
+        id: String,
+        path: String,
+        detail: &'static str,
+    },
     #[error(
         "rule `{id}` in `{path}`: YAML `language: {yaml}` does not match directory-derived language `{dir}`"
     )]
@@ -966,6 +973,64 @@ fn parse_rule_file(path: &Path, kind: RuleKind, dir_language: Option<&str>) -> R
 /// per match kind, no tautological regexes that would fire on every
 /// site.
 fn validate_rule(rule: &Rule) -> Result<(), LoadError> {
+    let typing_error = |detail| LoadError::InvalidTypingDeclaration {
+        id: rule.id.clone(),
+        path: rule.source_path.clone(),
+        detail,
+    };
+    if rule.match_spec.kind == MatchKind::Type && rule.kind != RuleKind::Typing {
+        return Err(typing_error("match.kind type is valid only in typing rules"));
+    }
+    if (!rule.callback_param_types.is_empty() || rule.callback_arg_index.is_some())
+        && rule.kind != RuleKind::Typing
+    {
+        return Err(typing_error(
+            "callback_param_types and callback_arg_index are valid only in typing rules",
+        ));
+    }
+    if rule.kind == RuleKind::Typing && !rule.callback_param_types.is_empty() {
+        if rule.callback_param_types.iter().any(Vec::is_empty) {
+            return Err(typing_error(
+                "every callback_param_types entry must declare at least one exact type alias",
+            ));
+        }
+        match rule.match_spec.kind {
+            MatchKind::Call if rule.callback_arg_index.is_some() => {}
+            MatchKind::Type if rule.callback_arg_index.is_none() => {}
+            MatchKind::Call => {
+                return Err(typing_error("call callback typing requires callback_arg_index"));
+            }
+            MatchKind::Type => {
+                return Err(typing_error(
+                    "type callback typing must not declare callback_arg_index",
+                ));
+            }
+            _ => {
+                return Err(typing_error(
+                    "callback_param_types requires match.kind call or type",
+                ));
+            }
+        }
+    } else if rule.callback_arg_index.is_some() {
+        return Err(typing_error("callback_arg_index requires callback_param_types"));
+    }
+    if rule.kind == RuleKind::Typing
+        && rule.match_spec.kind == MatchKind::Type
+        && rule.callback_param_types.is_empty()
+    {
+        return Err(typing_error("match.kind type requires callback_param_types"));
+    }
+    if let Some(transition) = &rule.lifecycle_transition {
+        if rule.kind != RuleKind::Typing {
+            return Err(typing_error("lifecycle_transition is valid only in typing rules"));
+        }
+        if rule.match_spec.kind != MatchKind::Call {
+            return Err(typing_error("lifecycle_transition requires match.kind call"));
+        }
+        if transition.state.trim().is_empty() {
+            return Err(typing_error("lifecycle_transition.state must be non-empty"));
+        }
+    }
     match rule.match_spec.kind {
         MatchKind::Call | MatchKind::New | MatchKind::Missing => {
             // Call-shaped rules (including Missing — inverse-match on an
@@ -983,7 +1048,7 @@ fn validate_rule(rule: &Rule) -> Result<(), LoadError> {
                 });
             }
         }
-        MatchKind::Read | MatchKind::Write | MatchKind::Param => {
+        MatchKind::Read | MatchKind::Write | MatchKind::Param | MatchKind::Type => {
             // Place-shaped rules need a target; an empty target is unusable.
             let target = rule
                 .match_spec

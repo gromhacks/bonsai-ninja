@@ -1437,11 +1437,12 @@
       regex: "^(\"\"|'')\\.join$"
   constraints:
   - arg_matches_regex:
-      index: 1
-      regex: "^for\\s+[A-Za-z_][A-Za-z0-9_]*\\s+in\\s+"
-  - arg_matches_regex:
-      index: 2
-      regex: "^if\\s+[A-Za-z_][A-Za-z0-9_]*\\.(?:isalnum|isalpha|isascii|isdecimal|isdigit|isnumeric)\\(\\)(?:\\s+or\\s+[A-Za-z_][A-Za-z0-9_]*\\s*==\\s*['\"][A-Za-z0-9_ .:@/-]?['\"])*$"
+      # A generator expression is one Python call argument. Keep the whole
+      # grammar-owned expression together instead of inventing argument slots
+      # for its `for` and `if` clauses.
+      index: 0
+      regex: |-
+        ^\(?\s*[A-Za-z_][A-Za-z0-9_]*\s+for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\s+.+\s+if\s+[A-Za-z_][A-Za-z0-9_]*\.(?:isalnum|isalpha|isascii|isdecimal|isdigit|isnumeric)\(\)(?:\s+or\s+[A-Za-z_][A-Za-z0-9_]*\s*==\s*['"][A-Za-z0-9_ .:@/-]?['"])*\s*\)?$
   match_examples:
   - name: generator join alnum allowlist
     code: |

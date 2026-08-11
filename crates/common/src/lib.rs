@@ -51,6 +51,7 @@ pub use resources::source_ingestion_batches;
 pub use resources::syntax_weighted_batches;
 pub use resources::syntax_worker_count;
 pub use resources::syntax_worker_count_for_sources;
+pub use resources::SyntaxMemoryPermitPool;
 pub use span::{LineCol, Span, SpanMap};
 pub use span_cache::{cached_span_map, cached_span_map_arc};
 

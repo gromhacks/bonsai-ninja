@@ -10,6 +10,14 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+struct ReceiverInitializerCall<'a> {
+    span: bonsai_common::Span,
+    name: &'a str,
+    kind: crate::CallKind,
+    receiver: Option<&'a str>,
+    receiver_types: &'a [String],
+}
+
 #[must_use]
 pub fn collect_receiver_field_writes(
     events: &[crate::FlowEvent],
@@ -46,6 +54,151 @@ pub fn collect_receiver_field_writes(
     out.dedup_by(|a, b| {
         a.span == b.span && a.target == b.target && a.source_param_indices == b.source_param_indices
     });
+    out
+}
+
+/// Collect compact direct-call initializers for receiver fields from an
+/// adapter-normalized flow tree.
+///
+/// The adapter must first qualify implicit field storage (`field` ->
+/// `this.field`/`self.field`) from its own grammar. This helper only joins the
+/// resulting assignment to the exact nested call fact at the same AST span;
+/// it does not infer types, constructors, names, or language semantics.
+#[must_use]
+pub fn collect_receiver_field_initializers(
+    events: &[crate::FlowEvent],
+    receiver_names: &[&str],
+) -> Vec<crate::ReceiverFieldInitializer> {
+    fn collect_calls<'a>(events: &'a [crate::FlowEvent], out: &mut Vec<ReceiverInitializerCall<'a>>) {
+        for event in events {
+            match event {
+                crate::FlowEvent::Call {
+                    span,
+                    name,
+                    call_kind,
+                    receiver,
+                    receiver_types,
+                    ..
+                } => out.push(ReceiverInitializerCall {
+                    span: *span,
+                    name,
+                    kind: *call_kind,
+                    receiver: receiver.as_deref(),
+                    receiver_types,
+                }),
+                crate::FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    collect_calls(then_events, out);
+                    collect_calls(else_events, out);
+                }
+                crate::FlowEvent::Loop { body, .. }
+                | crate::FlowEvent::Defer { body, .. }
+                | crate::FlowEvent::Using { body, .. } => collect_calls(body, out),
+                crate::FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    collect_calls(body, out);
+                    collect_calls(catch_events, out);
+                    collect_calls(finally_events, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_assignments(
+        events: &[crate::FlowEvent],
+        receiver_names: &[&str],
+        calls: &[ReceiverInitializerCall<'_>],
+        out: &mut Vec<crate::ReceiverFieldInitializer>,
+    ) {
+        for event in events {
+            match event {
+                crate::FlowEvent::Assign {
+                    span,
+                    target,
+                    source_call: Some(source_call),
+                    ..
+                } if receiver_names.iter().any(|receiver| {
+                    target
+                        .strip_prefix(receiver)
+                        .is_some_and(|suffix| suffix.starts_with('.'))
+                }) =>
+                {
+                    let call = calls
+                        .iter()
+                        .filter(|call| {
+                            call.name == source_call
+                                && call.span.file == span.file
+                                && span.start <= call.span.start
+                                && call.span.end <= span.end
+                        })
+                        .max_by_key(|call| call.span.end.saturating_sub(call.span.start));
+                    let (call_kind, call_receiver, call_receiver_types) = call.map_or_else(
+                        || (crate::CallKind::Function, None, Vec::new()),
+                        |call| {
+                            (
+                                call.kind,
+                                call.receiver.map(str::to_string),
+                                call.receiver_types.to_vec(),
+                            )
+                        },
+                    );
+                    out.push(crate::ReceiverFieldInitializer {
+                        span: *span,
+                        target: target.clone(),
+                        call_name: source_call.clone(),
+                        call_kind,
+                        call_receiver,
+                        call_receiver_types,
+                    });
+                }
+                crate::FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    collect_assignments(then_events, receiver_names, calls, out);
+                    collect_assignments(else_events, receiver_names, calls, out);
+                }
+                crate::FlowEvent::Loop { body, .. }
+                | crate::FlowEvent::Defer { body, .. }
+                | crate::FlowEvent::Using { body, .. } => {
+                    collect_assignments(body, receiver_names, calls, out);
+                }
+                crate::FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    collect_assignments(body, receiver_names, calls, out);
+                    collect_assignments(catch_events, receiver_names, calls, out);
+                    collect_assignments(finally_events, receiver_names, calls, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut calls = Vec::new();
+    collect_calls(events, &mut calls);
+    let mut out = Vec::new();
+    collect_assignments(events, receiver_names, &calls, &mut out);
+    out.sort_by(|left, right| {
+        (left.span, left.target.as_str(), left.call_name.as_str()).cmp(&(
+            right.span,
+            right.target.as_str(),
+            right.call_name.as_str(),
+        ))
+    });
+    out.dedup();
     out
 }
 
@@ -677,82 +830,117 @@ fn collect_receiver_state_source_name(
     }
 }
 
-pub(crate) fn argument_place(node: &Node<'_>, src: &[u8]) -> Option<String> {
-    let text = normalize_call_name_whitespace(node_text(node, src));
-    if looks_like_literal_value(node.kind(), &text) {
-        return None;
+pub(crate) fn argument_place(node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> Option<String> {
+    structural_argument_place(*node, src, handler)
+}
+
+fn structural_argument_place(node: Node<'_>, src: &[u8], handler: &GrammarHandler) -> Option<String> {
+    let kind = node.kind();
+    if let Some(operand) = handler
+        .indirect_place_operand_extractor
+        .and_then(|extract| extract(node))
+        .filter(|operand| operand.id() != node.id())
+    {
+        return structural_argument_place(operand, src, handler);
     }
-    if !text.is_empty() && argument_node_is_place(node, text.as_str()) && qualified_place_text(&text) {
-        return canonical_argument_place(&text);
+    if let Some(extract) = handler.expression_place_extractor {
+        let extracted = extract(node, src);
+        if extracted.places.len() == 1 {
+            let all_consumed = extracted.consumed_node_ids.contains(&node.id()) || {
+                let mut cursor = node.walk();
+                let all = node
+                    .named_children(&mut cursor)
+                    .all(|child| extracted.consumed_node_ids.contains(&child.id()));
+                all
+            };
+            if all_consumed {
+                return extracted.places.into_iter().next();
+            }
+        }
     }
-    if let Some(value) = node.child_by_field_name("value") {
-        let text = normalize_call_name_whitespace(node_text(&value, src));
-        if looks_like_literal_value(value.kind(), &text) {
+    // Some grammars expose the implicit receiver keyword as its own named
+    // CST node rather than as an identifier (Java `this`/`super` is the
+    // canonical shape). The adapter-declared receiver inventory is exact
+    // source syntax, so it is valid place evidence without teaching shared
+    // lowering any language token. Restrict this to leaf nodes: a compound
+    // expression whose rendered text happens to equal a receiver spelling is
+    // not a storage atom.
+    let text = normalize_call_name_whitespace(node_text(&node, src));
+    if node.named_child_count() == 0
+        && handler
+            .implicit_receiver_names
+            .iter()
+            .any(|receiver| *receiver == text)
+    {
+        return Some(text);
+    }
+    if handler.identifier_kinds.contains(&kind)
+        || handler.sigil_variable_kinds.contains(&kind)
+        || handler.global_variable_kinds.contains(&kind)
+    {
+        let text = handler
+            .reference_name_extractor
+            .and_then(|extract| extract(node, src))
+            .unwrap_or(text);
+        return (!text.is_empty()).then_some(text);
+    }
+    if let Some((base, key)) = handler
+        .computed_subscript_extractor
+        .and_then(|extract| extract(node))
+    {
+        return structural_subscript_place(base, key, src, handler);
+    }
+    if handler.member_expression_kinds.contains(&kind) {
+        let base = first_declared_field(node, handler.member_base_field_names)
+            .and_then(|base| structural_argument_place(base, src, handler))?;
+        let member = first_declared_field(node, handler.member_name_field_names)?;
+        let member = handler
+            .reference_name_extractor
+            .and_then(|extract| extract(member, src))
+            .unwrap_or_else(|| normalize_call_name_whitespace(node_text(&member, src)));
+        if member.is_empty() {
             return None;
         }
-        if !text.is_empty() && argument_node_is_place(&value, text.as_str()) {
-            return canonical_argument_place(&text);
+        return Some(format!("{base}.{member}"));
+    }
+    if handler.subscript_expression_kinds.contains(&kind) {
+        let base = first_declared_field(node, handler.subscript_base_field_names)?;
+        let key = first_declared_field(node, handler.subscript_index_field_names)?;
+        return structural_subscript_place(base, key, src, handler);
+    }
+    if handler.transparent_call_wrapper_kinds.contains(&kind) {
+        let mut cursor = node.walk();
+        let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
+        if let [child] = children.as_slice() {
+            return structural_argument_place(*child, src, handler);
         }
     }
-    if text.is_empty() || !argument_node_is_place(node, text.as_str()) {
-        return None;
-    }
-    canonical_argument_place(&text)
+    node.child_by_field_name("value")
+        .filter(|value| value.id() != node.id())
+        .and_then(|value| structural_argument_place(value, src, handler))
 }
 
-fn canonical_argument_place(text: &str) -> Option<String> {
-    let place = normalise_qualified_text(text);
-    // Preserve the adapter-emitted place exactly, including language-owned
-    // identifier sigils. Shared consumers compare compiler places through
-    // vocabulary-free name normalization when tolerant matching is needed;
-    // stripping arbitrary leading punctuation here destroys exact identities
-    // such as PHP `$value` and Perl `@items`.
-    let place = place.trim();
-    (!place.is_empty()).then(|| place.to_string())
+fn structural_subscript_place(
+    base: Node<'_>,
+    key: Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<String> {
+    let base = structural_argument_place(base, src, handler)?;
+    let static_key = handler
+        .static_subscript_key_extractor
+        .and_then(|extract| extract(key, src))
+        .or_else(|| {
+            let text = normalize_call_name_whitespace(node_text(&key, src));
+            handler.is_literal_value(key.kind(), &text).then_some(text)
+        });
+    Some(static_key.map_or_else(|| format!("{base}.*"), |key| format!("{base}.{key}")))
 }
 
-fn qualified_place_text(text: &str) -> bool {
-    bonsai_common::qualified_name_owner(text).is_some()
-}
-
-fn argument_node_is_place(node: &Node<'_>, text: &str) -> bool {
-    if looks_like_literal_value(node.kind(), text) {
-        return false;
-    }
-    if looks_like_bare_identifier(text) {
-        return true;
-    }
-    if matches!(
-        node.kind(),
-        "identifier"
-            | "variable_name"
-            | "var"
-            | "varname"
-            | "identifier_dollar_escaped"
-            | "field_identifier"
-            | "member_expression"
-            | "member_access_expression"
-            | "navigation_expression"
-            | "attribute"
-            | "dot_index_expression"
-            | "subscript_expression"
-            | "subscript"
-            | "element_reference"
-            | "array_access"
-            | "element_access_expression"
-            | "bracket_index_expression"
-            | "index_expression"
-            | "indexing_expression"
-            | "pointer_expression"
-            | "unary_expression"
-            | "field_expression"
-            | "selector_expression"
-            | "assignable_selector"
-            | "unconditional_assignable_selector"
-    ) {
-        return true;
-    }
-    text.trim_start().starts_with(['&', '*'])
+fn first_declared_field<'tree>(node: Node<'tree>, field_names: &[&str]) -> Option<Node<'tree>> {
+    field_names
+        .iter()
+        .find_map(|field| node.child_by_field_name(field))
 }
 
 fn assignment_source_values(
@@ -799,8 +987,7 @@ fn normalised_place_base(place: &str) -> Option<String> {
     if place.is_empty() {
         return None;
     }
-    let normalised = normalise_qualified_text(place);
-    let base = normalised
+    let base = place
         .split('.')
         .next()
         .map(str::trim)

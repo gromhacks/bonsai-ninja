@@ -7,9 +7,10 @@ use bonsai_lang_api::{
         expression_operand_names_with_handler, first_named_child_of_kind, language_from_pack,
         named_child_call_args_with_handler, node_text, parse_with, span_of, walk_flow_events,
     },
-    AdapterContext, AdapterError, AggregateLayout, ArgumentPassingMode, CallKind, DeclIndex, DeclKind,
-    FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
-    LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
+    AdapterContext, AdapterError, AggregateLayout, ArgumentPassingMode, CallKind, CallTargetExtraction,
+    DeclIndex, DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
+    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility,
+    EMPTY_HANDLER,
 };
 
 /// C++ parameter shape: `parameter_declaration` carries `type` and
@@ -30,69 +31,145 @@ const CPP_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
 };
 use tree_sitter::{Language, Node, Tree};
 
+fn cpp_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    (node.kind() == "for_range_loop")
+        .then(|| {
+            Some((
+                node.child_by_field_name("declarator")?,
+                node.child_by_field_name("right")?,
+            ))
+        })
+        .flatten()
+}
+
 pub const LANG_ID: LanguageId = LanguageId::new("cpp");
 const PACK_NAME: &str = "cpp";
 const CPP_CALL_KINDS: &[&str] = &["call_expression", "new_expression"];
 
-/// C++ lifecycle transitions. `release` covers `unique_ptr.release()`.
-/// `delete` / `delete[]` aren't `Call` events so they're not modelled here.
-const CPP_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "free",
-        transition: "freed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "fclose",
-        transition: "closed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "close",
-        transition: "closed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "closedir",
-        transition: "closed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "release",
-        transition: "freed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "reset",
-        transition: "freed",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "std::move",
-        transition: "moved",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "move",
-        transition: "moved",
-        arg_index: 0,
-    },
-    bonsai_lang_api::LifecycleTransition {
-        call_match: "pthread_mutex_unlock",
-        transition: "unlocked",
-        arg_index: 0,
-    },
-];
+fn cpp_indirect_place_operand(node: Node<'_>) -> Option<Node<'_>> {
+    if node.kind() != "pointer_expression" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let has_indirection = node
+        .children(&mut cursor)
+        .any(|child| matches!(child.kind(), "*" | "&"));
+    has_indirection
+        .then(|| node.child_by_field_name("argument"))
+        .flatten()
+}
+
+/// C++ call targets are grammar-delimited `function`/`type` nodes. Preserve
+/// the complete callable path (`absl::GetFlag`, `object.method`, and operator
+/// calls), while removing parsed template-argument nodes: `tokenize<T>` and
+/// its declaration `tokenize` are one compiler callable identity. The adapter
+/// owns this CST normalization so shared resolution never parses `<...>`.
+fn cpp_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
+    let target = match node.kind() {
+        "call_expression" => node.child_by_field_name("function")?,
+        "new_expression" => node.child_by_field_name("type")?,
+        _ => return None,
+    };
+    let full_text = cpp_call_target_without_template_arguments(target, src);
+    (!full_text.is_empty()).then_some(CallTargetExtraction {
+        node: target,
+        full_text,
+    })
+}
+
+fn cpp_call_target_without_template_arguments(target: Node<'_>, src: &[u8]) -> String {
+    let mut argument_ranges = Vec::new();
+    let mut stack = vec![target];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "template_argument_list" {
+            argument_ranges.push(node.byte_range());
+            continue;
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    if argument_ranges.is_empty() {
+        return node_text(&target, src).trim().to_string();
+    }
+    argument_ranges.sort_by_key(|range| (range.start, range.end));
+    let mut out = String::new();
+    let mut cursor = target.start_byte();
+    for range in argument_ranges {
+        if range.start > cursor {
+            out.push_str(std::str::from_utf8(&src[cursor..range.start]).unwrap_or_default());
+        }
+        cursor = cursor.max(range.end);
+    }
+    if cursor < target.end_byte() {
+        out.push_str(std::str::from_utf8(&src[cursor..target.end_byte()]).unwrap_or_default());
+    }
+    out.trim().to_string()
+}
 
 const HANDLER: GrammarHandler = GrammarHandler {
+    literal_value_kinds: &["null", "nullptr", "true", "false"],
+    string_literal_kinds: &[
+        "string_literal",
+        "raw_string_literal",
+        "char_literal",
+        "concatenated_string",
+    ],
+    comment_kinds: &["comment"],
+    doc_comment_prefixes: &["///", "//!", "/**"],
+    decorator_kinds: &["attribute"],
+    parameter_container_kinds: &["parameter_list"],
+    parameter_kinds: &["parameter_declaration", "optional_parameter_declaration"],
+    parameter_annotation_kinds: &["attribute"],
+    variadic_parameter_kinds: &["variadic_parameter", "variadic_declaration"],
+    binding_identifier_kinds: &["identifier"],
+    anonymous_variadic_token: Some("..."),
+    identifier_kinds: &["identifier"],
+    named_aggregate_kinds: &["initializer_list"],
+    positional_aggregate_kinds: &["initializer_list"],
+    aggregate_pair_kinds: &["initializer_pair"],
+    aggregate_key_field_names: &["designator"],
+    aggregate_value_field_names: &["value"],
+    static_field_name_kinds: &["field_identifier"],
+    aggregate_syntax_only_kinds: &["type_identifier"],
+    transparent_call_wrapper_kinds: &[
+        "field_expression",
+        "scoped_identifier",
+        "parenthesized_expression",
+        "await_expression",
+        "co_await_expression",
+    ],
+    single_expression_group_kinds: &["expression_list"],
+    assignment_target_wrapper_kinds: &[
+        "init_declarator",
+        "declarator",
+        "function_declarator",
+        "pointer_declarator",
+        "reference_declarator",
+        "parenthesized_declarator",
+    ],
+    binding_declaration_keyword_spellings: &["auto", "const"],
     fn_kinds: &["function_definition"],
     call_kinds: CPP_CALL_KINDS,
+    constructor_call_kinds: &["new_expression"],
+    call_callee_field_names: &["function"],
+    constructor_type_field_names: &["type"],
+    call_target_extractor: Some(cpp_call_target),
+    call_argument_field_names: &["arguments"],
+    call_argument_container_kinds: &["argument_list"],
+    writeback_operand_field_names: &["argument"],
+    indirect_place_operand_extractor: Some(cpp_indirect_place_operand),
+    lambda_body_field_names: &["body"],
     pseudo_call_extractor: Some(extract_cpp_pseudo_call),
     syntax_event_extractor: Some(extract_cpp_syntax_event),
     argument_passing_mode_extractor: Some(cpp_argument_passing_mode),
+    expression_value_kind_extractor: Some(cpp_expression_value_kind),
     call_ref_kinds: CPP_CALL_KINDS,
     member_expression_kinds: &["field_expression", "qualified_identifier", "scoped_identifier"],
     subscript_expression_kinds: &["subscript_expression"],
+    member_base_field_names: &["argument", "scope"],
+    member_name_field_names: &["field", "name"],
+    subscript_base_field_names: &["argument"],
+    subscript_index_field_names: &["index"],
     syntax_error_tolerant_call_names: &["va_arg", "__builtin_va_arg"],
     value_free_expression_kinds: &["sizeof_expression", "alignof_expression"],
     class_kinds: &["class_specifier", "struct_specifier", "union_specifier"],
@@ -103,11 +180,21 @@ const HANDLER: GrammarHandler = GrammarHandler {
     ],
     method_context_kinds: &["class_specifier", "struct_specifier", "union_specifier"],
     if_kinds: &["if_statement", "conditional_expression", "switch_statement"],
+    branch_then_field_names: &["consequence", "body"],
+    branch_else_field_names: &["alternative"],
+    branch_condition_field_names: &["condition", "value"],
+    loop_body_field_names: &["body"],
+    loop_body_kinds: &["compound_statement", "expression_statement"],
+    branch_arm_kinds: &["compound_statement", "expression_statement"],
     for_kinds: &["for_statement"],
     foreach_kinds: &["for_range_loop"],
+    foreach_binding_extractor: Some(cpp_foreach_binding),
     while_kinds: &["while_statement"],
     do_kinds: &["do_statement"],
     assignment_kinds: &["assignment_expression", "init_declarator"],
+    compound_assignment_operators: &["+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "&=", "^=", "|="],
+    positional_aggregate_assignment_kinds: &["init_declarator"],
+    positional_aggregate_value_kinds: &["initializer_list"],
     return_kinds: &["return_statement", "co_return_statement"],
     throw_kinds: &["throw_statement"],
     lambda_kinds: &["lambda_expression"],
@@ -115,7 +202,10 @@ const HANDLER: GrammarHandler = GrammarHandler {
     catch_kinds: &["catch_clause"],
     break_kinds: &["break_statement"],
     continue_kinds: &["continue_statement"],
+    control_label_field_names: &[],
     yield_kinds: &["co_yield_statement"],
+    yield_value_field_names: &["argument", "value"],
+    try_body_field_names: &["body"],
     await_kinds: &["co_await_expression"],
     // `this` for instance methods; C++ has no `super` keyword, but
     // `Base::method()` is a qualified call that the resolver
@@ -125,6 +215,14 @@ const HANDLER: GrammarHandler = GrammarHandler {
     implicit_receiver_names: &["this"],
     ..EMPTY_HANDLER
 };
+
+fn cpp_expression_value_kind(node: Node<'_>, _src: &[u8]) -> Option<bonsai_lang_api::AssignValueKind> {
+    matches!(
+        node.kind(),
+        "string_literal" | "char_literal" | "number_literal" | "true" | "false" | "nullptr"
+    )
+    .then_some(bonsai_lang_api::AssignValueKind::Literal)
+}
 
 fn cpp_argument_passing_mode(argument: Node<'_>, value: Node<'_>) -> ArgumentPassingMode {
     if [argument, value].into_iter().any(|node| {
@@ -352,6 +450,7 @@ impl LanguageAdapter for CppAdapter {
                 if let Some(bindings) = cast_aliases.get(&decl.span) {
                     decl.type_aliases.extend(bindings.iter().cloned());
                 }
+                collapse_cpp_same_type_copy_initializers(&mut decl.flow_events, &decl.type_aliases);
                 // Repair catch-param bindings: the kit's generic
                 // extractor picks the first identifier descendant of
                 // the catch clause, which on C++ `catch (const T& e)`
@@ -399,10 +498,6 @@ impl LanguageAdapter for CppAdapter {
                 }
             }
         }
-        // Append `FlowEvent::Lifecycle` for recognised C++
-        // resource transitions. Built on the C base set since
-        // `free` / `fclose` / `close` carry over; `delete` is the
-        // C++-specific addition.
         for decl in &mut decl_index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             let has_variadic_param = decl
@@ -415,7 +510,6 @@ impl LanguageAdapter for CppAdapter {
                 &["va_start", "__builtin_va_start"],
                 &["va_arg", "__builtin_va_arg"],
             );
-            bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, CPP_LIFECYCLE_TRANSITIONS);
             apply_cpp_moved_argument_places(&mut decl.flow_events);
         }
         // Precompute `self.<field> → Type` bindings from each
@@ -423,9 +517,8 @@ impl LanguageAdapter for CppAdapter {
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
-        // Local constructor-result receiver typing (`new Foo()` / `Foo()` / `Foo::new()` -> typed receiver) so `recv.method(...)` resolves
-        // `receiver_type_in` / `[Type, method]` rules; the constructor heuristic only
-        // types PascalCase callees, so language exported-function calls are unaffected.
+        // Local constructor-result receiver typing follows constructor CST
+        // nodes and declaration resolution, never identifier capitalization.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut decl_index);
         bonsai_lang_api::apply_class_field_type_aliases(&mut decl_index);
         decl_index
@@ -433,6 +526,76 @@ impl LanguageAdapter for CppAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+/// C++ direct-list initialization with one value of the declared type is copy
+/// construction, not positional aggregate initialization:
+/// `Envelope valid{env}` carries the whole object. Tree-sitter deliberately
+/// uses the same `initializer_list` node as `Envelope env{kind, cmd}`, so the
+/// adapter resolves the distinction from its parsed declaration types before
+/// shared aggregate lowering assigns positional field names.
+fn collapse_cpp_same_type_copy_initializers(events: &mut Vec<FlowEvent>, aliases: &[TypeAliasBinding]) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collapse_cpp_same_type_copy_initializers(then_events, aliases);
+                collapse_cpp_same_type_copy_initializers(else_events, aliases);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collapse_cpp_same_type_copy_initializers(body, aliases);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collapse_cpp_same_type_copy_initializers(body, aliases);
+                collapse_cpp_same_type_copy_initializers(catch_events, aliases);
+                collapse_cpp_same_type_copy_initializers(finally_events, aliases);
+            }
+            _ => {}
+        }
+    }
+    events.retain(|event| {
+        let FlowEvent::AggregateAssign {
+            target,
+            type_name,
+            value_flow,
+            ..
+        } = event
+        else {
+            return true;
+        };
+        if !value_flow.aggregate_fields.is_empty()
+            || !value_flow.spreads.is_empty()
+            || value_flow.tuple_items.len() != 1
+        {
+            return true;
+        }
+        let Some(source) = value_flow.tuple_items[0].place.as_deref() else {
+            return true;
+        };
+        let declared_type = type_name.as_deref().or_else(|| {
+            aliases
+                .iter()
+                .find(|alias| alias.name == *target)
+                .map(|alias| alias.type_name.as_str())
+        });
+        let source_type = aliases
+            .iter()
+            .find(|alias| alias.name == source)
+            .map(|alias| alias.type_name.as_str());
+        let (Some(declared_type), Some(source_type)) = (declared_type, source_type) else {
+            return true;
+        };
+        bonsai_lang_api::kit::canonical_simple_type_name(declared_type)
+            != bonsai_lang_api::kit::canonical_simple_type_name(source_type)
+    });
 }
 
 fn collect_cpp_constructor_initializer_events(

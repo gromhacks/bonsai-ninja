@@ -44,6 +44,12 @@ For scripts and structured inspection, normally add:
 --format json --no-color --no-progress
 ```
 
+JSON-only compiler reports (`index`, `diagnostics`, `dump-hir`, and
+`dump-cfg`) already emit JSON and intentionally have no `--format` switch;
+use only `--no-color --no-progress` with those commands. `diagnostics` reports
+capabilities only for adapters present in the workspace, so its payload stays
+proportional to the repository being inspected.
+
 Use `--output-path <file>` for large artifacts instead of shell redirection
 when the command supports it.
 Use `--html-output <file>` only when a human-readable standalone report is
@@ -92,13 +98,35 @@ source snapshot, adapter/compiler frontend ABI, dependency metadata, transfer
 semantics, and rule-selected graph options; a mismatch is rejected and rebuilt
 without narrowing semantic work.
 
+Compiler objects retain exact callback/type syntax headers and direct-call
+receiver-field initializer linkage. Adapters prove syntax; complete-workspace
+linking resolves class/constructor identity. Neither capitalization nor callee
+spelling alone is type evidence. Rulepack typing keeps its import constraints,
+and exact workspace values/functions shadow external `kind: new` models; the
+matcher fails closed on mixed or ambiguous callable identities.
+
+Compiler objects also retain adapter-owned assignment, return, and
+call-argument value shapes. A literal/static fact may prove a clean output
+value; a carrier-free unknown expression, rendered text, and ALL_CAPS spelling
+never do.
+
+Rulepack-only receiver types are compiled through the canonical matcher into
+exact AST call spans before IDG construction. Those spans participate in the
+transfer fingerprint; the IDG consumes the proven sites and never interprets
+provider, class, or method spellings. Import and workspace-shadowing checks
+therefore remain exact in both warm and cold analysis.
+
 Persisted analysis artifacts live in a canonical-path-keyed OS cache, not in
 the repository. `cache stats <workspace>` prints the exact directory;
 `BONSAI_WORKSPACE_DIR` supplies an explicit override. The repository-local
 `<workspace>/.bonsai/rules/` path is only a rule overlay.
+Current compiler-object publication prunes unlocked older recognized schema
+generations automatically. Use `cache clear <workspace>` only when you
+intentionally want to discard every reusable sidecar; it never changes source.
 
 When this skill is used to modify bonsai-ninja itself, preserve the compiler
-boundary: adapters own Tree-sitter syntax lowering; rulepack YAML owns
+boundary: adapters own Tree-sitter syntax lowering, including literal/value
+node inventories; rulepack YAML owns
 library/package/framework identities and security-sensitive values; shared
 crates consume typed facts without language-id or API-name branches.
 
@@ -228,8 +256,17 @@ file-local compiler-object view and does not build a callgraph or IDG.
 For standalone structural endpoint queries, use qualified `Owner.member`
 spellings when methods share a short name. `inspect --from Source.run --to
 Target.run` resolves the compiler identities as sets and keeps only the exact
-connected corridor. `dump-resolve --in-file` accepts and reports
-workspace-relative paths.
+connected corridor. `trace <workspace> Owner.member` uses the same
+adapter-emitted qualified identity; use `path:name` or `path:line:name` when
+file/line disambiguation is needed. A declared `trace --from/--to` pair is
+projected to its complete graph corridor before symbolic interpretation; use
+that shape instead of a broad entry trace when the question already names a
+target. `dump-resolve --in-file` accepts and reports workspace-relative
+paths. Pass the exact adapter-lowered call spelling (for example
+`self.inner.spawn`) to join that syntax site to the canonical callgraph; add
+`--line` only when repeated spellings resolve differently. Compiler-qualified
+identities printed by `defs` can be passed directly to `dump-hir` and
+`dump-cfg`.
 
 ## Debug A Code-Intelligence Disagreement
 
@@ -286,6 +323,10 @@ Inventory the model when a finding or gap needs explanation:
 ./target/release/bonsai-ninja security <workspace> deps \
   --severity high --context 8k --no-color --no-progress
 ```
+
+Dependency evidence paths are complete and workspace-relative. Preserve the
+whole path when citing or filtering them; do not shorten nested monorepo paths
+to their final components.
 
 `security sanitizers` lists only matched rules that can make a
 credit-bearing sanitizer claim. Rulepack declarations that preserve taint or

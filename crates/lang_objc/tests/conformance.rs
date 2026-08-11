@@ -15,6 +15,143 @@ fn conformance_traced() {
 }
 
 #[test]
+fn objc_call_arguments_use_ast_value_kinds_not_identifier_spelling() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, AssignValueKind, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_objc::ObjCAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("values.m"),
+        "void emit(NSString*, NSString*, int);\n\
+         void run(NSString *USER_VALUE) { emit(@\"literal\", USER_VALUE, 42); }\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let index = adapter.extract_declarations(
+        file,
+        &AdapterContext {
+            vfs: &vfs,
+            diagnostics: &diagnostics,
+            tree_provider: None,
+            workspace_root: None,
+        },
+    );
+    let kind = |argument_index| {
+        index
+            .call_argument_values
+            .iter()
+            .find(|fact| fact.argument_index == argument_index)
+            .and_then(|fact| fact.value_kind)
+    };
+
+    assert_eq!(kind(0), Some(AssignValueKind::Literal));
+    assert_eq!(kind(1), None, "ALL_CAPS is still a dynamic parameter");
+    assert_eq!(kind(2), Some(AssignValueKind::Literal));
+    let run = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "run")
+        .expect("run declaration");
+    let emitted_args = run
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            bonsai_lang_api::FlowEvent::Call { name, args, .. } if name == "emit" => Some(args),
+            _ => None,
+        })
+        .expect("emit call");
+    assert_eq!(
+        emitted_args.len(),
+        3,
+        "C-style argument containers and Objective-C direct message arguments must not both lower"
+    );
+}
+
+#[test]
+fn property_reads_after_zero_argument_messages_keep_the_exact_place() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, LanguageAdapter, RefKind};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_objc::ObjCAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("process.m"),
+        "void inspect_process(void) { id a = [NSProcessInfo processInfo].arguments; id e = [NSProcessInfo processInfo].environment; }\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let index = adapter.extract_declarations(
+        file,
+        &AdapterContext {
+            vfs: &vfs,
+            diagnostics: &diagnostics,
+            tree_provider: None,
+            workspace_root: None,
+        },
+    );
+    let reads = index
+        .refs
+        .iter()
+        .filter(|reference| reference.kind == RefKind::Read)
+        .map(|reference| reference.name.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(
+        reads.contains(&"NSProcessInfo.processInfo.arguments"),
+        "refs={:?}",
+        index.refs
+    );
+    assert!(
+        reads.contains(&"NSProcessInfo.processInfo.environment"),
+        "refs={:?}",
+        index.refs
+    );
+}
+
+#[test]
+fn block_pointer_type_parameters_do_not_replace_method_parameters() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_objc::ObjCAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("links.m"),
+        "@implementation AppDelegate\n- (BOOL)application:(UIApplication *)app continueUserActivity:(NSUserActivity *)userActivity restorationHandler:(void (^)(NSArray *))handler { return YES; }\n@end\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let index = adapter.extract_declarations(
+        file,
+        &AdapterContext {
+            vfs: &vfs,
+            diagnostics: &diagnostics,
+            tree_provider: None,
+            workspace_root: None,
+        },
+    );
+    let method = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "application")
+        .expect("application method");
+
+    assert_eq!(method.params, ["app", "userActivity", "handler"]);
+    assert_eq!(
+        method.param_annotations,
+        [
+            vec!["application".to_string()],
+            vec!["continueUserActivity".to_string()],
+            vec!["restorationHandler".to_string()],
+        ]
+    );
+}
+
+#[test]
 fn objc_adapter_emits_function_pointer_callable_alias() {
     use bonsai_diagnostics::DiagnosticSink;
     use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter};
@@ -268,6 +405,45 @@ fn objc_inheritance_and_local_receiver_type_are_ast_facts() {
 }
 
 #[test]
+fn lowercase_declared_class_allocation_is_not_filtered_by_convention() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_objc::ObjCAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("Entry.m"),
+        "@interface lower : NSObject\n- (instancetype)init;\n- (void)run:(NSString *)value;\n@end\n\
+         @implementation lower\n- (instancetype)init { return self; }\n- (void)run:(NSString *)value {}\n@end\n\
+         void entry(NSString *value) { lower *item = [[lower alloc] init]; [item run:value]; }\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        tree_provider: None,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+    let entry = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "entry")
+        .expect("entry declaration");
+    assert!(
+        entry.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call { receiver_types, .. }
+                if receiver_types.iter().any(|type_name| type_name == "lower")
+        )),
+        "events: {:#?}",
+        entry.flow_events
+    );
+}
+
+#[test]
 fn objc_message_compound_argument_uses_ast_place_and_sources() {
     use bonsai_diagnostics::DiagnosticSink;
     use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter};
@@ -302,5 +478,68 @@ fn objc_message_compound_argument_uses_ast_place_and_sources() {
     assert!(
         arg.source_names.iter().any(|source| source == "env.command"),
         "message argument must expose its AST field carrier: {arg:?}"
+    );
+}
+
+#[test]
+fn fast_enumeration_uses_the_declarator_and_iterable_ast_roles() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter, LoopKind};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_objc::ObjCAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("fast_enumeration.m"),
+        "void entry(NSArray *rows) { for (NSString *row in rows) { sink(row); } }\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let index = adapter.extract_declarations(
+        file,
+        &AdapterContext {
+            vfs: &vfs,
+            diagnostics: &diagnostics,
+            tree_provider: None,
+            workspace_root: None,
+        },
+    );
+    let entry = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "entry")
+        .expect("entry declaration");
+
+    assert!(
+        entry.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign {
+                target,
+                source_name: Some(source),
+                source_names,
+                ..
+            } if target == "row" && source == "rows" && source_names == &["rows"]
+        )),
+        "fast enumeration must lower row <- rows without treating NSString as a value: {:#?}",
+        entry.flow_events
+    );
+    assert!(
+        !entry.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign { target, .. } if target == "NSString"
+        )),
+        "the declared element type is not an iteration binding: {:#?}",
+        entry.flow_events
+    );
+    assert!(
+        entry.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Loop {
+                loop_kind: LoopKind::ForEach,
+                ..
+            }
+        )),
+        "fast enumeration must retain foreach control-flow semantics: {:#?}",
+        entry.flow_events
     );
 }

@@ -79,6 +79,7 @@ fn decl_with(
         bases: Vec::new(),
         receiver_param_index: None,
         receiver_field_writes: Vec::new(),
+        receiver_field_initializers: Vec::new(),
         implicit_receiver_names: Vec::new(),
         receiver_state_sources: Vec::new(),
         return_type: None,
@@ -258,6 +259,33 @@ fn build_graph(
     )
 }
 
+#[test]
+fn qualified_function_identity_does_not_inject_a_receiver_argument() {
+    let file = FileId::new(1);
+    let mut target = with_params(decl(file, 0, "method", Vec::new()), &["self", "value"]);
+    target.qualified_name = Some("box.method".to_string());
+    let caller = with_params(
+        decl(
+            file,
+            1,
+            "entry",
+            vec![call_with_args(file, "box.method", &["box", "input"])],
+        ),
+        &["input"],
+    );
+    let mut global = GlobalIndex::new();
+    insert_file(&mut global, file, vec![target, caller]);
+
+    let graph = build_graph(&global, |_| Some("syntactic"));
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let method = FuncId::new(global.find_by_name("box.method")[0].raw());
+    assert_eq!(
+        graph.callees_of(entry).map(|edge| edge.to).collect::<Vec<_>>(),
+        vec![method],
+        "a qualified function value maps its explicit arguments directly"
+    );
+}
+
 fn build_graph_with_capabilities(
     global: &GlobalIndex,
     language_for_file: impl Fn(FileId) -> Option<&'static str>,
@@ -423,6 +451,7 @@ fn streamed_factory_return_types_preserve_receiver_dispatch() {
                 span: returned_expression,
                 value_text: Some("new()".to_string()),
                 value_name: None,
+                value_kind: Some(AssignValueKind::CallResult),
                 value_flow: bonsai_lang_api::ExpressionFlow {
                     call_sites: vec![returned_expression],
                     ..Default::default()
@@ -4044,6 +4073,7 @@ fn returned_lambda_factory_assignment_resolves_local_callable_call() {
             span: Span::new(file, 120, 180),
             value_name: None,
             value_text: Some("func(acc, tok string) string { return tok }".to_string()),
+            value_kind: Some(AssignValueKind::CallableReference),
             value_flow: Default::default(),
         }],
     );
@@ -4818,9 +4848,9 @@ fn super_constructor_resolves_direct_parent_not_transitive_ancestors() {
             Some(3),
             vec![FlowEvent::Call {
                 span: Span::new(file, 260, 280),
-                name: "Repository".to_string(),
+                name: "super".to_string(),
                 receiver: Some("super".to_string()),
-                receiver_types: vec!["Repository".to_string(), "Base".to_string()],
+                receiver_types: Vec::new(),
                 call_kind: CallKind::Constructor,
                 args: vec![CallArg {
                     passing_mode: Default::default(),
@@ -4951,6 +4981,130 @@ fn ambiguous_bare_call_constructs_only_with_adapter_capability_and_resolved_clas
     );
 }
 
+fn streamed_receiver_field_initializer_targets_method(competing_function: bool) -> Vec<FuncId> {
+    let dependency_file = FileId::new(1);
+    let owner_file = FileId::new(2);
+    let module = ModulePath::from_segments(["sample"]);
+
+    let mut dependency_class = decl_with(dependency_file, 1, "lower", DeclKind::Class, None, Vec::new());
+    dependency_class.module_path.clone_from(&module);
+    let mut dependency_constructor = decl_with(
+        dependency_file,
+        2,
+        "lower",
+        DeclKind::Constructor,
+        Some(1),
+        Vec::new(),
+    );
+    dependency_constructor.module_path.clone_from(&module);
+    let mut work = decl_with(dependency_file, 3, "work", DeclKind::Method, Some(1), Vec::new());
+    work.module_path.clone_from(&module);
+    let mut dependency_defs = vec![dependency_class, dependency_constructor, work];
+    if competing_function {
+        let mut function = decl(dependency_file, 4, "lower", Vec::new());
+        function.module_path.clone_from(&module);
+        dependency_defs.push(function);
+    }
+
+    let mut owner_class = decl_with(owner_file, 1, "Owner", DeclKind::Class, None, Vec::new());
+    owner_class.module_path.clone_from(&module);
+    let mut owner_constructor = decl_with(owner_file, 2, "Owner", DeclKind::Constructor, Some(1), Vec::new());
+    owner_constructor.module_path.clone_from(&module);
+    owner_constructor.implicit_receiver_names = vec!["this".to_string()];
+    owner_constructor.receiver_field_initializers = vec![bonsai_lang_api::ReceiverFieldInitializer {
+        span: Span::new(owner_file, 20, 35),
+        target: "this.dependency".to_string(),
+        call_name: "lower".to_string(),
+        call_kind: CallKind::Function,
+        call_receiver: None,
+        call_receiver_types: Vec::new(),
+    }];
+    let mut run = decl_with(
+        owner_file,
+        3,
+        "run",
+        DeclKind::Method,
+        Some(1),
+        vec![method_call(owner_file, "dependency.work", "dependency", &[])],
+    );
+    run.module_path.clone_from(&module);
+    run.implicit_receiver_names = vec!["this".to_string()];
+    let owner_index = DeclIndex {
+        file: owner_file,
+        defs: vec![owner_class, owner_constructor, run],
+        ..DeclIndex::default()
+    };
+    let dependency_index = DeclIndex {
+        file: dependency_file,
+        defs: dependency_defs,
+        ..DeclIndex::default()
+    };
+
+    let mut headers = GlobalIndex::new();
+    headers.insert_header_preprocessed(dependency_index.clone());
+    headers.insert_header_preprocessed(owner_index.clone());
+    headers.finalize_semantic_facts();
+    let run = FuncId::new(headers.find_by_name("run")[0].raw());
+    let graph = ResolvedCallGraph::build_with_file_semantics_streaming(
+        &headers,
+        CallGraphFileSemantics::new(
+            |_| AHashMap::new(),
+            |_| AHashMap::new(),
+            |file| {
+                Some(
+                    if file == owner_file {
+                        "Owner.swift"
+                    } else {
+                        "Dependency.swift"
+                    }
+                    .to_string(),
+                )
+            },
+            |_| Some("fixture"),
+            |_| LanguageCapabilities {
+                bare_call_constructor_syntax: true,
+                same_directory_unqualified_calls: true,
+                implicit_receiver_tokens: &["this"],
+                ..LanguageCapabilities::unsupported()
+            },
+        ),
+        |file| {
+            let index = if file == owner_file {
+                owner_index.clone()
+            } else {
+                dependency_index.clone()
+            };
+            let mut remapped = headers.remap_file_to_existing_symbols(index);
+            if file == owner_file {
+                // Model sparse IDG demand: only the requested method body is
+                // resident. Its constructor fact survives solely in headers.
+                remapped.defs.retain(|decl| decl.name == "run");
+            }
+            Some(remapped)
+        },
+    );
+    graph.callees_of(run).map(|edge| edge.to).collect()
+}
+
+#[test]
+fn streamed_header_field_initializer_resolves_lowercase_cross_file_constructor() {
+    let targets = streamed_receiver_field_initializer_targets_method(false);
+    assert_eq!(
+        targets.len(),
+        1,
+        "exact constructor header must type field dispatch: {targets:?}"
+    );
+}
+
+#[test]
+fn streamed_header_field_initializer_rejects_function_constructor_ambiguity() {
+    let targets = streamed_receiver_field_initializer_targets_method(true);
+    assert!(
+        targets.is_empty(),
+        "a same-named function makes constructor result typing ambiguous: {targets:?}"
+    );
+}
+
 #[test]
 fn returned_constructor_type_comes_from_expression_call_site_not_text() {
     let file = FileId::new(1);
@@ -4982,6 +5136,7 @@ fn returned_constructor_type_comes_from_expression_call_site_not_text() {
                 span: Span::new(file, 35, 65),
                 value_name: None,
                 value_text: Some("misleading_render_text".to_string()),
+                value_kind: Some(AssignValueKind::CallResult),
                 value_flow: bonsai_lang_api::ExpressionFlow {
                     call_sites: vec![Span::new(file, call_span.start, 65)],
                     ..Default::default()

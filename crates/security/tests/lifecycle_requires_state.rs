@@ -1,8 +1,8 @@
-//! End-to-end P6 tests: adapter Lifecycle events →
-//! `collect_lifecycle_transitions` → `requires_state` evaluation.
+//! End-to-end lifecycle tests: adapter-lowered call facts + typing-rule
+//! transition semantics → `requires_state` evaluation.
 
 use bonsai_lang_api::LanguageRegistry;
-use bonsai_security::{load_rulepack, match_rule_against_facts};
+use bonsai_security::{load_rulepack, match_rules_against_facts, Rule, RuleKind, RuleMatch};
 use bonsai_workspace::Workspace;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,6 +22,53 @@ fn ws_with<A: bonsai_lang_api::LanguageAdapter>(adapter: A, name: &str, source: 
 fn write(path: &Path, content: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, content).unwrap();
+}
+
+#[derive(Clone, Copy)]
+enum TransitionBinding {
+    Receiver,
+    Argument(u32),
+}
+
+/// Match a sink together with the non-finding typing rule that assigns
+/// lifecycle meaning to the preceding call. Tests keep provider names here,
+/// never in an adapter or shared analyzer.
+fn match_with_lifecycle(
+    ws: &Workspace,
+    sink: &Rule,
+    call: &str,
+    state: &str,
+    binding: TransitionBinding,
+) -> Vec<RuleMatch> {
+    let binding = match binding {
+        TransitionBinding::Receiver => "binding: { kind: receiver }".to_string(),
+        TransitionBinding::Argument(index) => {
+            format!("binding: {{ kind: argument, index: {index} }}")
+        }
+    };
+    let yaml = format!(
+        r#"- id: {}.test.lifecycle_transition
+  enabled: true
+  language: {}
+  match:
+    kind: call
+    callee:
+      name: {}
+  lifecycle_transition:
+    state: {}
+    {}
+  description: "test lifecycle transfer"
+"#,
+        sink.language, sink.language, call, state, binding
+    );
+    let mut transition = serde_yaml::from_str::<Vec<Rule>>(&yaml)
+        .expect("test lifecycle rule parses")
+        .remove(0);
+    transition.kind = RuleKind::Typing;
+    match_rules_against_facts(ws, &[sink, &transition])
+        .into_iter()
+        .filter(|matched| matched.rule_id == sink.id)
+        .collect()
 }
 
 fn c_ws(source: &str) -> Workspace {
@@ -142,7 +189,7 @@ void example(int *p) {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "free", "freed", TransitionBinding::Argument(0));
     assert!(
         !matches.is_empty(),
         "C use-after-free with requires_state must fire when free precedes use; got {:?}",
@@ -157,7 +204,7 @@ void example(int *p) {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&good, rule);
+    let matches = match_with_lifecycle(&good, rule, "free", "freed", TransitionBinding::Argument(0));
     assert!(
         matches.is_empty(),
         "C use-before-free must NOT fire — no preceding lifecycle transition; got {:?}",
@@ -205,7 +252,7 @@ void example(int *p) {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "free", "freed", TransitionBinding::Argument(0));
     assert!(
         !matches.is_empty(),
         "C double-free must fire on second free after first marks the binding freed; got {:?}",
@@ -253,7 +300,13 @@ void example(pthread_mutex_t *m) {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(
+        &bad,
+        rule,
+        "pthread_mutex_unlock",
+        "unlocked",
+        TransitionBinding::Argument(0),
+    );
     assert!(
         !matches.is_empty(),
         "C use-after-unlock must fire after pthread_mutex_unlock(m); got {:?}",
@@ -307,7 +360,7 @@ void example(std::unique_ptr<int> ptr) {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "release", "freed", TransitionBinding::Receiver);
     assert!(
         !matches.is_empty(),
         "C++ use-after-release must fire on `read(ptr)` after `ptr.release()`; got {:?}",
@@ -363,7 +416,7 @@ fn example(handle: usize) {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "drop", "freed", TransitionBinding::Argument(0));
     assert!(
         !matches.is_empty(),
         "Rust use-after-drop must fire on `log(handle)` after `drop(handle)`; got {:?}",
@@ -417,7 +470,7 @@ class Foo {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "close", "closed", TransitionBinding::Receiver);
     assert!(
         !matches.is_empty(),
         "Java use-after-close must fire on `stream.read()` after `stream.close()`; got {:?}",
@@ -469,7 +522,7 @@ func example(f *File) {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "Close", "closed", TransitionBinding::Receiver);
     assert!(
         !matches.is_empty(),
         "Go use-after-close must fire on `f.Read()` after `f.Close()`; got {:?}",
@@ -517,7 +570,7 @@ def example(f):
     f.read()
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "close", "closed", TransitionBinding::Receiver);
     assert!(
         !matches.is_empty(),
         "Python use-after-close must fire on `f.read()` after `f.close()`; got {:?}",
@@ -574,7 +627,7 @@ class Foo {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "Dispose", "freed", TransitionBinding::Receiver);
     assert!(
         !matches.is_empty(),
         "C# use-after-dispose must fire on `stream.Read()` after `stream.Dispose()`; got {:?}",
@@ -629,7 +682,7 @@ class Foo {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "close", "closed", TransitionBinding::Receiver);
     assert!(
         !matches.is_empty(),
         "Kotlin use-after-close must fire on `stream.read()` after `stream.close()`; got {:?}",
@@ -684,7 +737,7 @@ class Foo {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "close", "closed", TransitionBinding::Receiver);
     assert!(
         !matches.is_empty(),
         "Scala use-after-close must fire; got {:?}",
@@ -735,7 +788,7 @@ func example(task: Task) {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "cancel", "cancelled", TransitionBinding::Receiver);
     assert!(
         !matches.is_empty(),
         "Swift use-after-cancel must fire; got {:?}",
@@ -786,7 +839,7 @@ void example(NSObject *obj) {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "release", "freed", TransitionBinding::Receiver);
     assert!(
         !matches.is_empty(),
         "ObjC use-after-release must fire; got {:?}",
@@ -837,7 +890,7 @@ void example(IOSink sink) {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "close", "closed", TransitionBinding::Receiver);
     assert!(
         !matches.is_empty(),
         "Dart use-after-close must fire; got {:?}",
@@ -890,7 +943,7 @@ function example(stream) {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "destroy", "freed", TransitionBinding::Receiver);
     assert!(
         !matches.is_empty(),
         "JavaScript use-after-destroy must fire; got {:?}",
@@ -943,7 +996,7 @@ function example(ctrl: AbortController) {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "abort", "cancelled", TransitionBinding::Receiver);
     assert!(
         !matches.is_empty(),
         "TypeScript use-after-abort must fire; got {:?}",
@@ -994,7 +1047,7 @@ def example(f)
 end
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "close", "closed", TransitionBinding::Receiver);
     assert!(
         !matches.is_empty(),
         "Ruby use-after-close must fire; got {:?}",
@@ -1046,7 +1099,7 @@ function example($f) {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "fclose", "closed", TransitionBinding::Argument(0));
     assert!(
         !matches.is_empty(),
         "PHP use-after-fclose must fire; got {:?}",
@@ -1099,7 +1152,7 @@ sub example {
 }
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "close", "closed", TransitionBinding::Argument(0));
     assert!(
         !matches.is_empty(),
         "Perl use-after-close must fire; got {:?}",
@@ -1150,7 +1203,7 @@ function example(f)
 end
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "close", "closed", TransitionBinding::Receiver);
     assert!(
         !matches.is_empty(),
         "Lua use-after-close must fire; got {:?}",
@@ -1205,7 +1258,7 @@ defmodule Foo do
 end
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "stop", "cancelled", TransitionBinding::Argument(0));
     assert!(
         !matches.is_empty(),
         "Elixir use-after-stop must fire; got {:?}",
@@ -1254,7 +1307,7 @@ example(Server) ->
     send(Server, ping).
 "#,
     );
-    let matches = match_rule_against_facts(&bad, rule);
+    let matches = match_with_lifecycle(&bad, rule, "stop", "cancelled", TransitionBinding::Argument(0));
     assert!(
         !matches.is_empty(),
         "Erlang use-after-stop must fire; got {:?}",

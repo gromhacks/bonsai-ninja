@@ -114,7 +114,7 @@
   - name: php.sanitizer.mysqli_real_escape_string example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $mysqli->real_escape_string($input);\n}\n"
     expect_match_text:
-    - $mysqli->real_escape_string
+    - $mysqli.real_escape_string
   description: mysqli::real_escape_string - last-resort SQL escape.
 - id: php.sanitizer.pdo_quote
   enabled: false
@@ -505,12 +505,12 @@
   match:
     kind: call
     callee:
-      regex: ^\$?mysqli->prepare$
+      regex: ^\$?mysqli\.prepare$
   match_examples:
   - name: php.sanitizer.mysqli_prepare example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $mysqli->prepare($input);\n}\n"
     expect_match_text:
-    - $mysqli->prepare
+    - $mysqli.prepare
   description: mysqli::prepare - parameterised statement.
 - id: php.sanitizer.twig_escape_filter
   enabled: true
@@ -571,7 +571,7 @@
   match:
     kind: call
     callee:
-      regex: ^\$?wpdb->prepare$
+      regex: ^\$?wpdb\.prepare$
   match_examples:
   - name: php.sanitizer.wordpress_wpdb_prepare example
     code: |
@@ -582,7 +582,7 @@
         $wpdb->prepare($input);
       }
     expect_match_text:
-    - $wpdb->prepare
+    - $wpdb.prepare
   description: WordPress wpdb::prepare - parameterised SQL.
 - id: php.sanitizer.wordpress_esc_sql
   enabled: true
@@ -910,7 +910,7 @@
   - name: php.sanitizer.pdo_statement_execute_bind_array example
     code: "<?php\nfunction example(PDOStatement $stmt, $id) {\n  $stmt->execute([$id]);\n}\n"
     expect_match_text:
-    - $stmt->execute
+    - $stmt.execute
   description: PDOStatement::execute([$value, ...]) - binds parameters out-of-band instead
     of interpolating them into SQL.
 - id: php.sanitizer.pdo_statement_bind_value
@@ -925,7 +925,7 @@
   - name: php.sanitizer.pdo_statement_bind_value example
     code: "<?php\nfunction example(PDOStatement $stmt, $id) {\n  $stmt->bindValue(':id', $id);\n}\n"
     expect_match_text:
-    - $stmt->bindValue
+    - $stmt.bindValue
   description: PDOStatement::bindValue - explicit parameter binding for prepared statements.
 - id: php.sanitizer.mysqli_stmt_bind_param
   enabled: true
@@ -934,14 +934,14 @@
   match:
     kind: call
     callee:
-      regex: ^\$?stmt->bind_param$
+      regex: ^\$?stmt\.bind_param$
   constraints:
   - min_args: 2
   match_examples:
   - name: php.sanitizer.mysqli_stmt_bind_param example
     code: "<?php\nfunction example($stmt, $id) {\n  $stmt->bind_param('i', $id);\n}\n"
     expect_match_text:
-    - $stmt->bind_param
+    - $stmt.bind_param
   - name: php.sanitizer.mysqli_stmt_bind_param example negative constraint boundary
     code: "<?php\nfunction example($stmt, $id) {\n  $stmt->bind_param();\n}\n"
     expect_no_match: true
@@ -956,7 +956,7 @@
   match:
     kind: call
     callee:
-      regex: ^\$?[A-Za-z_][A-Za-z0-9_]*->setParameter$
+      regex: ^\$?[A-Za-z_][A-Za-z0-9_]*\.setParameter$
   constraints:
   - min_args: 2
   match_examples:
@@ -968,7 +968,7 @@
         $qb->setParameter('id', $id);
       }
     expect_match_text:
-    - $qb->setParameter
+    - $qb.setParameter
   - name: php.sanitizer.doctrine_set_parameter example negative constraint boundary
     code: |
       <?php
@@ -1280,7 +1280,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $csrf_token_manager->isTokenValid($input);\n\
       }\n"
     expect_match_text:
-    - $csrf_token_manager->isTokenValid
+    - $csrf_token_manager.isTokenValid
   description: Symfony CsrfTokenManager::isTokenValid - explicit form CSRF check.
 - id: php.cookie.setcookie_with_httponly_secure
   enabled: true

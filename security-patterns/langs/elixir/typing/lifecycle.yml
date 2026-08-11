@@ -1,0 +1,41 @@
+- id: elixir.typing.lifecycle_cancelled_argument
+  enabled: true
+  language: elixir
+  match:
+    kind: call
+    callee:
+      regex: '^(?::?gen_server\.stop|Process\.exit|[^.]+\.cancel|cancel)$'
+  lifecycle_transition:
+    state: cancelled
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: GenServer stop changes the pid state
+    code: 'def f(pid), do: :gen_server.stop(pid)'
+    expect_match_text: [':gen_server.stop']
+  description: "Elixir/Erlang cancellation calls move argument zero to cancelled. Typing-only; never a finding."
+
+- id: elixir.typing.lifecycle_freed_argument
+  enabled: true
+  language: elixir
+  match: { kind: call, callee: { attribute: [':ets', delete] } }
+  lifecycle_transition:
+    state: freed
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: ETS delete changes the table state
+    code: 'def f(table), do: :ets.delete(table)'
+    expect_match_text: [':ets.delete']
+  description: "ETS delete moves argument zero to freed. Typing-only; never a finding."
+
+- id: elixir.typing.lifecycle_closed_argument
+  enabled: true
+  language: elixir
+  match: { kind: call, callee: { name: close } }
+  lifecycle_transition:
+    state: closed
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: module close changes the resource state
+    code: 'def f(resource), do: File.close(resource)'
+    expect_match_text: [File.close]
+  description: "Elixir close calls move argument zero to closed. Typing-only; never a finding."

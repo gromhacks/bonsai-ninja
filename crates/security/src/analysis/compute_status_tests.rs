@@ -102,6 +102,8 @@ fn tainted_argument_evidence_preserves_structured_ast_operands() {
     let tainted = bonsai_taint::TaintedArgAtCall {
         index: 0,
         value_text: "prefix + command".to_string(),
+        place: None,
+        source_names: vec!["prefix".to_string(), "command".to_string()],
     };
 
     let info = tainted_arg_info_from_events(&events, span, &tainted);
@@ -111,6 +113,7 @@ fn tainted_argument_evidence_preserves_structured_ast_operands() {
 
 #[test]
 fn clean_output_call_overwrites_only_with_clean_values() {
+    let call_span = bonsai_common::Span::new(bonsai_common::FileId::new(0), 0, 40);
     let overwrites = [CleanOutputOverwrite {
         callee: "snprintf".to_string(),
         output_arg_index: 0,
@@ -150,14 +153,30 @@ fn clean_output_call_overwrites_only_with_clean_values() {
             source_names: Vec::new(),
         },
     ];
+    let argument_values = [2_usize, 3_usize].map(|argument_index| bonsai_lang_api::CallArgumentValueFact {
+        call_span,
+        argument_index,
+        argument_span: args[argument_index].span,
+        direct_call_span: None,
+        value_kind: Some(bonsai_lang_api::AssignValueKind::Literal),
+        inline_callback_params: Vec::new(),
+        value_flow: Default::default(),
+        static_value: None,
+        exact_static_aggregate_fields: Vec::new(),
+        exact_static_sequence_values: None,
+    });
     assert!(clean_output_call_overwrites_target(
         &overwrites,
+        call_span,
+        &argument_values,
         "snprintf",
         &args,
         "buf"
     ));
     assert!(!clean_output_call_overwrites_target(
         &[],
+        call_span,
+        &argument_values,
         "snprintf",
         &args,
         "buf"
@@ -170,6 +189,8 @@ fn clean_output_call_overwrites_only_with_clean_values() {
     }];
     assert!(clean_output_call_overwrites_target(
         &project_overwrite,
+        call_span,
+        &argument_values,
         "project.write_clean",
         &args,
         "buf"
@@ -177,12 +198,31 @@ fn clean_output_call_overwrites_only_with_clean_values() {
 
     let mut tainted_value = args;
     tainted_value[3].value_text = "user_value".to_string();
+    tainted_value[3].place = Some("user_value".to_string());
+    tainted_value[3].source_names = vec!["user_value".to_string()];
     assert!(!clean_output_call_overwrites_target(
         &overwrites,
+        call_span,
+        &argument_values,
         "snprintf",
         &tainted_value,
         "buf"
     ));
+
+    tainted_value[3].value_text = "USER_VALUE".to_string();
+    tainted_value[3].place = Some("USER_VALUE".to_string());
+    tainted_value[3].source_names = vec!["USER_VALUE".to_string()];
+    assert!(
+        !clean_output_call_overwrites_target(
+            &overwrites,
+            call_span,
+            &argument_values,
+            "snprintf",
+            &tainted_value,
+            "buf"
+        ),
+        "identifier capitalization is not compiler evidence that a value is constant"
+    );
 }
 
 #[test]
@@ -777,6 +817,7 @@ fn taint_lineage_reconstructs_parent_edge_chain() {
         call_span: Span::new(bonsai_common::FileId::new(1), 30, 31),
         tainted_args: Vec::new(),
         tainted_receiver: None,
+        tainted_receiver_source_names: Vec::new(),
         kind: TaintedCallKind::Call,
     };
 
@@ -808,6 +849,7 @@ fn taint_lineage_keeps_helper_across_nested_return_stitch() {
         call_span: Span::new(bonsai_common::FileId::new(1), 40, 41),
         tainted_args: Vec::new(),
         tainted_receiver: None,
+        tainted_receiver_source_names: Vec::new(),
         kind: TaintedCallKind::Call,
     };
 
@@ -832,6 +874,7 @@ fn taint_lineage_requires_recorded_parent_trace() {
         call_span: Span::new(bonsai_common::FileId::new(1), 30, 31),
         tainted_args: Vec::new(),
         tainted_receiver: None,
+        tainted_receiver_source_names: Vec::new(),
         kind: TaintedCallKind::Call,
     };
 
@@ -884,6 +927,7 @@ fn tainted_call_with_span(name: &str, start: u32, end: u32) -> TaintedCall {
         call_span: Span::new(bonsai_common::FileId::new(1), u64::from(start), u64::from(end)),
         tainted_args: Vec::new(),
         tainted_receiver: None,
+        tainted_receiver_source_names: Vec::new(),
         kind: TaintedCallKind::Call,
     }
 }
@@ -896,6 +940,7 @@ fn tainted_call_with_name(name: &str) -> TaintedCall {
         call_span: Span::new(bonsai_common::FileId::new(1), 100, 110),
         tainted_args: Vec::new(),
         tainted_receiver: None,
+        tainted_receiver_source_names: Vec::new(),
         kind: TaintedCallKind::Call,
     }
 }

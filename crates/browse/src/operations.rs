@@ -60,15 +60,20 @@ pub fn operations(ws: &Workspace, f: &OperationsFilters<'_>) -> Result<Vec<Opera
     let mut out: Vec<OperationOut> = files
         .par_iter()
         .fold(Vec::new, |mut acc, &file| {
-            let file_path = ws
+            let absolute_file_path = ws
                 .vfs()
                 .path(file)
                 .map_or_else(|_| "<unknown>".to_string(), |p| p.display().to_string());
             if f.file
-                .is_some_and(|needle| !file_path_matches_filter(ws, &file_path, needle))
+                .is_some_and(|needle| !file_path_matches_filter(ws, &absolute_file_path, needle))
             {
                 return acc;
             }
+            // Browse rows use workspace-relative compiler paths. Besides
+            // keeping JSON portable, this is the identity consumed by the
+            // flow annotator's canonical FileId lookup. Feeding it the VFS's
+            // absolute path made every operations-row flow label empty.
+            let file_path = crate::common::workspace_relative_path(ws, &absolute_file_path);
             let Some(index) = ws.db().decl_index_uncached(file) else {
                 return acc;
             };

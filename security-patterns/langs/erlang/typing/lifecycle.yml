@@ -1,0 +1,38 @@
+- id: erlang.typing.lifecycle_cancelled_argument
+  enabled: true
+  language: erlang
+  match: { kind: call, callee: { attribute: [gen_server, stop] } }
+  lifecycle_transition:
+    state: cancelled
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: gen_server stop changes the pid state
+    code: 'f(Pid) -> gen_server:stop(Pid).'
+    expect_match_text: ['gen_server:stop']
+  description: "gen_server:stop moves argument zero to cancelled. Typing-only; never a finding."
+
+- id: erlang.typing.lifecycle_freed_argument
+  enabled: true
+  language: erlang
+  match: { kind: call, callee: { attribute: [ets, delete] } }
+  lifecycle_transition:
+    state: freed
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: ets delete changes the table state
+    code: 'f(Table) -> ets:delete(Table).'
+    expect_match_text: ['ets:delete']
+  description: "ets:delete moves argument zero to freed. Typing-only; never a finding."
+
+- id: erlang.typing.lifecycle_closed_argument
+  enabled: true
+  language: erlang
+  match: { kind: call, callee: { name: close } }
+  lifecycle_transition:
+    state: closed
+    binding: { kind: argument, index: 0 }
+  match_examples:
+  - name: close changes the resource state
+    code: 'f(Resource) -> close(Resource).'
+    expect_match_text: [close]
+  description: "Erlang close moves argument zero to closed. Typing-only; never a finding."

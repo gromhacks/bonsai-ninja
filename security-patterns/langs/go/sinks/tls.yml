@@ -1,7 +1,5 @@
-# Go TLS misconfiguration. Writes to fields of tls.Config; engine's
-# constraint support for write-targets is limited, so these match the
-# assignment shape and rely on reviewers to see the RHS. Descriptions
-# call out the actual risky value.
+# Go TLS misconfiguration. Assignment targets and their exact RHS expression
+# are adapter-lowered compiler facts; rules own the security-sensitive values.
 - id: go.tls.insecure_skip_verify
   enabled: true
   language: go
@@ -14,15 +12,29 @@
     kind: write
     target:
       name: InsecureSkipVerify
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^true$"
   match_examples:
-  - name: generated direct match
+  - name: certificate verification disabled
     code: |
-      import "crypto/tls"
       package main
+      import "crypto/tls"
 
       func example() {
         cfg.InsecureSkipVerify = true
       }
+    expect_match_text: [cfg.InsecureSkipVerify]
+  - name: certificate verification retained negative
+    code: |
+      package main
+      import "crypto/tls"
+
+      func example() {
+        cfg.InsecureSkipVerify = false
+      }
+    expect_no_match: true
   description: "tls.Config.InsecureSkipVerify assignment - setting true disables certificate verification (MITM)."
 
 - id: go.tls.minversion_old
@@ -37,15 +49,29 @@
     kind: write
     target:
       name: MinVersion
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^(?:tls\\.)?(?:VersionSSL30|VersionTLS10|VersionTLS11)$"
   match_examples:
-  - name: generated direct match
+  - name: deprecated minimum TLS version
     code: |
-      import "crypto/tls"
       package main
+      import "crypto/tls"
 
       func example() {
-        cfg.MinVersion = true
+        cfg.MinVersion = tls.VersionTLS11
       }
+    expect_match_text: [cfg.MinVersion]
+  - name: modern minimum TLS version negative
+    code: |
+      package main
+      import "crypto/tls"
+
+      func example() {
+        cfg.MinVersion = tls.VersionTLS12
+      }
+    expect_no_match: true
   description: "tls.Config.MinVersion - values VersionTLS10 / VersionTLS11 allow deprecated-protocol downgrade."
 
 - id: go.tls.weak_ciphersuites

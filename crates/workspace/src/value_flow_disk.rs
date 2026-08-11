@@ -140,6 +140,8 @@ struct OnDiskNode {
     span_end: u64,
     value_text_id: u32,
     kind: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    argument_index: Option<u32>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +185,9 @@ where
             span_end: n.span.end,
             value_text_id: intern(&n.value_text),
             kind: encode_node_kind(n.kind),
+            argument_index: n
+                .argument_index
+                .map(|index| u32::try_from(index).expect("> 2^32 arguments at one call site")),
         })
         .collect();
 
@@ -307,6 +312,7 @@ impl OnDiskEntry {
                     kind: node.kind,
                     index: i,
                 })?,
+                argument_index: node.argument_index.map(|index| index as usize),
             });
         }
 

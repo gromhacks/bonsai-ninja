@@ -170,8 +170,17 @@ fn dotted_table_call_keeps_explicit_receiver_argument() {
 
     assert!(entry.flow_events.iter().any(|event| matches!(
         event,
-        FlowEvent::Call { name, call_kind: CallKind::Function, args, .. }
-            if name == "Box.method" && args.len() == 2
+        FlowEvent::Call {
+            name,
+            receiver,
+            receiver_types,
+            call_kind: CallKind::Function,
+            args,
+            ..
+        } if name == "Box.method"
+            && receiver.is_none()
+            && receiver_types.is_empty()
+            && args.len() == 2
     )));
     let method = global
         .find_by_name("method")
@@ -182,6 +191,105 @@ fn dotted_table_call_keeps_explicit_receiver_argument() {
         method.qualified_name.as_deref(),
         Some("Box.method"),
         "the Tree-sitter declaration owner must survive into semantic identity"
+    );
+}
+
+#[test]
+fn colon_call_preserves_implicit_receiver_while_dot_call_does_not() {
+    let db =
+        db_with("function entry(resource, Namespace)\n  resource:close()\n  Namespace.open(resource)\nend\n");
+    let global = db.global_index();
+    let entry = global
+        .find_by_name("entry")
+        .iter()
+        .find_map(|symbol| global.decl_of(*symbol))
+        .expect("entry declaration");
+
+    assert!(
+        entry.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call {
+                name,
+                receiver: Some(receiver),
+                call_kind: CallKind::Method,
+                ..
+            } if name == "resource.close" && receiver == "resource"
+        )),
+        "events={:?}",
+        entry.flow_events
+    );
+    assert!(
+        entry.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call {
+                name,
+                receiver: None,
+                call_kind: CallKind::Function,
+                ..
+            } if name == "Namespace.open"
+        )),
+        "events={:?}",
+        entry.flow_events
+    );
+}
+
+#[test]
+fn static_bracket_assignment_keeps_the_complete_table_place() {
+    let db = db_with(
+        "function handle(input)\n  ngx.header[\"X-User\"] = input\n  ngx.header.Location = input\nend\n",
+    );
+    let global = db.global_index();
+    let handle = global
+        .find_by_name("handle")
+        .iter()
+        .find_map(|symbol| global.decl_of(*symbol))
+        .expect("handle declaration");
+
+    for expected in ["ngx.header.X-User", "ngx.header.Location"] {
+        assert!(
+            handle.flow_events.iter().any(|event| matches!(
+                event,
+                FlowEvent::Assign { target, source_name: Some(source), .. }
+                    if target == expected && source == "input"
+            )),
+            "missing exact assignment place {expected}: {:?}",
+            handle.flow_events
+        );
+    }
+}
+
+#[test]
+fn factory_receiver_field_write_uses_exact_member_assignment() {
+    let db = db_with(
+        "local Repo = {}\nfunction Repo.new(conn)\n  local self = setmetatable({}, Repo)\n  self.conn = conn\n  return self\nend\nreturn Repo\n",
+    );
+    let global = db.global_index();
+    let constructor = global
+        .find_by_name("new")
+        .iter()
+        .find_map(|symbol| global.decl_of(*symbol))
+        .expect("Repo.new declaration");
+
+    assert!(
+        constructor.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign {
+                target,
+                source_name: Some(source),
+                ..
+            } if target == "self.conn" && source == "conn"
+        )),
+        "Lua member assignment must retain self.conn <- conn: {:#?}",
+        constructor.flow_events
+    );
+    assert!(
+        constructor
+            .receiver_field_writes
+            .iter()
+            .any(|write| { write.target == "self.conn" && write.source_param_indices == [0] }),
+        "Lua factory must summarize receiver state from its parsed member assignment; params={:?}, writes={:#?}",
+        constructor.params,
+        constructor.receiver_field_writes
     );
 }
 

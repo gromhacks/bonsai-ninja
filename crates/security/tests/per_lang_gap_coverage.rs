@@ -1,9 +1,12 @@
 //! Per-language coverage for G1 / G2 / G3 / G5 / G8.
 //!
 //! One synthetic fixture per (capability × language) pair. The fixture
-//! writes a tiny source file + a one-rule sinks pack to a tempdir and
-//! asserts `security sinks --all` (matcher-only, no chain-building) or
-//! `security taint-analysis --all` (full pipeline) produces at least one hit.
+//! writes a tiny source file plus a one-rule sink pack, opens it through the
+//! production workspace registry, and invokes the security library directly.
+//! Matcher-only cases use `sink_inventory`; flow cases use
+//! `run_taint_analysis` with explicit inferred entry sources. Keeping this
+//! in-process prevents a stale or missing CLI executable from skipping tests
+//! or reporting results from different compiler code.
 //!
 //! Capabilities exercised:
 //! - G1 — Return-value taint: `y = transform(tainted)` taints `y`.
@@ -25,22 +28,10 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 // ---------------------------------------------------------------------------
 // Test harness — shared fixture helpers.
 // ---------------------------------------------------------------------------
-
-fn repo_root() -> PathBuf {
-    let mut p = std::env::current_dir().expect("cwd");
-    p.push("../..");
-    p.canonicalize().expect("repo root")
-}
-
-fn bin_path() -> Option<PathBuf> {
-    let p = repo_root().join("target/release/bonsai-ninja");
-    p.exists().then_some(p)
-}
 
 fn fresh_tmp(tag: &str) -> PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -115,43 +106,32 @@ fn write_fixture(tmp: &Path, name: &str, contents: &str) {
     fs::write(tmp.join(name), contents).expect("write fixture");
 }
 
-fn run_subcmd(tmp: &Path, rules: &Path, subcmd: &str) -> u32 {
-    let Some(bin) = bin_path() else { return u32::MAX };
-    // Inferred entry-point sources are CLI-opt-in (commit 1f4922c).
-    // The G5 cases (and most G1-G3 fixtures) rely on inferred handler
-    // params being treated as remote-trust sources; opt in for the
-    // taint-analysis subcommand. Other subcommands ignore the flag.
-    let mut args: Vec<&str> = vec![subcmd, "--all", "--rules-dir"];
-    let rules_str = rules.to_str().expect("rules path");
-    args.push(rules_str);
-    if subcmd == "taint-analysis" {
-        args.push("--inferred-sources");
-    }
-    let out = Command::new(&bin)
-        .args(["--no-cache", "--no-progress", "security"])
-        .arg(tmp)
-        .args(&args)
-        .env("NO_COLOR", "1")
-        .env("COLUMNS", "200")
-        .output()
-        .expect("run");
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    for line in text.lines() {
-        if line.contains("match(es)") || line.contains("finding(s)") {
-            if let Some(n) = line.split_whitespace().find_map(|t| t.parse::<u32>().ok()) {
-                return n;
-            }
-        }
-    }
-    0
+fn open_fixture(tmp: &Path, rules: &Path) -> (bonsai_workspace::Workspace, bonsai_security::Rulepack) {
+    let workspace = bonsai_workspace::Workspace::index(tmp, bonsai_adapters::all_languages_registry())
+        .expect("index language-gap fixture");
+    let pack = bonsai_security::load_rulepack(rules).expect("load language-gap rules");
+    (workspace, pack)
 }
 
 fn sinks_count(tmp: &Path, rules: &Path) -> u32 {
-    run_subcmd(tmp, rules, "sinks")
+    let (workspace, pack) = open_fixture(tmp, rules);
+    let matches = bonsai_security::sink_inventory(&workspace, &pack, Default::default())
+        .expect("match language-gap sink");
+    u32::try_from(matches.len()).expect("language-gap sink count exceeds u32")
 }
 
 fn flows_count(tmp: &Path, rules: &Path) -> u32 {
-    run_subcmd(tmp, rules, "taint-analysis")
+    let (workspace, pack) = open_fixture(tmp, rules);
+    let report = bonsai_security::run_taint_analysis(
+        &workspace,
+        &pack,
+        bonsai_security::TaintAnalysisOptions {
+            include_inferred_sources: true,
+            ..Default::default()
+        },
+    )
+    .expect("analyze language-gap fixture");
+    u32::try_from(report.findings.len()).expect("language-gap finding count exceeds u32")
 }
 
 // ===========================================================================
@@ -163,7 +143,6 @@ macro_rules! g5_test {
     ($name:ident, $tag:expr, $lang:expr, $file:expr, $contents:expr, $rule_id:expr, $sink:expr) => {
         #[test]
         fn $name() {
-            let Some(_) = bin_path() else { return };
             let tmp = fresh_tmp($tag);
             let rules = write_sink_rule(&tmp, $lang, $rule_id, $sink);
             write_fixture(&tmp, $file, $contents);
@@ -385,7 +364,6 @@ g5_test!(g5_cpp_entry, "g5-cpp", "cpp", "app.cpp",
 
 #[test]
 fn g1_python_return_value_taint() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g1-py");
     let rules = write_sink_rule(&tmp, "python", "py.sink", "sink");
     write_fixture(
@@ -402,7 +380,6 @@ fn g1_python_return_value_taint() {
 
 #[test]
 fn g1_javascript_return_value_taint() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g1-js");
     let rules = write_sink_rule(&tmp, "javascript", "js.sink", "sink");
     write_fixture(
@@ -419,7 +396,6 @@ fn g1_javascript_return_value_taint() {
 
 #[test]
 fn g1_typescript_return_value_taint() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g1-ts");
     let rules = write_sink_rule(&tmp, "typescript", "ts.sink", "sink");
     write_fixture(
@@ -436,7 +412,6 @@ fn g1_typescript_return_value_taint() {
 
 #[test]
 fn g1_ruby_return_value_taint() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g1-rb");
     let rules = write_sink_rule(&tmp, "ruby", "rb.sink", "sink");
     write_fixture(
@@ -453,7 +428,6 @@ fn g1_ruby_return_value_taint() {
 
 #[test]
 fn g1_php_return_value_taint() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g1-php");
     let rules = write_sink_rule(&tmp, "php", "php.sink", "sink");
     write_fixture(
@@ -474,7 +448,6 @@ fn g1_php_return_value_taint() {
 
 #[test]
 fn g2_python_string_concat_taint() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g2-py");
     let rules = write_sink_rule(&tmp, "python", "py.sink", "sink");
     write_fixture(
@@ -491,7 +464,6 @@ fn g2_python_string_concat_taint() {
 
 #[test]
 fn g2_javascript_template_literal_taint() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g2-js");
     let rules = write_sink_rule(&tmp, "javascript", "js.sink", "sink");
     write_fixture(
@@ -505,7 +477,6 @@ fn g2_javascript_template_literal_taint() {
 
 #[test]
 fn g2_typescript_template_literal_taint() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g2-ts");
     let rules = write_sink_rule(&tmp, "typescript", "ts.sink", "sink");
     write_fixture(
@@ -519,7 +490,6 @@ fn g2_typescript_template_literal_taint() {
 
 #[test]
 fn g2_ruby_string_interpolation_taint() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g2-rb");
     let rules = write_sink_rule(&tmp, "ruby", "rb.sink", "sink");
     write_fixture(
@@ -542,7 +512,6 @@ fn g3_python_field_taint_single_method() {
     // needing cross-method object-state propagation (which the
     // interprocedural pass doesn't yet carry across constructor → method
     // pairs). This single-method form IS what G3 enables.
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g3-py-single");
     let rules = write_sink_rule(&tmp, "python", "py.sink", "sink");
     write_fixture(
@@ -559,7 +528,6 @@ fn g3_python_field_taint_single_method() {
 
 #[test]
 fn g3_javascript_field_taint_single_method() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g3-js-single");
     let rules = write_sink_rule(&tmp, "javascript", "js.sink", "sink");
     write_fixture(
@@ -580,7 +548,6 @@ fn g3_cross_method_field_taint_python() {
     // reads `self.cmd`. G3 cross-method inference emits a synthetic
     // source for `self.cmd` inside every method of the class so
     // this chain fires end-to-end.
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g3-cross-py");
     let rules = write_sink_rule(&tmp, "python", "py.sink", "sink");
     write_fixture(
@@ -597,7 +564,6 @@ fn g3_cross_method_field_taint_python() {
 
 #[test]
 fn g3_cross_method_field_taint_javascript() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g3-cross-js");
     let rules = write_sink_rule(&tmp, "javascript", "js.sink", "sink");
     write_fixture(
@@ -614,7 +580,6 @@ fn g3_cross_method_field_taint_javascript() {
 
 #[test]
 fn g7_js_higher_order_for_each_callback() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g7-js");
     let rules = write_sink_rule(&tmp, "javascript", "js.sink", "sink");
     // `handle` gets `items` tainted by entry-point inference; then
@@ -634,7 +599,6 @@ fn g7_js_higher_order_for_each_callback() {
 
 #[test]
 fn g7_python_map_callback() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g7-py");
     let rules = write_sink_rule(&tmp, "python", "py.sink", "sink");
     write_fixture(
@@ -655,7 +619,6 @@ fn g7_python_map_callback() {
 
 #[test]
 fn g8_javascript_throw_catch() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g8-js");
     let rules = write_sink_rule(&tmp, "javascript", "js.sink", "sink");
     write_fixture(
@@ -676,7 +639,6 @@ fn g8_javascript_throw_catch() {
 
 #[test]
 fn g1_python_multi_hop_return_chain() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g1-py-nhop");
     let rules = write_sink_rule(&tmp, "python", "py.sink", "sink");
     write_fixture(
@@ -693,7 +655,6 @@ fn g1_python_multi_hop_return_chain() {
 
 #[test]
 fn g1_javascript_multi_hop_return_chain() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g1-js-nhop");
     let rules = write_sink_rule(&tmp, "javascript", "js.sink", "sink");
     write_fixture(
@@ -716,7 +677,6 @@ macro_rules! g1_test {
     ($name:ident, $tag:expr, $lang:expr, $file:expr, $contents:expr, $rule_id:expr, $sink:expr) => {
         #[test]
         fn $name() {
-            let Some(_) = bin_path() else { return };
             let tmp = fresh_tmp($tag);
             let rules = write_sink_rule(&tmp, $lang, $rule_id, $sink);
             write_fixture(&tmp, $file, $contents);
@@ -788,7 +748,6 @@ macro_rules! g2_test {
     ($name:ident, $tag:expr, $lang:expr, $file:expr, $contents:expr, $rule_id:expr, $sink:expr) => {
         #[test]
         fn $name() {
-            let Some(_) = bin_path() else { return };
             let tmp = fresh_tmp($tag);
             let rules = write_sink_rule(&tmp, $lang, $rule_id, $sink);
             write_fixture(&tmp, $file, $contents);
@@ -889,7 +848,6 @@ g2_test!(g2_cpp_concat, "g2-cpp", "cpp", "app.cpp",
     "cpp.sink", "sink");
 #[test]
 fn g2_objc_concat() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("g2-objc");
     let rules = write_sink_rule(&tmp, "objc", "objc.sink", "sink");
     write_call_result_passthrough_rule(
@@ -926,7 +884,6 @@ macro_rules! g9_test {
     ($name:ident, $tag:expr, $lang:expr, $file:expr, $contents:expr, $rule_id:expr, $sink:expr) => {
         #[test]
         fn $name() {
-            let Some(_) = bin_path() else { return };
             let tmp = fresh_tmp($tag);
             let rules = write_sink_rule(&tmp, $lang, $rule_id, $sink);
             write_fixture(&tmp, $file, $contents);
@@ -948,7 +905,6 @@ macro_rules! g9_best_effort_test {
     ($name:ident, $tag:expr, $lang:expr, $file:expr, $contents:expr, $rule_id:expr, $sink:expr) => {
         #[test]
         fn $name() {
-            let Some(_) = bin_path() else { return };
             let tmp = fresh_tmp($tag);
             let rules = write_sink_rule(&tmp, $lang, $rule_id, $sink);
             write_fixture(&tmp, $file, $contents);
@@ -1062,7 +1018,6 @@ macro_rules! g3_test {
     ($name:ident, $tag:expr, $lang:expr, $file:expr, $contents:expr, $rule_id:expr, $sink:expr) => {
         #[test]
         fn $name() {
-            let Some(_) = bin_path() else { return };
             let tmp = fresh_tmp($tag);
             let rules = write_sink_rule(&tmp, $lang, $rule_id, $sink);
             write_fixture(&tmp, $file, $contents);
@@ -1085,7 +1040,6 @@ macro_rules! g3_best_effort_test {
     ($name:ident, $tag:expr, $lang:expr, $file:expr, $contents:expr, $rule_id:expr, $sink:expr) => {
         #[test]
         fn $name() {
-            let Some(_) = bin_path() else { return };
             let tmp = fresh_tmp($tag);
             let rules = write_sink_rule(&tmp, $lang, $rule_id, $sink);
             write_fixture(&tmp, $file, $contents);
@@ -1162,7 +1116,6 @@ macro_rules! g3_cross_test {
     ($name:ident, $tag:expr, $lang:expr, $file:expr, $contents:expr, $rule_id:expr, $sink:expr) => {
         #[test]
         fn $name() {
-            let Some(_) = bin_path() else { return };
             let tmp = fresh_tmp($tag);
             let rules = write_sink_rule(&tmp, $lang, $rule_id, $sink);
             write_fixture(&tmp, $file, $contents);
@@ -1194,7 +1147,6 @@ macro_rules! g7_test {
     ($name:ident, $tag:expr, $lang:expr, $file:expr, $contents:expr, $rule_id:expr, $sink:expr) => {
         #[test]
         fn $name() {
-            let Some(_) = bin_path() else { return };
             let tmp = fresh_tmp($tag);
             let rules = write_sink_rule(&tmp, $lang, $rule_id, $sink);
             write_fixture(&tmp, $file, $contents);
@@ -1216,7 +1168,6 @@ macro_rules! g7_best_effort_test {
     ($name:ident, $tag:expr, $lang:expr, $file:expr, $contents:expr, $rule_id:expr, $sink:expr) => {
         #[test]
         fn $name() {
-            let Some(_) = bin_path() else { return };
             let tmp = fresh_tmp($tag);
             let rules = write_sink_rule(&tmp, $lang, $rule_id, $sink);
             write_fixture(&tmp, $file, $contents);
@@ -1290,7 +1241,6 @@ macro_rules! g8_test {
     ($name:ident, $tag:expr, $lang:expr, $file:expr, $contents:expr, $rule_id:expr, $sink:expr) => {
         #[test]
         fn $name() {
-            let Some(_) = bin_path() else { return };
             let tmp = fresh_tmp($tag);
             let rules = write_sink_rule(&tmp, $lang, $rule_id, $sink);
             write_fixture(&tmp, $file, $contents);
@@ -1367,7 +1317,6 @@ g8_test!(g8_perl_throw, "g8-perl", "perl", "app.pl",
 
 #[test]
 fn indirection_js_sql_concat_variable_to_pool_query() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("indir-js-sql");
     let rules = write_sink_rule(&tmp, "javascript", "js.sql", "pool.query");
     write_fixture(
@@ -1384,7 +1333,6 @@ fn indirection_js_sql_concat_variable_to_pool_query() {
 
 #[test]
 fn indirection_python_joined_path_variable_to_open() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("indir-py-path");
     let rules = write_sink_rule(&tmp, "python", "py.open", "open");
     write_call_result_passthrough_rule(
@@ -1408,7 +1356,6 @@ fn indirection_python_joined_path_variable_to_open() {
 
 #[test]
 fn indirection_python_xpath_expression_variable_to_select() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("indir-py-xpath");
     let rules = write_sink_rule(&tmp, "python", "py.xpath", "xpath.select");
     write_fixture(
@@ -1425,7 +1372,6 @@ fn indirection_python_xpath_expression_variable_to_select() {
 
 #[test]
 fn indirection_js_wrapper_return_variable_to_html_response_sink() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("indir-js-html");
     let rules = write_sink_rule(&tmp, "javascript", "js.html", "res.send");
     write_fixture(
@@ -1442,7 +1388,6 @@ fn indirection_js_wrapper_return_variable_to_html_response_sink() {
 
 #[test]
 fn indirection_ts_graphql_resolver_dispatch_args_to_helper_sink() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("indir-ts-gql");
     let rules = write_sink_rule(&tmp, "typescript", "ts.sink", "sink");
     write_fixture(
@@ -1475,7 +1420,6 @@ fn indirection_ts_graphql_resolver_dispatch_args_to_helper_sink() {
 
 #[test]
 fn alias_js_destructured_require() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("alias-js");
     let rules = write_sink_rule(&tmp, "javascript", "js.cmdi", "exec");
     write_fixture(
@@ -1492,7 +1436,6 @@ fn alias_js_destructured_require() {
 
 #[test]
 fn alias_python_from_import() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("alias-py");
     let rules = write_sink_rule(&tmp, "python", "py.sys", "system");
     write_fixture(
@@ -1509,7 +1452,6 @@ fn alias_python_from_import() {
 
 #[test]
 fn alias_js_var_reassignment_chain() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("alias-jshop");
     let rules = write_sink_rule(&tmp, "javascript", "js.cmdi", "exec");
     write_fixture(
@@ -1526,7 +1468,6 @@ fn alias_js_var_reassignment_chain() {
 
 #[test]
 fn alias_python_var_reassignment_chain() {
-    let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("alias-pyhop");
     let rules = write_sink_rule(&tmp, "python", "py.sys", "system");
     write_fixture(

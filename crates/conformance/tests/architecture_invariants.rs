@@ -2195,6 +2195,9 @@ fn every_language_adapter_owns_its_tree_sitter_lowering() {
             "call_kinds:",
             "call_ref_kinds:",
             "argument_passing_mode_extractor:",
+            "expression_value_kind_extractor:",
+            "literal_value_",
+            "string_literal_kinds:",
             "fn extract_imports",
         ] {
             if !source.contains(required) {
@@ -2218,9 +2221,14 @@ fn every_language_adapter_owns_its_tree_sitter_lowering() {
     }
 
     let shared_kit = read(&root.join("crates/lang_api/src/kit/mod.rs"));
+    let identifiers = read(&root.join("crates/lang_api/src/kit/identifiers.rs"));
     assert!(
         !shared_kit.contains("|| GENERIC_HANDLER"),
         "GrammarHandler classification must use only the active adapter's exact syntax inventory"
+    );
+    assert!(
+        !shared_kit.contains("const STRING_KINDS") && !identifiers.contains("fn looks_like_literal_value"),
+        "shared lowering must not restore a cross-language literal/token inventory"
     );
 
     assert_eq!(checked, 20, "expected every bundled language compiler frontend");
@@ -2491,6 +2499,36 @@ fn idg_taint_does_not_reparse_call_arg_value_text() {
         violations.is_empty(),
         "IDG taint must consume CallArg.place/source_names, never parse value_text:\n  {}",
         violations.join("\n  ")
+    );
+}
+
+/// Overlapping endpoint attribution must join the matcher's call argument to
+/// taint evidence through adapter-lowered places and value carriers. Rendered
+/// call text is diagnostic output, not a second language parser.
+#[test]
+fn security_taint_endpoint_join_uses_compiler_value_identities() {
+    let root = repo_root();
+    let matcher = read(&root.join("crates/security/src/matcher/mod.rs"));
+    for retired_parser in [
+        "fn quoted_literal",
+        "fn expression_contains_identifier",
+        "receiver.contains(arg_value)",
+    ] {
+        assert!(
+            !matcher.contains(retired_parser),
+            "security taint endpoint join must not restore rendered-text parser `{retired_parser}`"
+        );
+    }
+    let join = function_body(&matcher, "tainted_call_has_arg");
+    let argument_join = function_body(&matcher, "arg_matches_tainted_value");
+    assert!(
+        join.contains("arg_matches_tainted_value")
+            && join.contains("tainted_receiver_source_names")
+            && argument_join.contains("structured_argument_names")
+            && argument_join.contains("tainted_argument_names")
+            && !join.contains("value_text")
+            && !argument_join.contains("value_text"),
+        "security taint endpoint attribution must join typed argument/receiver carriers"
     );
 }
 
@@ -3635,7 +3673,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
                 &security_matcher,
                 "match_rules_against_facts_with_progress_and_mode",
             ),
-            "syntax_worker_count_for_sources",
+            "SyntaxMemoryPermitPool",
         ),
     ] {
         assert!(
@@ -5089,7 +5127,7 @@ fn db_applies_receiver_type_enrichment_centrally() {
     assert!(
         body.contains("adapter.extract_declarations(file, ctx)")
             && body.contains("apply_constructor_result_type_aliases")
-            && body.contains("apply_assign_value_kind")
+            && body.contains("apply_expression_value_kinds")
             && body.contains("apply_assign_call_result_types")
             && body.contains("apply_call_receiver_types"),
         "AnalyzerDb::build_decl_index_with_diagnostics must centrally enrich FlowEvent::Call::receiver_types after adapter extraction"
@@ -5316,6 +5354,7 @@ fn security_matcher_uses_compiler_expression_facts() {
         "fn split_balanced_args",
         "fn split_read_token",
         "fn parse_type_test",
+        "fn looks_like_type_anchor",
     ] {
         assert!(
             !matcher.contains(retired_parser),
@@ -5346,8 +5385,60 @@ fn security_matcher_uses_compiler_expression_facts() {
         language_types.contains("pub struct RuntimeTypeNarrowingFact")
             && language_types.contains("pub direct_call_name: Option<String>")
             && language_kit.contains("pub use runtime_types::extract_runtime_type_narrowing_facts")
-            && runtime_type_lowering.contains("fn extract_runtime_type_narrowing_facts"),
+            && runtime_type_lowering.contains("fn extract_runtime_type_narrowing_facts")
+            && runtime_type_lowering.contains("handler.is_string_literal(type_node.kind())")
+            && runtime_type_lowering.contains("handler.runtime_type_wrapper_kinds")
+            && !runtime_type_lowering
+                .contains("\"string\" | \"string_literal\" | \"interpreted_string_literal\""),
         "language IR must retain direct-call and runtime-guard relationships"
+    );
+}
+
+/// Clean-overwrite suppression is security-sensitive and must fail closed.
+/// Literal value identity comes from the active adapter's AST lowering, never
+/// rendered source or a naming convention.
+#[test]
+fn clean_overwrite_uses_adapter_value_facts() {
+    let root = repo_root();
+    let source = read(&root.join("crates/security/src/analysis/clean_overwrite.rs"));
+    let language_kit = read(&root.join("crates/lang_api/src/kit/mod.rs"));
+    let language_types = read(&root.join("crates/lang_api/src/types.rs"));
+
+    for retired_heuristic in [
+        "fn looks_like_clean_constant",
+        "fn clean_constant_assignment",
+        "fn quoted_literal",
+        "fn numeric_literal",
+    ] {
+        assert!(
+            !source.contains(retired_heuristic),
+            "clean-overwrite must not restore rendered-value heuristic `{retired_heuristic}`"
+        );
+    }
+
+    let body = function_body(&source, "clean_output_call_overwrites_target");
+    let argument = function_body(&source, "clean_output_overwrite_arg_is_clean");
+    assert!(
+        body.contains("output") && body.contains(".place") && !body.contains("value_text"),
+        "clean output targets must use adapter-lowered places"
+    );
+    assert!(
+        argument.contains("call_argument_value_fact")
+            && argument.contains("value_kind")
+            && argument.contains("static_value")
+            && !argument.contains("value_text"),
+        "clean output writes must be proven from adapter-lowered argument facts"
+    );
+    let fallback_classifier = function_body(&language_kit, "classify_flow_value_kinds");
+    assert!(
+        fallback_classifier.contains("AssignValueKind::Unknown")
+            && !fallback_classifier.contains("AssignValueKind::Literal"),
+        "missing carriers must remain unknown; only an adapter AST classifier may prove a literal"
+    );
+    assert!(
+        language_types.contains("value_kind: Option<AssignValueKind>")
+            && source.contains("Some(AssignValueKind::Literal)"),
+        "return clean-value proofs must consume adapter-owned expression value shape"
     );
 }
 
@@ -5373,6 +5464,7 @@ fn structured_security_guards_are_rulepack_driven() {
     let metadata = read(&root.join("security-patterns/metadata.yml"));
     let assignment_lowering = read(&root.join("crates/lang_api/src/kit/walker/assignment.rs"));
     let prototype_guard = read(&root.join("crates/security/src/analysis/prototype_guard.rs"));
+    let idg_transfer = read(&root.join("crates/idg/src/transfer.rs"));
 
     for spelling in ["os.path.join", "realpath", "setLocation"] {
         assert!(
@@ -5405,6 +5497,19 @@ fn structured_security_guards_are_rulepack_driven() {
         receiver_flow.contains("receiver_mutation_targets")
             && receiver_flow.contains("rule_target_matches_call"),
         "receiver mutation proofs must consume taint_receiver_from_args rule targets"
+    );
+    assert!(
+        analysis.contains("fn compiled_receiver_state_propagations_for_languages")
+            && analysis.contains("match_rules_against_facts_for_sink_inventory_with_progress_on_files",)
+            && analysis.contains("propagation.resolved_call_sites"),
+        "rulepack-only receiver typing must compile complete matcher proofs to exact AST call sites"
+    );
+    let transfer_fingerprint = function_body(&idg_transfer, "semantic_fingerprint");
+    let receiver_transfer = function_body(&idg_transfer, "apply_receiver_state_propagation_call");
+    assert!(
+        transfer_fingerprint.contains("spec.resolved_call_sites")
+            && receiver_transfer.contains("shape.resolved_call_sites.binary_search(&span)"),
+        "IDG receiver transfer must consume exact typed sites and include them in graph identity"
     );
     let path_guard = function_body(guards_runtime, "path_containment_guard_sanitizer");
     assert!(
@@ -5788,4 +5893,38 @@ fn hardcoded_audit_refuses_destructive_output_paths() {
     assert!(sentinel.exists(), "rejected output paths must remain untouched");
 
     fs::remove_dir_all(output).expect("remove audit safety fixture");
+}
+
+/// External framework callback signatures are rulepack knowledge. The Java
+/// frontend may prove that an argument is a lambda or that a binding has a
+/// functional-interface type, but it must not compile framework callback
+/// parameter types into the adapter.
+#[test]
+fn external_callback_signatures_are_rulepack_owned() {
+    let root = repo_root();
+    let java = live_code(&read(&root.join("crates/lang_java/src/lib.rs")));
+    for provider_type in [
+        "RoutingContext",
+        "ServerRequest",
+        "DataFetchingEnvironment",
+        "DataFetcher",
+    ] {
+        assert!(
+            !java.contains(provider_type),
+            "Java adapter must not hardcode external callback type `{provider_type}`"
+        );
+    }
+
+    let rule = read(&root.join("crates/security/src/rule.rs"));
+    let matcher = read(&root.join("crates/security/src/matcher/mod.rs"));
+    let typing = read(&root.join("security-patterns/langs/java/typing/callback_params.yml"));
+    assert!(
+        rule.contains("callback_param_types")
+            && rule.contains("callback_arg_index")
+            && matcher.contains("synth_callback_param_type_aliases")
+            && typing.contains("RoutingContext")
+            && typing.contains("ServerRequest")
+            && typing.contains("DataFetchingEnvironment"),
+        "external callback signatures must flow from typing YAML through the generic matcher"
+    );
 }

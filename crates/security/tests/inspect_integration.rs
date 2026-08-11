@@ -22,12 +22,12 @@ fn repo_root() -> PathBuf {
 }
 
 fn bin_path() -> Option<PathBuf> {
-    let debug = repo_root().join("target/debug/bonsai-ninja");
-    if debug.exists() {
-        return Some(debug);
-    }
     let release = repo_root().join("target/release/bonsai-ninja");
-    release.exists().then_some(release)
+    if release.exists() {
+        return Some(release);
+    }
+    let debug = repo_root().join("target/debug/bonsai-ninja");
+    debug.exists().then_some(debug)
 }
 
 fn run(args: &[&str]) -> Option<String> {
@@ -141,7 +141,10 @@ fn compile_rule_produces_non_empty_inspect_args_for_sink() {
         },
         analysis_semantics: None,
         taint_semantics: None,
+        lifecycle_transition: None,
         returns_type: None,
+        callback_param_types: Vec::new(),
+        callback_arg_index: None,
         constraints: RuleConstraint::default(),
         match_examples: Vec::new(),
         description: "os.system".into(),

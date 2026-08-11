@@ -45,11 +45,94 @@ fun apply(value: String): String {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(aliases.len(), 1, "callable reference should be one compiler fact");
+    assert_eq!(
+        aliases.len(),
+        1,
+        "callable reference should be one compiler fact: {:#?}",
+        apply.flow_events
+    );
     assert_eq!(aliases[0].0.as_deref(), Some("helper"));
     assert_eq!(aliases[0].1.as_deref(), None);
     assert!(aliases[0].2.is_empty());
     assert_eq!(aliases[0].3, &Some(AssignValueKind::CallableReference));
+}
+
+#[test]
+fn initialized_and_type_only_properties_have_distinct_value_semantics() {
+    use bonsai_lang_api::{AssignValueKind, LanguageAdapter};
+    use std::sync::Arc;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(KotlinAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Properties.kt",
+            r#"
+abstract class Base {
+  abstract val deferred: String
+  fun run() {
+    val initialized = "ready"
+    sink(initialized)
+  }
+}
+"#,
+        )],
+    );
+    let global = ws.db().global_index();
+    let run = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "run")
+        .expect("run declaration");
+
+    assert!(
+        run.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign {
+                target,
+                value_kind: Some(AssignValueKind::Literal),
+                ..
+            } if target == "initialized"
+        )),
+        "events={:?}",
+        run.flow_events
+    );
+    assert!(
+        global
+            .all_files()
+            .flat_map(|file| global.decls_in(file))
+            .flat_map(|decl| decl.flow_events.iter())
+            .all(|event| !matches!(event, FlowEvent::Assign { target, .. } if target == "deferred")),
+        "type-only abstract property must not invent a runtime assignment"
+    );
+}
+
+#[test]
+fn directly_assignable_navigation_preserves_the_complete_field_place() {
+    use bonsai_lang_api::{FlowEvent, LanguageAdapter};
+    use std::sync::Arc;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(KotlinAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[("Fields.kt", "fun update(c: Any, args: String) { c.cmd = args }")],
+    );
+    let global = ws.db().global_index();
+    let update = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "update")
+        .expect("update declaration");
+
+    assert!(
+        update.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign { target, source_name, .. }
+                if target == "c.cmd" && source_name.as_deref() == Some("args")
+        )),
+        "events={:#?}",
+        update.flow_events
+    );
 }
 
 #[test]
