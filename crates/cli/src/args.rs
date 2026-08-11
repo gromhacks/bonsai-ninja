@@ -3079,8 +3079,8 @@ pub(crate) enum SecurityAction {
         summary: bool,
         /// Output shape — `text` for the paginated finding report,
         /// `json` for the bonsai-native machine-readable shape, or
-        /// `sarif` for SARIF 2.1.0 (GitHub code scanning, IDE
-        /// plugins, CVEBench-SAST harness). SARIF results carry
+        /// `sarif` for SARIF 2.1.0 (GitHub code scanning and IDE
+        /// plugins). SARIF results carry
         /// `properties.bonsai` with the original `S:` / `F:` /
         /// `G:` / CWE / status / tainted-args metadata so consumers
         /// that understand bonsai's stable IDs can drill back into

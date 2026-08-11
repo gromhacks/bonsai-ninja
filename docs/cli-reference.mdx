@@ -195,6 +195,11 @@ bonsai-ninja security ./src taint-analysis --format sarif --all --output-path fi
 Text output is labelled `TAINT FLOW`. Each step is derived from the
 finding's source-specific taint path and annotates the source, tainted
 argument propagation, receiver evidence where relevant, and sink operand.
+Unfiltered analysis preserves exact local-trust flows and caps their emitted
+severity at `medium`; it does not silently discard them. The bundled
+`production` profile applies `trust: remote` and `severity: high`, keeping
+those operator/environment flows out of the production review without
+changing the underlying graph.
 JSON and SARIF findings include `analysis_complete` and
 `analysis_incomplete_reasons`; emitted findings are complete semantic
 evidence, so complete findings carry an empty reason list. The command

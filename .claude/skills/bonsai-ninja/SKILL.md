@@ -310,6 +310,10 @@ high-severity taint threshold, a 16k context window, and common non-production
 path exclusions. Profile values and test-path conventions come from
 `security-patterns/metadata.yml`; explicit CLI flags override them.
 Use `--exclude-tests` when you only want the narrower test-path exclusion.
+An unfiltered taint analysis preserves exact local-trust flows and caps their
+emitted severity at medium. Use the production profile for the remote/high
+deployment boundary; do not interpret an intentionally filtered local flow as
+missing compiler or taint evidence.
 
 Inventory the model when a finding or gap needs explanation:
 

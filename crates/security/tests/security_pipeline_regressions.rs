@@ -6068,7 +6068,7 @@ def render_template():
 }
 
 #[test]
-fn local_environment_source_to_log_injection_is_low_signal() {
+fn local_environment_source_to_log_injection_is_reported_at_capped_severity() {
     let mut pack = constrained_call_sink_rulepack("go", "os.Getenv", "log.Printf");
     let go_pack = pack.packs.get_mut("go").expect("go pack");
     go_pack.sources[0].id = "go.os.getenv".to_string();
@@ -6080,6 +6080,12 @@ fn local_environment_source_to_log_injection_is_low_signal() {
     });
     go_pack.sinks[0].id = "go.log_injection.log_printf_tainted_value".to_string();
     go_pack.sinks[0].tag = Some("log-injection".to_string());
+    go_pack.sinks[0].constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(1),
+            kw: None,
+        },
+    }]);
 
     let ws = workspace(&[(
         "/app/main.go",
@@ -6098,10 +6104,16 @@ func main() {
 "#,
     )]);
     let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
-    assert!(
-        report.findings.is_empty(),
-        "local environment/config values logged at startup should not be reported as log injection: {:#?}",
+    assert_eq!(
+        report.findings.len(),
+        1,
+        "an exact local environment-to-log flow remains useful outside remote-only review profiles: {:#?}",
         report.findings
+    );
+    assert_eq!(
+        report.findings[0].finding.severity,
+        Some(Severity::Medium),
+        "local trust must cap the rule's network-grade severity without hiding the exact flow"
     );
 
     let remote_pack = constrained_call_sink_rulepack("go", "remote", "log.Printf");
@@ -6128,6 +6140,69 @@ func handler() {
         "remote request-like values must still report when logged: {:#?}",
         remote_report.findings
     );
+    assert_eq!(
+        remote_report.findings[0].finding.severity,
+        Some(Severity::Critical)
+    );
+}
+
+#[test]
+fn one_tainted_value_reaching_distinct_sink_classes_emits_each_vulnerability() {
+    let mut pack = constrained_call_sink_rulepack("python", "source", "command_sink");
+    let language = pack.packs.get_mut("python").expect("Python pack");
+    language.sinks[0].id = "python.test.command_sink".to_string();
+    language.sinks[0].tag = Some("command-injection".to_string());
+    language.sinks[0].cwe = vec!["CWE-78".to_string()];
+
+    let mut sql_sink = rule(
+        "python",
+        RuleKind::Sink,
+        "python.test.sql_sink",
+        None,
+        Some(Severity::High),
+        "sql_sink",
+    );
+    sql_sink.tag = Some("sql-injection".to_string());
+    sql_sink.cwe = vec!["CWE-89".to_string()];
+    sql_sink.constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(0),
+            kw: None,
+        },
+    }]);
+    language.sinks.push(sql_sink);
+
+    let ws = workspace(&[(
+        "/app/main.py",
+        r#"
+def source():
+    return ""
+
+def command_sink(value):
+    pass
+
+def sql_sink(value):
+    pass
+
+def handler():
+    value = source()
+    command_sink(value)
+    sql_sink(value)
+"#,
+    )]);
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    let tags = report
+        .findings
+        .iter()
+        .filter_map(|finding| finding.finding.tag.as_deref())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        report.findings.len(),
+        2,
+        "finding combination must preserve separate vulnerability classes on shared taint: {:#?}",
+        report.findings
+    );
+    assert_eq!(tags, BTreeSet::from(["command-injection", "sql-injection"]));
 }
 
 #[test]

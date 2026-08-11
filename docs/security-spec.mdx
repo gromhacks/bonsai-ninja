@@ -51,6 +51,13 @@ Use source `tag` values to describe the trust boundary, not the sink
 class; for example `network-input`, `archive-input`, `graphql-input`,
 `env-input`, or `cli-input`.
 
+Trust changes reporting policy, not propagation. Exact local-trust flows stay
+visible in an unfiltered analysis, but their emitted severity is capped at
+`medium`. The bundled `production` profile selects remote-trust sources at
+`high` or above, so operator/environment findings do not add noise to the
+default deployment review. A rulepack may explicitly suppress a declared
+local flow class, but propagation and compiler facts remain unchanged.
+
 Typing rules declare at least one non-finding compiler model:
 
 - `returns_type` plus a structured call/new match declares a factory or
@@ -445,7 +452,7 @@ Three:
 - **text** (default) - themed terminal output.
 - **json** - stable schema documented in `crates/security/src/report.rs`.
 - **sarif** - SARIF 2.1.0 for `security taint-analysis` findings,
-  GitHub code scanning, and the CVEBench-SAST harness. SARIF includes
+  GitHub code scanning, and other standards-based consumers. SARIF includes
   exact source-independent API/config misuse findings by default; those
   rows have no `codeFlows` and use `pattern:<sink-rule-id>` as their
   source id. Lifecycle-audit transition sites are not emitted as

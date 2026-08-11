@@ -720,8 +720,8 @@ fn finding_to_sarif_result(
     };
 
     // S6: link this finding to every CWE it carries via SARIF's
-    // reportingDescriptorReference shape. CVEBench also uses this
-    // as a CWE fallback when result.properties.cwe is absent.
+    // reportingDescriptorReference shape so standards-based consumers
+    // can recover taxonomy even when result.properties.cwe is absent.
     let finding_cwes = dedup_strings(finding.cwe.clone());
     let cwe_taxa: Vec<serde_json::Value> = finding_cwes
         .iter()

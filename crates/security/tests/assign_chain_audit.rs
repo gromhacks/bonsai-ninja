@@ -16,10 +16,9 @@
 //!
 //! For each language the harness asserts:
 //!
-//! - **positive**: at least one finding reaches the cmdi sink. The
-//!   benchmark feedback (CVEBench-SAST) listed several adapters as
-//!   silent on this shape — those rows show up here as failures with
-//!   clear "[lang] no taint findings" diagnostics.
+//! - **positive**: at least one finding reaches the cmdi sink. Any
+//!   adapter silent on this shape fails with a clear
+//!   "[lang] no taint findings" diagnostic.
 //! - **negative coherence**: when findings exist, every finding's
 //!   chain endpoint matches one of the positive functions, never a
 //!   `_decoy` or `_clean_constant` function. This proves the engine

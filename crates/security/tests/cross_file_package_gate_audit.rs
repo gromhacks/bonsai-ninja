@@ -7,7 +7,7 @@
 //! module that imported a *different* framework (see the committed
 //! `benchmark_gap_regressions::typescript_*_requires_matching_package_evidence`
 //! invariants) — violating the standing "do NOT loosen the matcher package
-//! gate" directive (CVE-Bench FP rationale). It was reverted.
+//! gate" directive. It was reverted.
 //!
 //! The sound contract pinned here:
 //!   * a bare receiver-agnostic source (`request.args.get`, whose only
