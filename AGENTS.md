@@ -331,7 +331,7 @@ Filter findings by rule class:
 ./target/release/bonsai-ninja security <workspace> taint-analysis --source <source-rule> --sink <sink-rule> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja security <workspace> taint-analysis --flow F:<id> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja security <workspace> taint-analysis --group G:<id> --context 16k --no-color --no-progress
-./target/release/bonsai-ninja security <workspace> taint-analysis --format sarif --no-color --no-progress > findings.sarif.json
+./target/release/bonsai-ninja security <workspace> taint-analysis --format sarif --all --output-path findings.sarif.json --no-color --no-progress
 ```
 
 For each issue, cite `S:` finding id, `F:` flow id, `G:` group id, source line, sink
