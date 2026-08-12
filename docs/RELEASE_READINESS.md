@@ -235,8 +235,8 @@ with:
 
 - `analysis_complete: true` and no incomplete reasons.
 - 0 findings at the production profile's severity threshold.
-- 1.90 seconds wall time from an empty workspace cache.
-- 682,590,208 bytes maximum resident memory (about 651.0 MiB).
+- 1.62 seconds wall time from an empty workspace cache.
+- 737,853,440 bytes maximum resident memory (about 703.7 MiB).
 - 0 swaps under `BONSAI_MEMORY_BUDGET_MB=3072`.
 
 This is a correctness smoke, not a claim that an empty finding set proves the
@@ -263,20 +263,19 @@ seconds with 35,110,912 bytes maximum RSS.
 ## Elasticsearch scale result
 
 The current release pipeline is measured against the sibling 30,055-source
-Elasticsearch checkout. The 2026-08-11 ABI-v84 release gate passed 5/5 in
-225.16 seconds under a 3 GiB scheduling budget. Its one-time migration gate,
-including exact compiler-object/IDG generation and all five checks, completed
-in 1,802.20 seconds; subsequent semantic readiness and immediate fresh-process
-reuse took 5.20 and 2.36 seconds. The final warm gate measured fresh-cache
-production taint at 31.12 seconds, warm production taint at 26.66 seconds,
-default inspect at 7.50 seconds, and exact raw-taint inspect at 26.31 seconds.
-Navigation timings were tree 0.03 seconds, search 4.15, definitions 13.20,
-imports 7.18, classes 7.65, entrypoints 27.52, calls 3.42, arguments 3.38,
-and scoped `read-file` 1.35. Source, high-severity sink, sanitizer, and
-dependency inventories completed in 3.90, 23.46, 20.49, and 10.23 seconds.
+Elasticsearch checkout pinned at `e9741368da0`. The final 2026-08-11 ABI-v84
+release gate passed 5/5 in 232.90 seconds under a 3 GiB scheduling budget.
+Semantic generation and immediate fresh-process reuse took 12.01 and 2.47
+seconds. Fresh-cache production taint completed in 30.54 seconds, warm
+production taint in 28.12 seconds, default inspect in 7.25 seconds, and exact
+raw-taint inspect in 26.74 seconds. Navigation timings were tree 0.02 seconds,
+search 3.84, definitions 13.46, imports 7.32, classes 7.83, entrypoints 27.35,
+calls 3.59, arguments 3.67, and scoped `read-file` 1.37. Source,
+high-severity sink, sanitizer, and dependency inventories completed in 3.67,
+23.96, 20.09, and 9.57 seconds.
 The high-severity sink inventory returned the same exact 6,866 matches before
 and after its matcher optimization; its end-to-end latency fell from about 52
-seconds to 23.46 seconds because each surviving rule batch now derives only
+seconds to about 24 seconds because each surviving rule batch now derives only
 the compiler-secondary views it can consult. Header and body concurrency is
 source-weighted and changes scheduling only. Every enforced SLO passed with
 no cap on files, rules, graph depth, fixed-point work, or results. This is the

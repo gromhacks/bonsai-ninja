@@ -132,7 +132,9 @@ scope, not analysis accuracy:
 emitted graph facts still use the exact/narrowed static evidence
 contract. Inspect raw taint paths go through the workspace syntax-flow
 facade: a warmed IDG target cut is used only when already available,
-otherwise the canonical cached dataflow graph is used.
+otherwise an exact query-scoped source/target IDG is built. The canonical
+cached dataflow graph remains only as the compatibility fallback when the
+scoped compiler graph cannot be prepared.
 
 Record understanding as:
 

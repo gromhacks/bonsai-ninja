@@ -89,10 +89,13 @@ work, but it may never reject a scalar seed, call boundary, or valid path.
 
 Rulepack-free inspect taint rows use `Workspace::syntax_flow_graph` from
 `crates/workspace/src/flow_query.rs`. That workspace facade is the only
-command-facing switch between a warmed IDG target cut and the canonical
-cached `EntryTaintGraph`; `inspect` does not build IDG on its hot path.
-Both backends use the same adapter-lowered `FlowEvent`s, resolver-backed
-call edges, precision ceiling, and taint crate propagation semantics.
+command-facing switch between a warmed IDG target cut, an exact query-scoped
+source/target IDG, and the canonical cached `EntryTaintGraph` compatibility
+fallback. A warm query reuses the validated IDG accelerator; a cold query
+builds only the complete compiler corridor required by its source and target
+spans and never publishes that partial graph as the workspace-wide IDG. All
+backends use the same adapter-lowered `FlowEvent`s, resolver-backed call
+edges, precision ceiling, and taint crate propagation semantics.
 
 Default entry seeds are centralized in `reachable.rs`:
 
