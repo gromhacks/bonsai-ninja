@@ -1,165 +1,165 @@
 ---
 title: "Getting Started"
-description: "Install bonsai-ninja, run a first security scan, and read the output."
+description: "Install bonsai-ninja, map a workspace, run a security scan, and follow its evidence."
 ---
 
 # Getting Started
 
-<Steps>
-
-1. Install or build the CLI.
-2. Index the workspace so structural facts are ready.
-3. Keep `index --watch` running while you edit if you want save-time hot reloads.
-4. Run `security taint-analysis` against a source tree.
-5. Re-run with JSON or SARIF when you need machine-readable output.
-6. Use `show F:...` or `security taint-analysis --flow F:...` to drill into a specific security flow.
-
-</Steps>
-
 ## Install
 
-### Cargo install
+### Build from this repository
 
-Use this when the crate is published or when you have a local checkout that you want Cargo to install into your toolchain.
+```bash
+cargo build --release --locked -p bonsai_cli
+./target/release/bonsai-ninja --version
+```
+
+### Install with Cargo
+
+Use this for a local checkout or after the crate is published:
 
 ```bash
 cargo install --path crates/cli --locked
 bonsai-ninja --version
 ```
 
-### Prebuilt binary
+### Use a release archive
 
-Use a GitHub release artifact when you want the same binary locally and in CI.
+Extract the archive for your operating system and CPU, then run the binary
+from its directory. Release archives include the bundled rulepack.
 
 ```bash
 tar -xzf bonsai-ninja-x86_64-unknown-linux-gnu.tar.gz
 cd bonsai-ninja-x86_64-unknown-linux-gnu
-chmod +x ./bonsai-ninja
 ./bonsai-ninja --version
 ```
 
-### Local release build
+See [Platform And Architecture Support](platform-support.mdx) for release
+targets and source-build requirements.
 
-Use the repository build when contributing or validating rulepack changes.
+## Map a workspace
 
-```bash
-cargo build --release -p bonsai_cli
-./target/release/bonsai-ninja --version
-```
-
-For non-release CPU architectures, validate the target toolchain and
-parser-pack path before relying on a build:
+Start with cheap structural facts:
 
 ```bash
-scripts/check-targets.sh --extra
+./target/release/bonsai-ninja context ./src --no-color --no-progress
+./target/release/bonsai-ninja tree ./src --max-depth 3 \
+  --context 16k --no-color --no-progress
+./target/release/bonsai-ninja entrypoints ./src \
+  --context 16k --no-color --no-progress
 ```
 
-See [Platform And Architecture Support](platform-support.mdx) for the
-release target matrix and parser bundle constraints.
-
-## First Scan
+Indexing is optional. Run it when you expect several queries:
 
 ```bash
-./target/release/bonsai-ninja index ./examples/python/mega_flow
-./target/release/bonsai-ninja security ./examples/python/mega_flow taint-analysis --rules-dir ./security-patterns
+# Syntax and declaration warm-up.
+./target/release/bonsai-ninja index ./src --no-progress
+
+# Keep saved changes warm while editing.
+./target/release/bonsai-ninja index ./src --watch --no-progress
 ```
 
-`index` is the syntax/construct warm-up command: it parses supported files
-and builds the declaration/import indexes that later commands share without
-forcing a whole-workspace semantic prewarm. Browse, inspect, trace, security,
-export, and debug commands validate and hydrate sidecars when present, then
-compute missing exact facts on demand when needed. Pass `--semantic` only
-when a workflow explicitly wants structural semantic sidecars built up front;
-pass `--prewarm-dataflow` only when it needs the full-workspace
-compatibility dataflow projection built by itself. That projection serves
-older SDK/query surfaces; it is not a separate taint engine. Retrieval
-sidecars are candidate lookup:
-exact indexes decide candidates; canonical facts and semantic graph
-verification decide truth. Vector similarity is never evidence. Search,
-inspect, and literal-filtered browse commands validate a fresh retrieval
-sidecar from source/dependency/schema fingerprints before large-repo candidate
-lookup, then hydrate the selected candidate files/facts through canonical
-APIs. Large or scoped queries that are not prewarmed fall back to canonical
-syntax-backed facts instead of writing partial retrieval cache state.
+Use `index ./src --semantic` only for repeated broad semantic queries. Normal
+commands compute their requested exact facts on demand.
 
-`--semantic` starts with a content-addressed compiler-object generation, then
-builds callgraph, retrieval, linkage, and IDG artifacts in separate processes.
-Unchanged files reuse their validated compressed objects. Process exits are
-hard memory-reclamation boundaries; file-size-weighted scheduling subtracts
-current RSS and safety headroom before adapting concurrency to the detected
-machine/container budget. A 3 GiB budget serializes exact compiler units
-without reducing analysis scope. The parent validates one coherent workspace
-generation after
-all phases and restarts them if a source changed between workers.
+## Follow one behavior
 
-Security, inspect, and export may revisit the same exact file body after that
-streaming phase. Those consumers share a byte-weighted hot cache sized from
-the effective memory budget instead of repeatedly lowering the file. On a
-smaller machine the cache evicts sooner and exact work may be recomputed; an
-individual body that does not fit is still analyzed. Memory therefore affects
-parallelism, retention, and wall time, never semantic coverage.
-
-The workspace-wide linker retains only compact declaration, type, module,
-inheritance, import, and stable-symbol headers. Exact body facts are streamed
-from the same compiler objects and remapped to those symbols as consumers need
-them, so large projects do not require every function body and the IDG to be
-resident at the same time.
-
-Each adapter parses its own language with Tree-sitter and lowers syntax into
-typed compiler facts. Shared resolver, callgraph, IDG, security, and export
-passes consume those facts without hardcoded per-language name lists. Taint
-propagation runs the sparse IDG to a fixed point without semantic depth,
-iteration, or result caps; `--context`, `--page`, and inspect preview flags
-only control what is rendered.
-
-For development workflows, keep the workspace hot while your editor saves:
+Find an anchor, then pivot to compiler facts:
 
 ```bash
-./target/release/bonsai-ninja index ./src --watch
+./target/release/bonsai-ninja search ./src verify_token \
+  --context 8k --no-color --no-progress
+./target/release/bonsai-ninja refs ./src verify_token \
+  --context 8k --no-color --no-progress
+./target/release/bonsai-ninja calls ./src --callee verify_token \
+  --context 8k --no-color --no-progress
+./target/release/bonsai-ninja inspect ./src --query verify_token \
+  --context 16k --no-color --no-progress
 ```
 
-Long-lived SDK projects use the same refresh path before queries, so
-embedded tools can keep one project open and still see saved changes.
-Reduced-open SDK projects, such as literal or path-filtered query opens,
-keep their declared file scope stable by default.
+When both endpoints are known, request the exact corridor:
 
-For CI or scripts:
+```bash
+./target/release/bonsai-ninja path ./src \
+  --from handle_request --to verify_token \
+  --context 16k --no-color --no-progress
+```
+
+Use qualified `Owner.member` selectors when short method names collide.
+
+## Run a security scan
+
+The production profile selects remote input, high-severity findings, and
+common non-production path exclusions from rulepack metadata:
 
 ```bash
 ./target/release/bonsai-ninja security ./src taint-analysis \
   --profile production \
-  --rules-dir ./security-patterns \
-  --format json \
-  --all \
+  --context 16k \
   --no-color \
   --no-progress
 ```
 
-## Read A Finding
-
-Each finding has a stable `S:` ID, a source rule, a sink rule, a status, a primary security `F:` flow ID, and a `G:` flow-group ID. The source and sink show exact file, line, function, and rule metadata. The flow block shows the call path and the tainted argument at each hop.
-
-<Tip>
-Security text reports render flow bodies by default. Use `--context` and `--page next` to walk larger reports without losing source code.
-</Tip>
+For a complete machine-readable artifact:
 
 ```bash
-./target/release/bonsai-ninja security ./src taint-analysis --flow F:0123456789abcdef
-./target/release/bonsai-ninja security ./src taint-analysis --group G:0123456789abcdef
-./target/release/bonsai-ninja show ./src F:0123456789abcdef
-./target/release/bonsai-ninja show ./src G:0123456789abcdef
+./target/release/bonsai-ninja security ./src taint-analysis \
+  --profile production \
+  --format json \
+  --all \
+  --output-path bonsai-findings.json \
+  --no-color \
+  --no-progress
 ```
 
-Use `inspect --flow F:...` / `inspect --group G:...` for structural
-inspect IDs printed by `inspect`, `defs`, `refs`, and other
-code-navigation commands. Security finding flow/group IDs are taint-path
-IDs; reopen them with `show F:...` / `show G:...` or
-`security taint-analysis --flow F:...` / `--group G:...`.
+Check `analysis_complete` and `analysis_incomplete_reasons` before treating an
+empty result as evidence that no path exists. `--all` removes output paging;
+it does not change semantic analysis.
 
-For code-navigation queries, `inspect` is rulepack-free by default: it
-shows indexed syntax facts and source excerpts that contain the query.
-Add `--taint-flow` to request raw
-taint paths for large result sets, or `--graph-flow` to request structural
-source-body evidence for large result sets that would otherwise render
-syntax/index facts only. These flags change output scope, not analysis
-accuracy.
+Use SARIF for code-scanning platforms:
+
+```bash
+./target/release/bonsai-ninja security ./src taint-analysis \
+  --profile production \
+  --format sarif \
+  --all \
+  --output-path bonsai.sarif.json \
+  --no-color \
+  --no-progress
+```
+
+## Read a finding
+
+A security finding includes:
+
+- `S:` stable finding ID;
+- source rule and exact source location;
+- sink rule and exact sink location;
+- `F:` representative taint-path ID;
+- `G:` finding-group ID;
+- tainted argument and propagation steps;
+- sanitizer or taint-transform evidence;
+- precision and completeness metadata.
+
+Reopen evidence with:
+
+```bash
+./target/release/bonsai-ninja show ./src S:<id> \
+  --context 16k --no-color --no-progress
+./target/release/bonsai-ninja security ./src taint-analysis --flow F:<id> \
+  --context 16k --no-color --no-progress
+./target/release/bonsai-ninja security ./src taint-analysis --group G:<id> \
+  --context 16k --no-color --no-progress
+```
+
+`inspect` is rulepack-free by default. Add `--graph-flow` for structural
+source-body paths or `--taint-flow` for raw taint-engine paths. Those flags
+change requested output scope, not accuracy.
+
+## Next steps
+
+- [Concepts](concepts.mdx)
+- [CLI Reference](cli-reference.mdx)
+- [Triage Workflow](triage-workflow.mdx)
+- [Output Formats](output-formats.mdx)
+- [Configuration](configuration.mdx)

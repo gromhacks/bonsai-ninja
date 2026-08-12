@@ -469,7 +469,7 @@ lookup instead of a fresh propagation pass.
   write-through status.
 - **`Workspace::cached_resolved_call_graph()`** — singleton
   `Arc<ResolvedCallGraph>` shared across `inspect`, `security`,
-  `dump callgraph`, the `DataFlowCache`, and the `FlowIdCache`. The
+  `dump-callgraph`, the `DataFlowCache`, and the `FlowIdCache`. The
   data caches receive it via `seed_call_graph(arc)` when a query or
   explicit prewarm path has built it so they don't rebuild identical
   content. Security's serial planner passes its exact graph by immutable
@@ -483,7 +483,7 @@ invalidates each one when a file edit lands.
 
 ## Resolver semantics and precision
 
-`resolve_callable_with_context` (`crates/resolve/src/lib.rs:124`)
+`resolve_callable_with_context` (`crates/resolve/src/lib.rs`)
 is the single semantic entry point. It applies, in order:
 
 1. `Visibility::Private` filter — keep only same-file decls.
