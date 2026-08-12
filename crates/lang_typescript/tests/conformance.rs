@@ -13,6 +13,53 @@ fn conformance_traced() {
 }
 
 #[test]
+fn assigned_object_methods_share_receiver_identity() {
+    use bonsai_common::FuncId;
+    use bonsai_lang_api::{DeclKind, FlowEvent, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "app.ts",
+            "const app: Record<string, unknown> = {};\n\
+             app.init = function init(): void { this.configure(); };\n\
+             app.configure = function configure(): void {};\n",
+        )],
+    );
+    let global = ws.db().global_index();
+    let owner = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "app" && decl.kind == DeclKind::Struct)
+        .expect("assigned TypeScript method family owner");
+    let init = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "init")
+        .expect("assigned init method");
+    let configure = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "configure")
+        .expect("assigned configure method");
+    assert_eq!(init.parent, Some(owner.symbol));
+    assert_eq!(configure.parent, Some(owner.symbol));
+    assert!(init.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Call { name, receiver_types, .. }
+            if name == "this.configure" && receiver_types.iter().any(|ty| ty == "app")
+    )));
+    let graph = ws.resolved_call_graph();
+    assert!(
+        graph
+            .callees_of(FuncId::new(init.symbol.raw()))
+            .any(|edge| edge.to == FuncId::new(configure.symbol.raw())),
+        "TypeScript should reuse the ECMAScript object-method ownership model"
+    );
+}
+
+#[test]
 fn lowercase_declared_and_cast_types_remain_receiver_evidence() {
     use bonsai_lang_api::{FlowEvent, LanguageAdapter};
 

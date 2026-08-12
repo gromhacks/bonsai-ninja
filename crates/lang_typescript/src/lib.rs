@@ -57,9 +57,10 @@ const TYPESCRIPT_VOCAB: ModifierVocabulary = ModifierVocabulary {
     default_visibility: Visibility::Public,
 };
 use bonsai_lang_javascript::{
-    apply_javascript_getter_property_sources, apply_js_ts_commonjs_named_export_aliases,
-    apply_js_ts_default_export_aliases, extract_ecmascript_pseudo_call, js_ts_imports, js_ts_module_segments,
-    js_ts_require_calls, populate_ecmascript_compiler_facts, JS_TS_MODULE_RESOLUTION_EXTENSIONS,
+    apply_ecmascript_assigned_member_callable_owners, apply_javascript_getter_property_sources,
+    apply_js_ts_commonjs_named_export_aliases, apply_js_ts_default_export_aliases,
+    extract_ecmascript_pseudo_call, js_ts_imports, js_ts_module_segments, js_ts_require_calls,
+    populate_ecmascript_compiler_facts, JS_TS_MODULE_RESOLUTION_EXTENSIONS,
 };
 use tree_sitter::{Language, Tree};
 
@@ -280,6 +281,7 @@ impl LanguageAdapter for TypeScriptAdapter {
             let src = snapshot.text.as_bytes();
             populate_ecmascript_compiler_facts(&mut decl_index, &tree, file, src);
             populate_typescript_readonly_instance_literals(&mut decl_index, &tree, file, src);
+            apply_ecmascript_assigned_member_callable_owners(&mut decl_index, &tree, file, src);
             apply_js_ts_commonjs_named_export_aliases(&mut decl_index, &tree, src, file);
         }
         // TS/JS module = workspace-relative file path with `.ts`/`.tsx` (etc.) stripped.

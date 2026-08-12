@@ -3294,6 +3294,9 @@ fn lower_local_closure_captures(defs: &mut [crate::Decl]) {
     let mut planned_callable_spans = ahash::AHashSet::new();
     for lambda_index in 0..defs.len() {
         let lambda = &defs[lambda_index];
+        if lambda.kind != crate::DeclKind::Function {
+            continue;
+        }
         let lambda_width = lambda.span.end.saturating_sub(lambda.span.start);
         let caller_index = defs
             .iter()
@@ -5576,7 +5579,11 @@ fn lower_lambda_declarations(lowering: &CallableLowering<'_>, defs: &mut Vec<cra
             );
         }
         annotate_tuple_call_result_bindings(&mut flow_events, lowering.tree, lowering.src, lowering.handler);
-        if params.is_empty() && flow_events.is_empty() {
+        // A named/bound empty callable is still a real compiler symbol. It
+        // can be the target of an exact call edge (and may gain a body after
+        // an incremental edit), so only discard a truly anonymous empty
+        // callable that has no stable syntax identity.
+        if binding_name.is_none() && params.is_empty() && flow_events.is_empty() {
             continue;
         }
         let symbol = bonsai_common::SymbolId::new(*next);

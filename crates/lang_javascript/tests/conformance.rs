@@ -9,6 +9,81 @@ fn conformance_traced() {
 }
 
 #[test]
+fn assigned_object_methods_resolve_implicit_receiver_calls() {
+    use bonsai_common::FuncId;
+    use bonsai_lang_api::{DeclKind, FlowEvent, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "app.js",
+            "const app = {};\n\
+             app.init = function init() { this.configure(); };\n\
+             app.configure = function configure() {};\n\
+             app.arrow = () => this.configure();\n\
+             app.publicName = function privateName() { privateName(); };\n",
+        )],
+    );
+    let global = ws.db().global_index();
+    let owner = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "app" && decl.kind == DeclKind::Struct)
+        .expect("static object method family should have a structural owner");
+    let init = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "init")
+        .expect("assigned init method");
+    let configure = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "configure")
+        .expect("assigned configure method");
+
+    assert_eq!(init.kind, DeclKind::Method);
+    assert_eq!(configure.kind, DeclKind::Method);
+    assert_eq!(init.parent, Some(owner.symbol));
+    assert_eq!(configure.parent, Some(owner.symbol));
+    assert!(init.implicit_receiver_names.iter().any(|name| name == "this"));
+    assert!(init.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Call { name, receiver_types, .. }
+            if name == "this.configure" && receiver_types.iter().any(|ty| ty == "app")
+    )));
+
+    let graph = ws.resolved_call_graph();
+    assert!(
+        graph
+            .callees_of(FuncId::new(init.symbol.raw()))
+            .any(|edge| edge.to == FuncId::new(configure.symbol.raw())),
+        "AST-owned object methods should resolve this.configure()"
+    );
+
+    let arrow = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "app.arrow")
+        .expect("assigned arrow");
+    assert_ne!(
+        arrow.kind,
+        DeclKind::Method,
+        "arrows must keep lexical-this semantics"
+    );
+    let private_name = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "privateName")
+        .expect("named function expression");
+    assert_ne!(
+        private_name.kind,
+        DeclKind::Method,
+        "a differing inner function name must fail closed until alias identity is explicit"
+    );
+}
+
+#[test]
 fn typeof_rejection_guard_is_typed_condition_ir() {
     use bonsai_lang_api::{ConditionExpressionFact, LanguageAdapter};
 
