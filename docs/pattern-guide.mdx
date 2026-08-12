@@ -781,7 +781,7 @@ shape:
   cwe: [CWE-22, CWE-434]
 ```
 
-Aliases count as coverage in `security pack --audit`, so a path write rule
+Aliases count as coverage in `security <workspace> pack --audit`, so a path write rule
 that also covers a client-supplied upload filename can satisfy both `path`
 and `file_upload` audit cells. Keep the primary `id` in the file that owns
 the canonical match shape, and keep the alias only when it preserves a real
@@ -849,7 +849,13 @@ SARIF tag selection.
 
 ## Validation tips
 
-Run `bonsai-ninja security pack --validate path/` to lint a rulepack
-locally. Add `--audit` for the coverage matrix. The validator catches
-missing examples, broken `subsumed_by` chains, severity/CWE typos, and
-match shapes that wouldn't fire on their own examples.
+Use a workspace argument even when the command only inspects rule data:
+
+```bash
+bonsai-ninja security . pack --validate --rules-dir path/
+bonsai-ninja security . pack --audit --rules-dir path/
+```
+
+The validator catches missing examples, broken `subsumed_by` chains,
+severity/CWE typos, and match shapes that would not fire on their own
+examples. Audit mode adds the coverage matrix.

@@ -509,8 +509,8 @@ routes live in `alternate_flows`.
 
 ## Validation
 
-`bonsai-ninja security pack --validate <path>` lints a rulepack locally
-without running analysis. Catches:
+`bonsai-ninja security . pack --validate --rules-dir <path>` lints a rulepack
+locally without scanning a workspace. It catches:
 
 - missing `match_examples`,
 - examples that wouldn't fire on their own canonical shape,
@@ -518,4 +518,5 @@ without running analysis. Catches:
 - severity / CWE typos,
 - match shapes incompatible with the language's adapter capabilities.
 
-`security pack --audit` adds the coverage matrix.
+`bonsai-ninja security . pack --audit --rules-dir <path>` adds the coverage
+matrix.

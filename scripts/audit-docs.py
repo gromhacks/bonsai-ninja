@@ -150,6 +150,26 @@ def check_retired_surface() -> list[str]:
     return failures
 
 
+def check_command_examples() -> list[str]:
+    """Reject known-invalid public command shapes.
+
+    Security always takes a workspace before its nested action. Keeping this
+    small grammar check in the docs-only job catches copy/paste drift without
+    requiring a release binary in that job.
+    """
+
+    failures: list[str] = []
+    invalid_security_pack = re.compile(r"\bbonsai-ninja\s+security\s+pack\b")
+    for path in active_docs() + [REPO / "README.md", REPO / "AGENTS.md", REPO / "SKILLS.md"]:
+        for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+            if invalid_security_pack.search(line):
+                failures.append(
+                    f"{path.relative_to(REPO)}:{line_number}: `security` requires "
+                    "`<workspace>` before `pack`"
+                )
+    return failures
+
+
 def check_markdown_structure(files: list[Path]) -> list[str]:
     failures: list[str] = []
     for path in files:
@@ -239,6 +259,7 @@ def main() -> int:
         check_links(files)
         + check_navigation()
         + check_retired_surface()
+        + check_command_examples()
         + check_markdown_structure(files)
         + check_measurement_ownership()
         + check_language_counts()

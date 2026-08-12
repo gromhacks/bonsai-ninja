@@ -6,7 +6,7 @@ not duplicate dated performance history.
 
 ## Status
 
-Validated on 2026-08-11. Local `main` has no known failing release gate.
+Validated on 2026-08-12. Local `main` has no known failing release gate.
 Publishing still requires the tag workflow because signing, packaging, and
 platform-specific execution happen there.
 
@@ -42,7 +42,7 @@ The final local pass completed these checks with zero failures:
 | Shared production clone audit | 0 clones at the configured threshold |
 | Dependency advisories, unused edges, and SPDX policy | Passed |
 | Documentation structure, links, navigation, and skill copies | Passed |
-| Build-artifact size gate | 29.84 GiB / 32 GiB limit |
+| Build-artifact size gate | 30.16 GiB / 32 GiB limit |
 
 The rulepack replay command was:
 
@@ -97,8 +97,8 @@ A cold production-profile security scan of this repository completed with:
 | `analysis_complete` | `true` |
 | Incomplete reasons | 0 |
 | Findings at the production threshold | 0 |
-| Wall time | 1.62 s |
-| Maximum RSS | 737,853,440 bytes (about 703.7 MiB) |
+| Wall time | 1.68 s |
+| Maximum RSS | 737,165,312 bytes (about 703.0 MiB) |
 | Swaps | 0 |
 | Scheduling budget | 3,072 MiB |
 
@@ -122,30 +122,31 @@ repository contains no defect.
 ## Large-workspace scale gate
 
 The required release test uses the sibling 30,055-source Elasticsearch
-checkout pinned by the release workflow at `e9741368da0`. The final run passed
-all 5 scenarios in 232.90 seconds under the 3 GiB scheduler.
+checkout pinned by the release workflow at `e9741368da0`. The final run began
+from an empty analysis cache and passed all 5 scenarios in 1,786.93 seconds
+under the 3 GiB scheduler.
 
 | Operation | Time | Enforced SLO |
 |---|---:|---:|
-| Semantic generation | 12.01 s | completion required |
-| Fresh-process semantic reuse | 2.47 s | 15 s |
-| Default inspect | 7.25 s | 30 s |
-| Exact raw-taint inspect | 26.74 s | 30 s |
-| Fresh-cache production taint | 30.54 s | 45 s |
-| Warm production taint | 28.12 s | 30 s |
+| Cold semantic generation | 1,576.62 s | completion required |
+| Fresh-process semantic reuse | 2.37 s | 15 s |
+| Default inspect | 7.01 s | 30 s |
+| Exact raw-taint inspect | 24.43 s | 30 s |
+| Fresh-cache production taint | 29.38 s | 45 s |
+| Warm production taint | 25.37 s | 30 s |
 | `tree --max-depth 1` | 0.02 s | 30 s |
-| Search | 3.84 s | 30 s |
-| Definitions | 13.46 s | 30 s |
-| Imports | 7.32 s | 30 s |
-| Classes | 7.83 s | 30 s |
-| Entry points | 27.35 s | 30 s |
-| Calls | 3.59 s | 30 s |
-| Arguments | 3.67 s | 30 s |
-| Scoped `read-file` | 1.37 s | 30 s |
-| Source inventory | 3.67 s | 30 s |
-| High-severity sink inventory | 23.96 s | 30 s |
-| Sanitizer inventory | 20.09 s | 30 s |
-| Dependency inventory | 9.57 s | 30 s |
+| Search | 3.87 s | 30 s |
+| Definitions | 13.04 s | 30 s |
+| Imports | 6.97 s | 30 s |
+| Classes | 7.52 s | 30 s |
+| Entry points | 25.72 s | 30 s |
+| Calls | 3.54 s | 30 s |
+| Arguments | 3.39 s | 30 s |
+| Scoped `read-file` | 1.62 s | 30 s |
+| Source inventory | 3.82 s | 30 s |
+| High-severity sink inventory | 22.40 s | 30 s |
+| Sanitizer inventory | 18.98 s | 30 s |
+| Dependency inventory | 10.82 s | 30 s |
 
 Command:
 
@@ -161,6 +162,15 @@ The test waits for every command to finish before evaluating latency and
 completeness. It never uses a timeout to turn incomplete work into a pass.
 Memory scheduling may serialize workers, but the test does not cap files,
 rules, graph edges, closure steps, paths, or findings.
+
+The cold semantic row is a deliberate one-time frontend-ABI migration, not a
+normal command startup cost. It rebuilt exact compiler objects, linkage,
+callgraph, retrieval, and IDG sidecars for all 30,055 sources after the cache
+was explicitly cleared. The resulting cache is 7,113,741,889 bytes (about
+6.62 GiB), including an 888,832,952-byte compiler-object store (about
+847.66 MiB). Ordinary commands compute exact requested facts on demand; users
+only pay this full prewarm when they explicitly run `index --semantic`. A
+fresh process reused the completed semantic generation in 2.37 seconds.
 
 ## Output and packaging gates
 
