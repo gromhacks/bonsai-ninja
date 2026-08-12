@@ -211,7 +211,7 @@
   - name: fast xml parser processes tainted entities
     code: "const { XMLParser } = require(\"fast-xml-parser\");\nconst parser = new XMLParser({ processEntities: true });\nfunction parse(xml) {\n  return parser.parse(xml);\n}\n"
     expect_match_text:
-    - parser.parse
+    - XMLParser
   - name: fast xml parser entities disabled negative
     code: |
       const { XMLParser } = require("fast-xml-parser");
