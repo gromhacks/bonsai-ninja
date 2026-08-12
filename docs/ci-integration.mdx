@@ -1,239 +1,54 @@
 ---
 title: "CI Integration"
-description: "Run bonsai-ninja in GitHub Actions, GitLab CI, and CircleCI."
+description: "Run bonsai-ninja in CI, publish machine-readable findings, and preserve exact analysis semantics."
 ---
 
 # CI Integration
 
-Use release binaries or a cached Rust build. In CI, pass `--no-color --no-progress` for clean logs and `--format json` or `--format sarif` for artifacts. Run `index` first when you want to validate syntax/construct indexing before later commands; scan commands also open the workspace and compute any missing exact scope on demand. Use `index --semantic` only for workflows that intentionally warm the immutable compiler-object generation plus structural semantic sidecars up front. Unchanged compiler objects are content-addressed and reused across CI cache restores after exact validation. `index --prewarm-dataflow` materializes the compatibility dataflow projection for older SDK/query consumers; it does not select another taint engine.
+Use a release binary or a cached release build. For automation, pass
+`--no-color --no-progress` and write JSON or SARIF through `--output-path`.
+Findings are report data: a successful scan exits zero even when findings are
+present. Apply repository policy in a separate step.
 
-The compiler frontends and sparse IDG closure use the same semantics in
-interactive, CI, SDK, and export modes. Semantic taint analysis has no BFS
-depth, iteration, or result cap. `--all` controls artifact pagination; omitting
-it can produce a valid first page but must not be treated as review of every
-finding.
+## Recommended workflow
 
-Large-project speed depends on three pinned compiler ownership rules:
-compiler-object import/syntax headers must filter before body decode; every
-consumer must share the workspace's canonical resolved callgraph; and
-external-memory IDG acceleration must allocate lazily on promotion/spill.
-Architecture conformance rejects violations before the timed gate is run.
-Flow-ID/export code must reuse the live compiler linkage header and canonical
-callgraph instead of calling `global_index()`, and export must serialize/drop
-callgraph and exact-body phases before opening the IDG. Native export has no
-capped/BFS path-prefix mode: the resolved callgraph is always the exact
-linear-space path-language representation.
-
-## Workspace test build performance
-
-`[profile.test] debug = 0` is intentional. The repository has hundreds of
-standalone integration-test executables, and each large security/CLI test
-links the complete 20-language analysis graph. Embedding full DWARF made a
-cold `cargo test --workspace --locked` spend tens of minutes linking and
-triggered repeated macOS policy scans without improving test semantics. Do not
-remove this profile setting as routine cleanup. For an intentional debugger
-session, opt in locally:
+For one scan, the security command can open the workspace and compute its
+requested exact scope directly:
 
 ```bash
-CARGO_PROFILE_TEST_DEBUG=2 cargo test -p <crate> <test-name>
+./target/release/bonsai-ninja security . taint-analysis \
+  --profile production \
+  --format sarif \
+  --all \
+  --output-path bonsai.sarif.json \
+  --no-color \
+  --no-progress
 ```
 
-CI correctness still uses `cargo test --workspace --locked`; production
-runtime and memory measurements always use the release binary.
+Run `index .` first when you also want an explicit syntax/diagnostic gate.
+Use `index . --semantic` only when several broad semantic commands in the same
+job will reuse its validated compiler-object and graph sidecars.
 
-## Large-workspace performance regression gate
+Persist the operating-system workspace cache between jobs only when the cache
+key includes source revision, lockfiles, the bonsai-ninja version, and the
+target platform. Sidecars are accelerators, not authority: the binary validates
+their source, adapter, ABI, dependency, and policy identities before reuse.
 
-Engine, cache, query, security, and export changes must run the real
-Elasticsearch gate after building release:
+## Completeness and paging
 
-```bash
-cargo build --release --locked -p bonsai_cli
-BONSAI_ELASTICSEARCH_ROOT=../elasticsearch \
-BONSAI_REQUIRE_ELASTICSEARCH_GATE=1 \
-BONSAI_MEMORY_BUDGET_MB=3072 \
-  cargo test --release --locked -p bonsai_cli \
-  --test elasticsearch_large_repo -- --nocapture
-```
+Semantic analysis has no BFS depth, iteration, file, or result cap.
+`--all` removes output paging; it does not change accuracy. If a CI job stores
+only a page, it must not claim exhaustive review.
 
-The test uses a 3 GiB compiler scheduling budget by default. It first allows a
-cold `index --semantic` to finish, then measures a second fresh-process warm
-reuse plus navigation, inspect, security inventory, and production taint
-commands. Every assertion is evaluated after the command exits and
-`analysis_complete` is checked, so an SLO failure cannot interrupt, skip, or
-truncate semantic work. The five top-level benchmark scenarios take a shared
-test lock: Rust's parallel test harness must not make a command's SLO depend on
-another benchmark command running at the same time. This serializes scenarios,
-not analyzer workers, and does not change the memory budget, semantic scope, or
-SLO.
+For JSON output, require:
 
-The inspect gate also protects phase residency and target planning: broad
-`inspect --taint-flow` must finish syntax discovery and release exact bodies
-before opening the IDG, batch-resolve matching AST spans, and reuse a sparse
-backward target-demand proof. Reintroducing one unrestricted closure per
-lexical hit is both a latency and peak-memory regression.
+- `analysis_complete: true`;
+- an empty `analysis_incomplete_reasons` list;
+- every source, sink, and path location to exist under the selected workspace;
+- deterministic stable IDs across an unchanged snapshot.
 
-Entry-rooted closures are scheduled from the measured non-reclaimable
-linkage/output reserve plus a bounded sparse frontier per worker. Do not size
-this phase from live RSS: the external-memory IDG's clean file-backed pages are
-reclaimable, and charging them as committed memory serializes identical work
-according to page-cache history. Conversely, do not introduce a worker floor
-that ignores the configured budget. Subject to CPU availability, the current
-resource-profile tests pin maximum concurrency of ten workers at 3 GiB, two
-at 2 GiB, and one at 1 GiB; all configurations run the same entries and fixed
-points.
-
-Raw-flow rendering is part of the same gate. Row-size costs are precomputed by
-the closure workers and reused by pagination; page planning must not serialize
-or rescan every flow. Only the requested raw-taint page is formatted and
-cached. Eagerly formatting future pages is unrelated work and is prohibited
-for this mode; the complete deterministic page/cursor stream remains
-available on demand.
-
-The same gate protects two warm-start complexity bounds. Dense IDG compiler
-headers remain fixed-width and buffered rather than being decoded through a
-generic row/object codec, and occurrence deduplication remains an exact hash
-identity operation rather than a scan of all previously emitted hits. These
-are representation and algorithm constraints only; neither permits a semantic
-cap, approximate equality, or skipped integrity validation.
-
-Default warm ceilings are 15 seconds for semantic index reuse and 30 seconds
-for each query/analysis command. Dedicated slower performance hosts can
-calibrate `BONSAI_ES_WARM_INDEX_MAX_SECS`,
-`BONSAI_ES_NAVIGATION_MAX_SECS`, `BONSAI_ES_INSPECT_MAX_SECS`,
-`BONSAI_ES_SECURITY_INVENTORY_MAX_SECS`, and
-`BONSAI_ES_TAINT_MAX_SECS`. Do not raise a repository baseline merely to make
-a regression pass: record the host, source-file count, cold/warm cache state,
-wall time, physical footprint/RSS, swaps, and completeness, then review the
-phase/allocation change.
-
-The final 2026-08-06 ABI-v62 reference pass completed all five tests in
-1,760.06 seconds, including the required one-time rebuild from the incompatible
-ABI-v61 generation. That explicit empty-cache `index --semantic` bulk prewarm
-took 1,541.88 seconds; normal commands do not force it. Immediate fresh-process
-reuse took 2.32 seconds, default inspect 10.33 seconds, broad raw-taint inspect
-29.58 seconds, fresh-cache production taint 30.22 seconds, and warm production
-taint 25.90 seconds. Source, sink, sanitizer, and dependency inventories took
-3.85, 22.63, 18.32, and 10.42 seconds respectively. Compiler lowering
-remained near 1 GiB RSS, released its bodies before IDG replay, and the IDG
-worker remained below the 3 GiB scheduling budget.
-
-A 2026-08-07 final warm-generation repeat passed all five tests in 234.09
-seconds without changing those limits: immediate semantic reuse took 2.48
-seconds, default inspect 10.02 seconds, broad raw-taint inspect 29.53 seconds,
-fresh-cache production taint 34.28 seconds, and warm production taint 27.74
-seconds. The broad inspect result retained all 12,233 entry closures and
-198,025 unique pageable paths; compiler-owned declaration targets and direct
-target ownership now avoid redundant header/relevance lookups without changing
-the IDG fixed point.
-
-The current 2026-08-11 ABI-v84 release pass completed all five tests in
-225.16 seconds under the enforced 3 GiB scheduler. The one-time migration gate
-that published the exact generation took 1,802.20 seconds, while subsequent
-semantic readiness and immediate fresh-process reuse took 5.20/2.36 seconds.
-The warm test pass measured default/exact raw-taint inspect at 7.50/26.31
-seconds, fresh-cache/warm production taint at 31.12/26.66 seconds, and
-source/sink/sanitizer/dependency inventory at 3.90/23.46/20.49/10.23 seconds.
-The sink matcher retained byte-identical
-output while demand-projecting optional compiler-derived facts and running
-header/body work behind source-weighted memory permits. All query and
-inventory SLOs passed; the scheduler did not cap semantic work.
-
-The previous 2026-08-08 ABI-v68 migration pass passed all five tests in
-1,822.56 seconds. Its required one-time exact generation took 1,619.68 seconds
-and immediate reuse took 2.35 seconds. Default inspect took 6.76 seconds,
-broad raw-taint inspect 24.20 seconds, fresh-cache production taint 29.51
-seconds, and warm production taint 25.42 seconds. The scoped `read-file` probe
-took 1.71 seconds. All navigation and security-inventory SLOs passed; the
-compiler worker stayed near 1.04 GiB RSS and the IDG worker near 2.67 GiB under
-the 3 GiB scheduling budget. This remains the prior cache-compatibility reference.
-
-The final 2026-08-09 ABI-v68 warm release-candidate repeat passed 5/5 in
-219.44 seconds. Semantic readiness/reuse took 5.29/2.38 seconds, default and
-exact broad raw-taint inspect 7.12/25.81 seconds, and fresh-cache/warm
-production taint 30.16/29.23 seconds. Every navigation and security inventory
-remained below its 30-second SLO without limiting semantic work.
-
-The 2026-08-07 ABI-v64 migration pass passed all five tests in 1,883.15
-seconds. Its required one-time exact generation took 1,672.82 seconds and
-immediate reuse took 2.34 seconds. Default inspect took 7.38 seconds, broad
-raw-taint inspect 27.11 seconds, fresh-cache production taint 29.89 seconds,
-and warm production taint 28.46 seconds. The scoped `read-file` probe took
-1.31 seconds. All navigation and security-inventory SLOs passed; compiler
-lowering stayed near 0.9 GiB RSS under the 3 GiB scheduling budget. ABI-v64
-also binds every callgraph and compatibility flow artifact to the compiler
-frontend ABI, preventing stale adapter IR from surviving an upgrade. This is
-the prior ABI-v64 cache-compatibility reference.
-
-The prior 2026-08-07 ABI-v63 migration pass also passed all five tests. Its required
-one-time exact generation took 1,720.68 seconds and immediate reuse took 2.34
-seconds. Default inspect took 10.35 seconds, broad raw-taint inspect 29.69
-seconds, fresh-cache production taint 34.30 seconds, and warm production taint
-29.85 seconds. The scoped `read-file` navigation probe took 1.62 seconds. The
-compiler worker remained near 1 GiB RSS and the IDG worker stayed within the 3
-GiB scheduling budget. The earlier migration runs remain useful historical
-comparisons.
-
-After the final shared parameter-fact refinement, a complete warm-generation
-repeat passed 5/5 in 220.51 seconds with the same limits. Immediate semantic
-validation/reuse took 5.11/2.34 seconds, default inspect 10.02 seconds, broad
-raw-taint inspect 28.53 seconds, fresh-cache production taint 30.44 seconds,
-warm production taint 27.47 seconds, and scoped `read-file` 1.33 seconds. This
-remains the pre-query-scheduler comparison; the migration timing above remains
-the cache-compatibility reference.
-
-The final 2026-08-07 release-candidate repeat passed 5/5 in 217.85 seconds
-under the same 3 GiB schedule. Exact occurrence hydration now uses
-source-size-weighted file batches and canonical-order fact application;
-Elasticsearch syntax hydration fell from about 5.2 seconds to 2.0 seconds
-without changing compiler facts or pagination. Immediate semantic validation
-and reuse took 5.15/2.41 seconds, default inspect 7.05 seconds, broad exact
-raw-taint inspect 25.71 seconds, fresh-cache production taint 31.59 seconds,
-warm production taint 27.00 seconds, and scoped `read-file` 1.54 seconds.
-Source, sink, sanitizer, and dependency inventories took 3.84, 23.01, 17.51,
-and 10.09 seconds. This remains the pre-ABI-v64 warm-generation comparison.
-
-The integration test deliberately does not write the multi-gigabyte native
-Elasticsearch artifact on every CI runner. Changes to native export, compiler
-summary closure, phase release, JSON streaming, or export caching must also run
-an artifact host gate:
-
-```bash
-BONSAI_MEMORY_BUDGET_MB=2048 MIMALLOC_PURGE_DELAY=0 \
-  ./target/release/bonsai-ninja export ../elasticsearch \
-  --format json \
-  --output-path /tmp/bonsai-es-export.json \
-  --no-color --no-progress
-jq --stream 'empty' /tmp/bonsai-es-export.json
-```
-
-Record bytes, wall time, physical footprint/RSS, dirty resident memory when
-available, swaps, and SHA-256. Confirm `flow_chains_mode`,
-`taint_graph.chains_mode`, and `taint_graph.flow_id_labels_mode` are all
-`compressed_callgraph`, every truncation counter is zero, and a one-shot cache
-miss did not create an `export.default.*` artifact in the workspace cache. Do not replace this gate with a
-timeout or reintroduce a materialized path-prefix option.
-
-## GitHub Release Artifacts
-
-Repository releases are built from `v*.*.*` tags by `.github/workflows/release.yml`. The workflow builds Linux x64, Linux arm64, macOS Intel, macOS Apple Silicon, Windows x64, and Windows arm64 archives, includes `security-patterns/`, `docs/`, `README.md`, `AGENTS.md`, `SKILLS.md`, and checksum files, then publishes them with `softprops/action-gh-release`.
-The installable `.agents/skills/bonsai-ninja/SKILL.md` package is included as
-well, so extracting a release preserves both human documentation and the
-agent-discoverable workflow.
-
-For source-build target checks outside that release artifact matrix, use
-`scripts/check-targets.sh`; see
-[Platform And Architecture Support](platform-support.mdx) for the parser
-bundle constraints that affect non-mainstream CPU architectures.
-
-```bash
-curl -L -o bonsai.tar.gz \
-  https://github.com/gromhacks/bonsai-ninja/releases/download/v0.1.0/bonsai-ninja-x86_64-unknown-linux-gnu.tar.gz
-curl -L -o bonsai.tar.gz.sha256 \
-  https://github.com/gromhacks/bonsai-ninja/releases/download/v0.1.0/bonsai-ninja-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c bonsai.tar.gz.sha256
-tar -xzf bonsai.tar.gz
-./bonsai-ninja-x86_64-unknown-linux-gnu/bonsai-ninja --version
-```
+Parser or resolver incompleteness is a valid static-analysis result, not a
+successful “no findings” verdict.
 
 ## GitHub Actions
 
@@ -254,24 +69,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release -p bonsai_cli --locked
-      - run: ./target/release/bonsai-ninja index . --no-color --no-progress
-      - run: |
+      - run: cargo build --release --locked -p bonsai_cli
+      - name: Run bonsai-ninja
+        run: |
           ./target/release/bonsai-ninja security . taint-analysis \
+            --profile production \
             --rules-dir security-patterns \
             --format sarif \
             --all \
+            --output-path bonsai.sarif.json \
             --no-color \
-            --no-progress \
-            --output-path bonsai.sarif.json
+            --no-progress
       - uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: bonsai.sarif.json
 ```
 
-<Note>
-GitHub SARIF upload requires `security-events: write`. For forked pull requests, upload permissions depend on repository settings.
-</Note>
+GitHub SARIF upload requires `security-events: write`. Forked pull requests
+may not receive that permission; retain the SARIF artifact even when upload is
+disabled by repository policy.
 
 ## GitLab CI
 
@@ -282,16 +98,16 @@ bonsai_security:
   image: rust:latest
   stage: security
   script:
-    - cargo build --release -p bonsai_cli --locked
-    - ./target/release/bonsai-ninja index . --no-color --no-progress
+    - cargo build --release --locked -p bonsai_cli
     - |
         ./target/release/bonsai-ninja security . taint-analysis \
+          --profile production \
           --rules-dir security-patterns \
           --format json \
           --all \
+          --output-path bonsai-findings.json \
           --no-color \
-          --no-progress \
-          --output-path bonsai-findings.json
+          --no-progress
   artifacts:
     when: always
     paths:
@@ -309,16 +125,16 @@ jobs:
       - image: cimg/rust:stable
     steps:
       - checkout
-      - run: cargo build --release -p bonsai_cli --locked
-      - run: ./target/release/bonsai-ninja index . --no-color --no-progress
+      - run: cargo build --release --locked -p bonsai_cli
       - run: |
           ./target/release/bonsai-ninja security . taint-analysis \
+            --profile production \
             --rules-dir security-patterns \
             --format json \
             --all \
+            --output-path bonsai-findings.json \
             --no-color \
-            --no-progress \
-            --output-path bonsai-findings.json
+            --no-progress
       - store_artifacts:
           path: bonsai-findings.json
 
@@ -328,12 +144,102 @@ workflows:
       - bonsai-security
 ```
 
-## Exit Codes
+## Failing a job on findings
 
-| Command outcome | Exit code | Notes |
-|---|---:|---|
-| Successful scan, findings or no findings | 0 | Findings are report data, not a process failure. |
-| Invalid flags, bad regex, missing workspace | Non-zero | Treat as CI failure. |
-| Rulepack validation failure | Non-zero | Fix schema, examples, or collisions. |
+The CLI distinguishes execution failure from policy failure. A scan with
+findings exits zero; malformed configuration, invalid flags, unavailable
+workspace input, or rulepack validation failures exit non-zero.
 
-Use a small wrapper if your policy requires failing builds when findings exist.
+Use the JSON or SARIF artifact to enforce policy after confirming the report is
+complete. For example, a wrapper can fail only on new unsanitized critical or
+high findings while allowing unchanged baseline findings.
+
+## Repository release checks
+
+This repository's tag workflow is `.github/workflows/release.yml`. It verifies
+version/tag provenance, runs cross-platform build and test jobs, executes
+documentation and rulepack audits, performs self-analysis, checks packaged
+output formats, and runs the pinned large-workspace gate before publishing.
+
+The workflow builds archives for:
+
+- Linux x64 and arm64;
+- macOS Intel and Apple Silicon;
+- Windows x64 and arm64.
+
+Archives include the binary, `security-patterns/`, human documentation,
+`AGENTS.md`, `SKILLS.md`, the installable agent skill, license information, and
+checksums. A relocated-package smoke proves that rule discovery does not rely
+on the source checkout.
+
+## Large-workspace regression gate
+
+Changes to compiler objects, adapters, resolver, callgraph, IDG, taint,
+security planning, query execution, caching, or export must run:
+
+```bash
+cargo build --release --locked -p bonsai_cli
+BONSAI_ELASTICSEARCH_ROOT=../elasticsearch \
+BONSAI_REQUIRE_ELASTICSEARCH_GATE=1 \
+BONSAI_MEMORY_BUDGET_MB=3072 \
+  cargo test --release --locked -p bonsai_cli \
+  --test elasticsearch_large_repo -- --nocapture
+```
+
+The gate checks semantic generation and reuse, lightweight navigation,
+inspect, rule inventories, and production taint. It evaluates latency only
+after each command completes and verifies completeness, so an SLO cannot hide
+truncated semantic work.
+
+The 3 GiB value schedules concurrency and cache retention. It is not a result
+budget or a promise that operating-system RSS will equal the configured value.
+Do not raise SLOs to make a regression pass. Record the source snapshot, file
+count, cold/warm state, wall time, memory, swaps, and completeness, then review
+the architecture change. Current measurements live only in
+[Release Readiness](RELEASE_READINESS.md).
+
+## Native export changes
+
+The regular large-workspace test does not write the multi-gigabyte native
+export on every runner. Changes to export serialization, compiled graph
+representation, phase release, or export caching also require an artifact-host
+check:
+
+```bash
+BONSAI_MEMORY_BUDGET_MB=2048 MIMALLOC_PURGE_DELAY=0 \
+  ./target/release/bonsai-ninja export ../elasticsearch \
+  --format json \
+  --output-path /tmp/bonsai-es-export.json \
+  --no-color \
+  --no-progress
+
+jq --stream 'empty' /tmp/bonsai-es-export.json
+shasum -a 256 /tmp/bonsai-es-export.json
+```
+
+Verify that native call/path relations remain `compressed_callgraph`, every
+truncation counter is zero, and a one-shot export does not publish a hidden
+reusable export cache. Record size, wall time, memory, swaps, completeness, and
+hash.
+
+## Test-build performance
+
+`[profile.test] debug = 0` is intentional. The workspace links many integration
+executables that include all language adapters. Full DWARF substantially
+increases link time and artifact size without changing test behavior. For a
+local debugger session, opt in explicitly:
+
+```bash
+CARGO_PROFILE_TEST_DEBUG=2 cargo test -p <crate> <test-name>
+```
+
+Production runtime measurements always use release binaries.
+
+## Exit codes
+
+| Outcome | Exit code |
+|---|---:|
+| Successful command, with or without findings | 0 |
+| Invalid arguments, regex, workspace, or output configuration | Non-zero |
+| Rulepack validation failure | Non-zero |
+| I/O or analysis execution failure | Non-zero |

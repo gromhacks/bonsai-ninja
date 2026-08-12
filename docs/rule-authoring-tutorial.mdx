@@ -19,7 +19,7 @@ This walkthrough creates a small Python command-injection rule set. The same str
 
 ## 1. Write Source
 
-### Rule YAML
+### Source rule YAML
 
 ```yaml
 - id: python.flask.request_args_get
@@ -44,7 +44,7 @@ This walkthrough creates a small Python command-injection rule set. The same str
   description: "Flask request.args.get(name) returns attacker-controlled query input."
 ```
 
-### Code that triggers it
+### Source example
 
 ```python
 from flask import request
@@ -56,7 +56,7 @@ def handler():
 
 ## 2. Write Sink
 
-### Rule YAML
+### Sink rule YAML
 
 ```yaml
 - id: python.cmdi.os_system
@@ -87,7 +87,7 @@ def handler():
   description: "os.system(command) executes through the shell; tainted arg 0 is command injection."
 ```
 
-### Code that triggers it
+### Sink example
 
 ```python
 import os
@@ -98,7 +98,7 @@ def run(cmd):
 
 ## 3. Write Sanitizer
 
-### Rule YAML
+### Sanitizer rule YAML
 
 ```yaml
 - id: python.sanitizer.shlex_quote
@@ -119,7 +119,7 @@ def run(cmd):
   description: "shlex.quote escapes a single shell token; review context before crediting it."
 ```
 
-### Code that triggers it
+### Sanitizer example
 
 ```python
 import shlex
@@ -130,7 +130,7 @@ def clean(value):
 
 ## 4. Add Constraint
 
-### Rule YAML
+### Constrained rule YAML
 
 ```yaml
 - id: python.cmdi.subprocess_shell_true
@@ -164,7 +164,7 @@ def clean(value):
   description: "subprocess.run(command, shell=True) interprets the command string through a shell."
 ```
 
-### Code that triggers it
+### Constrained example
 
 ```python
 import subprocess

@@ -12,27 +12,23 @@
         "pages": [
           "docs/index",
           "docs/getting-started",
-          "docs/platform-support",
-          "docs/RELEASE_READINESS"
+          "docs/language-support",
+          "docs/platform-support"
         ]
       },
       {
-        "group": "Concepts",
+        "group": "Using bonsai-ninja",
         "pages": [
           "docs/concepts",
-          "docs/language-support",
-          "docs/PER_LANGUAGE_DETECTION_AUDIT",
-          "docs/MEGA_FLOW_COVERAGE",
-          "docs/COVERAGE_BASELINE",
-          "docs/TAINT_COVERAGE_MATRIX"
+          "docs/cli-reference",
+          "docs/output-formats",
+          "docs/configuration",
+          "docs/triage-workflow",
+          "docs/faq"
         ]
       },
       {
-        "group": "CLI",
-        "pages": ["docs/cli-reference", "docs/output-formats"]
-      },
-      {
-        "group": "Writing Rules",
+        "group": "Security and rules",
         "pages": [
           "docs/rule-authoring-tutorial",
           "docs/pattern-guide",
@@ -44,15 +40,16 @@
       },
       {
         "group": "Integration",
-        "pages": ["docs/ci-integration", "docs/configuration"]
+        "pages": ["docs/ci-integration"]
       },
       {
-        "group": "Triage",
-        "pages": ["docs/triage-workflow"]
-      },
-      {
-        "group": "FAQ",
-        "pages": ["docs/faq"]
+        "group": "Validation",
+        "pages": [
+          "docs/RELEASE_READINESS",
+          "docs/MEGA_FLOW_COVERAGE",
+          "docs/COVERAGE_BASELINE",
+          "docs/TAINT_COVERAGE_MATRIX"
+        ]
       },
       {
         "group": "Contributing",

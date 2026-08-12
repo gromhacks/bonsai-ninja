@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject broken documentation links, navigation drift, and retired CLI flags."""
+"""Reject documentation structure, ownership, link, and surface drift."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 DOCS = REPO / "docs"
-ARCHIVES = {"goal.md", "goal-benchmark-2026-05-15.md"}
 LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*#*$")
 LANGUAGE_COUNT_RES = (
@@ -35,7 +34,7 @@ def active_docs() -> list[Path]:
     return sorted(
         path
         for path in DOCS.rglob("*")
-        if path.suffix in {".md", ".mdx"} and path.name not in ARCHIVES
+        if path.suffix in {".md", ".mdx"}
     )
 
 
@@ -135,12 +134,64 @@ def check_navigation() -> list[str]:
 
 def check_retired_surface() -> list[str]:
     failures: list[str] = []
+    retired_tokens = {
+        "--no-flows": "flow columns are opt-in with `--flows`",
+        "--findings": "security analysis is an explicit `security` command",
+        "goal-benchmark-2026-05-15.md": "historical engineering logs are not product documentation",
+        "docs/goal.md": "historical engineering logs are not product documentation",
+    }
     for path in active_docs() + [REPO / "README.md", REPO / "AGENTS.md", REPO / "SKILLS.md"]:
         for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
-            if "--no-flows" in line:
+            for token, replacement in retired_tokens.items():
+                if token in line:
+                    failures.append(
+                        f"{path.relative_to(REPO)}:{line_number}: retired `{token}`; {replacement}"
+                    )
+    return failures
+
+
+def check_markdown_structure(files: list[Path]) -> list[str]:
+    failures: list[str] = []
+    for path in files:
+        relative = path.relative_to(REPO)
+        headings: dict[str, int] = {}
+        fence: tuple[str, int] | None = None
+        for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+            heading = HEADING_RE.match(line)
+            if heading:
+                slug = heading_slug(heading.group(1))
+                if slug in headings:
+                    failures.append(
+                        f"{relative}:{line_number}: duplicate heading anchor `#{slug}`; "
+                        f"first declared at line {headings[slug]}"
+                    )
+                else:
+                    headings[slug] = line_number
+
+            marker = re.match(r"^\s*(```+|~~~+)", line)
+            if marker:
+                kind = marker.group(1)[0]
+                if fence is None:
+                    fence = (kind, line_number)
+                elif fence[0] == kind:
+                    fence = None
+
+        if fence is not None:
+            failures.append(f"{relative}:{fence[1]}: unclosed Markdown code fence")
+    return failures
+
+
+def check_measurement_ownership() -> list[str]:
+    failures: list[str] = []
+    date_re = re.compile(r"\b20\d{2}-\d{2}-\d{2}\b")
+    for path in active_docs() + [REPO / "README.md"]:
+        if path.name == "RELEASE_READINESS.md":
+            continue
+        for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+            if date_re.search(line) or re.search(r"\bABI-v\d+\b", line):
                 failures.append(
-                    f"{path.relative_to(REPO)}:{line_number}: retired `--no-flows`; "
-                    "flow columns are opt-in with `--flows`"
+                    f"{path.relative_to(REPO)}:{line_number}: dated release evidence belongs in "
+                    "docs/RELEASE_READINESS.md"
                 )
     return failures
 
@@ -166,13 +217,32 @@ def check_language_counts() -> list[str]:
     return failures
 
 
+def check_workspace_counts() -> list[str]:
+    crate_count = len(list((REPO / "crates").glob("*/Cargo.toml")))
+    failures: list[str] = []
+    pattern = re.compile(r"\b(\d+)-crate Rust workspace\b", re.IGNORECASE)
+    for path in active_docs() + [REPO / "README.md", REPO / "AGENTS.md", REPO / "SKILLS.md"]:
+        for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+            for match in pattern.finditer(line):
+                documented = int(match.group(1))
+                if documented != crate_count:
+                    failures.append(
+                        f"{path.relative_to(REPO)}:{line_number}: documents {documented} crates, "
+                        f"workspace has {crate_count} crate manifests"
+                    )
+    return failures
+
+
 def main() -> int:
     files = documentation_files()
     failures = (
         check_links(files)
         + check_navigation()
         + check_retired_surface()
+        + check_markdown_structure(files)
+        + check_measurement_ownership()
         + check_language_counts()
+        + check_workspace_counts()
     )
     if failures:
         for failure in failures:

@@ -9,6 +9,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 CANONICAL = REPO / ".agents" / "skills" / "bonsai-ninja" / "SKILL.md"
 SKILL_COPIES = [
+    REPO / "SKILLS.md",
     REPO / ".claude" / "skills" / "bonsai-ninja" / "SKILL.md",
     REPO / ".cline" / "skills" / "bonsai-ninja" / "SKILL.md",
 ]

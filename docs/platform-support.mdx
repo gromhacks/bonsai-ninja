@@ -58,16 +58,7 @@ that every requested target has a usable `libstd`. Missing targets are reported
 together and the script exits without launching partial checks. This keeps a
 toolchain setup failure distinct from a bonsai-ninja compile failure.
 
-## Local Verification Note
-
-On the 2026-06-03 macOS/Homebrew Rust environment, the explicit host target check passed:
-
-```bash
-scripts/check-targets.sh --no-install aarch64-apple-darwin
-```
-
-Non-host target checks could not reach bonsai-ninja code on that machine
-because Homebrew Rust only had `aarch64-apple-darwin` std installed and
-`rustup` was not present to add more targets. The target preflight reports that
-condition before Cargo runs; install the listed target libraries before
-interpreting the command as a source-compatibility check.
+The preflight distinguishes a missing target standard library or linker from a
+bonsai-ninja compilation failure. Do not report an uninstalled cross target as
+an application portability defect; install the reported toolchain components
+and rerun the check.

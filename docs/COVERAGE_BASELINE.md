@@ -73,7 +73,7 @@ will leave unrecognized forms as diagnostic incompleteness.
 
 | Level | Internal evidence declaration | Effect on rules | When you'd see it |
 |---|---|---|---|
-| `Exact` | Construct has a closed static model. Findings may use `Precision::Exact`. | Rule fires whenever the static model proves a match. | Only set when an adapter has a closed-form analysis for this category (rare today; see [backlog](#backlog) below). |
+| `Exact` | Construct has a closed static model. Findings may use `Precision::Exact`. | Rule fires whenever the static model proves a match. | Set only when an adapter has a closed-form analysis for the category. |
 | `Partial` | Recognized forms produce semantic evidence; unrecognized forms are marked incomplete/unsupported. | Rule fires only when exact/narrowed semantic evidence exists. | The conservative default. Most cells. Means "the engine works here, with honest completion metadata." |
 | `Unsupported` | Construct has no static evidence model. | **Rules requiring this category are rejected at rulepack load time.** | A deliberate gate: prevents false-precision findings on shapes the engine would not analyze correctly. |
 | `n/a` | Construct doesn't exist in this language. | No rule could target it anyway. | E.g. macros in JS, exceptions in Rust, generics in Lua. |
@@ -219,8 +219,8 @@ A plain-English read of where each language stands today:
 - **JavaScript / TypeScript** - CommonJS + ES module analysis. The
   engine credits `module.exports = X` and `exports.X = …` to the
   module's public surface (the only languages that need this). Type
-  annotations populate `Decl.type_aliases`; flow-sensitive narrowing
-  isn't used by the matcher.
+  annotations populate `Decl.type_aliases`; compiler-emitted branch and
+  runtime-type facts support conservative narrowing for recognized forms.
 - **Lua** - Module-level resolution via `require` works; the
   metatable-based "method dispatch" is partially modeled (the common
   `obj:method()` shape resolves; metatable forwarding chains
@@ -258,25 +258,10 @@ language-id branches or token unions.
 invariants reject missing declarations, shared hardcoded source inventories,
 and adapter/core boundary violations.
 
-## Backlog
-
-Promotion candidates - places where an adapter could declare `Exact` once
-the matching static model and test coverage land:
-
-- **C# / Java / Kotlin:** `Exceptions -> Exact` (typed `throws` /
-  checked exceptions / `try-catch` chains are statically analysable
-  in ways Python/Ruby exception hierarchies aren't).
-- **JavaScript / TypeScript:** `Modules -> Exact` for ES module graphs
-  that aren't dynamic-import-shaped.
-- **Scala / Swift:** `Pattern matching -> Exact` (both have exhaustive-
-  by-default match expressions with compiler-validated totality).
-- **Rust:** scheduler happens-before precision once typed future-poll and
-  detachment summaries exist; executor API spellings must stay outside the
-  adapter and shared engine.
-
-Each promotion lands together with: (a) the adapter override
-declaration, (b) a per-language matrix test exercising the construct
-end-to-end, (c) re-blessing both snapshots.
+Capability promotions are derived from adapter implementation and executable
+tests, not maintained as a prose backlog. An intentional promotion lands with
+the adapter declaration, positive and negative conformance coverage, and both
+updated snapshots.
 
 ## How this doc stays honest
 

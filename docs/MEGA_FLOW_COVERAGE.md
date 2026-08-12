@@ -137,16 +137,9 @@ reliably follows. Representative coverage:
   dispatch, with-clause, try/rescue, structs.
 - **Erlang**  - list comprehensions, lists:foldl + anonymous-fun,
   pattern match on records, try/catch.
-## Adapter constraints we hit
 
-Not every construct survives the chain builder. Where an idiom breaks
-dispatch, the fixture uses the closest procedural equivalent:
-
-- **Perl / Lua** - OO via bless / metatables doesn't connect method
-  dispatch to decls. Both fall back to procedural storage.
-- **Rust**     - indirect function-pointer dispatch (`runner_fn p = f`)
-  is opaque; use direct calls.
-- **TypeScript** - a turbofish-style generic call (`persist<T>(…)`)
-  isn't followed; drop the explicit type argument.
-
-Patching those is an adapter-level fix, not a fixture change.
+These fixtures are dense regression programs, not a complete language
+specification. The executable taint matrix and adapter conformance suites own
+the broader positive and negative syntax contract; see
+[`TAINT_COVERAGE_MATRIX.md`](TAINT_COVERAGE_MATRIX.md) and
+[`language-support.mdx`](language-support.mdx).

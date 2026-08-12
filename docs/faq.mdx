@@ -44,7 +44,11 @@ semantic result.
 
 <Accordion title="Why did a sanitizer not remove the finding?">
 
-Sanitizers are evidence, not propagation blockers. The finding remains visible with `status` set from the sanitizer context so reviewers can decide whether the sanitizer is sufficient.
+Sanitizers do not alter the underlying reachability graph. The security layer
+attaches sanitizer evidence to the exact lineage and classifies the path.
+Sanitized paths are hidden from the default finding report; add
+`--show-sanitized` when auditing sanitizer coverage. Passthrough rules preserve
+taint and appear as `TAINT TRANSFORM`, never as sanitizer evidence.
 
 </Accordion>
 

@@ -286,24 +286,10 @@ class and verify each box.
       requests ancestry only for typed method candidates it can change, and
       reuses exact parser coverage in the completion audit. Unchecked files
       receive a Tree-sitter diagnostic pass only; declarations and flow bodies
-      are not lowered for `analysis_complete`. On the reference Elasticsearch
-      checkout, compare against the recorded final 2026-08-06 ABI-v62
-      fresh-cache baseline (30.22 s, 3 GiB scheduling budget) and investigate
-      material regressions
-      rather than loosening the gate. The same checkout's exhaustive
-      `security sinks --severity high --context 4k` baseline is 22.63 s process
-      wall time under the same budget. The 2026-08-07 final warm-generation
-      repeat completed fresh-cache taint in 34.28 s, warm taint in 27.74 s, and
-      broad raw-taint inspect in 29.53 s with all 12,233 entry closures retained.
-      The current ABI-v68 migration gate completed its one-time generation in
-      1,619.68 s, immediate reuse in 2.35 s, fresh-cache taint in 29.51 s,
-      warm taint in 25.42 s, broad raw-taint inspect in 24.20 s, and scoped
-      `read-file` in 1.71 s. The compiler/IDG workers peaked near 1.04/2.67
-      GiB respectively; every navigation and inventory SLO passed under the
-      3 GiB scheduling budget. The final 2026-08-09 ABI-v68 warm candidate
-      repeated the complete gate in 219.44 s: semantic readiness/reuse
-      5.29/2.38 s, fresh/warm taint 30.16/29.23 s, and default/broad inspect
-      7.12/25.81 s, with every command below its enforced SLO.
+      are not lowered merely to compute `analysis_complete`. Compare against
+      the current measurements in `docs/RELEASE_READINESS.md`, investigate
+      material regressions, and do not loosen an SLO without an intentional
+      architecture review.
 - [ ] **Large native export gate passes when relevant.** Export the complete
       sibling Elasticsearch checkout under a recorded scheduling budget,
       validate with `jq --stream`, and record bytes, wall time, physical
