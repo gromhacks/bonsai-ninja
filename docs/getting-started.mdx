@@ -14,14 +14,31 @@ cargo build --release --locked -p bonsai_cli
 ./target/release/bonsai-ninja --version
 ```
 
-### Install with Cargo
+### Install from source on macOS or Linux
 
-Use this for a local checkout or after the crate is published:
+The CLI needs the bundled `security-patterns/` directory for security
+commands. Build the native binary, install it beside that rulepack, and expose
+it through a launcher in `~/.local/bin`:
 
 ```bash
-cargo install --path crates/cli --locked
-bonsai-ninja --version
+cargo build --release --locked -p bonsai_cli
+
+PREFIX="${HOME}/.local"
+APP_HOME="${PREFIX}/lib/bonsai-ninja"
+mkdir -p "${APP_HOME}/security-patterns" "${PREFIX}/bin"
+install -m 755 target/release/bonsai-ninja "${APP_HOME}/bonsai-ninja"
+cp -R security-patterns/. "${APP_HOME}/security-patterns/"
+printf '%s\n' '#!/bin/sh' \
+  "exec \"${APP_HOME}/bonsai-ninja\" \"\$@\"" \
+  > "${PREFIX}/bin/bonsai-ninja"
+chmod 755 "${PREFIX}/bin/bonsai-ninja"
+
+"${PREFIX}/bin/bonsai-ninja" --version
 ```
+
+Add `~/.local/bin` to `PATH` if it is not already present. A launcher is used
+instead of a symbolic link because executable-sibling rulepack discovery must
+remain reliable across operating systems.
 
 ### Use a release archive
 
