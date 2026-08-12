@@ -131,8 +131,11 @@ Visible from the matrix above:
   inheritance.** JavaScript/TypeScript, Java/Kotlin/PHP/Python/Ruby/Rust,
   C#/Dart, and the tested `super`/`parent`/`base` receiver shapes have full
   support today; C++/ObjC/Scala/Swift remain partial.
-- **JavaScript / TypeScript receiver types are now populated for common
-  class shapes, but dynamic prototype mutation remains a precision gap.**
+- **JavaScript / TypeScript receiver types cover common classes and direct
+  static object/prototype method assignments.** Tree-sitter must prove the
+  owner, property, and function-expression RHS before an assigned method joins
+  a receiver family. Computed members, lexical-`this` arrows, and dynamic
+  prototype mutation remain explicit precision gaps.
 
 ## How this matrix is gated
 

@@ -277,6 +277,15 @@ exact, serializable summaries to `DeclIndex`:
   nodes. The fact records syntax only; rule data decides whether a callback
   position receives untrusted input.
 
+Adapters may also promote a function expression assigned to a statically
+named object/prototype member into `DeclKind::Method` under one structural
+owner when the CST proves the complete owner path, property, and callable
+RHS. The promoted declaration carries the language's implicit receiver so
+ordinary receiver typing resolves sibling calls. Dynamic/computed members,
+callable forms with different receiver semantics (such as ECMAScript arrows),
+and conflicting inner names must remain ordinary functions until another
+typed fact proves their identity.
+
 Provider-dependent facts record the canonical imported factory/operation call
 but do not classify it. `CharacterConstraintDomain::ProviderBound` and
 `SameOriginPathConstraintFact::provider_call` receive security credit only

@@ -221,6 +221,11 @@ A plain-English read of where each language stands today:
   module's public surface (the only languages that need this). Type
   annotations populate `Decl.type_aliases`; compiler-emitted branch and
   runtime-type facts support conservative narrowing for recognized forms.
+  Direct static assignments such as `app.init = function init() { ... }`
+  and `Type.prototype.run = function run() { ... }` share one AST-proven
+  structural receiver owner, so sibling `this.method()` calls resolve like
+  class methods. Computed members, arrows with lexical `this`, differing
+  inner names, and later dynamic prototype mutation fail closed.
 - **Lua** - Module-level resolution via `require` works; the
   metatable-based "method dispatch" is partially modeled (the common
   `obj:method()` shape resolves; metatable forwarding chains

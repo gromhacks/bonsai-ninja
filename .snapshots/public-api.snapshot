@@ -259,6 +259,7 @@ pub struct JavaAdapter;
 === lang_javascript ===
 pub const JS_TS_MODULE_RESOLUTION_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs"];
 pub const LANG_ID: LanguageId = LanguageId::new("javascript");
+pub fn apply_ecmascript_assigned_member_callable_owners(
 pub fn apply_javascript_getter_property_sources(
 pub fn apply_js_ts_commonjs_named_export_aliases(
 pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tree, src: &[u8], file: FileId) {

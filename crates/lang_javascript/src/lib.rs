@@ -284,6 +284,7 @@ impl LanguageAdapter for JavaScriptAdapter {
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
             populate_ecmascript_compiler_facts(&mut decl_index, &tree, file, src);
+            apply_ecmascript_assigned_member_callable_owners(&mut decl_index, &tree, file, src);
             apply_js_ts_commonjs_named_export_aliases(&mut decl_index, &tree, src, file);
         }
         // Module identity = workspace-relative path with the JS/TS extension stripped.
@@ -407,6 +408,209 @@ pub fn populate_ecmascript_compiler_facts(index: &mut DeclIndex, tree: &Tree, fi
         &HANDLER,
         ecmascript_static_scalar,
     );
+}
+
+/// Model classic ECMAScript object/prototype methods from their assignment
+/// syntax.
+///
+/// JavaScript libraries commonly declare a method family without `class`:
+///
+/// ```text
+/// app.init = function init() { this.configure(); };
+/// app.configure = function configure() {};
+/// ```
+///
+/// Tree-sitter proves the static member owner, member name, and callable RHS.
+/// Lower those declarations under one synthetic structural owner so the
+/// normal implicit-receiver/type pipeline can resolve `this.configure()`.
+/// Dynamic/computed members, arrows (whose `this` is lexical), and named
+/// function expressions whose inner name differs from the assigned property
+/// fail closed.
+pub fn apply_ecmascript_assigned_member_callable_owners(
+    index: &mut DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) {
+    #[derive(Debug)]
+    struct MemberCallable {
+        assignment_start: u64,
+        decl_index: usize,
+        owner: String,
+        owner_name: String,
+        owner_span: bonsai_common::Span,
+        property: String,
+    }
+
+    let mut members = Vec::new();
+    for assignment in collect_kinds(tree, &["assignment_expression"]) {
+        let (Some(left), Some(right)) = (
+            assignment.child_by_field_name("left"),
+            assignment.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        if !matches!(right.kind(), "function_expression" | "generator_function")
+            || left.kind() != "member_expression"
+        {
+            continue;
+        }
+        let left_text = node_text(&left, src);
+        if left_text.trim() == "module.exports" || commonjs_named_export_member(left_text).is_some() {
+            // CommonJS export members are module bindings, not object-method
+            // receiver families. The export-alias lowering below preserves
+            // their public names and links namespace `require` calls.
+            continue;
+        }
+        let (Some(object), Some(property_node)) = (
+            left.child_by_field_name("object"),
+            left.child_by_field_name("property"),
+        ) else {
+            continue;
+        };
+        let Some(owner) = ecmascript_static_member_owner(object, src) else {
+            continue;
+        };
+        if matches!(owner.as_str(), "this" | "super") {
+            continue;
+        }
+        let property = node_text(&property_node, src).trim();
+        if property.is_empty()
+            || !matches!(
+                property_node.kind(),
+                "identifier" | "property_identifier" | "private_property_identifier"
+            )
+        {
+            continue;
+        }
+        let callable_span = span_of(file, &right);
+        let Some(decl_index) = index.defs.iter().position(|decl| {
+            decl.span == callable_span && decl.parent.is_none() && matches!(decl.kind, DeclKind::Function)
+        }) else {
+            continue;
+        };
+        let declared_name = index.defs[decl_index].name.trim();
+        let assigned_name = format!("{owner}.{property}");
+        if declared_name != property && declared_name != assigned_name {
+            continue;
+        }
+        let owner_name = owner
+            .strip_suffix(".prototype")
+            .unwrap_or(owner.as_str())
+            .to_string();
+        members.push(MemberCallable {
+            assignment_start: u64::try_from(assignment.start_byte()).unwrap_or(u64::MAX),
+            decl_index,
+            owner,
+            owner_name,
+            owner_span: span_of(file, &object),
+            property: property.to_string(),
+        });
+    }
+    members.sort_by_key(|member| member.assignment_start);
+    members.dedup_by_key(|member| member.decl_index);
+    if members.is_empty() {
+        return;
+    }
+
+    let mut next_symbol = index
+        .defs
+        .iter()
+        .map(|decl| decl.symbol.raw())
+        .max()
+        .map_or(0, |symbol| symbol.saturating_add(1));
+    let mut owners = HashMap::<String, SymbolId>::new();
+    for member in &members {
+        if owners.contains_key(&member.owner) {
+            continue;
+        }
+        if let Some(symbol) = index
+            .defs
+            .iter()
+            .find(|decl| {
+                decl.name == member.owner_name
+                    && matches!(
+                        decl.kind,
+                        DeclKind::Class
+                            | DeclKind::Struct
+                            | DeclKind::Trait
+                            | DeclKind::Interface
+                            | DeclKind::Enum
+                    )
+            })
+            .map(|decl| decl.symbol)
+        {
+            owners.insert(member.owner.clone(), symbol);
+            continue;
+        }
+
+        let symbol = SymbolId::new(next_symbol);
+        next_symbol = next_symbol.saturating_add(1);
+        owners.insert(member.owner.clone(), symbol);
+        index.defs.push(bonsai_lang_api::Decl {
+            symbol,
+            kind: DeclKind::Struct,
+            name: member.owner_name.clone(),
+            qualified_name: None,
+            module_path: Default::default(),
+            span: member.owner_span,
+            name_span: member.owner_span,
+            visibility: Visibility::Public,
+            parent: None,
+            body_span: None,
+            flow_events: Vec::new(),
+            has_implicit_returns: false,
+            params: Vec::new(),
+            param_annotations: Vec::new(),
+            param_default_calls: Vec::new(),
+            type_aliases: Vec::new(),
+            bases: Vec::new(),
+            receiver_param_index: None,
+            receiver_field_writes: Vec::new(),
+            receiver_field_initializers: Vec::new(),
+            implicit_receiver_names: Vec::new(),
+            receiver_state_sources: Vec::new(),
+            return_type: None,
+            is_variadic: false,
+        });
+    }
+
+    for member in members {
+        let Some(owner) = owners.get(&member.owner).copied() else {
+            continue;
+        };
+        let decl = &mut index.defs[member.decl_index];
+        decl.kind = DeclKind::Method;
+        decl.name = member.property;
+        decl.qualified_name = None;
+        decl.parent = Some(owner);
+        if !decl.implicit_receiver_names.iter().any(|name| name == "this") {
+            decl.implicit_receiver_names.push("this".to_string());
+        }
+    }
+}
+
+fn ecmascript_static_member_owner(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" | "property_identifier" => {
+            let name = node_text(&node, src).trim();
+            (!name.is_empty()).then(|| name.to_string())
+        }
+        "member_expression" => {
+            let object = node.child_by_field_name("object")?;
+            let property = node.child_by_field_name("property")?;
+            if !matches!(
+                property.kind(),
+                "identifier" | "property_identifier" | "private_property_identifier"
+            ) {
+                return None;
+            }
+            let owner = ecmascript_static_member_owner(object, src)?;
+            let property = node_text(&property, src).trim();
+            (!property.is_empty()).then(|| format!("{owner}.{property}"))
+        }
+        _ => None,
+    }
 }
 
 /// Mark simple `const name = value` bindings as immutable compiler places.
