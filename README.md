@@ -99,11 +99,11 @@ workflows.
 # Map and search the repository.
 ./target/release/bonsai-ninja tree ./my-app --max-depth 3 \
   --context 16k --no-color --no-progress
-./target/release/bonsai-ninja search ./my-app verify_token \
+./target/release/bonsai-ninja search ./my-app --query verify_token \
   --context 8k --no-color --no-progress
 
 # Pivot from an anchor to compiler facts.
-./target/release/bonsai-ninja refs ./my-app verify_token \
+./target/release/bonsai-ninja refs ./my-app --symbol verify_token \
   --context 8k --no-color --no-progress
 ./target/release/bonsai-ninja calls ./my-app --callee verify_token \
   --context 8k --no-color --no-progress
@@ -111,7 +111,7 @@ workflows.
 # Follow behavior.
 ./target/release/bonsai-ninja inspect ./my-app --query verify_token \
   --context 16k --no-color --no-progress
-./target/release/bonsai-ninja trace ./my-app handle_request \
+./target/release/bonsai-ninja trace ./my-app --symbol handle_request \
   --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja path ./my-app \
   --from handle_request --to verify_token \
@@ -133,6 +133,13 @@ workflows.
 
 Run `./target/release/bonsai-ninja --help` and the relevant command's
 `--help` before relying on an unfamiliar option.
+
+Workspace paths are normal positional operands. Query-like values have named
+forms such as `--query`, `--symbol`, `--file`, `--from`, `--to`, and `--id`;
+prefer those in scripts and agent workflows. The concise positional selector
+forms remain available for interactive use, but passing both forms is an
+error instead of silently choosing one. Output files accept
+`-o`, `--output`, or the canonical `--output-path` spelling.
 
 ## Choose the smallest command
 

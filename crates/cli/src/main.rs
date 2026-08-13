@@ -46,7 +46,7 @@ use commands::{
     cmd_dump_ast, cmd_dump_callgraph, cmd_dump_cfg, cmd_dump_edges, cmd_dump_hir, cmd_dump_resolution,
     cmd_dump_resolve, cmd_dump_taint, cmd_entrypoints, cmd_export, cmd_imports, cmd_index, cmd_inspect,
     cmd_operations, cmd_path, cmd_refs, cmd_search, cmd_slice, cmd_strings, cmd_trace, cmd_vars,
-    paging_from_cli, paging_from_cli_output, resolve_symbol_arg, ArgsFilters, CallsFilters, ClassesFilters,
+    paging_from_cli, paging_from_cli_output, resolve_selector_arg, ArgsFilters, CallsFilters, ClassesFilters,
     CommentsFilters, DefsFilters, EntryPointsFilters, ImportsFilters, IndexCommandOptions,
     InspectCommandOptions, InspectFilters, InspectRenderOptions, OperationsFilters, PathCommandOptions,
     RefsFilters, SearchFilters, StringsFilters, VarsFilters,
@@ -484,6 +484,7 @@ fn real_main() -> Result<()> {
         ),
         Cmd::Show {
             workspace,
+            id_pos,
             id,
             query,
             in_file,
@@ -497,28 +498,31 @@ fn real_main() -> Result<()> {
             format,
             rules_dir,
             output: _,
-        } => commands::show::cmd_show(commands::show::ShowArgs {
-            workspace: &workspace,
-            id: &id,
-            query: query.as_deref(),
-            in_file: in_file.as_deref(),
-            taint_source: taint_source.as_deref(),
-            taint_seeds: &taint_seeds,
-            taint_sink: taint_sink.as_deref(),
-            compact,
-            context: context.as_deref(),
-            page: page.as_deref(),
-            all,
-            format,
-            rules_dir: rules_dir.as_deref(),
-        }),
+        } => {
+            let id = resolve_selector_arg(id_pos, id, "id")?;
+            commands::show::cmd_show(commands::show::ShowArgs {
+                workspace: &workspace,
+                id: &id,
+                query: query.as_deref(),
+                in_file: in_file.as_deref(),
+                taint_source: taint_source.as_deref(),
+                taint_seeds: &taint_seeds,
+                taint_sink: taint_sink.as_deref(),
+                compact,
+                context: context.as_deref(),
+                page: page.as_deref(),
+                all,
+                format,
+                rules_dir: rules_dir.as_deref(),
+            })
+        }
         Cmd::Diagnostics { workspace } => cmd_diagnostics(&workspace),
         Cmd::DumpHir {
             workspace,
             symbol_pos,
             symbol,
         } => {
-            let sym = resolve_symbol_arg(symbol_pos, symbol, "symbol")?;
+            let sym = resolve_selector_arg(symbol_pos, symbol, "symbol")?;
             cmd_dump_hir(&workspace, &sym)
         }
         Cmd::DumpCfg {
@@ -526,7 +530,7 @@ fn real_main() -> Result<()> {
             symbol_pos,
             symbol,
         } => {
-            let sym = resolve_symbol_arg(symbol_pos, symbol, "symbol")?;
+            let sym = resolve_selector_arg(symbol_pos, symbol, "symbol")?;
             cmd_dump_cfg(&workspace, &sym)
         }
         Cmd::DumpCallgraph {
@@ -599,7 +603,7 @@ fn real_main() -> Result<()> {
             format,
             output: _,
         } => {
-            // --function takes precedence over the positional symbol.
+            // Clap guarantees at most one function selector form.
             let function_scope = function.or(symbol_pos);
             let paging = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
             cmd_dump_ast(
@@ -624,7 +628,7 @@ fn real_main() -> Result<()> {
             format,
             output: _,
         } => {
-            // --name takes precedence over the positional name.
+            // Clap guarantees exactly one resolver-name form.
             let query_name = name.or(name_pos).ok_or_else(|| {
                 anyhow::anyhow!("dump-resolve needs a name to resolve (positional arg or --name)")
             })?;
@@ -969,7 +973,7 @@ fn real_main() -> Result<()> {
             format,
             output: _,
         } => {
-            let sym = resolve_symbol_arg(symbol_pos, symbol, "symbol")?;
+            let sym = resolve_selector_arg(symbol_pos, symbol, "symbol")?;
             let paging = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
             cmd_refs(
                 &workspace,
@@ -1001,7 +1005,7 @@ fn real_main() -> Result<()> {
             format,
             output: _,
         } => {
-            let q = resolve_symbol_arg(query_pos, query, "query")?;
+            let q = resolve_selector_arg(query_pos, query, "query")?;
             let paging = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
             cmd_search(
                 &workspace,
@@ -1041,8 +1045,7 @@ fn real_main() -> Result<()> {
             format,
             output: _,
         } => {
-            // Precedence: positional query, then `--query`.
-            // Query is OPTIONAL: when omitted, `--from` / `--to` /
+            // Query is optional: when omitted, `--from` / `--to` /
             // `--file` / `--in-fn` / `--kind` can act as standalone
             // filters that enumerate every decl + hit and narrow from
             // there. At least one signal must be present. `--flow
@@ -1136,6 +1139,7 @@ fn real_main() -> Result<()> {
         Cmd::ReadFile {
             workspace,
             path,
+            path_flag,
             symbol,
             lines,
             from,
@@ -1150,7 +1154,7 @@ fn real_main() -> Result<()> {
             output: _,
         } => commands::read_file::cmd_read_file(commands::read_file::ReadFileArgs {
             workspace: &workspace,
-            path: path.as_deref(),
+            path: path.as_deref().or(path_flag.as_deref()),
             symbol: symbol.as_deref(),
             lines: lines.as_deref(),
             from: from.as_deref(),

@@ -5,7 +5,7 @@ description: "Command and flag reference for security analysis, flow inspection,
 
 # CLI Reference
 
-Global options accepted before the command include `--no-color`,
+Global options accepted before or after the command include `--no-color`,
 `--theme`, `--no-cache`, `--no-progress`, `--html-output`, `--contains`,
 `--not-contains`, `--parse-timeout`, `--memory-budget`, `--debug`, `--help`,
 and `--version`. `--memory-budget <MIB>` controls exact compiler-work
@@ -14,6 +14,14 @@ fixed-point iterations, or results. `--debug <CATEGORIES>` emits selected
 diagnostic categories to stderr and is equivalent to `BONSAI_DEBUG`.
 `--theme` and `BONSAI_THEME` accept exactly `moss`, `earthy-dark`,
 `dracula`, or `retro-amber`; unknown values are errors.
+
+Workspace roots are positional operands. Query-like values have explicit
+forms—`--query`, `--symbol`, `--file`, `--from`, `--to`, and `--id`—which are
+preferred in scripts and agent workflows. Concise positional selector forms
+remain supported for interactive use. Supplying both forms is a parse error;
+the CLI never silently chooses one. File outputs accept the canonical
+`--output-path <PATH>` spelling plus the standard `-o <PATH>` and
+`--output <PATH>` aliases.
 
 Progress bars render to stderr only. Interactive commands show staged
 work such as workspace ingest/parse, reduced-workspace file selection,
@@ -44,7 +52,9 @@ opt out of the sidecar write-through.
 ## Help Layout
 
 `bonsai-ninja --help` is ordered for scanning: intro, `USAGE`,
-`COMMAND GROUPS`, `OPTIONS`, `EXAMPLES`, then `SEE ALSO`. Root help puts
+`COMMAND GROUPS`, `OPTIONS`, `EXAMPLES`, then `SEE ALSO`. Leaf help prints the
+full invocation path (including `security <WORKSPACE>` and `cache`) and groups
+inherited switches under `GLOBAL OPTIONS`. Root help puts
 the grouped command index before global options so users can find the
 right command first. All help section headings use uppercase casing
 (`USAGE`, `COMMAND GROUPS`, `OPTIONS`, `ARGUMENTS`, `COMMANDS`,
@@ -325,10 +335,10 @@ and `R:` use exactly 8. Malformed IDs fail immediately with the required
 shape.
 
 ```bash
-bonsai-ninja show ./src F:0123456789abcdef
-bonsai-ninja show ./src S:0123456789abcdef --rules-dir security-patterns
-bonsai-ninja show ./src R:aabbccdd --query execute
-bonsai-ninja show ./src T:aabbccdd --taint-source update_user --taint-seed token --taint-seed action
+bonsai-ninja show ./src --id F:0123456789abcdef
+bonsai-ninja show ./src --id S:0123456789abcdef --rules-dir security-patterns
+bonsai-ninja show ./src --id R:aabbccdd --query execute
+bonsai-ninja show ./src --id T:aabbccdd --taint-source update_user --taint-seed token --taint-seed action
 ```
 
 | Prefix | Owner view | Required context |
@@ -363,8 +373,8 @@ bonsai-ninja show ./src T:aabbccdd --taint-source update_user --taint-seed token
 `trace` expands a function's call tree and can bracket paths with `--from` and `--to`.
 
 ```bash
-bonsai-ninja trace ./src handle_request
-bonsai-ninja trace ./src Flask.__call__
+bonsai-ninja trace ./src --symbol handle_request
+bonsai-ninja trace ./src --symbol Flask.__call__
 bonsai-ninja trace ./src --from handle_request --to os.system --format dot --output-path flow.dot
 ```
 
@@ -372,7 +382,7 @@ bonsai-ninja trace ./src --from handle_request --to os.system --format dot --out
 |---|---:|---|
 | `<WORKSPACE>` | Required | Workspace root. |
 | `[TARGET]` | None | Positional function/symbol to trace. Accepts qualified `Owner.member` and exact `path:name` or `path:line:name` selectors. |
-| `--symbol <NAME>` | None | Function/symbol selector; takes precedence over the positional target. `--function` is a compatibility alias. |
+| `--symbol <NAME>` | None | Preferred function/symbol selector. The positional target remains supported, and `--function` is a compatibility alias; supplying more than one form is an error. |
 | `--from <TEXT>` | None | Restrict to flows starting at or passing through this selector. Qualified callable names are accepted. |
 | `--to <TEXT>` | None | Restrict to flows reaching this selector. Qualified callable names are accepted; requires `--from`. |
 | `--context <BUDGET>` | 32k | Token budget for text. |
@@ -604,8 +614,8 @@ whole-workspace resolved call graph.
 bonsai-ninja defs ./src --kind function
 bonsai-ninja calls ./src --callee os.system
 bonsai-ninja operations ./src --kind write --name token
-bonsai-ninja refs ./src verify_token
-bonsai-ninja search ./src "request.args"
+bonsai-ninja refs ./src --symbol verify_token
+bonsai-ninja search ./src --query "request.args"
 ```
 
 | Command | Purpose | Common filters |
@@ -656,13 +666,13 @@ corresponding options are requested.
 ```bash
 bonsai-ninja tree ./src --max-depth 3
 bonsai-ninja security ./src taint-analysis --severity high
-bonsai-ninja read-file ./src auth/verify_token.py --lines 1:80 --from request.args --to os.system
+bonsai-ninja read-file ./src --file auth/verify_token.py --lines 1:80 --from request.args --to os.system
 ```
 
 | Command | Purpose | Key flags |
 |---|---|---|
 | `tree` | Fast structural workspace tree with no compiler or security work. | `--max-depth`, `--file`, `--exclude-file`, `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
-| `read-file` | Lightweight file-local source/declaration view; findings and cross-file caller/callee bodies are explicit overlays. | `--symbol`, `--lines`, `--from`, `--to`, `--max-inlined-bodies`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--output-path`, `--rules-dir` |
+| `read-file` | Lightweight file-local source/declaration view; findings and cross-file caller/callee bodies are explicit overlays. | `--file`/`--path`, `--symbol`, `--lines`, `--from`, `--to`, `--max-inlined-bodies`, `--compact`, `--context`, `--page`, `--all`, `--format`, `-o`/`--output`/`--output-path`, `--rules-dir` |
 
 JSON includes top-level `analysis_complete` and
 `analysis_incomplete_reasons`. Structural `tree` marks depth and child limits
@@ -689,19 +699,19 @@ trace, or security output disagrees with the source.
 
 ```bash
 bonsai-ninja dump-ast ./src --file gateway.py --function handle_request
-bonsai-ninja dump-hir ./src handle_request
+bonsai-ninja dump-hir ./src --symbol handle_request
 bonsai-ninja dump-taint ./src --source handle_request --seed cmd
 ```
 
 | Command | Purpose | Key flags |
 |---|---|---|
 | `dump-ast` | Tree-sitter parse tree by file, function, or stable `N:` node id. | `--file`, `--function`, `--compact`, `--max-depth`, `--node`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
-| `dump-hir` | Flow-event tree for one function as JSON. | positional symbol, `--symbol` |
-| `dump-cfg` | Basic-block CFG for one function as JSON. | positional symbol, `--symbol` |
+| `dump-hir` | Flow-event tree for one function as JSON. | `--symbol` (preferred), positional symbol |
+| `dump-cfg` | Basic-block CFG for one function as JSON. | `--symbol` (preferred), positional symbol |
 | `dump-callgraph` | Per-function caller and outgoing counts. | `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `dump-edges` | Resolved call edges with stable `E:` ids, precision, resolver stage, evidence, and confidence. | `--from`, `--to`, `--precision`, `--compact`, `--edge`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `dump-resolution` | Per-file and per-decl call resolution coverage from shared `FlowEvent::Call` facts and canonical callgraph edges. | `--file`, `--unresolved-only`, `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
-| `dump-resolve` | Resolver stages and candidates for a name. | positional name, `--name`, `--in-file`, `--compact`, `--candidate`, `--format`, `--output-path` |
+| `dump-resolve` | Resolver stages and candidates for a name. | `--name` (preferred), positional name, `--in-file`, `--compact`, `--candidate`, `--format`, `--output-path` |
 | `dump-taint` | Taint propagation records from one source function with stable `T:` ids. | `--source`, `--seed`, `--sink`, `--compact`, `--taint`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `diagnostics` | JSON-only adapter diagnostic report with parser diagnostics, workspace languages, and capability declarations only for adapters present in the workspace. | `<WORKSPACE>`; omit `--format` because JSON is the sole intentional output shape |
 
