@@ -1088,6 +1088,7 @@ fn real_main() -> Result<()> {
                 view,
                 group_id_filter: group,
                 structural_drilldown: false,
+                endpoint_drilldown: false,
             };
             let paging = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
             let taint_flow = taint_flow || taint_id_lookup;

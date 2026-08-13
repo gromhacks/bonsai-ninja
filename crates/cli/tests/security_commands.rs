@@ -2014,6 +2014,49 @@ fn source_analysis_maps_python_entrypoint_paths() {
 }
 
 #[test]
+fn security_text_locations_preserve_complete_workspace_relative_paths() {
+    let ws = temp_workspace("complete-relative-locations");
+    let nested = ws.join("examples/tutorial/flaskr");
+    std::fs::create_dir_all(&nested).expect("create nested fixture directory");
+    std::fs::write(
+        nested.join("auth.py"),
+        r#"
+from flask import request
+
+def login():
+    form = request.form
+    return form
+"#,
+    )
+    .expect("write fixture");
+
+    for (subcommand, rule_flag, rule_value) in [
+        ("sources", "--rule", "python.flask.request_form"),
+        ("source-analysis", "--source", "^python\\.flask\\.request_form$"),
+    ] {
+        let out = run(&[
+            "security",
+            ws.to_str().unwrap(),
+            "--rules-dir",
+            &rules_dir(),
+            subcommand,
+            rule_flag,
+            rule_value,
+            "--all",
+        ])
+        .unwrap();
+        assert!(
+            out.contains("examples/tutorial/flaskr/auth.py:"),
+            "security {subcommand} must print a complete, copyable workspace-relative path:\n{out}"
+        );
+        assert!(
+            !out.contains(&ws.to_string_lossy().to_string()),
+            "security {subcommand} should not leak an absolute workspace path:\n{out}"
+        );
+    }
+}
+
+#[test]
 fn source_analysis_parser_rejects_sarif_format() {
     let Some(bin) = bin_path() else {
         return;

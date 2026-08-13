@@ -224,6 +224,10 @@ fn entrypoints_lists_callable_roots() {
         out.contains("no_semantic_callers"),
         "entrypoints should explain why rows are roots: {out}"
     );
+    assert!(
+        !out.contains("__module__"),
+        "entrypoints must hide the compiler's synthetic module-body declaration: {out}"
+    );
 }
 
 #[test]
@@ -6027,6 +6031,18 @@ fn show_flow_id_restores_endpoint_scoped_inspect_provenance() {
     assert!(
         out.contains(target),
         "show must return the requested endpoint-scoped flow id:\n{out}"
+    );
+    let Some(text) = run(&["show", ws.to_str().unwrap(), target, "--compact"]) else {
+        return;
+    };
+    assert_eq!(
+        text.matches(&format!("FLOW 1 {target}")).count(),
+        1,
+        "endpoint-scoped show must render one stable flow once:\n{text}"
+    );
+    assert!(
+        !text.contains("OCCURRENCE HITS") && !text.contains("match points:"),
+        "endpoint-scoped show is a stable-flow drilldown, not a repeated occurrence report:\n{text}"
     );
 }
 
