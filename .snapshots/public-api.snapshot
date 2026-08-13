@@ -205,6 +205,7 @@ pub use query::{matching_decls, matching_func_ids, matching_func_ids_in_headers,
 
 === lang_api ===
 pub enum AdapterError {
+pub enum LanguageOwnershipEvidence {
 pub mod capabilities;
 pub mod kit;
 pub mod registry;
@@ -218,7 +219,7 @@ pub type DynAdapter = Arc<dyn LanguageAdapter>;
 pub use bonsai_vfs::{FileSnapshot, Vfs};
 pub use capabilities::{
 pub use kit::{
-pub use parse_recovery::{c_family_declaration_macro_recovery_edits, syntax_damage_score, ParseRecoveryEdit};
+pub use parse_recovery::{
 pub use registry::{AdapterArc, LanguageRegistry};
 pub use taxonomy::{flow_edge_spec, FlowEdgeKind, FlowEdgeSpec, FlowEdgeSupport, FLOW_EDGE_TAXONOMY};
 pub use tree_sitter::Tree as SyntaxTree;

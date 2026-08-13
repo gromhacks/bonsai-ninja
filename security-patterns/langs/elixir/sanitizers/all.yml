@@ -206,7 +206,7 @@
 - id: elixir.sanitizer.plug_crypto_message_verifier_verify
   enabled: true
   language: elixir
-  tag: jwt-verify
+  tag: signed-token-verify
   packages: [plug_crypto]
   match:
     kind: call
@@ -1046,7 +1046,7 @@
 - id: elixir.sanitizer.plug_crypto_verify
   enabled: true
   language: elixir
-  tag: jwt-verify
+  tag: signed-token-verify
   packages: [plug_crypto]
   match:
     kind: call

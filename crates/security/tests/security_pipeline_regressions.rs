@@ -1082,6 +1082,31 @@ fn taint_analysis_populates_bounded_workspace_graph_cache() {
 }
 
 #[test]
+fn taint_report_keeps_loaded_sanitizer_count_when_no_source_matches() {
+    let ws = workspace(&[("/w/app.py", "def clean():\n    return 1\n")]);
+    let mut pack = rulepack("python", "missing_source", "missing_sink");
+    pack.packs
+        .get_mut("python")
+        .expect("Python pack")
+        .sanitizers
+        .push(rule(
+            "python",
+            RuleKind::Sanitizer,
+            "python.test.sanitizer",
+            None,
+            None,
+            "sanitize",
+        ));
+
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+
+    assert!(report.findings.is_empty());
+    assert_eq!(report.source_rule_count, 1);
+    assert_eq!(report.sink_rule_count, 1);
+    assert_eq!(report.sanitizer_rule_count, 1);
+}
+
+#[test]
 fn taint_graph_disk_namespace_changes_with_semantic_idg_scope() {
     let root = temp_real_workspace("taint-scope-identity");
     std::fs::write(

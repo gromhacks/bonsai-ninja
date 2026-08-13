@@ -4,6 +4,8 @@
 //! detection assigns `.m` to Objective-C by default (same convention
 //! `tree-sitter-language-pack` uses). If a project mixes the two, the
 //! user can scope `--include` / `--exclude` to disambiguate.
+mod parse_recovery;
+
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
@@ -15,6 +17,7 @@ use bonsai_lang_api::{
     ExpressionPlaceExtraction, FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportSpec,
     LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, SyntaxSpecialForm, TypeAliasBinding,
 };
+use parse_recovery::{objc_parse_recovery_edits, objc_tree_proves_language};
 use tree_sitter::{Language, Node, Tree};
 
 fn objc_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
@@ -248,18 +251,24 @@ impl LanguageAdapter for ObjCAdapter {
     fn tree_sitter_language(&self) -> Result<Language, AdapterError> {
         language_from_pack(PACK_NAME)
     }
+    fn source_syntax_proves_language(
+        &self,
+        snapshot: &bonsai_lang_api::FileSnapshot,
+        tree: &Tree,
+    ) -> bonsai_lang_api::LanguageOwnershipEvidence {
+        if objc_tree_proves_language(snapshot, tree) {
+            bonsai_lang_api::LanguageOwnershipEvidence::Proven
+        } else {
+            bonsai_lang_api::LanguageOwnershipEvidence::Excluded
+        }
+    }
     fn parse_recovery_edits(
         &self,
         snapshot: &bonsai_lang_api::FileSnapshot,
         vfs: &bonsai_lang_api::Vfs,
         tree: &Tree,
     ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
-        bonsai_lang_api::c_family_declaration_macro_recovery_edits(
-            snapshot,
-            vfs,
-            tree,
-            &["va_arg", "__builtin_va_arg"],
-        )
+        objc_parse_recovery_edits(snapshot, vfs, tree)
     }
     fn capabilities(&self) -> LanguageCapabilities {
         // Macros: tree-sitter-objc parses `NSAssert(...)` / `NS_INLINE`

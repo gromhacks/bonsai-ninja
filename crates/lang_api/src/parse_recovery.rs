@@ -34,6 +34,7 @@ pub struct ParseRecoveryEdit {
 enum ParseRecoveryAction {
     Mask,
     UppercaseAscii,
+    ReplaceAscii(&'static [u8]),
 }
 
 /// Exact syntax-damage score for a concrete Tree-sitter tree.
@@ -62,7 +63,127 @@ pub fn syntax_damage_score(tree: &Tree) -> (usize, usize) {
             }
         }
     }
-    (count, covered_bytes)
+    // Some grammars expose a hidden missing production through the root's
+    // damage flag and S-expression but do not make that hidden node iterable
+    // through the public Node API. Preserve a non-zero recovery/selection
+    // score for that exact condition so a clean recovery tree can win.
+    if count == 0 && tree.root_node().has_error() {
+        (
+            1,
+            tree.root_node()
+                .end_byte()
+                .saturating_sub(tree.root_node().start_byte()),
+        )
+    } else {
+        (count, covered_bytes)
+    }
+}
+
+/// Adapter-owned spelling for one conditional-compilation grammar.
+///
+/// The shared recovery algorithm understands balanced optional regions, but
+/// it deliberately does not own any language's directive inventory.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ConditionalDirectiveSyntax {
+    /// Opening directives whose suffix must contain a condition.
+    pub openings_with_condition: &'static [&'static str],
+    /// Alternative directives whose suffix must contain a condition.
+    pub alternatives_with_condition: &'static [&'static str],
+    /// Alternative directives that accept no argument.
+    pub alternatives_without_condition: &'static [&'static str],
+    /// Closing directive that accepts no argument.
+    pub closing: &'static str,
+    /// Adapter-owned line/block comment prefixes accepted after a no-argument
+    /// directive.
+    pub trailing_comment_prefixes: &'static [&'static str],
+}
+
+/// Mask directive lines around branch-free conditional-compilation regions.
+///
+/// Retaining the optional tokens models the conservative union of build
+/// configurations. Regions with any alternative directive are never
+/// flattened because adjacent alternatives are not one source program. The
+/// shared parser still requires the recovery tree to contain strictly less
+/// syntax damage.
+#[must_use]
+pub fn branch_free_conditional_recovery_edits(
+    snapshot: &FileSnapshot,
+    tree: &Tree,
+    syntax: ConditionalDirectiveSyntax,
+) -> Vec<ParseRecoveryEdit> {
+    if !tree.root_node().has_error() {
+        return Vec::new();
+    }
+
+    let mut stack = Vec::<ConditionalRegion>::new();
+    let mut edits = Vec::new();
+    for (start, end, line) in source_lines_with_ranges(snapshot.text.as_ref()) {
+        let directive = line.trim_start();
+        if syntax
+            .openings_with_condition
+            .iter()
+            .any(|prefix| directive_with_condition(directive, prefix))
+        {
+            stack.push(ConditionalRegion {
+                if_start: start,
+                if_end: end,
+                has_alternative: false,
+            });
+        } else if syntax
+            .alternatives_with_condition
+            .iter()
+            .any(|prefix| directive_with_condition(directive, prefix))
+            || syntax
+                .alternatives_without_condition
+                .iter()
+                .any(|prefix| directive_without_argument(directive, prefix, syntax.trailing_comment_prefixes))
+        {
+            if let Some(region) = stack.last_mut() {
+                region.has_alternative = true;
+            }
+        } else if directive_without_argument(directive, syntax.closing, syntax.trailing_comment_prefixes) {
+            let Some(region) = stack.pop() else {
+                continue;
+            };
+            if !region.has_alternative {
+                edits.push(ParseRecoveryEdit::new(region.if_start, region.if_end));
+                edits.push(ParseRecoveryEdit::new(start, end));
+            }
+        }
+    }
+    edits.sort_by_key(|edit| (edit.start_byte, edit.end_byte));
+    edits.dedup();
+    edits
+}
+
+struct ConditionalRegion {
+    if_start: usize,
+    if_end: usize,
+    has_alternative: bool,
+}
+
+fn source_lines_with_ranges(source: &str) -> impl Iterator<Item = (usize, usize, &str)> {
+    let mut offset = 0usize;
+    source.split_inclusive('\n').map(move |line| {
+        let start = offset;
+        offset += line.len();
+        (start, offset, line)
+    })
+}
+
+fn directive_with_condition(line: &str, prefix: &str) -> bool {
+    line.strip_prefix(prefix)
+        .is_some_and(|condition| condition.starts_with(char::is_whitespace) && !condition.trim().is_empty())
+}
+
+fn directive_without_argument(line: &str, prefix: &str, comment_prefixes: &[&str]) -> bool {
+    line.strip_prefix(prefix)
+        .is_some_and(|rest| directive_has_no_argument(rest, comment_prefixes))
+}
+
+fn directive_has_no_argument(rest: &str, comment_prefixes: &[&str]) -> bool {
+    let rest = rest.trim_start();
+    rest.is_empty() || comment_prefixes.iter().any(|prefix| rest.starts_with(prefix))
 }
 
 impl ParseRecoveryEdit {
@@ -85,6 +206,20 @@ impl ParseRecoveryEdit {
             start_byte: byte_offset,
             end_byte: byte_offset + 1,
             action: ParseRecoveryAction::UppercaseAscii,
+        }
+    }
+
+    /// Replace one parser-buffer token with a shorter or equal-length ASCII
+    /// grammar keyword and pad the remaining bytes with spaces.
+    ///
+    /// Adapters use this only after proving a compiler macro's syntactic role
+    /// from its surrounding CST. Original source remains authoritative.
+    #[must_use]
+    pub const fn replace_ascii(start_byte: usize, end_byte: usize, replacement: &'static [u8]) -> Self {
+        Self {
+            start_byte,
+            end_byte,
+            action: ParseRecoveryAction::ReplaceAscii(replacement),
         }
     }
 
@@ -118,6 +253,20 @@ impl ParseRecoveryEdit {
                 }
                 byte.make_ascii_uppercase();
                 true
+            }
+            ParseRecoveryAction::ReplaceAscii(replacement) => {
+                let target = &mut recovered[self.start_byte..self.end_byte];
+                if replacement.is_empty()
+                    || replacement.len() > target.len()
+                    || !replacement.iter().all(u8::is_ascii)
+                    || target.iter().any(|byte| matches!(*byte, b'\n' | b'\r'))
+                {
+                    return false;
+                }
+                let before = target.to_vec();
+                target.fill(b' ');
+                target[..replacement.len()].copy_from_slice(replacement);
+                target != before
             }
         }
     }
@@ -454,7 +603,22 @@ mod tests {
         let mut recovered = source.as_bytes().to_vec();
         assert!(ParseRecoveryEdit::new(0, 3).apply_to(source, &mut recovered));
         assert!(ParseRecoveryEdit::uppercase_ascii(4).apply_to(source, &mut recovered));
-        assert_eq!(std::str::from_utf8(&recovered).unwrap(), "    Var\n");
+        assert!(ParseRecoveryEdit::replace_ascii(4, 7, b"fn").apply_to(source, &mut recovered));
+        assert_eq!(std::str::from_utf8(&recovered).unwrap(), "    fn \n");
         assert_eq!(source, "API var\n");
+    }
+
+    #[test]
+    fn syntax_damage_scores_hidden_missing_grammar_symbols() {
+        let source =
+            "package sample\n\nimport sample.Platform\n\n/** Docs. */\nactual class PlatformLogger\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&crate::kit::language_from_pack("kotlin").expect("Kotlin grammar"))
+            .expect("set Kotlin grammar");
+        let tree = parser.parse(source, None).expect("parse Kotlin fixture");
+
+        assert!(tree.root_node().has_error());
+        assert_eq!(syntax_damage_score(&tree), (1, source.len()));
     }
 }

@@ -36,7 +36,10 @@ pub use kit::{
     PatternBindingSite, PatternSourceProjection, ProjectedPatternBindingSite, SyntaxSpecialForm,
     TypeAliasVocabulary, EMPTY_HANDLER, MODULE_DECL_NAME, WILDCARD_IMPORT_ALIAS_PREFIX,
 };
-pub use parse_recovery::{c_family_declaration_macro_recovery_edits, syntax_damage_score, ParseRecoveryEdit};
+pub use parse_recovery::{
+    branch_free_conditional_recovery_edits, c_family_declaration_macro_recovery_edits, syntax_damage_score,
+    ConditionalDirectiveSyntax, ParseRecoveryEdit,
+};
 pub use registry::{AdapterArc, LanguageRegistry};
 pub use taxonomy::{flow_edge_spec, FlowEdgeKind, FlowEdgeSpec, FlowEdgeSupport, FLOW_EDGE_TAXONOMY};
 pub use types::{
@@ -131,6 +134,33 @@ pub struct FragmentParseContext {
     pub suffix: &'static str,
 }
 
+/// Adapter-owned proof for selecting among grammars that share a file
+/// extension.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum LanguageOwnershipEvidence {
+    /// This specialized grammar's distinguishing syntax is absent. A generic
+    /// compatible grammar should own the ambiguous-extension file instead.
+    Excluded,
+    /// The grammar exposed no syntax unique to this language. Selection falls
+    /// back to concrete syntax damage.
+    #[default]
+    Unproven,
+    /// The concrete tree contains grammar-owned syntax that proves this
+    /// language owns the file.
+    Proven,
+}
+
+impl LanguageOwnershipEvidence {
+    #[must_use]
+    pub const fn selection_rank(self) -> u8 {
+        match self {
+            Self::Excluded => 0,
+            Self::Unproven => 1,
+            Self::Proven => 2,
+        }
+    }
+}
+
 /// The full contract an adapter must implement. See spec §5.5.
 ///
 /// The trait is intentionally object-safe so a registry can store
@@ -149,6 +179,24 @@ pub trait LanguageAdapter: Send + Sync + 'static {
     /// The Tree-sitter `Language` used for parsing. Most adapters fetch
     /// this from `tree_sitter_language_pack::get_language`.
     fn tree_sitter_language(&self) -> Result<tree_sitter::Language, AdapterError>;
+
+    /// Prove that an ambiguous-extension file belongs to this adapter from
+    /// grammar-owned syntax in its concrete tree.
+    ///
+    /// This is a proof hook, not a filename or token-scoring heuristic. The
+    /// database considers the adapter's evidence before comparing parse
+    /// damage. A specialized superset grammar may return
+    /// [`LanguageOwnershipEvidence::Excluded`] when its distinguishing syntax
+    /// is absent and a generic compatible grammar should own the file. Most
+    /// languages have unambiguous extensions and inherit
+    /// [`LanguageOwnershipEvidence::Unproven`].
+    fn source_syntax_proves_language(
+        &self,
+        _snapshot: &FileSnapshot,
+        _tree: &SyntaxTree,
+    ) -> LanguageOwnershipEvidence {
+        LanguageOwnershipEvidence::Unproven
+    }
 
     /// Select the exact Tree-sitter grammar pack for one source path.
     /// Most languages have one grammar and inherit their language id. An

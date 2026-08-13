@@ -1,4 +1,6 @@
 //! C# language adapter.
+mod parse_recovery;
+
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_assign_targets, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
@@ -12,6 +14,7 @@ use bonsai_lang_api::{
     LanguageCapabilities, LanguageId, PatternBindingSite, TypeAliasBinding, TypeAliasVocabulary, Visibility,
     EMPTY_HANDLER,
 };
+use parse_recovery::csharp_parse_recovery_edits;
 use tree_sitter::Node;
 
 fn csharp_call_target<'tree>(node: Node<'tree>, src: &[u8]) -> Option<CallTargetExtraction<'tree>> {
@@ -381,6 +384,14 @@ impl LanguageAdapter for CSharpAdapter {
     }
     fn tree_sitter_language(&self) -> Result<Language, AdapterError> {
         language_from_pack(PACK_NAME)
+    }
+    fn parse_recovery_edits(
+        &self,
+        snapshot: &bonsai_lang_api::FileSnapshot,
+        _vfs: &bonsai_lang_api::Vfs,
+        tree: &bonsai_lang_api::SyntaxTree,
+    ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
+        csharp_parse_recovery_edits(snapshot, tree)
     }
     fn capabilities(&self) -> LanguageCapabilities {
         // Exceptions: the adapter populates `Throw::thrown_type` from

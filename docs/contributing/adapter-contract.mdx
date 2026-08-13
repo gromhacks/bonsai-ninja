@@ -52,6 +52,21 @@ The parser cache keys both adapter and grammar variant; syntax highlighting
 uses the same per-extension selection. Shared parser/CLI code does not carry a
 parallel extension-to-grammar table.
 
+When multiple adapters claim one extension, the database parses the exact
+snapshot with each candidate. An adapter may return
+`LanguageOwnershipEvidence::Proven` only from grammar-owned syntax in that
+concrete tree (for example, an Objective-C interface node in a `.h` file).
+Proven candidates are considered first; parse damage and registration order
+remain the deterministic fallbacks. Shared code never scans source tokens or
+contains a language-id branch for this decision.
+
+A specialized superset grammar may return
+`LanguageOwnershipEvidence::Excluded` when its distinguishing syntax is absent
+and a generic compatible grammar can represent the file exactly. C++ and
+Objective-C use this for ambiguous `.h` files: grammar-owned C++ or
+Objective-C constructs prove the specialized frontend; a C-compatible header
+without them stays with the C adapter.
+
 ## Where language syntax belongs
 
 In the adapter, not in `kit`. A useful test: if a Tree-sitter construct or
@@ -203,6 +218,16 @@ type head but leaves only the pointer declarator as an `ERROR` sibling. That
 recovery masks the proven pointer token; it does not maintain a library API
 inventory, expand arbitrary macros, or reinterpret malformed value
 expressions.
+
+The shared balanced-region helper owns only the algorithm for retaining a
+branch-free conditional region. Every directive and trailing-comment spelling
+is supplied by the calling adapter (`#elif` for C-family/C#, `#elseif` for
+Swift); a region with any alternative branch is left intact because flattening
+mutually exclusive programs would invent syntax. Dart, Kotlin, Objective-C,
+and Swift keep their remaining recovery recognizers in their adapter crates.
+Those recognizers require exact CST damage plus exact language syntax, preserve
+byte width, and are covered by positive and non-match tests. Security API names
+and package identities are never parser-recovery inputs.
 
 New hooks should:
 

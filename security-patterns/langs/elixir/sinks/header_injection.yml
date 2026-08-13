@@ -1,6 +1,8 @@
 # Elixir response-header / CRLF injection (Plug + Phoenix).
 - id: elixir.header.plug_put_resp_header
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: elixir
   tag: header-injection
   severity: high
@@ -31,7 +33,7 @@
         end
       end
     expect_no_match: true
-  description: "Plug.Conn.put_resp_header(conn, name, tainted) - value is written verbatim; `\\r\\n` splits the response / injects cookies."
+  description: "Disabled: Plug.Conn.put_resp_header/3 rejects carriage return, newline, and null bytes in header names and values before storing the response header."
 
   imports:
   - Plug
