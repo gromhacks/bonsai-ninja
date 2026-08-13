@@ -169,12 +169,24 @@ impl LanguageAdapter for CAdapter {
         vfs: &bonsai_lang_api::Vfs,
         tree: &Tree,
     ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
-        bonsai_lang_api::c_family_declaration_macro_recovery_edits(
+        let mut edits = bonsai_lang_api::branch_free_conditional_recovery_edits(
+            snapshot,
+            tree,
+            bonsai_lang_api::ConditionalDirectiveSyntax {
+                openings_with_condition: &["#if", "#ifdef", "#ifndef"],
+                alternatives_with_condition: &["#elif", "#elifdef", "#elifndef"],
+                alternatives_without_condition: &["#else"],
+                closing: "#endif",
+                trailing_comment_prefixes: &["//", "/*"],
+            },
+        );
+        edits.extend(bonsai_lang_api::c_family_declaration_macro_recovery_edits(
             snapshot,
             vfs,
             tree,
             &["va_arg", "__builtin_va_arg"],
-        )
+        ));
+        edits
     }
     fn capabilities(&self) -> LanguageCapabilities {
         // Macros: tree-sitter-c parses `STR_CPY(dest, src)` and

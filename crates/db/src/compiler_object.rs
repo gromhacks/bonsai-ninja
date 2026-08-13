@@ -32,6 +32,22 @@ use std::sync::Arc;
 /// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
 /// or the object validation contract changes in a way that can alter compiler
 /// facts.
+// v88: C++ ownership proof derives exclusive syntax from the C and C++
+// Tree-sitter grammar inventories, with an exact structural distinction for
+// their shared compound-literal node. Cached v87 objects used a finite C++
+// node-kind list and can retain the generic C frontend for other valid C++
+// header syntax.
+// v86: exact adapter recovery covers an unnamed Dart library declaration,
+// Kotlin KDoc before a multiplatform `actual` class, branch-free conditional
+// regions, modern Swift concurrency/unit syntax, and Objective-C declaration
+// macros. Hidden grammar-missing symbols retain a non-zero damage score;
+// grammar-owned C++/Objective-C evidence disambiguates shared headers and
+// excludes specialized superset grammars when their syntax is absent.
+// Cached v85 objects can preserve stale diagnostics, parser coverage, or
+// declarations for otherwise valid source.
+// v85: ECMAScript assignment lowering resolves immutable function-valued
+// bindings as exact callable aliases. Cached v84 objects can omit those
+// assigned method edges.
 // v84: ECMAScript adapters mark simple `const name = value` places immutable
 // from exact lexical-declaration syntax. Cached v83 objects leave those
 // places mutable/unknown and cannot support configured-receiver proofs.
@@ -214,7 +230,7 @@ use std::sync::Arc;
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 85;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 88;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;

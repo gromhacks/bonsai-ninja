@@ -324,9 +324,11 @@ impl AnalyzerDb {
     ///
     /// Most extensions have one grammar and take the constant-time registry
     /// path. Ambiguous compiler extensions retain every candidate; each grammar
-    /// parses the exact snapshot and the tree with the least syntax damage
-    /// wins, with registration order as the deterministic tie-breaker. The
-    /// result is cached by `(FileId, version)` and invalidated with the file.
+    /// parses the exact snapshot. Adapter-owned grammar syntax may first prove
+    /// language ownership; among equally proven candidates the tree with the
+    /// least syntax damage wins, with registration order as the deterministic
+    /// tie-breaker. The result is cached by `(FileId, version)` and invalidated
+    /// with the file.
     pub fn adapter_for(&self, file: FileId) -> Option<DynAdapter> {
         let snapshot = self.inner.vfs.snapshot(file).ok()?;
         let path = &snapshot.path;
@@ -342,17 +344,26 @@ impl AnalyzerDb {
                 }
 
                 let mut selected_index = 0usize;
+                let mut selected_evidence_rank = 0u8;
                 let mut selected_score = (usize::MAX, usize::MAX);
                 for (index, adapter) in candidates.iter().enumerate() {
-                    let score = self
+                    let (evidence_rank, score) = self
                         .inner
                         .parser
                         .parse_snapshot(&snapshot, adapter, &self.inner.vfs)
-                        .map_or((usize::MAX, usize::MAX), |parsed| {
-                            bonsai_lang_api::syntax_damage_score(&parsed.tree)
+                        .map_or((0, (usize::MAX, usize::MAX)), |parsed| {
+                            (
+                                adapter
+                                    .source_syntax_proves_language(&snapshot, &parsed.tree)
+                                    .selection_rank(),
+                                bonsai_lang_api::syntax_damage_score(&parsed.tree),
+                            )
                         });
-                    if score < selected_score {
+                    if evidence_rank > selected_evidence_rank
+                        || (evidence_rank == selected_evidence_rank && score < selected_score)
+                    {
                         selected_index = index;
+                        selected_evidence_rank = evidence_rank;
                         selected_score = score;
                     }
                 }

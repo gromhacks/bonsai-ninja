@@ -28,6 +28,12 @@ command or flag:
 Prefer `./target/release/bonsai-ninja`; use the debug binary only when release
 is unavailable.
 
+Keep the workspace as the positional operand. Prefer explicit selector flags
+(`--query`, `--symbol`, `--file`, `--from`, `--to`, `--id`) in agent and
+script invocations; concise positional selectors remain supported for humans,
+but the CLI rejects supplying both forms. Use `-o`, `--output`, or
+`--output-path` for files.
+
 For agent-readable text, normally add:
 
 ```text
@@ -99,9 +105,9 @@ Start with shape:
 Find one concrete anchor, then inspect its relationships:
 
 ```shell
-./target/release/bonsai-ninja search <workspace> <query> \
+./target/release/bonsai-ninja search <workspace> --query <query> \
   --context 8k --no-color --no-progress
-./target/release/bonsai-ninja refs <workspace> <symbol> \
+./target/release/bonsai-ninja refs <workspace> --symbol <symbol> \
   --context 8k --no-color --no-progress
 ./target/release/bonsai-ninja calls <workspace> --callee <callee> \
   --context 8k --no-color --no-progress
@@ -131,7 +137,7 @@ source-backed paths or `--taint-flow` for raw taint paths.
 ./target/release/bonsai-ninja path <workspace> \
   --from <entry> --to <target> \
   --context 16k --no-color --no-progress
-./target/release/bonsai-ninja trace <workspace> <entry> \
+./target/release/bonsai-ninja trace <workspace> --symbol <entry> \
   --context 16k --no-color --no-progress
 ```
 
@@ -144,7 +150,7 @@ For local evidence:
 ```shell
 ./target/release/bonsai-ninja slice <workspace> --symbol <symbol> \
   --context 16k --no-color --no-progress
-./target/release/bonsai-ninja read-file <workspace> <path> --lines A:B \
+./target/release/bonsai-ninja read-file <workspace> --file <path> --lines A:B \
   --context 16k --no-color --no-progress
 ```
 
@@ -191,7 +197,7 @@ Narrow and reopen findings:
   --flow F:<id> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja security <workspace> taint-analysis \
   --group G:<id> --context 16k --no-color --no-progress
-./target/release/bonsai-ninja show <workspace> S:<id> \
+./target/release/bonsai-ninja show <workspace> --id S:<id> \
   --context 16k --no-color --no-progress
 ```
 
@@ -217,11 +223,11 @@ needed:
 ./target/release/bonsai-ninja dump-ast <workspace> \
   --file <file> --function <function> \
   --context 16k --no-color --no-progress
-./target/release/bonsai-ninja dump-hir <workspace> <function> \
+./target/release/bonsai-ninja dump-hir <workspace> --symbol <function> \
   --no-color --no-progress
-./target/release/bonsai-ninja dump-cfg <workspace> <function> \
+./target/release/bonsai-ninja dump-cfg <workspace> --symbol <function> \
   --no-color --no-progress
-./target/release/bonsai-ninja dump-resolve <workspace> <callee> \
+./target/release/bonsai-ninja dump-resolve <workspace> --name <callee> \
   --in-file <file> --no-color --no-progress
 ./target/release/bonsai-ninja dump-edges <workspace> \
   --from <caller> --to <callee> \

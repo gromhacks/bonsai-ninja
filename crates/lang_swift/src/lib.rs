@@ -1,4 +1,6 @@
 //! Swift language adapter.
+mod parse_recovery;
+
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
@@ -56,6 +58,7 @@ fn swift_pattern_bindings(node: Node<'_>) -> Vec<PatternBindingSite<'_>> {
     }
     pattern_binding_sites_from_arms(node, &["expr"], &["switch_entry"], &[], &["switch_pattern"])
 }
+use parse_recovery::swift_parse_recovery_edits;
 use tree_sitter::{Language, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("swift");
@@ -375,6 +378,14 @@ impl LanguageAdapter for SwiftAdapter {
     }
     fn tree_sitter_language(&self) -> Result<Language, AdapterError> {
         language_from_pack(PACK_NAME)
+    }
+    fn parse_recovery_edits(
+        &self,
+        snapshot: &bonsai_lang_api::FileSnapshot,
+        _vfs: &bonsai_lang_api::Vfs,
+        tree: &Tree,
+    ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
+        swift_parse_recovery_edits(snapshot, tree)
     }
     fn capabilities(&self) -> LanguageCapabilities {
         // Pattern matching: the adapter post-processes flat `Branch`

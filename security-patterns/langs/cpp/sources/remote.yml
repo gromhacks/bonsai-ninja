@@ -709,16 +709,16 @@
       }
   description: "Qt QMqttMessage::payload() - broker-delivered MQTT payload bytes."
 
-# Untrusted-size parameter source for the cpp.memory.malloc_tainted_size
-# / calloc / realloc family. Names taken from common C++ network-parser
-# conventions (size, len, length, count, n_bytes). Bare-name regex
-# matches widely; engine taint flow + the malloc-family sinks scope
-# real findings.
+# A bare size-like parameter name cannot prove a remote trust boundary in an
+# ordinary C++ library. Keep the retired rule as an explicit compatibility
+# record; concrete network/framework sources still feed the allocation sinks.
   imports:
   - QtCore
   - QtCore/Qt
 - id: cpp.input.untrusted_size_param
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: cpp
   trust: remote
   tag: network-input
@@ -739,4 +739,4 @@
         (void)result;
       }
     expect_no_match: true
-  description: "Multi-arg size-style parameter (`size`, `len`, `length`, `count`, ...) typically populated from a peer-controlled message header. Pairs with cpp.memory.malloc_tainted_size / calloc / realloc and the memcpy family for CWE-190/787 detection."
+  description: "Disabled: a parameter named `size`, `len`, `length`, or `count` is not evidence of a remote trust boundary. Allocation and copy sinks remain active for values reached from concrete remote sources."

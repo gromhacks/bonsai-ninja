@@ -655,9 +655,9 @@ fn cli_reference_documents_stable_id_and_cache_surfaces() {
             "| `N:` | `dump-ast --node`",
             "| `R:` | `dump-resolve --candidate`",
             "| `S:` | `security taint-analysis --finding`",
-            "bonsai-ninja show ./src S:",
-            "bonsai-ninja show ./src R:",
-            "bonsai-ninja show ./src T:",
+            "bonsai-ninja show ./src --id S:",
+            "bonsai-ninja show ./src --id R:",
+            "bonsai-ninja show ./src --id T:",
         ],
     );
     assert_contains_all(

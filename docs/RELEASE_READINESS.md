@@ -6,7 +6,7 @@ not duplicate dated performance history.
 
 ## Status
 
-Validated on 2026-08-12. Local `main` has no known failing release gate.
+Validated on 2026-08-13. Local `main` has no known failing release gate.
 Publishing still requires the tag workflow because signing, packaging, and
 platform-specific execution happen there.
 
@@ -14,8 +14,8 @@ The validated product contains:
 
 - 20 registered Tree-sitter language adapters;
 - one adapter-lowered compiler IR and one production sparse IDG taint engine;
-- 7,130 bundled rules, of which 5,989 are enabled;
-- 10,044 enabled positive/negative rule examples;
+- 7,130 bundled rules, of which 5,987 are enabled;
+- 10,040 enabled positive/negative rule examples;
 - native CLI, Rust SDK, SARIF 2.1.0, JSON, HTML, and graph-export surfaces.
 
 ## Correctness and architecture gates
@@ -42,7 +42,7 @@ The final local pass completed these checks with zero failures:
 | Shared production clone audit | 0 clones at the configured threshold |
 | Dependency advisories, unused edges, and SPDX policy | Passed |
 | Documentation structure, links, navigation, and skill copies | Passed |
-| Build-artifact size gate | 30.16 GiB / 32 GiB limit |
+| Build-artifact size gate | 5.96 GiB / 32 GiB limit |
 
 The rulepack replay command was:
 
@@ -57,10 +57,10 @@ The rulepack replay command was:
 | Rulepack measure | Result |
 |---|---:|
 | Rules | 7,130 |
-| Enabled rules | 5,989 |
-| Disabled rules | 1,141 |
+| Enabled rules | 5,987 |
+| Disabled rules | 1,143 |
 | Examples | 10,483 |
-| Enabled examples | 10,044 |
+| Enabled examples | 10,040 |
 | Errors | 0 |
 | Warnings | 0 |
 
@@ -119,34 +119,64 @@ BONSAI_MEMORY_BUDGET_MB=3072 \
 This is a completeness and output-contract smoke, not proof that the
 repository contains no defect.
 
+## Real-project language matrix
+
+The release candidate was exercised against one current, public production
+repository for every registered language adapter. Each checkout was shallow,
+pinned to the tested commit, processed alone, and deleted before the next
+checkout. The matrix covered jq, fmt, CommandLineParser, args, Plug, Cowboy,
+chi, Gson, Express, Timber, LuaSocket, AFNetworking, Mojolicious, Slim,
+Requests, Rack, ripgrep, os-lib, Alamofire, and Axios.
+
+Across the 20 checkouts, the CLI indexed 2,388 source files, 38,264
+declarations, and 251,735 call sites. The matrix exercised filesystem and
+context views, structural indexing, declarations, classes, imports,
+entrypoints, calls, diagnostics, search, references, inspect, trace,
+read-file, AST/HIR/CFG debugging, resolution, native export, security
+inventories, taint analysis, and cache reporting. A selected exact declaration
+in every language round-tripped through inspect and the AST/HIR/CFG views, and
+every JSON/export/security result passed schema parsing.
+
+This is a command and frontend integration gate, not a claim that every file
+in every repository has complete static semantics. C/C++ preprocessor
+environments, Objective-C SDK macros, Perl grammar gaps, and mutually
+exclusive Swift build branches can remain unresolved without the build-time
+configuration that selects or expands them. Those files produce syntax or
+resolution diagnostics and make `analysis_complete` false; they are never
+silently skipped, capped, or connected through guessed edges. The run exposed
+and closed adapter-selection, parse-recovery, and rule-precision defects in
+C/C++, C#, Dart, Elixir, Kotlin, Objective-C, and Swift. Temporary checkouts
+and their generated workspace caches are not retained after the gate.
+
 ## Large-workspace scale gate
 
 The required release test uses the sibling 30,055-source Elasticsearch
-checkout pinned by the release workflow at `e9741368da0`. The final run began
-from an empty analysis cache and passed all 5 scenarios in 1,786.93 seconds
+checkout pinned by the release workflow at `e9741368da0`. The frontend-ABI
+migration rebuilt the semantic generation from an empty cache in 1,571.52
+seconds. The following complete five-scenario gate passed in 214.27 seconds
 under the 3 GiB scheduler.
 
 | Operation | Time | Enforced SLO |
 |---|---:|---:|
-| Cold semantic generation | 1,576.62 s | completion required |
-| Fresh-process semantic reuse | 2.37 s | 15 s |
-| Default inspect | 7.01 s | 30 s |
-| Exact raw-taint inspect | 24.43 s | 30 s |
-| Fresh-cache production taint | 29.38 s | 45 s |
-| Warm production taint | 25.37 s | 30 s |
+| Cold semantic generation | 1,571.52 s | completion required |
+| Fresh-process semantic reuse | 2.30 s | 15 s |
+| Default inspect | 7.04 s | 30 s |
+| Exact raw-taint inspect | 24.82 s | 30 s |
+| Fresh-cache production taint | 30.18 s | 45 s |
+| Warm production taint | 25.27 s | 30 s |
 | `tree --max-depth 1` | 0.02 s | 30 s |
-| Search | 3.87 s | 30 s |
-| Definitions | 13.04 s | 30 s |
-| Imports | 6.97 s | 30 s |
-| Classes | 7.52 s | 30 s |
-| Entry points | 25.72 s | 30 s |
-| Calls | 3.54 s | 30 s |
-| Arguments | 3.39 s | 30 s |
-| Scoped `read-file` | 1.62 s | 30 s |
-| Source inventory | 3.82 s | 30 s |
-| High-severity sink inventory | 22.40 s | 30 s |
-| Sanitizer inventory | 18.98 s | 30 s |
-| Dependency inventory | 10.82 s | 30 s |
+| Search | 3.62 s | 30 s |
+| Definitions | 12.83 s | 30 s |
+| Imports | 7.09 s | 30 s |
+| Classes | 7.40 s | 30 s |
+| Entry points | 25.76 s | 30 s |
+| Calls | 3.42 s | 30 s |
+| Arguments | 3.36 s | 30 s |
+| Scoped `read-file` | 1.60 s | 30 s |
+| Source inventory | 3.32 s | 30 s |
+| High-severity sink inventory | 22.52 s | 30 s |
+| Sanitizer inventory | 19.16 s | 30 s |
+| Dependency inventory | 9.81 s | 30 s |
 
 Command:
 

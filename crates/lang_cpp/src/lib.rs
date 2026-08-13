@@ -12,6 +12,8 @@ use bonsai_lang_api::{
     LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility,
     EMPTY_HANDLER,
 };
+use std::sync::OnceLock;
+use tree_sitter::{Language, Node, Tree};
 
 /// C++ parameter shape: `parameter_declaration` carries `type` and
 /// `declarator` fields (the declarator may be a pointer / array /
@@ -29,7 +31,6 @@ const CPP_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
     name_field: "declarator",
     type_field: "type",
 };
-use tree_sitter::{Language, Node, Tree};
 
 fn cpp_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
     (node.kind() == "for_range_loop")
@@ -315,6 +316,41 @@ impl CppAdapter {
     }
 }
 
+fn cpp_tree_proves_language(tree: &Tree) -> bool {
+    static C_GRAMMAR: OnceLock<Option<Language>> = OnceLock::new();
+    let Some(c_grammar) = C_GRAMMAR.get_or_init(|| language_from_pack("c").ok()) else {
+        return false;
+    };
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.is_named()
+            && !node.is_error()
+            && (!grammar_has_named_kind(c_grammar, node.kind()) || is_cpp_braced_construction(node))
+        {
+            return true;
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    false
+}
+
+fn grammar_has_named_kind(grammar: &Language, kind: &str) -> bool {
+    let id = grammar.id_for_node_kind(kind, true);
+    id != 0 && grammar.node_kind_is_named(id) && grammar.node_kind_for_id(id) == Some(kind)
+}
+
+/// Distinguish C++ uniform construction (`Type { ... }`) from C's standard
+/// compound literal (`(Type) { ... }`) using the grammar's typed child span.
+/// Both grammars call the parent a `compound_literal_expression`, so the node
+/// kind alone is not language proof.
+fn is_cpp_braced_construction(node: Node<'_>) -> bool {
+    node.kind() == "compound_literal_expression"
+        && node
+            .child_by_field_name("type")
+            .is_some_and(|ty| ty.start_byte() == node.start_byte())
+}
+
 impl LanguageAdapter for CppAdapter {
     fn language_id(&self) -> LanguageId {
         LANG_ID
@@ -323,16 +359,24 @@ impl LanguageAdapter for CppAdapter {
         "C++"
     }
     fn file_extensions(&self) -> &'static [&'static str] {
-        // `.h` is shared with C. The registry preserves both candidates and
-        // the database selects the grammar whose concrete syntax tree has the
-        // fewest errors, preferring C on an exact tie. This mirrors a compiler
-        // frontend's translation-unit context without guessing from names or
-        // repository paths, using the syntax facts available without a
-        // compile-command database.
+        // `.h` is shared with C and Objective-C. Grammar-owned C++ constructs
+        // prove this specialized frontend; a C-compatible header with no C++
+        // syntax stays with the generic C adapter.
         &["cpp", "cc", "cxx", "hpp", "hh", "hxx", "h"]
     }
     fn tree_sitter_language(&self) -> Result<Language, AdapterError> {
         language_from_pack(PACK_NAME)
+    }
+    fn source_syntax_proves_language(
+        &self,
+        _snapshot: &bonsai_lang_api::FileSnapshot,
+        tree: &Tree,
+    ) -> bonsai_lang_api::LanguageOwnershipEvidence {
+        if cpp_tree_proves_language(tree) {
+            bonsai_lang_api::LanguageOwnershipEvidence::Proven
+        } else {
+            bonsai_lang_api::LanguageOwnershipEvidence::Excluded
+        }
     }
     fn parse_recovery_edits(
         &self,
@@ -340,12 +384,24 @@ impl LanguageAdapter for CppAdapter {
         vfs: &bonsai_lang_api::Vfs,
         tree: &Tree,
     ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
-        bonsai_lang_api::c_family_declaration_macro_recovery_edits(
+        let mut edits = bonsai_lang_api::branch_free_conditional_recovery_edits(
+            snapshot,
+            tree,
+            bonsai_lang_api::ConditionalDirectiveSyntax {
+                openings_with_condition: &["#if", "#ifdef", "#ifndef"],
+                alternatives_with_condition: &["#elif", "#elifdef", "#elifndef"],
+                alternatives_without_condition: &["#else"],
+                closing: "#endif",
+                trailing_comment_prefixes: &["//", "/*"],
+            },
+        );
+        edits.extend(bonsai_lang_api::c_family_declaration_macro_recovery_edits(
             snapshot,
             vfs,
             tree,
             &["va_arg", "__builtin_va_arg"],
-        )
+        ));
+        edits
     }
     fn capabilities(&self) -> LanguageCapabilities {
         // Macros: same story as C — tree-sitter-cpp parses

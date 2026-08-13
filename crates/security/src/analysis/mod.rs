@@ -1110,6 +1110,11 @@ where
         sink_rule_count: selected_sink_rule_count,
         rulepack_typing,
     } = select_taint_analysis_rules(ws, pack, &options)?;
+    // Report the complete selected workspace-language inventory, just as the
+    // source/sink counts do. The later source-language retain is a matching
+    // optimization based on hits in this snapshot; it must not rewrite what
+    // "sanitizer rules loaded" means when a clean workspace has no sources.
+    let selected_sanitizer_rule_count = sanitizers.len();
 
     let scan_files = security_scan_files(
         ws,
@@ -1366,7 +1371,7 @@ where
             unattributed_sink_matches,
             source_rule_count: sources.len(),
             sink_rule_count: selected_sink_rule_count,
-            sanitizer_rule_count: sanitizers.len(),
+            sanitizer_rule_count: selected_sanitizer_rule_count,
         },
     ))
 }
