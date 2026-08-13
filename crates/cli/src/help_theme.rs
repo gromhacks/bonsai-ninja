@@ -129,7 +129,7 @@ pub(crate) const HELP_EXAMPLES: &[(&str, &[&str])] = &[
     ),
     (
         "Trace behavior from an entry point:",
-        &["bonsai-ninja trace ./src handle_request"],
+        &["bonsai-ninja trace ./src --symbol handle_request"],
     ),
     (
         "Browse before drilling in:",
@@ -509,25 +509,61 @@ pub(crate) fn try_themed_help() -> Option<i32> {
 
     // Walk argv collecting the subcommand CHAIN (e.g. `cache stats`,
     // `security <WORKSPACE> pack`) — not just the first level. Flags
-    // we handle ourselves: --theme, --no-color, --no-cache,
-    // --no-progress. Unrecognised tokens at a level that DOES have
+    // we handle ourselves: every global flag, including `--flag=value`
+    // spellings. Unrecognised tokens at a level that DOES have
     // subcommands (like `security`'s `<WORKSPACE>` positional before
     // the action) are treated as positionals and skipped so the walker
     // keeps scanning for a subcommand match. When the current command
     // has no subcommands, any unrecognised token ends the walk.
     let mut command = Cli::command();
+    // Build the complete command tree before descending into a leaf. Clap's
+    // build phase propagates global arguments and the full binary/subcommand
+    // display name into child commands. Rendering an unbuilt cloned child
+    // loses both, producing misleading usage such as `USAGE: taint-analysis
+    // [OPTIONS]` and hiding valid global flags from leaf help.
+    command.build();
     let mut argv_iter = argv.iter().skip(1).peekable();
     while let Some(arg) = argv_iter.next() {
         if arg == "--help" || arg == "-h" || arg == "--" {
             break;
         }
-        if arg == "--theme" || arg == "--no-color" || arg == "--no-cache" || arg == "--no-progress" {
-            if arg == "--theme" {
-                argv_iter.next();
-            }
+        if matches!(arg.as_str(), "--no-color" | "--no-cache" | "--no-progress") {
+            continue;
+        }
+        if matches!(
+            arg.as_str(),
+            "--theme"
+                | "--html-output"
+                | "--contains"
+                | "--not-contains"
+                | "--parse-timeout"
+                | "--memory-budget"
+                | "--debug"
+        ) {
+            argv_iter.next();
+            continue;
+        }
+        if [
+            "--theme=",
+            "--html-output=",
+            "--contains=",
+            "--not-contains=",
+            "--parse-timeout=",
+            "--memory-budget=",
+            "--debug=",
+        ]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
+        {
             continue;
         }
         if arg.starts_with("--") || arg.starts_with('-') {
+            // Once the target is a leaf, local flags do not affect which
+            // help page owns the invocation. Stop descending and render that
+            // leaf instead of falling back to clap's unthemed help path.
+            if command.get_subcommands().next().is_none() {
+                break;
+            }
             return None;
         }
         match command.find_subcommand(arg.as_str()) {
@@ -568,6 +604,7 @@ pub(crate) fn try_themed_help() -> Option<i32> {
         .replace("Print help (see more with '--help')", "Print help")
         .replace("Print help (see a summary with '-h')", "Print help");
     let rendered_help = normalize_help_section_casing(&rendered_help);
+    let rendered_help = add_inherited_workspace_argument(&rendered_help);
 
     // `colorize_help_body` both reflows `COMMANDS:` blocks into the
     // roomier name-on-its-own-line shape AND paints description
@@ -580,6 +617,32 @@ pub(crate) fn try_themed_help() -> Option<i32> {
     let _ = stdout_lock.write_all(rendered.as_bytes());
     let _ = stdout_lock.flush();
     Some(0)
+}
+
+/// A `security` action is a leaf below `security <WORKSPACE>`. Clap carries
+/// the parent operand into the leaf's full usage line, but not into the leaf's
+/// `ARGUMENTS` table. Fill that presentation gap so help never names a
+/// required operand without explaining it.
+fn add_inherited_workspace_argument(rendered_help: &str) -> String {
+    let plain = strip_ansi_roughly(rendered_help);
+    if !plain.contains("USAGE: bonsai-ninja security <WORKSPACE>") || plain.contains("\nARGUMENTS:") {
+        return rendered_help.to_string();
+    }
+
+    let mut out = String::with_capacity(rendered_help.len() + 96);
+    let mut inserted = false;
+    for line in rendered_help.lines() {
+        if !inserted && strip_ansi_roughly(line).trim() == "OPTIONS:" {
+            out.push_str("ARGUMENTS:\n  <WORKSPACE>\n          Workspace root to analyze\n\n");
+            inserted = true;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !rendered_help.ends_with('\n') {
+        out.pop();
+    }
+    out
 }
 
 fn normalize_help_section_casing(rendered_help: &str) -> String {
@@ -609,17 +672,23 @@ pub(crate) fn colorize_help_body(rendered_help: &str) -> String {
     let mut line_index = 0usize;
     let mut description_lines_for_item = 0usize;
     let mut compact_item_section = false;
+    let mut global_options_section = false;
     while line_index < lines.len() {
         let line = lines[line_index];
         let header_probe = strip_ansi_roughly(line);
         let header_trimmed = header_probe.trim();
-        if matches!(
+        if matches!(header_trimmed, "GLOBAL OPTIONS:" | "Global options:") {
+            compact_item_section = true;
+            global_options_section = true;
+        } else if matches!(
             header_trimmed,
             "Arguments:" | "ARGUMENTS:" | "Options:" | "OPTIONS:"
         ) {
             compact_item_section = true;
+            global_options_section = false;
         } else if looks_like_section_header(line) && !header_probe.starts_with(char::is_whitespace) {
             compact_item_section = false;
+            global_options_section = false;
         }
         if compact_item_section && line.trim().is_empty() {
             line_index += 1;
@@ -686,24 +755,40 @@ pub(crate) fn colorize_help_body(rendered_help: &str) -> String {
         if is_description_body && colors {
             if !is_value_metadata {
                 description_lines_for_item += 1;
-                if description_lines_for_item > MAX_HELP_DESCRIPTION_LINES {
+                let max_lines = if global_options_section {
+                    1
+                } else {
+                    MAX_HELP_DESCRIPTION_LINES
+                };
+                if description_lines_for_item > max_lines {
                     line_index += 1;
                     continue;
                 }
             }
             let line = if is_value_metadata {
                 line.to_string()
+            } else if global_options_section {
+                compact_global_description_line(&line)
             } else {
                 compact_description_line(&line)
             };
             out.push_str(&line.style(palette.dim).to_string());
         } else if is_description_body && !is_value_metadata {
             description_lines_for_item += 1;
-            if description_lines_for_item > MAX_HELP_DESCRIPTION_LINES {
+            let max_lines = if global_options_section {
+                1
+            } else {
+                MAX_HELP_DESCRIPTION_LINES
+            };
+            if description_lines_for_item > max_lines {
                 line_index += 1;
                 continue;
             }
-            out.push_str(&compact_description_line(&line));
+            if global_options_section {
+                out.push_str(&compact_global_description_line(&line));
+            } else {
+                out.push_str(&compact_description_line(&line));
+            }
         } else {
             out.push_str(&line);
         }
@@ -749,6 +834,18 @@ fn compact_description_line(line: &str) -> String {
     let leading: String = line.chars().take_while(|c| c.is_whitespace()).collect();
     let body = line.trim_start();
     wrap_words_with_prefix(body, MAX_CHARS, &leading)
+}
+
+/// Leaf help lists global switches for discoverability, but their complete
+/// explanations belong in root help and the CLI reference. Keep one complete
+/// sentence here instead of clipping a multi-sentence description mid-thought.
+fn compact_global_description_line(line: &str) -> String {
+    const MAX_CHARS: usize = 100;
+
+    let leading: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+    let body = line.trim_start();
+    let sentence_end = body.find(". ").map_or(body.len(), |index| index + 1);
+    wrap_words_with_prefix(&body[..sentence_end], MAX_CHARS, &leading)
 }
 
 fn wrap_words(text: &str, width: usize) -> String {

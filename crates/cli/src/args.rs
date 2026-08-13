@@ -10,7 +10,7 @@
 //! `#[arg(default_value_t = ...)]` must be able to resolve them at
 //! attribute-expansion time.
 
-use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args as ClapArgs, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 use crate::help_theme::{
@@ -93,8 +93,8 @@ pub(crate) enum ExportFormat {
 
 #[derive(Clone, Debug, Default, ClapArgs)]
 pub(crate) struct OutputPathArg {
-    /// Write the selected --format output to this file instead of stdout.
-    #[arg(long, value_name = "PATH")]
+    /// Write the selected command output to this file instead of stdout.
+    #[arg(short = 'o', long, visible_alias = "output", value_name = "PATH")]
     pub(crate) output_path: Option<PathBuf>,
 }
 
@@ -221,32 +221,42 @@ pub(crate) enum PrecisionFilter {
 pub(crate) struct Cli {
     /// Disable colored / styled output. Also respects `NO_COLOR` env and
     /// auto-disables when stdout isn't a TTY.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "GLOBAL OPTIONS")]
     pub(crate) no_color: bool,
 
     /// Color theme preset: `moss`, `earthy-dark`, `dracula`, or `retro-amber`.
     /// Also respects `BONSAI_THEME`.
-    #[arg(long, global = true, value_enum, env = "BONSAI_THEME")]
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        env = "BONSAI_THEME",
+        help_heading = "GLOBAL OPTIONS"
+    )]
     pub(crate) theme: Option<Theme>,
 
-    /// Disable the in-process chain / downstream / reachable-names caches
-    /// used by `inspect` and `export`. Results are identical — cached and
-    /// uncached paths return the same flows — but every lookup recomputes
-    /// from scratch. Use for benchmarking the cold path or as a safety
-    /// hatch if you suspect stale state. Also respects `BONSAI_NO_CACHE`.
-    #[arg(long, global = true)]
+    /// Disable the in-process caches used by `inspect` and `export`; results
+    /// remain identical. Every lookup recomputes from scratch. Use for
+    /// benchmarking the cold path or as a safety hatch if you suspect stale
+    /// state. Also respects `BONSAI_NO_CACHE`.
+    #[arg(long, global = true, help_heading = "GLOBAL OPTIONS")]
     pub(crate) no_cache: bool,
 
     /// Disable progress bars for long-running commands. Also respects
     /// `NO_PROGRESS` and auto-disables when stderr isn't a TTY (so
     /// pipes / CI / `--format json` scripts stay clean by default).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "GLOBAL OPTIONS")]
     pub(crate) no_progress: bool,
 
-    /// Write the command's human-readable output as a standalone themed HTML
-    /// report. This is a presentation sink: it does not enable security,
-    /// semantic, or indexing work the selected command did not request.
-    #[arg(long = "html-output", global = true, value_name = "PATH")]
+    /// Write human-readable output as themed HTML without enabling extra
+    /// analysis. This is only a presentation sink; it does not enable
+    /// security, semantic, or indexing work the command did not request.
+    #[arg(
+        long = "html-output",
+        global = true,
+        value_name = "PATH",
+        help_heading = "GLOBAL OPTIONS"
+    )]
     pub(crate) html_output: Option<PathBuf>,
 
     /// Secondary output filter: keep only result rows whose text
@@ -255,23 +265,38 @@ pub(crate) struct Cli {
     /// inspect, and security commands. Applied AFTER the query, so the
     /// expensive analysis is reused — iterating on `--contains`
     /// re-renders instead of re-running.
-    #[arg(long = "contains", global = true, value_name = "TEXT")]
+    #[arg(
+        long = "contains",
+        global = true,
+        value_name = "TEXT",
+        help_heading = "GLOBAL OPTIONS"
+    )]
     pub(crate) contains: Vec<String>,
 
     /// Secondary output filter: drop result rows whose text contains
     /// this substring (case-insensitive). Repeatable — a row matching
     /// ANY given substring is removed. Pairs with `--contains`.
-    #[arg(long = "not-contains", global = true, value_name = "TEXT")]
+    #[arg(
+        long = "not-contains",
+        global = true,
+        value_name = "TEXT",
+        help_heading = "GLOBAL OPTIONS"
+    )]
     pub(crate) not_contains: Vec<String>,
 
-    /// Optional per-file tree-sitter parse timeout in milliseconds.
-    /// Uncapped by default; `0` also disables the guard. Also respects
+    /// Optional per-file tree-sitter parse timeout in milliseconds; uncapped
+    /// by default. `0` also disables the guard. Also respects
     /// `BONSAI_PARSE_TIMEOUT_MS`.
-    #[arg(long = "parse-timeout", global = true, value_name = "MS")]
+    #[arg(
+        long = "parse-timeout",
+        global = true,
+        value_name = "MS",
+        help_heading = "GLOBAL OPTIONS"
+    )]
     pub(crate) parse_timeout_ms: Option<u64>,
 
-    /// Memory budget in MiB used to schedule compiler work. The analyzer
-    /// remains exhaustive: lower budgets reduce parser/lowering/serialization
+    /// Compiler scheduling budget in MiB; analysis remains exact and
+    /// exhaustive. Lower budgets reduce parser/lowering/serialization
     /// concurrency and use smaller streaming batches; they do not cap files,
     /// graph depth, fixed-point iterations, or results. This is not an OS hard
     /// RSS limit. When omitted, bonsai detects physical/container memory
@@ -280,14 +305,20 @@ pub(crate) struct Cli {
         long = "memory-budget",
         global = true,
         value_name = "MIB",
-        value_parser = clap::value_parser!(u64).range(1..)
+        value_parser = clap::value_parser!(u64).range(1..),
+        help_heading = "GLOBAL OPTIONS"
     )]
     pub(crate) memory_budget_mb: Option<u64>,
 
     /// Enable comma-separated debug categories on stderr, or `*` for all.
     /// Equivalent to `BONSAI_DEBUG`; common categories are `idg-closure`,
     /// `idg-resolve`, `recv-state`, `find-group`, `taint-graph`, and `xcall`.
-    #[arg(long = "debug", global = true, value_name = "CATEGORIES")]
+    #[arg(
+        long = "debug",
+        global = true,
+        value_name = "CATEGORIES",
+        help_heading = "GLOBAL OPTIONS"
+    )]
     pub(crate) debug: Option<String>,
 
     #[command(subcommand)]
@@ -411,6 +442,7 @@ pub(crate) enum Cmd {
     /// Cross-module execution trace from a function (headline feature).
     #[command(
         display_order = 2,
+        override_usage = "bonsai-ninja trace [OPTIONS] <WORKSPACE> [TARGET]",
         long_about = themed_subcommand_long_about("Expand a function's call tree across the whole workspace and \
                       emit a structured trace of every step (Call / Branch / Loop / \
                       Return / Throw / Try / ...). Follows qualified calls through \
@@ -420,16 +452,22 @@ pub(crate) enum Cmd {
                       Use `--from X --to Y` to restrict to flows that go from X to Y."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Trace every flow that starts at handle_request\n  \
-                      $ bonsai-ninja trace ./src handle_request\n  \
+                      $ bonsai-ninja trace ./src --symbol handle_request\n  \
                       \n  \
                       # Disambiguate a same-named method by compiler owner\n  \
-                      $ bonsai-ninja trace ./src Flask.__call__\n  \
+                      $ bonsai-ninja trace ./src --symbol Flask.__call__\n  \
                       \n  \
                       # Only flows that reach os.system starting from handle_request\n  \
                       $ bonsai-ninja trace ./src --from handle_request --to os.system\n  \
                       \n  \
                       # Graphviz output\n  \
-                      $ bonsai-ninja trace ./src handle_request --format dot | dot -Tpng > flow.png")
+                      $ bonsai-ninja trace ./src --symbol handle_request --format dot | dot -Tpng > flow.png"),
+        group(
+            ArgGroup::new("trace_selector")
+                .args(["target", "function", "from"])
+                .required(true)
+                .multiple(false)
+        )
     )]
     Trace {
         /// Workspace root to analyze.
@@ -437,15 +475,15 @@ pub(crate) enum Cmd {
         /// Positional symbol selector to trace. Accepts qualified
         /// `Owner.member`, `path:name`, and `path:line:name` forms.
         target: Option<String>,
-        /// Function/symbol selector to trace. Takes precedence over the
-        /// positional target. Accepts the same qualified/file selectors;
-        /// `--function` remains a compatibility alias.
+        /// Function/symbol selector to trace. Accepts the same qualified/file
+        /// selectors as the positional form; `--function` remains a
+        /// compatibility alias. Pass exactly one selector form.
         #[arg(long = "symbol", visible_alias = "function")]
         function: Option<String>,
         /// Restrict to flows from this symbol selector. Qualified owner and
         /// exact file selectors are accepted. Pairs with `--to` to bracket a
         /// specific entry → sink window.
-        #[arg(long)]
+        #[arg(long, requires = "to")]
         from: Option<String>,
         /// Restrict to flows that reach this symbol selector. Qualified owner
         /// and exact file selectors are accepted. Requires `--from`.
@@ -567,6 +605,7 @@ pub(crate) enum Cmd {
     /// Resolve a stable bonsai id and open its owning drilldown view.
     #[command(
         display_order = 5,
+        override_usage = "bonsai-ninja show [OPTIONS] <WORKSPACE> [ID]",
         long_about = themed_subcommand_long_about(
             "Resolve a stable bonsai id and re-open the command view \
              that owns it. Supports structural/security flow ids (`F:`), \
@@ -589,26 +628,37 @@ pub(crate) enum Cmd {
         after_help = themed_subcommand_after_help(
             "EXAMPLES\n\n  \
              # Re-open one structural flow from a defs/search/inspect row\n  \
-             $ bonsai-ninja show ./src F:0123456789abcdef\n  \
+             $ bonsai-ninja show ./src --id F:0123456789abcdef\n  \
              \n  \
              # Re-open one raw inspect taint path\n  \
-             $ bonsai-ninja show ./src T:aabbccdd\n  \
+             $ bonsai-ninja show ./src --id T:aabbccdd\n  \
              \n  \
              # Re-open one structured dump-taint propagation\n  \
-             $ bonsai-ninja show ./src T:aabbccdd --taint-source update_user --taint-seed token --taint-seed action\n  \
+             $ bonsai-ninja show ./src --id T:aabbccdd --taint-source update_user --taint-seed token --taint-seed action\n  \
              \n  \
              # Re-open one security finding\n  \
-             $ bonsai-ninja show ./src S:0123456789abcdef --rules-dir security-patterns\n  \
+             $ bonsai-ninja show ./src --id S:0123456789abcdef --rules-dir security-patterns\n  \
              \n  \
              # Resolver candidates need the original resolver query\n  \
-             $ bonsai-ninja show ./src R:aabbccdd --query execute"
+             $ bonsai-ninja show ./src --id R:aabbccdd --query execute"
+        ),
+        group(
+            ArgGroup::new("show_id")
+                .args(["id_pos", "id"])
+                .required(true)
+                .multiple(false)
         )
     )]
     Show {
         /// Workspace root to analyze.
         workspace: PathBuf,
-        /// Stable id to resolve (`F:`, `G:`, `T:`, `E:`, `N:`, `S:`, or `R:`).
-        id: String,
+        /// Positional stable id to resolve (`F:`, `G:`, `T:`, `E:`, `N:`,
+        /// `S:`, or `R:`).
+        #[arg(value_name = "ID")]
+        id_pos: Option<String>,
+        /// Stable id to resolve. Explicit equivalent of the positional id.
+        #[arg(long, value_name = "ID")]
+        id: Option<String>,
         /// Query/name required when resolving an `R:` candidate id.
         #[arg(long)]
         query: Option<String>,
@@ -675,6 +725,7 @@ pub(crate) enum Cmd {
     /// Dump the HIR of a single function.
     #[command(
         display_order = 30,
+        override_usage = "bonsai-ninja dump-hir [OPTIONS] <WORKSPACE> [SYMBOL]",
         long_about = themed_subcommand_long_about("Emit the HIR (flow-event tree — Call / Branch / Loop / Return \
                       / Throw / Try / …) for one function as JSON. The \
                       layer directly above the tree-sitter AST; what \
@@ -696,26 +747,33 @@ pub(crate) enum Cmd {
                       not tabular, so a rendered text view wouldn't add \
                       information. Pipe through `jq` to drill down."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Positional symbol\n  \
-                      $ bonsai-ninja dump-hir ./src handle_request\n  \
-                      \n  \
-                      # Equivalent, via --symbol\n  \
+                      # Explicit symbol selector\n  \
                       $ bonsai-ninja dump-hir ./src --symbol run_admin_command\n  \
+                      \n  \
+                      # Concise positional form\n  \
+                      $ bonsai-ninja dump-hir ./src handle_request\n  \
                       \n  \
                       # Disambiguate a duplicate symbol\n  \
                       $ bonsai-ninja dump-hir ./src auth/gateway.py:42:handle_request\n  \
                       \n  \
                       # Just the call events inside a function\n  \
-                      $ bonsai-ninja dump-hir ./src handle_request | jq '.flow_events[] | select(.Call)'")
+                      $ bonsai-ninja dump-hir ./src handle_request | jq '.flow_events[] | select(.Call)'"),
+        group(
+            ArgGroup::new("hir_symbol")
+                .args(["symbol_pos", "symbol"])
+                .required(true)
+                .multiple(false)
+        )
     )]
     DumpHir {
         /// Workspace root to analyze.
         workspace: PathBuf,
         /// Positional symbol to dump (alternative to `--symbol`).
+        #[arg(value_name = "SYMBOL")]
         symbol_pos: Option<String>,
         /// Function name or compiler-qualified identity to dump. Use
         /// `path:name` or `path:line:name` when a bare name is ambiguous.
-        /// The positional symbol takes precedence when both are set.
+        /// Pass either this flag or the positional form, not both.
         #[arg(long)]
         symbol: Option<String>,
     },
@@ -723,6 +781,7 @@ pub(crate) enum Cmd {
     /// Dump the CFG of a single function.
     #[command(
         display_order = 31,
+        override_usage = "bonsai-ninja dump-cfg [OPTIONS] <WORKSPACE> [SYMBOL]",
         long_about = themed_subcommand_long_about("Emit the CFG (basic blocks + edges) derived from a function's \
                       HIR as JSON. The intraprocedural view taint analysis \
                       walks — every branch, loop, and join point is \
@@ -744,26 +803,33 @@ pub(crate) enum Cmd {
                       not tabular. Pipe through `jq` to inspect specific \
                       blocks / terminators."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Positional symbol\n  \
-                      $ bonsai-ninja dump-cfg ./src handle_request\n  \
-                      \n  \
-                      # Equivalent, via --symbol\n  \
+                      # Explicit symbol selector\n  \
                       $ bonsai-ninja dump-cfg ./src --symbol run_admin_command\n  \
+                      \n  \
+                      # Concise positional form\n  \
+                      $ bonsai-ninja dump-cfg ./src handle_request\n  \
                       \n  \
                       # Disambiguate a duplicate symbol\n  \
                       $ bonsai-ninja dump-cfg ./src auth/gateway.py:42:handle_request\n  \
                       \n  \
                       # Just block terminators\n  \
-                      $ bonsai-ninja dump-cfg ./src handle_request | jq '.blocks[] | {id, terminator}'")
+                      $ bonsai-ninja dump-cfg ./src handle_request | jq '.blocks[] | {id, terminator}'"),
+        group(
+            ArgGroup::new("cfg_symbol")
+                .args(["symbol_pos", "symbol"])
+                .required(true)
+                .multiple(false)
+        )
     )]
     DumpCfg {
         /// Workspace root to analyze.
         workspace: PathBuf,
         /// Positional symbol to dump (alternative to `--symbol`).
+        #[arg(value_name = "SYMBOL")]
         symbol_pos: Option<String>,
         /// Function name or compiler-qualified identity to dump. Use
         /// `path:name` or `path:line:name` when a bare name is ambiguous.
-        /// The positional symbol takes precedence when both are set.
+        /// Pass either this flag or the positional form, not both.
         #[arg(long)]
         symbol: Option<String>,
     },
@@ -974,19 +1040,25 @@ pub(crate) enum Cmd {
                       $ bonsai-ninja dump-ast ./src --compact\n  \
                       \n  \
                       # Drill into one node by its stable id\n  \
-                      $ bonsai-ninja dump-ast ./src --node N:aabbccdd")
+                      $ bonsai-ninja dump-ast ./src --node N:aabbccdd"),
+        group(
+            ArgGroup::new("ast_function")
+                .args(["symbol_pos", "function"])
+                .multiple(false)
+        )
     )]
     DumpAst {
         /// Workspace root to analyze.
         workspace: PathBuf,
         /// Positional symbol (alternative to `--function`).
+        #[arg(value_name = "FUNCTION")]
         symbol_pos: Option<String>,
         /// Filter to files whose workspace-relative path matches this text.
         /// Explicit absolute paths are also accepted.
         #[arg(long)]
         file: Option<String>,
-        /// Scope to a single function's subtree (decl name). Takes
-        /// precedence over `--file` when both are set.
+        /// Scope to a single function's subtree (decl name). Combine with
+        /// `--file` to disambiguate same-named functions.
         #[arg(long)]
         function: Option<String>,
         /// Kinds-only compact render (drop source text snippets and
@@ -1020,6 +1092,7 @@ pub(crate) enum Cmd {
     /// Trace the name resolver stage-by-stage.
     #[command(
         display_order = 35,
+        override_usage = "bonsai-ninja dump-resolve [OPTIONS] <WORKSPACE> [NAME]",
         long_about = themed_subcommand_long_about("Feed a name token through the resolver and emit every \
                       stage's input and output: `short_callee` qualification \
                       trim, per-file import alias rewrite, \
@@ -1043,23 +1116,30 @@ pub(crate) enum Cmd {
                       failures."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Trace a single name (global lookup, no file context)\n  \
-                      $ bonsai-ninja dump-resolve ./src run_admin_command\n  \
+                      $ bonsai-ninja dump-resolve ./src --name run_admin_command\n  \
                       \n  \
                       # With a file context so the alias map is applied\n  \
-                      $ bonsai-ninja dump-resolve ./src z --in-file gateway.py\n  \
+                      $ bonsai-ninja dump-resolve ./src --name z --in-file gateway.py\n  \
                       # Resolve one exact adapter-lowered call site\n  \
-                      $ bonsai-ninja dump-resolve ./src self.inner.spawn --in-file runtime.rs\n  \
+                      $ bonsai-ninja dump-resolve ./src --name self.inner.spawn --in-file runtime.rs\n  \
                       \n  \
                       # Compact — one line per candidate\n  \
                       $ bonsai-ninja dump-resolve ./src execute --compact\n  \
                       \n  \
                       # Drill into one candidate by its stable id\n  \
-                      $ bonsai-ninja dump-resolve ./src execute --candidate R:aabbccdd")
+                      $ bonsai-ninja dump-resolve ./src execute --candidate R:aabbccdd"),
+        group(
+            ArgGroup::new("resolve_name")
+                .args(["name_pos", "name"])
+                .required(true)
+                .multiple(false)
+        )
     )]
     DumpResolve {
         /// Workspace root to analyze.
         workspace: PathBuf,
         /// Positional name to resolve (alternative to `--name`).
+        #[arg(value_name = "NAME")]
         name_pos: Option<String>,
         /// Name to resolve.
         #[arg(long)]
@@ -1904,6 +1984,7 @@ pub(crate) enum Cmd {
     /// Every indexed reference to a symbol.
     #[command(
         display_order = 28,
+        override_usage = "bonsai-ninja refs [OPTIONS] <WORKSPACE> [SYMBOL]",
         long_about = themed_subcommand_long_about("Find every place a symbol is read, called, or referenced. \
                       Columns: symbol, kind, enclosing fn, location, code.\n\
                       \n\
@@ -1913,25 +1994,32 @@ pub(crate) enum Cmd {
                       ref's enclosing function; paste into \
                       `inspect --flow F:<16-hex>` to expand the chain."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Positional symbol\n  \
-                      $ bonsai-ninja refs ./src run_admin_command\n  \
-                      \n  \
-                      # Equivalent, via --symbol\n  \
+                      # Explicit symbol selector\n  \
                       $ bonsai-ninja refs ./src --symbol handle_request\n  \
+                      \n  \
+                      # Concise positional form\n  \
+                      $ bonsai-ninja refs ./src run_admin_command\n  \
                       \n  \
                       # Only call-site references\n  \
                       $ bonsai-ninja refs ./src verify_token --kind call\n  \
                       \n  \
                       # Regex across every symbol matching a pattern\n  \
-                      $ bonsai-ninja refs ./src --regex 'handle_.*'")
+                      $ bonsai-ninja refs ./src --symbol 'handle_.*' --regex"),
+        group(
+            ArgGroup::new("refs_symbol")
+                .args(["symbol_pos", "symbol"])
+                .required(true)
+                .multiple(false)
+        )
     )]
     Refs {
         /// Workspace root to analyze.
         workspace: PathBuf,
         /// Positional symbol (alternative to `--symbol`).
+        #[arg(value_name = "SYMBOL")]
         symbol_pos: Option<String>,
-        /// Symbol name whose refs to surface. The positional symbol
-        /// takes precedence when both are set.
+        /// Symbol name whose refs to surface. Pass either this flag or the
+        /// positional form, not both.
         #[arg(long)]
         symbol: Option<String>,
         /// Ref kind filter (`call`, `read`, `write`, `type`, `import`, `macro`, `decorator`, `other`).
@@ -1978,6 +2066,7 @@ pub(crate) enum Cmd {
     /// Fuzzy search across indexed browse facts.
     #[command(
         display_order = 29,
+        override_usage = "bonsai-ninja search [OPTIONS] <WORKSPACE> [QUERY]",
         long_about = themed_subcommand_long_about("Prefix-first fuzzy search over every indexed browse fact: \
                       decl names / qualified names, call sites, imports, \
                       assignment targets, strings, comments, args, and refs. \
@@ -1992,23 +2081,30 @@ pub(crate) enum Cmd {
                       reaches each hit — paste into `inspect --flow` to \
                       expand the chain."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Positional query\n  \
-                      $ bonsai-ninja search ./src run_admin\n  \
-                      \n  \
-                      # Equivalent, via --query\n  \
+                      # Explicit query selector\n  \
                       $ bonsai-ninja search ./src --query verify --limit 50\n  \
                       \n  \
+                      # Concise positional form\n  \
+                      $ bonsai-ninja search ./src run_admin\n  \
+                      \n  \
                       # Regex query, methods only\n  \
-                      $ bonsai-ninja search ./src --query 'handle_.*' --regex --kind method")
+                      $ bonsai-ninja search ./src --query 'handle_.*' --regex --kind method"),
+        group(
+            ArgGroup::new("search_query")
+                .args(["query_pos", "query"])
+                .required(true)
+                .multiple(false)
+        )
     )]
     Search {
         /// Workspace root to analyze.
         workspace: PathBuf,
         /// Positional query (alternative to `--query`).
+        #[arg(value_name = "QUERY")]
         query_pos: Option<String>,
-        /// Search query. The positional query takes precedence when
-        /// both are set.
-        #[arg(long)]
+        /// Search query. Pass either this flag or the positional form, not
+        /// both.
+        #[arg(short = 'q', long)]
         query: Option<String>,
         /// Fact-kind filter (`function`, `call`, `import`, `var`,
         /// `string`, `comment`, `arg`, `ref-read`, …).
@@ -2021,6 +2117,8 @@ pub(crate) enum Cmd {
         /// Interpret the query as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
+        /// Maximum rows per output page (`0` = token-budget only). This
+        /// combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = 0)]
         limit: usize,
         /// Include structural flow IDs. This explicitly hydrates semantic
@@ -2102,16 +2200,23 @@ pub(crate) enum Cmd {
                       $ bonsai-ninja inspect ./src --query exec --view grouped\n  \
                       \n  \
                       # JSON output for CI / tooling\n  \
-                      $ bonsai-ninja inspect ./src --query os.system --format json")
+                      $ bonsai-ninja inspect ./src --query os.system --format json"),
+        group(
+            ArgGroup::new("inspect_query")
+                .args(["symbol_pos", "query"])
+                .multiple(false)
+        )
     )]
     Inspect {
         /// Workspace root to analyze.
         workspace: PathBuf,
         /// Positional search query. Case-insensitive substring by default;
         /// pair with `--regex` to interpret as a regex.
+        #[arg(value_name = "QUERY")]
         symbol_pos: Option<String>,
-        /// Preferred query flag.
-        #[arg(long)]
+        /// Preferred query flag. The positional form remains supported for
+        /// interactive use; pass only one form.
+        #[arg(short = 'q', long)]
         query: Option<String>,
         /// Interpret the query as a regex instead of a fuzzy substring.
         #[arg(long, default_value_t = false)]
@@ -2442,9 +2547,10 @@ pub(crate) enum Cmd {
     #[command(
         display_order = 24,
         name = "read-file",
+        override_usage = "bonsai-ninja read-file [OPTIONS] <WORKSPACE> [PATH]",
         long_about = themed_subcommand_long_about(
-            "Cat-style view of a single file. Pass an exact path, \
-             unique workspace suffix, unique basename, or `--symbol` \
+            "Cat-style view of a single file. Pass `--file` with an exact path, \
+             unique workspace suffix, unique basename, or use `--symbol` \
              to open the defining file for a symbol. By default this \
              opens and indexes only the resolved file, so it is \
              suitable for large workspaces after `search`, `defs`, \
@@ -2471,7 +2577,7 @@ pub(crate) enum Cmd {
         after_help = themed_subcommand_after_help(
             "EXAMPLES\n\n  \
              # Lightweight source view of one file\n  \
-             $ bonsai-ninja read-file ./src auth/verify_token.py\n  \
+             $ bonsai-ninja read-file ./src --file auth/verify_token.py\n  \
              \n  \
              # Unique basename/suffix after search or defs finds an anchor\n  \
              $ bonsai-ninja read-file ./src verify_token.py\n  \
@@ -2487,6 +2593,12 @@ pub(crate) enum Cmd {
              \n  \
              # Machine-readable shape for tooling\n  \
              $ bonsai-ninja read-file ./src auth/verify_token.py --format json"
+        ),
+        group(
+            ArgGroup::new("read_target")
+                .args(["path", "path_flag", "symbol"])
+                .required(true)
+                .multiple(false)
         )
     )]
     ReadFile {
@@ -2494,8 +2606,12 @@ pub(crate) enum Cmd {
         workspace: PathBuf,
         /// File path, unique workspace suffix, or unique basename.
         path: Option<String>,
-        /// Open the file defining this symbol. The positional path
-        /// takes precedence when both are provided.
+        /// File path, unique workspace suffix, or unique basename. This is
+        /// the explicit equivalent of the positional path.
+        #[arg(long = "file", visible_alias = "path", value_name = "PATH")]
+        path_flag: Option<String>,
+        /// Open the file defining this symbol. Pass exactly one of a path or
+        /// symbol selector.
         #[arg(long)]
         symbol: Option<String>,
         /// Restrict to a 1-based line range (`A:B`, inclusive).
@@ -2951,14 +3067,9 @@ pub(crate) enum SecurityAction {
         /// `./security-patterns/` (cwd-relative).
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
-        /// Bundle of defaults for common review postures. `production`
-        /// applies the SKILL.md production exclusion set for common
-        /// test, fixture, sample, vendored dependency, build artifact,
-        /// generated-code, and language-specific non-production
-        /// layouts; severity `high`; trust `remote`; and context
-        /// `16k`. Per-flag overrides take precedence — passing
-        /// `--severity critical --profile production` keeps
-        /// `critical`.
+        /// Review defaults. `production` excludes common non-production
+        /// paths and selects severity `high`, trust `remote`, and context
+        /// `16k`; explicit flags override profile values.
         #[arg(long)]
         profile: Option<String>,
         /// Restrict to source rules whose id matches this regex.
@@ -2995,26 +3106,9 @@ pub(crate) enum SecurityAction {
         /// filter).
         #[arg(long)]
         severity: Option<String>,
-        /// Sink tag narrower. Documented vocabulary:
-        /// `access-control`, `atom-exhaustion`,
-        /// `cache-poisoning`, `code-injection`, `command-injection`,
-        /// `cookie-misconfig`, `cors`, `cql-injection`,
-        /// `cypher-injection`, `dos`, `env-leak`, `ets-match-dos`,
-        /// `file-upload`, `format-string`, `graphql`,
-        /// `graphql-injection`, `hash-collision`, `header-injection`,
-        /// `host-header`,
-        /// `insecure-deserialization`, `insecure-temp-file`,
-        /// `intent-redirection`, `jndi-injection`,
-        /// `jwt`, `ldap-injection`, `lfi`, `log-injection`,
-        /// `mass-assignment`, `memory-safety`, `nosql-injection`,
-        /// `oauth`, `open-redirect`,
-        /// `path-traversal`, `prototype-pollution`, `queue-injection`,
-        /// `race`, `redos`,
-        /// `smtp-injection`, `sql-injection`, `sqli`,
-        /// `state-manipulation`, `ssrf`, `ssti`, `timeout-bypass`,
-        /// `timing-attack`, `untrusted-token`,
-        /// `weak-auth`, `weak-crypto`, `weak-randomness`, `weak-tls`,
-        /// `web-llm`, `xss`, `xxe`, `zip-slip`.
+        /// Restrict findings to one sink tag, such as
+        /// `command-injection`, `path-traversal`, `ssrf`, `xss`, or `xxe`.
+        /// Run `security pack --kind sink` to browse the loaded vocabulary.
         #[arg(long)]
         tag: Option<String>,
         /// File-path include filter (repeatable). Analyze only files whose
@@ -3027,34 +3121,18 @@ pub(crate) enum SecurityAction {
         /// absolute paths are also accepted.
         #[arg(long = "exclude-file")]
         exclude_files: Vec<String>,
-        /// Opt in to inferred per-function entry-point sources. By
-        /// default `taint-analysis` only seeds taint at sites matched
-        /// by a real `sources/*.yml` rule. With `--inferred-sources`,
-        /// every unreferenced or framework-decorated function becomes
-        /// its own synthetic source — useful for audit-style coverage
-        /// when the rulepack is thin, but very noisy on large
-        /// codebases. Combine with `--trust local --category inferred`
-        /// to view only the synthetic set.
+        /// Also seed inferred unreferenced/framework entry points. This is
+        /// useful for coverage audits but noisy on large workspaces; combine
+        /// with `--category inferred` to isolate synthetic sources.
         #[arg(long = "inferred-sources", default_value_t = false)]
         inferred_sources: bool,
-        /// Include exact local source-independent findings in
-        /// taint-analysis text/JSON output. SARIF enables this
-        /// automatically so code-scanning and benchmark consumers get
-        /// crypto, random, JWT, TLS, cookie, CORS, and other exact
-        /// source-independent API misuse results even when no
-        /// source-to-sink path is required. Lifecycle-audit transition
-        /// sites remain matcher/audit evidence until the engine can
-        /// prove the later same-value use.
+        /// Include exact source-independent API misuse findings in text/JSON.
+        /// SARIF enables these automatically; lifecycle transitions still
+        /// require a proven later use.
         #[arg(long = "include-pattern-only", default_value_t = false)]
         include_pattern_only: bool,
-        /// Drop findings whose source OR sink lives in a conventional
-        /// test path (`test/`, `tests/`, `*_test.go`, `Tests/`, etc.).
-        /// Use for "production review" reports — large projects with
-        /// strong test suites otherwise inflate the finding list with
-        /// test-fixture flows that exercise the production code being
-        /// reviewed. Findings carry a `from_test: true` boolean in the
-        /// JSON output so consumers can filter without re-parsing
-        /// paths.
+        /// Drop findings whose source or sink is in a conventional test path.
+        /// JSON also exposes `from_test` for downstream filtering.
         #[arg(long = "exclude-tests", default_value_t = false)]
         exclude_tests: bool,
         /// Include sanitizer-cleared source-to-sink paths for audit and
@@ -3077,35 +3155,18 @@ pub(crate) enum SecurityAction {
         /// JSON renders a summary object for tag/severity/rule triage.
         #[arg(long = "summary", default_value_t = false)]
         summary: bool,
-        /// Output shape — `text` for the paginated finding report,
-        /// `json` for the bonsai-native machine-readable shape, or
-        /// `sarif` for SARIF 2.1.0 (GitHub code scanning and IDE
-        /// plugins). SARIF results carry
-        /// `properties.bonsai` with the original `S:` / `F:` /
-        /// `G:` / CWE / status / tainted-args metadata so consumers
-        /// that understand bonsai's stable IDs can drill back into
-        /// `inspect` and `dump-edges`.
+        /// Output as human text, native JSON, or SARIF 2.1.0. SARIF retains
+        /// bonsai stable IDs, CWE, status, and tainted-argument metadata.
         #[arg(long, value_enum, default_value_t = SecurityFormat::Text)]
         format: SecurityFormat,
-        /// Code-review diff mode. Point this at a previous
-        /// `taint-analysis --format json --all` output file; each
-        /// finding is then classified against it as `new` /
-        /// `unchanged` (by stable finding id), and findings present in
-        /// the baseline but gone now are reported as `fixed`. Text mode
-        /// tags NEW findings and prints a `new/fixed/unchanged` summary;
-        /// JSON mode adds `baseline_status` per finding plus a
-        /// `baseline` summary object. Applied at render — it reuses the
-        /// cached analysis, so it does not re-scan.
+        /// Compare with a prior `--format json --all` report and classify
+        /// stable findings as new, unchanged, or fixed. This is render-only
+        /// and reuses the current analysis.
         #[arg(long = "baseline", value_name = "PREV_JSON")]
         baseline: Option<PathBuf>,
-        /// Diagnose WHY a `--source`/`--sink` pair does or does not
-        /// connect, instead of rendering the report. Reports how many
-        /// source sites and sink sites matched and how many taint paths
-        /// link them, then a verdict — distinguishing "the rule didn't
-        /// match anything" from "matched but the value doesn't flow"
-        /// (the usual review question). For the per-source IDG cut
-        /// detail of a no-path verdict, re-run with
-        /// `BONSAI_DEBUG=security-taint`.
+        /// Explain why a `--source`/`--sink` pair connects or not, including
+        /// match and path counts. Use `BONSAI_DEBUG=security-taint` for the
+        /// per-source IDG cut behind a no-path verdict.
         #[arg(long = "explain", default_value_t = false)]
         explain: bool,
         #[command(flatten)]

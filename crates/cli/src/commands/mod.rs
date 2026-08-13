@@ -106,24 +106,23 @@ pub(crate) fn is_internal_workspace_entry_name(name: &str) -> bool {
     ) || name.starts_with(".bonsai.pre-")
 }
 
-/// Resolve the symbol for commands that accept either a positional
-/// argument (`bonsai-ninja trace ./src handle_request`) or a named
-/// flag (`--symbol` / `--query` depending on the subcommand). The
-/// positional form wins when both are set so scripted pipelines
-/// have predictable precedence.
+/// Resolve a selector for commands that accept either a positional argument
+/// or a named flag (`--symbol`, `--query`, `--name`, or `--id`). Clap groups
+/// guarantee exactly one form before dispatch; this remains a defensive check
+/// for direct/internal callers.
 ///
 /// `flag_name` is the name of the named flag for the calling
 /// command (`symbol` for most dumps / refs / trace; `query` for
 /// search / inspect) so the error message points the user at the
 /// right flag rather than a generic "try --symbol or --query".
-pub(crate) fn resolve_symbol_arg(
+pub(crate) fn resolve_selector_arg(
     positional: Option<String>,
     flag: Option<String>,
     flag_name: &str,
 ) -> Result<String> {
     positional
         .or(flag)
-        .ok_or_else(|| anyhow::anyhow!("expected a symbol as positional arg or --{flag_name}"))
+        .ok_or_else(|| anyhow::anyhow!("expected a positional value or --{flag_name}"))
 }
 
 /// Open the workspace at `root` through the SDK lifecycle facade and

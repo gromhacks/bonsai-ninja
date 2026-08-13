@@ -16,6 +16,11 @@ missing. For scripts use `--format json --no-color --no-progress`; add
 `--all` or `--context uncapped` only for intentional exhaustive
 artifacts. For LLM-readable text use `--no-color --no-progress
 --context 16k`.
+Keep the workspace positional and prefer explicit selector flags
+(`--query`, `--symbol`, `--file`, `--from`, `--to`, `--id`) in scripts and
+agent calls. Positional selectors remain supported for interactive use, but
+the CLI rejects supplying both forms. Output files accept `-o`, `--output`,
+and `--output-path`.
 Use `--html-output <file>` for a standalone themed human report; it wraps the
 selected command's text view and must never enable additional analysis.
 For save-time workflows, keep `index <workspace> --watch --no-progress`
@@ -208,8 +213,8 @@ Start with shape, then follow one concrete behavior.
 Find anchors with `search`, then pivot to structured facts:
 
 ```shell
-./target/release/bonsai-ninja search <workspace> <route|symbol|error|config|sink> --context 8k --no-color --no-progress
-./target/release/bonsai-ninja refs <workspace> <symbol> --context 8k --no-color --no-progress
+./target/release/bonsai-ninja search <workspace> --query <route|symbol|error|config|sink> --context 8k --no-color --no-progress
+./target/release/bonsai-ninja refs <workspace> --symbol <symbol> --context 8k --no-color --no-progress
 ./target/release/bonsai-ninja calls <workspace> --callee <callee> --context 8k --no-color --no-progress
 ./target/release/bonsai-ninja args <workspace> --callee <callee> --context 8k --no-color --no-progress
 ```
@@ -220,10 +225,10 @@ Understand behavior:
 ./target/release/bonsai-ninja inspect <workspace> --query <target> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja inspect <workspace> --query <target> --taint-flow --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja inspect <workspace> --from <entry> --to <target> --context 16k --no-color --no-progress
-./target/release/bonsai-ninja show <workspace> F:<id> --context 16k --no-color --no-progress
-./target/release/bonsai-ninja trace <workspace> <entry-function> --context 16k --no-color --no-progress
+./target/release/bonsai-ninja show <workspace> --id F:<id> --context 16k --no-color --no-progress
+./target/release/bonsai-ninja trace <workspace> --symbol <entry-function> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja slice <workspace> --symbol <symbol> --context 16k --no-color --no-progress
-./target/release/bonsai-ninja read-file <workspace> <path> --lines A:B --context 16k --no-color --no-progress
+./target/release/bonsai-ninja read-file <workspace> --file <path> --lines A:B --context 16k --no-color --no-progress
 ```
 
 Use qualified `Owner.member` trace selectors when short method names collide;
@@ -265,8 +270,8 @@ Use the tool to narrow the bug before editing.
 
 ```shell
 ./target/release/bonsai-ninja index <workspace> --no-progress
-./target/release/bonsai-ninja search <workspace> <symptom> --context 16k --no-color --no-progress
-./target/release/bonsai-ninja refs <workspace> <symbol> --context 16k --no-color --no-progress
+./target/release/bonsai-ninja search <workspace> --query <symptom> --context 16k --no-color --no-progress
+./target/release/bonsai-ninja refs <workspace> --symbol <symbol> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja calls <workspace> --callee <callee> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja inspect <workspace> --from <entry> --to <target> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja trace <workspace> --from <entry> --to <target> --context 16k --no-color --no-progress
@@ -276,9 +281,9 @@ If high-level output disagrees with source, use the debug ladder:
 
 ```shell
 ./target/release/bonsai-ninja dump-ast <workspace> --file <file> --function <fn> --context 16k --no-color --no-progress
-./target/release/bonsai-ninja dump-hir <workspace> <fn> --no-color --no-progress
-./target/release/bonsai-ninja dump-cfg <workspace> <fn> --no-color --no-progress
-./target/release/bonsai-ninja dump-resolve <workspace> <callee> --in-file <file> --no-color --no-progress
+./target/release/bonsai-ninja dump-hir <workspace> --symbol <fn> --no-color --no-progress
+./target/release/bonsai-ninja dump-cfg <workspace> --symbol <fn> --no-color --no-progress
+./target/release/bonsai-ninja dump-resolve <workspace> --name <callee> --in-file <file> --no-color --no-progress
 ./target/release/bonsai-ninja dump-edges <workspace> --from <caller> --to <callee> --context 8k --no-color --no-progress
 ./target/release/bonsai-ninja dump-taint <workspace> --source <entry> --seed <param> --no-color --no-progress
 ```

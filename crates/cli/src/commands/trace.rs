@@ -87,7 +87,7 @@ pub(crate) fn cmd_trace(
                 .trace()
                 .source_to_sink_with_options(f, t, trace_opts)
                 .map_err(|e| augment_source_or_sink_not_found(e, ws, f, t))?,
-            _ => anyhow::bail!("specify a function as a positional arg, --function, or --from + --to"),
+            _ => anyhow::bail!("specify --symbol <name> or a complete --from <name> --to <name> corridor"),
         };
         spin.finish();
         if let Err(error) =

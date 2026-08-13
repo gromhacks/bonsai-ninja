@@ -69,5 +69,5 @@ Prefer rule fixes over suppressions. When a project needs local policy, disable 
 ```bash
 bonsai-ninja security ./src taint-analysis --format json --all > after.json
 bonsai-ninja security ./src taint-analysis --flow F:0123456789abcdef
-bonsai-ninja show ./src F:0123456789abcdef
+bonsai-ninja show ./src --id F:0123456789abcdef
 ```

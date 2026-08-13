@@ -1142,7 +1142,6 @@ class Validator:
             [
                 "refs",
                 ws,
-                target,
                 "--symbol",
                 target,
                 "--kind",
@@ -1170,7 +1169,6 @@ class Validator:
             [
                 "search",
                 ws,
-                entry,
                 "--query",
                 entry,
                 "--kind",

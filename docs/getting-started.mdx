@@ -84,9 +84,9 @@ commands compute their requested exact facts on demand.
 Find an anchor, then pivot to compiler facts:
 
 ```bash
-./target/release/bonsai-ninja search ./src verify_token \
+./target/release/bonsai-ninja search ./src --query verify_token \
   --context 8k --no-color --no-progress
-./target/release/bonsai-ninja refs ./src verify_token \
+./target/release/bonsai-ninja refs ./src --symbol verify_token \
   --context 8k --no-color --no-progress
 ./target/release/bonsai-ninja calls ./src --callee verify_token \
   --context 8k --no-color --no-progress
@@ -161,7 +161,7 @@ A security finding includes:
 Reopen evidence with:
 
 ```bash
-./target/release/bonsai-ninja show ./src S:<id> \
+./target/release/bonsai-ninja show ./src --id S:<id> \
   --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja security ./src taint-analysis --flow F:<id> \
   --context 16k --no-color --no-progress
