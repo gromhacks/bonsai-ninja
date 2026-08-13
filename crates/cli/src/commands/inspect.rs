@@ -440,6 +440,12 @@ pub(crate) struct InspectRenderOptions {
     /// `show` stays a pure structural-chain view. `inspect --flow`
     /// keeps the folded occurrence context on small workspaces.
     pub(crate) structural_drilldown: bool,
+    /// An endpoint-scoped `show F:` / `show G:` must replay its saved
+    /// `--from`/`--to` candidate phase before narrowing by stable id. Unlike
+    /// `structural_drilldown`, this cannot skip occurrence discovery, but the
+    /// final report is still one structural target rather than one copy per
+    /// matching declaration or occurrence.
+    pub(crate) endpoint_drilldown: bool,
 }
 
 impl Default for InspectRenderOptions {
@@ -454,6 +460,7 @@ impl Default for InspectRenderOptions {
             view: InspectView::Trace,
             group_id_filter: None,
             structural_drilldown: false,
+            endpoint_drilldown: false,
         }
     }
 }
@@ -1814,8 +1821,12 @@ fn finish_inspect(
             );
         }
     }
-    if render.structural_drilldown {
+    if render.structural_drilldown || render.endpoint_drilldown {
         retain_structural_drilldown_targets(&mut report);
+    }
+    if render.endpoint_drilldown {
+        report.hits.clear();
+        rebuild_report_summary(&mut report);
     }
 
     if graph_flows_enabled && filters.from.is_some() && filters.to.is_some() {

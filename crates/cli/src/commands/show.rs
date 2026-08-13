@@ -143,6 +143,7 @@ fn show_structural_flow(workspace: &Path, id: &str, options: StructuralShowOptio
                 // must replay that exact candidate phase before the id-only
                 // render narrow is applied.
                 structural_drilldown,
+                endpoint_drilldown: !structural_drilldown,
             },
             graph_flow: true,
             taint_flow: false,
@@ -229,6 +230,7 @@ fn show_flow_group(workspace: &Path, id: &str, options: StructuralShowOptions<'_
                 view: InspectView::Grouped,
                 group_id_filter: Some(id.to_string()),
                 structural_drilldown,
+                endpoint_drilldown: !structural_drilldown,
             },
             graph_flow: true,
             taint_flow: false,
@@ -392,6 +394,7 @@ fn show_raw_taint_flow(
                 view: InspectView::Trace,
                 group_id_filter: None,
                 structural_drilldown: true,
+                endpoint_drilldown: false,
             },
             graph_flow: false,
             taint_flow: true,

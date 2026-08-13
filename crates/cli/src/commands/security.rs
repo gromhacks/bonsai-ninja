@@ -18,7 +18,7 @@ use crate::args::{BrowseFormat, SecurityAction, SecurityFormat};
 use crate::commands::{
     emit_json_paged_cached, emit_json_value_paged_cached, open_project_index_filtered_paths,
     open_project_index_matching_literal, open_project_index_only, page_info_to_json,
-    paged_json_incomplete_reasons, paging_from_cli, paging_with_row_limit, short_file,
+    paged_json_incomplete_reasons, paging_from_cli, paging_with_row_limit,
 };
 use crate::footer::{render_paging_footer, render_truncation_notice};
 use crate::page_cache;
@@ -679,7 +679,6 @@ fn cmd_sources(
         "sources",
         &matches,
         pack,
-        project.workspace(),
         limit,
         paging_cfg,
         format,
@@ -832,7 +831,6 @@ fn cmd_sinks(
         "sinks",
         &matches,
         pack,
-        project.workspace(),
         limit,
         paging_cfg,
         format,
@@ -897,7 +895,6 @@ fn cmd_sanitizers(
         "sanitizers",
         &matches,
         pack,
-        project.workspace(),
         limit,
         paging_cfg,
         format,
@@ -1346,8 +1343,14 @@ fn emit_taint_render_report_inner(
             emit_cached_page(&pages, current_page)?;
         }
         SecurityFormat::Text => {
-            let (pages, current_page) =
-                build_taint_text_pages(render_workspace, pack, report, paging_cfg, filters_hash)?;
+            let (pages, current_page) = build_taint_text_pages(
+                workspace,
+                render_workspace,
+                pack,
+                report,
+                paging_cfg,
+                filters_hash,
+            )?;
             save_taint_payload_if_requested(workspace, filters_hash, pages.clone(), cache_payload);
             emit_cached_page(&pages, current_page)?;
         }
@@ -1587,6 +1590,7 @@ fn render_taint_json_page(
 }
 
 fn build_taint_text_pages(
+    workspace: &Path,
     render_workspace: Option<&bonsai_sdk::Workspace>,
     pack: &Rulepack,
     report: &TaintAnalysisRenderReport,
@@ -1603,7 +1607,7 @@ fn build_taint_text_pages(
         .unwrap_or(u64::MAX / 8)
         .max(unit_target_bytes);
 
-    let units = build_taint_text_units(render_workspace, pack, report, unit_target_bytes)?;
+    let units = build_taint_text_units(workspace, render_workspace, pack, report, unit_target_bytes)?;
     let page_bounds = taint_text_page_bounds(&units, page_payload_budget_bytes);
     let current_page = resolve_taint_text_page(&page_bounds, paging_cfg, filters_hash)?;
     let page_numbers: Vec<u64> = page_cache::eager_window(current_page, page_bounds.len() as u64)
@@ -1664,6 +1668,7 @@ struct TaintTextUnit {
 }
 
 fn build_taint_text_units(
+    workspace: &Path,
     render_workspace: Option<&bonsai_sdk::Workspace>,
     pack: &Rulepack,
     report: &TaintAnalysisRenderReport,
@@ -1682,6 +1687,7 @@ fn build_taint_text_units(
                 for (chunk_idx, chunk) in chunks.iter().enumerate() {
                     let text = page_cache::capture(|| {
                         render_taint_analysis_text_unit(
+                            workspace,
                             pack,
                             &item,
                             finding_idx,
@@ -1695,7 +1701,7 @@ fn build_taint_text_units(
             }
             None => {
                 let text = page_cache::capture(|| {
-                    render_taint_analysis_text_unit(pack, &item, finding_idx, None, 0, 1)
+                    render_taint_analysis_text_unit(workspace, pack, &item, finding_idx, None, 0, 1)
                 })?;
                 units.push(TaintTextUnit { text });
             }
@@ -1757,6 +1763,7 @@ fn render_taint_analysis_report_heading(summary: &TaintAnalysisSummary) {
 }
 
 fn render_taint_analysis_text_unit(
+    workspace: &Path,
     pack: &Rulepack,
     item: &TaintAnalysisRenderFinding,
     finding_idx: usize,
@@ -1766,7 +1773,7 @@ fn render_taint_analysis_text_unit(
 ) -> Result<()> {
     let u = ui();
     if chunk_idx == 0 {
-        render_finding_security_header(u, finding_idx + 1, &item.finding, pack);
+        render_finding_security_header(u, workspace, finding_idx + 1, &item.finding, pack);
         if item.baseline_status.as_deref() == Some("new") {
             cli_println!("  {}", u.warn("[NEW since baseline]"));
         }
@@ -1794,7 +1801,7 @@ fn render_taint_analysis_text_unit(
             "TAINT FLOW",
         );
     } else {
-        render_finding_block_compact(u, &item.finding, pack);
+        render_finding_block_compact(u, workspace, &item.finding, pack);
     }
     Ok(())
 }
@@ -2764,6 +2771,7 @@ fn cmd_source_analysis(
                 )?;
                 let text = page_cache::capture(|| {
                     render_source_analysis_text_page(
+                        workspace,
                         ws,
                         pack,
                         &paged,
@@ -2810,6 +2818,7 @@ fn cmd_source_analysis(
 
 #[allow(clippy::too_many_arguments)] // Renderer state is explicit to keep pagination metadata visible at call sites.
 fn render_source_analysis_text_page(
+    workspace: &Path,
     ws: &bonsai_sdk::Workspace,
     pack: &Rulepack,
     candidates: &[CombinedSourceAnalysisCandidate],
@@ -2866,7 +2875,7 @@ fn render_source_analysis_text_page(
     }
     let render_opts = crate::commands::InspectRenderOptions::default();
     for item in rendered.iter() {
-        render_source_analysis_header(u, item.flow.flow_number as usize, item, pack);
+        render_source_analysis_header(u, workspace, item.flow.flow_number as usize, item, pack);
         let mut local_seen: crate::commands::BodySet = ahash::AHashSet::new();
         crate::commands::render_flow_block_with_heading(
             u,
@@ -3202,7 +3211,13 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
     out
 }
 
-fn render_source_analysis_header(u: &Ui, idx: usize, item: &CombinedSourceAnalysisFlow, pack: &Rulepack) {
+fn render_source_analysis_header(
+    u: &Ui,
+    workspace: &Path,
+    idx: usize,
+    item: &CombinedSourceAnalysisFlow,
+    pack: &Rulepack,
+) {
     let source = &item.source;
     cli_println!();
     cli_println!("{}", u.ruler('═', 70));
@@ -3227,16 +3242,21 @@ fn render_source_analysis_header(u: &Ui, idx: usize, item: &CombinedSourceAnalys
             u.warn(&format!("representative ({})", parts.join("; ")))
         );
     }
-    render_source_analysis_source(u, source, pack);
+    render_source_analysis_source(u, workspace, source, pack);
     for source in &item.additional_sources {
-        render_source_analysis_source(u, source, pack);
+        render_source_analysis_source(u, workspace, source, pack);
     }
 }
 
-fn render_source_analysis_source(u: &Ui, source: &FindingMatch, pack: &Rulepack) {
+fn render_source_analysis_source(u: &Ui, workspace: &Path, source: &FindingMatch, pack: &Rulepack) {
     cli_println!();
     cli_println!("  {} {}", u.kind("SOURCE:"), u.name(&source.rule_id));
-    let loc = format!("{}:{}:{}", short_file(&source.file), source.line, source.column);
+    let loc = format!(
+        "{}:{}:{}",
+        security_display_file(workspace, &source.file),
+        source.line,
+        source.column
+    );
     cli_println!("    {}   {}", u.dim("where:"), u.path(&loc));
     if let Some(trust) = source.trust.as_deref() {
         cli_println!("    {}   {}", u.dim("trust:"), u.dim(trust));
@@ -3277,7 +3297,13 @@ fn render_source_analysis_source(u: &Ui, source: &FindingMatch, pack: &Rulepack)
 /// supporting taxonomy metadata (CWE, OWASP, category, packages,
 /// frameworks). Goes above the taint-flow block so a reviewer sees
 /// the finding *as a vulnerability* before reading the propagation.
-fn render_finding_security_header(u: &Ui, idx: usize, combined: &CombinedFindingWithChain, pack: &Rulepack) {
+fn render_finding_security_header(
+    u: &Ui,
+    workspace: &Path,
+    idx: usize,
+    combined: &CombinedFindingWithChain,
+    pack: &Rulepack,
+) {
     let f = &combined.finding;
     let sev = f
         .severity
@@ -3378,15 +3404,15 @@ fn render_finding_security_header(u: &Ui, idx: usize, combined: &CombinedFinding
         cli_println!();
     }
 
-    render_finding_side(u, FindingSide::Source, &f.source, pack);
+    render_finding_side(u, workspace, FindingSide::Source, &f.source, pack);
     for source in &combined.additional_sources {
-        render_finding_side(u, FindingSide::Source, source, pack);
+        render_finding_side(u, workspace, FindingSide::Source, source, pack);
     }
     for transform in &f.taint_transforms_seen {
-        render_finding_side(u, FindingSide::TaintTransform, transform, pack);
+        render_finding_side(u, workspace, FindingSide::TaintTransform, transform, pack);
     }
     for s in &f.sanitizers_seen {
-        render_finding_side(u, FindingSide::Sanitizer, s, pack);
+        render_finding_side(u, workspace, FindingSide::Sanitizer, s, pack);
     }
     if f.sanitizers_seen.is_empty() {
         cli_println!();
@@ -3396,9 +3422,9 @@ fn render_finding_security_header(u: &Ui, idx: usize, combined: &CombinedFinding
             u.warn("none observed on this call path"),
         );
     }
-    render_finding_side(u, FindingSide::Sink, &f.sink, pack);
+    render_finding_side(u, workspace, FindingSide::Sink, &f.sink, pack);
     for sink in &combined.additional_sinks {
-        render_finding_side(u, FindingSide::Sink, sink, pack);
+        render_finding_side(u, workspace, FindingSide::Sink, sink, pack);
     }
     cli_println!("{}", u.ruler('─', 70));
 }
@@ -3464,7 +3490,7 @@ impl FindingSide {
 /// chip trailer for supporting taxonomy that didn't fit the headline
 /// (trust, tag, category, CWE, packages, frameworks). Matches the
 /// framing of a bug report more than a rule dump.
-fn render_finding_side(u: &Ui, side: FindingSide, m: &FindingMatch, pack: &Rulepack) {
+fn render_finding_side(u: &Ui, workspace: &Path, side: FindingSide, m: &FindingMatch, pack: &Rulepack) {
     let rule = pack.find_rule_by_id(&m.rule_id);
     cli_println!();
     cli_println!("  {}  {}", u.kind(side.label()), u.name(&m.rule_id),);
@@ -3482,7 +3508,12 @@ fn render_finding_side(u: &Ui, side: FindingSide, m: &FindingMatch, pack: &Rulep
             }
         }
     }
-    let loc = format!("{}:{}:{}", short_file(&m.file), m.line, m.column);
+    let loc = format!(
+        "{}:{}:{}",
+        security_display_file(workspace, &m.file),
+        m.line,
+        m.column
+    );
     let in_fn = m
         .enclosing_fn
         .as_deref()
@@ -3595,7 +3626,12 @@ fn synth_summary(combined: &CombinedFindingWithChain, pack: &Rulepack) -> Option
 /// Same visual shape as the per-side blocks in the taint-analysis
 /// render, so same-file findings still read coherently without
 /// implying approximate analysis.
-fn render_finding_block_compact(u: &Ui, combined: &CombinedFindingWithChain, pack: &Rulepack) {
+fn render_finding_block_compact(
+    u: &Ui,
+    workspace: &Path,
+    combined: &CombinedFindingWithChain,
+    pack: &Rulepack,
+) {
     let f = &combined.finding;
     cli_println!();
     // The full per-function body render (`render_flow_with_cached_call_spans`)
@@ -3617,7 +3653,7 @@ fn render_finding_block_compact(u: &Ui, combined: &CombinedFindingWithChain, pac
             cli_println!("{}  {}", u.kind("CHAIN"), u.dim(&f.chain_display.join(" → ")));
         }
         for step in &f.taint_path {
-            let loc = format!("{}:{}", short_file(&step.file), step.line);
+            let loc = format!("{}:{}", security_display_file(workspace, &step.file), step.line);
             let args: Vec<&str> = step.tainted_args.iter().map(|a| a.value_text.as_str()).collect();
             let arg_note = if args.is_empty() {
                 String::new()
@@ -3635,26 +3671,31 @@ fn render_finding_block_compact(u: &Ui, combined: &CombinedFindingWithChain, pac
     } else {
         cli_println!("{}", u.dim("(same-file evidence — no cross-function chain)"));
     }
-    render_site_code(u, "SOURCE", &f.source, pack);
+    render_site_code(u, workspace, "SOURCE", &f.source, pack);
     for source in &combined.additional_sources {
-        render_site_code(u, "SOURCE", source, pack);
+        render_site_code(u, workspace, "SOURCE", source, pack);
     }
     for transform in &f.taint_transforms_seen {
-        render_site_code(u, "TAINT TRANSFORM", transform, pack);
+        render_site_code(u, workspace, "TAINT TRANSFORM", transform, pack);
     }
     for s in &f.sanitizers_seen {
-        render_site_code(u, "SANITIZER", s, pack);
+        render_site_code(u, workspace, "SANITIZER", s, pack);
     }
-    render_site_code(u, "SINK", &f.sink, pack);
+    render_site_code(u, workspace, "SINK", &f.sink, pack);
     for sink in &combined.additional_sinks {
-        render_site_code(u, "SINK", sink, pack);
+        render_site_code(u, workspace, "SINK", sink, pack);
     }
 }
 
-fn render_site_code(u: &Ui, label: &str, m: &FindingMatch, pack: &Rulepack) {
+fn render_site_code(u: &Ui, workspace: &Path, label: &str, m: &FindingMatch, pack: &Rulepack) {
     cli_println!();
     cli_println!("{}  {}", u.kind(&format!("[{label}]")), u.name(&m.rule_id),);
-    let loc = format!("{}:{}:{}", short_file(&m.file), m.line, m.column);
+    let loc = format!(
+        "{}:{}:{}",
+        security_display_file(workspace, &m.file),
+        m.line,
+        m.column
+    );
     cli_println!(
         "    {}  {}",
         u.path(&loc),
@@ -3836,6 +3877,10 @@ fn trust_str(t: TrustClass) -> &'static str {
     }
 }
 
+fn security_display_file(workspace: &Path, file: &str) -> String {
+    bonsai_common::workspace_relative_filter_path(Some(workspace), file)
+}
+
 fn severity_cell(u: &Ui, sev: &str) -> String {
     match sev {
         "critical" | "high" | "medium" => u.warn(sev),
@@ -3861,7 +3906,6 @@ fn render_match_table(
     label: &str,
     matches: &[RuleMatch],
     pack: &Rulepack,
-    ws: &bonsai_sdk::Workspace,
     limit: usize,
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
@@ -3936,7 +3980,7 @@ fn render_match_table(
                         u.dim(&format!("security {label} — {} match(es)", matches.len()))
                     );
                     for (idx, m) in rows.iter().enumerate() {
-                        render_standalone_match(u, &block_label, idx + 1, m, pack, ws, show_severity);
+                        render_standalone_match(u, workspace, &block_label, idx + 1, m, pack, show_severity);
                     }
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, &format!("bonsai-ninja security <workspace> {label}"));
@@ -3954,11 +3998,11 @@ fn render_match_table(
 /// sections read identically.
 fn render_standalone_match(
     u: &Ui,
+    workspace: &Path,
     label: &str,
     idx: usize,
     m: &RuleMatch,
     pack: &Rulepack,
-    _ws: &bonsai_sdk::Workspace,
     show_severity: bool,
 ) {
     let rule = pack.find_rule_by_id(&m.rule_id);
@@ -3999,7 +4043,12 @@ fn render_standalone_match(
             cli_println!("{line}");
         }
     }
-    let loc = format!("{}:{}:{}", short_file(&m.file), m.line, m.column);
+    let loc = format!(
+        "{}:{}:{}",
+        security_display_file(workspace, &m.file),
+        m.line,
+        m.column
+    );
     let in_fn = m
         .enclosing_fn
         .as_deref()

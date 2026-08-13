@@ -9,7 +9,7 @@ use crate::common::{
     make_name_filter, textual_relevance_key,
 };
 use bonsai_common::FuncId;
-use bonsai_lang_api::DeclKind;
+use bonsai_lang_api::{DeclKind, MODULE_DECL_NAME};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 
@@ -63,7 +63,11 @@ pub fn entrypoints(ws: &Workspace, f: &EntryPointsFilters<'_>) -> Result<Vec<Ent
     let mut candidates = Vec::new();
     for file in global.all_files() {
         for decl in global.decls_in(file) {
-            if !is_callable_entry_kind(decl.kind) {
+            // Adapters use a synthetic function to own executable module-scope
+            // statements. It is a compiler container, not a callable users can
+            // select or invoke, so it must not appear in the public root
+            // inventory even though its lowered declaration kind is Function.
+            if decl.name == MODULE_DECL_NAME || !is_callable_entry_kind(decl.kind) {
                 continue;
             }
             let kind = format!("{:?}", decl.kind).to_lowercase();
