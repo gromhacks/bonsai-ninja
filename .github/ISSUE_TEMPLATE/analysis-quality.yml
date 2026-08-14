@@ -1,0 +1,66 @@
+name: Analysis quality report
+description: Report a false positive, false negative, incomplete resolution, or language gap.
+title: "analysis: "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Report type
+      options:
+        - False positive
+        - False negative
+        - Incorrect source, sink, or path
+        - Incomplete parser or resolver coverage
+        - Performance regression
+        - Other analysis defect
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: "bonsai-ninja 0.1.0; commit …"
+    validations:
+      required: true
+  - type: input
+    id: language
+    attributes:
+      label: Language and ecosystem
+      placeholder: "Python 3.13 with FastAPI"
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: Minimal publishable source
+      description: Include both positive and negative variants when possible.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and output
+      description: Use JSON when possible and include analysis_complete plus analysis_incomplete_reasons.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: reasoning
+    attributes:
+      label: Why the result is incorrect
+      description: Explain the language/runtime semantics, expected source/sink path, or measured regression.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I followed every printed page or cursor before claiming complete coverage.
+          required: true
+        - label: I checked parser and resolver diagnostics when analysis was incomplete.
+          required: true
+        - label: I am authorized to publish every source fragment in this report.
+          required: true

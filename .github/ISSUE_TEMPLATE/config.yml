@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/gromhacks/bonsai-ninja/security/advisories/new
+    about: Report exploitable analyzer or release-process vulnerabilities privately.
+  - name: Documentation and troubleshooting
+    url: https://github.com/gromhacks/bonsai-ninja/blob/main/docs/faq.mdx
+    about: Check common questions before opening an issue.

@@ -1,0 +1,66 @@
+name: Bug report
+description: Report a reproducible CLI, cache, parser, SDK, or output defect.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Do not include credentials, private source code,
+        or exploitable analyzer vulnerabilities in a public issue. Use the
+        repository security policy for sensitive reports.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Paste `bonsai-ninja --version` and the commit or release used.
+      placeholder: "bonsai-ninja 0.1.0; commit …"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Operating system, CPU architecture, Rust version, and installation method.
+      placeholder: "macOS 15 arm64; rustc 1.88; source build"
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: Include the complete command and relevant environment variables.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include exit status and diagnostics. Redact private paths and source.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest publishable source tree or steps that reproduce the defect.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and pull requests.
+          required: true
+        - label: This report contains no credentials or private source code.
+          required: true
+        - label: This is not an exploitable vulnerability in bonsai-ninja itself.
+          required: true

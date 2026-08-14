@@ -370,8 +370,8 @@ jobs:
           artifact="bonsai-ninja-${{ matrix.target }}"
           mkdir -p "dist/$artifact"
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/$artifact/"
-          cp README.md CONTRIBUTING.md SECURITY.md SKILLS.md AGENTS.md LICENSE \
-            Cargo.lock docs.json "dist/$artifact/"
+          cp README.md CONTRIBUTING.md CODE_OF_CONDUCT.md SECURITY.md SKILLS.md \
+            AGENTS.md LICENSE Cargo.lock docs.json "dist/$artifact/"
           mkdir -p "dist/$artifact/.agents/skills"
           cp -R .agents/skills/bonsai-ninja "dist/$artifact/.agents/skills/bonsai-ninja"
           cp -R docs "dist/$artifact/docs"
@@ -422,7 +422,7 @@ jobs:
           $artifact = "bonsai-ninja-${{ matrix.target }}"
           New-Item -ItemType Directory -Force "dist/$artifact" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/$artifact/"
-          Copy-Item README.md, CONTRIBUTING.md, SECURITY.md, SKILLS.md, AGENTS.md, LICENSE, Cargo.lock, docs.json "dist/$artifact/"
+          Copy-Item README.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md, SECURITY.md, SKILLS.md, AGENTS.md, LICENSE, Cargo.lock, docs.json "dist/$artifact/"
           New-Item -ItemType Directory -Force "dist/$artifact/.agents/skills" | Out-Null
           Copy-Item .agents/skills/bonsai-ninja "dist/$artifact/.agents/skills/bonsai-ninja" -Recurse
           Copy-Item docs "dist/$artifact/docs" -Recurse
