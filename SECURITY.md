@@ -9,9 +9,10 @@ release advisory explicitly says otherwise.
 ## Report a vulnerability privately
 
 Do not open a public issue for a vulnerability that could put users or their
-source code at risk. Use GitHub's private vulnerability reporting for this
-repository. If that interface is unavailable, email `contact@gromhacks.com`
-with the subject `bonsai-ninja security report`.
+source code at risk. Use GitHub's
+[private vulnerability reporting](https://github.com/gromhacks/bonsai-ninja/security/advisories/new)
+for this repository. If that interface is unavailable, email
+`contact@gromhacks.com` with the subject `bonsai-ninja security report`.
 
 Include the affected version or commit, operating system and architecture,
 impact, reproduction steps, and any suggested mitigation. Do not include

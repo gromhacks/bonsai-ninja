@@ -466,7 +466,7 @@ WorkspaceOpenOptions::full_prewarm() // dataflow/flow-id plus canonical callgrap
 
 The high-level `bonsai-ninja index` and SDK `Bonsai::index(root)` paths use
 `WorkspaceOpenOptions::parse_only()` so an index pass stays focused on syntax
-and construct facts. Use `bonsai-ninja index --semantic` or
+and construct facts. Use `bonsai-ninja index <workspace> --semantic` or
 `Bonsai::index_semantic(root)` when a workflow deliberately wants structural
 semantic sidecars, including retrieval, built up front. Use
 `open_with_options(root, WorkspaceOpenOptions::full_prewarm())` only for the

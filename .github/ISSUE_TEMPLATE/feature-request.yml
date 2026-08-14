@@ -1,0 +1,37 @@
+name: Feature request
+description: Propose a focused product, language, rulepack, SDK, or integration improvement.
+title: "feature: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the user problem and why existing commands or rule data do not solve it.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest intentional interface or semantic change.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Language or runtime evidence
+      description: For analysis changes, explain the syntax/runtime rule and provide publishable examples.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: contract
+    attributes:
+      label: Architecture contract
+      options:
+        - label: I considered whether this belongs in an adapter, shared typed analysis, or rule data.
+          required: true
+        - label: I am not proposing a semantic cap, guessed edge, or hidden incomplete result.
+          required: true

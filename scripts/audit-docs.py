@@ -10,6 +10,14 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 DOCS = REPO / "docs"
+ROOT_DOCUMENTS = (
+    "README.md",
+    "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md",
+    "SECURITY.md",
+    "AGENTS.md",
+    "SKILLS.md",
+)
 LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*#*$")
 LANGUAGE_COUNT_RES = (
@@ -22,12 +30,26 @@ LANGUAGE_COUNT_RES = (
 
 
 def documentation_files() -> list[Path]:
-    files = [REPO / "README.md", REPO / "AGENTS.md", REPO / "SKILLS.md"]
-    roots = (DOCS, REPO / ".agents", REPO / ".claude", REPO / ".cline", REPO / "crates")
+    files = [REPO / name for name in ROOT_DOCUMENTS]
+    roots = (
+        DOCS,
+        REPO / ".github",
+        REPO / ".agents",
+        REPO / ".claude",
+        REPO / ".cline",
+        REPO / "crates",
+    )
     for root in roots:
         for suffix in ("*.md", "*.mdx"):
             files.extend(root.rglob(suffix))
     return sorted({path for path in files if path.is_file() and "target" not in path.parts})
+
+
+def public_documentation_files() -> list[Path]:
+    files = [REPO / name for name in ROOT_DOCUMENTS]
+    files.extend(active_docs())
+    files.extend((REPO / ".github").rglob("*.md"))
+    return sorted({path for path in files if path.is_file()})
 
 
 def active_docs() -> list[Path]:
@@ -140,7 +162,7 @@ def check_retired_surface() -> list[str]:
         "goal-benchmark-2026-05-15.md": "historical engineering logs are not product documentation",
         "docs/goal.md": "historical engineering logs are not product documentation",
     }
-    for path in active_docs() + [REPO / "README.md", REPO / "AGENTS.md", REPO / "SKILLS.md"]:
+    for path in documentation_files():
         for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
             for token, replacement in retired_tokens.items():
                 if token in line:
@@ -148,6 +170,45 @@ def check_retired_surface() -> list[str]:
                         f"{path.relative_to(REPO)}:{line_number}: retired `{token}`; {replacement}"
                     )
     return failures
+
+
+def check_publication_hygiene() -> list[str]:
+    """Reject local-only or corpus-specific residue from public documentation."""
+
+    failures: list[str] = []
+    retired = {
+        "cvebench": "public product documentation must not depend on a private evaluation corpus",
+        "cve bench": "public product documentation must not depend on a private evaluation corpus",
+        "cb2-": "public product documentation must not expose corpus case identifiers",
+        "/users/": "replace developer-specific absolute paths with portable examples",
+        "/private/tmp": "replace host-specific temporary paths with portable examples",
+    }
+    for path in documentation_files():
+        for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+            lowered = line.lower()
+            for token, replacement in retired.items():
+                if token in lowered:
+                    failures.append(
+                        f"{path.relative_to(REPO)}:{line_number}: publication residue "
+                        f"`{token}`; {replacement}"
+                    )
+    return failures
+
+
+def check_github_community_files() -> list[str]:
+    required = (
+        REPO / ".github" / "ISSUE_TEMPLATE" / "bug-report.yml",
+        REPO / ".github" / "ISSUE_TEMPLATE" / "analysis-quality.yml",
+        REPO / ".github" / "ISSUE_TEMPLATE" / "feature-request.yml",
+        REPO / ".github" / "ISSUE_TEMPLATE" / "config.yml",
+        REPO / ".github" / "PULL_REQUEST_TEMPLATE.md",
+        REPO / "CODE_OF_CONDUCT.md",
+    )
+    return [
+        f"missing GitHub community file `{path.relative_to(REPO)}`"
+        for path in required
+        if not path.is_file()
+    ]
 
 
 def check_command_examples() -> list[str]:
@@ -160,12 +221,18 @@ def check_command_examples() -> list[str]:
 
     failures: list[str] = []
     invalid_security_pack = re.compile(r"\bbonsai-ninja\s+security\s+pack\b")
-    for path in active_docs() + [REPO / "README.md", REPO / "AGENTS.md", REPO / "SKILLS.md"]:
+    invalid_index = re.compile(r"\bbonsai-ninja\s+index\s+--")
+    for path in public_documentation_files():
         for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
             if invalid_security_pack.search(line):
                 failures.append(
                     f"{path.relative_to(REPO)}:{line_number}: `security` requires "
                     "`<workspace>` before `pack`"
+                )
+            if invalid_index.search(line):
+                failures.append(
+                    f"{path.relative_to(REPO)}:{line_number}: `index` requires "
+                    "`<workspace>` before its options"
                 )
     return failures
 
@@ -182,7 +249,7 @@ def check_product_contract_language() -> list[str]:
         "## source-analysis\n": "use the full `security source-analysis` command heading",
         "Out of scope (Phase 10-12)": "document current analysis boundaries, not old phase labels",
     }
-    checked = active_docs() + [REPO / "README.md", REPO / "AGENTS.md", REPO / "SKILLS.md"]
+    checked = public_documentation_files()
     for path in checked:
         text = path.read_text(errors="replace")
         for phrase, replacement in retired_phrases.items():
@@ -277,7 +344,7 @@ def check_language_counts() -> list[str]:
         return ["could not derive the supported-language count from crates/adapters/src/lib.rs"]
 
     failures: list[str] = []
-    current_files = active_docs() + [REPO / "README.md", REPO / "AGENTS.md", REPO / "SKILLS.md"]
+    current_files = public_documentation_files()
     for path in current_files:
         for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
             for pattern in LANGUAGE_COUNT_RES:
@@ -295,7 +362,7 @@ def check_workspace_counts() -> list[str]:
     crate_count = len(list((REPO / "crates").glob("*/Cargo.toml")))
     failures: list[str] = []
     pattern = re.compile(r"\b(\d+)-crate Rust workspace\b", re.IGNORECASE)
-    for path in active_docs() + [REPO / "README.md", REPO / "AGENTS.md", REPO / "SKILLS.md"]:
+    for path in public_documentation_files():
         for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
             for match in pattern.finditer(line):
                 documented = int(match.group(1))
@@ -313,6 +380,8 @@ def main() -> int:
         check_links(files)
         + check_navigation()
         + check_retired_surface()
+        + check_publication_hygiene()
+        + check_github_community_files()
         + check_command_examples()
         + check_product_contract_language()
         + check_mdx_frontmatter()

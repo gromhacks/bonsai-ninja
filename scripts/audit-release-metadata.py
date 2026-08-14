@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 REQUIRED_ROOT_FILES = (
     "README.md",
     "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md",
     "SECURITY.md",
     "LICENSE",
 )

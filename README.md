@@ -2,6 +2,10 @@
 
 # bonsai-ninja
 
+[![CI](https://github.com/gromhacks/bonsai-ninja/actions/workflows/ci.yml/badge.svg)](https://github.com/gromhacks/bonsai-ninja/actions/workflows/ci.yml)
+[![Hardening checks](https://github.com/gromhacks/bonsai-ninja/actions/workflows/hardening-checks.yml/badge.svg)](https://github.com/gromhacks/bonsai-ninja/actions/workflows/hardening-checks.yml)
+[![Rulepack audit](https://github.com/gromhacks/bonsai-ninja/actions/workflows/pack-audit.yml/badge.svg)](https://github.com/gromhacks/bonsai-ninja/actions/workflows/pack-audit.yml)
+
 bonsai-ninja is a local code-intelligence and static-analysis engine. It maps
 repositories, resolves symbols and calls, traces behavior across files,
 inspects dataflow, exports graph facts, and reports source-to-sink security
@@ -295,7 +299,13 @@ Current validation evidence and exact release commands live in
 Contributions should preserve the compiler/rule boundary and include the
 smallest positive and negative tests that prove the behavior. Start with
 [Contributing](CONTRIBUTING.md) and the
-[PR Review Checklist](docs/contributing/review-checklist.mdx).
+[PR Review Checklist](docs/contributing/review-checklist.mdx). Participation is
+governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+Use the guided GitHub issue forms for reproducible product defects, analysis
+quality reports, and feature proposals. Do not attach private source code,
+credentials, generated analysis caches, or proprietary findings to a public
+issue.
 
 Report exploitable vulnerabilities through the private process in
 [Security Policy](SECURITY.md), not through a public issue.
