@@ -1,6 +1,6 @@
 ---
 title: "bonsai-ninja Documentation"
-description: "Entry points for using, understanding, integrating, and extending bonsai-ninja."
+description: "Compiler-backed code intelligence for agents, debugging, security review, and structured code export across 20 languages."
 ---
 
 # bonsai-ninja Documentation
@@ -14,6 +14,24 @@ package identities, and security policy.
 The analyzer is a content-addressed compiler: Tree-sitter adapters publish
 immutable per-file typed objects, the linker and IDG compiler consume one
 atomic generation, and query, security, and export modes share those facts.
+
+## What it unlocks
+
+- **Give agents facts, not file dumps:** use symbol, file, and kind selectors to
+  retrieve a focused definition, reference set, call path, slice, or dataflow
+  instead of repeatedly loading a repository into the prompt.
+- **Trace cause to effect:** follow statically proven behavior across files
+  from an entry point through validation and business logic to storage or an
+  external side effect; unresolved runtime edges stay explicit.
+- **Debug with compiler evidence:** inspect AST, HIR, CFG, resolution, call
+  edges, and taint propagation when source behavior or analysis is unclear.
+- **Build model-ready code data:** export typed graph facts and completeness
+  metadata as JSON, GraphML, Cypher, or NetworkX for retrieval, training-set
+  construction, evaluation, or tool-using agents.
+- **Work at production scale:** the release gate covers 30,055 Elasticsearch
+  source files, exact warm queries, and complete production taint without
+  semantic caps. Current timings are recorded in
+  [Release Readiness](RELEASE_READINESS.md).
 
 Use the first two groups below for normal operation. The coverage pages record
 generated or measured validation evidence; contributor specifications define
