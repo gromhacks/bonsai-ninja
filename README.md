@@ -41,27 +41,32 @@ improves a model.
 
 ## Scale, measured
 
-**30,055 source files. Exact analysis. Warm navigation in seconds.** A current
-Elasticsearch verification under a 3 GiB scheduling budget reopened the
-content-addressed semantic generation in 3.2 seconds; search and call lookup
-took about 4.1 seconds, default inspect 7.3 seconds, and complete warm
-production taint analysis 27.9 seconds.
+**30,055 source files. Exact analysis. Warm navigation in seconds.** Current
+Elasticsearch measurements under a 3 GiB semantic-worker scheduling budget
+separate the first explicit semantic index from commands run after it exists:
 
-The cold full semantic generation is real work, not hidden startup: the
-measured rebuild takes about 26–27 minutes on this checkout. Ordinary commands
-do not force that prewarm; users request it explicitly with
-`index --semantic`, then reuse the exact generation. The controlled release
-methodology and exact gate measurements live in
-[Release Readiness](docs/RELEASE_READINESS.md).
+| Cache state and operation | Measured time | Result |
+|---|---:|---|
+| Empty cache: `index --semantic` | 26m 53.8s | 7.11 GB validated reusable cache; 3.20 GB maximum RSS; no swaps |
+| After index: semantic generation reopen | 3.2s | Existing compiler objects, linkage, callgraph, retrieval, and IDG validated and reused |
+| After index: search | 4.1s | Exact requested matches |
+| After index: call lookup | 4.1s | Compiler-resolved call rows |
+| After index: default inspect | 7.3s | Structural evidence for the requested target |
+| After index: complete production taint analysis | 27.9s | Exact requested fixed point |
+| After index: default native export | 4m 05s | 4.54 GB compiler, callgraph, flow, and compiled-IDG facts |
+| After index: `--full-propagations` export | 7m 36s | 6.42 GB with the same exact propagation relation materialized as individual rows |
 
-**A complete production-scale graph export takes minutes, not hours.** Against
-the same warmed 30,055-file generation, native JSON streamed 4.54 GB of
-compiler, callgraph, flow, and IDG-backed facts in 4 minutes 5 seconds. Explicit
-`--full-propagations` materialized the same exact propagation relation as
-individual rows: 6.42 GB in 7 minutes 36 seconds. The default therefore saved
-1.88 GB and 3 minutes 31 seconds without reducing accuracy. These whole-repo
-exports peaked near 4.8 GB RSS; the 3 GiB setting schedules semantic workers
-and is not a hard operating-system RSS limit.
+The measured cold operation is specifically `index --semantic`, which users
+request when they want every reusable semantic sidecar prepared up front.
+Ordinary `index` is the lighter syntax/declaration warm-up and does not force a
+whole-workspace callgraph or IDG build; ordinary commands can also compute
+their requested exact facts on demand.
+
+For whole-repository export, the compressed default saved 1.88 GB and 3 minutes
+31 seconds without reducing accuracy. Both export forms peaked near 4.8 GB
+RSS; the 3 GiB setting schedules semantic workers and is not a hard
+operating-system RSS limit. The controlled methodology and exact measurements
+live in [Release Readiness](docs/RELEASE_READINESS.md).
 
 ## Supported languages
 
