@@ -14,6 +14,46 @@ findings from one compiler-style pipeline.
 The project is MIT licensed. It does not require a hosted service, upload
 source code, or reserve analysis features for a paid tier.
 
+## Why agents use it
+
+**Give agents facts, not file dumps.** With tight symbol, file, and kind
+selectors, bonsai-ninja lets an agent ask for the smallest useful slice of a
+repository: the definition, callers, references, arguments, path, backward
+slice, raw dataflow, or source file around one symbol. That means less prompt
+waste, less repeated reading, and answers tied to compiler evidence.
+
+| Capability | Practical benefit |
+|---|---|
+| Tree-sitter compiler frontends | Parse 20 languages into typed declarations, calls, imports, values, control flow, and dataflow facts |
+| Focused `search`, `refs`, `calls`, and `read-file` | Retrieve a small, source-backed context slice before asking for heavier semantics |
+| Compiler-resolved `inspect`, `trace`, `path`, and `slice` | Follow statically proven behavior across files and report unresolved dynamic edges instead of inventing them |
+| AST, HIR, CFG, resolver, edge, and taint diagnostics | Debug both the target program and the analyzer's reasoning instead of guessing from text |
+| Sparse IDG taint fixed point | Prove exact source-to-sink reachability without a hidden depth, file, iteration, or result cap |
+| Stable IDs, explicit page cursors, JSON, and the Rust SDK | Let agents cite evidence, detect when coverage continues, and automate repeatable review workflows |
+| JSON, GraphML, Cypher, and NetworkX export | Build retrieval indexes, graph features, training examples, evaluation sets, or tool-using agents from structured code facts and explicit completeness metadata |
+| Local execution and external caches | Keep source on the machine while reusing validated compiler work across queries |
+
+**From symbol to side effect, across files.** Use it to map an unfamiliar
+codebase, explain behavior, trace a bug, triage a finding, or prepare
+structured code data for downstream models. Export supplies the data;
+task-specific evaluation still determines whether a training approach
+improves a model.
+
+## Scale, measured
+
+**30,055 source files. Exact analysis. Warm navigation in seconds.** A current
+Elasticsearch verification under a 3 GiB scheduling budget reopened the
+content-addressed semantic generation in 3.2 seconds; search and call lookup
+took about 4.1 seconds, default inspect 7.3 seconds, and complete warm
+production taint analysis 27.9 seconds.
+
+The cold full semantic generation is real work, not hidden startup: the
+measured rebuild takes about 26–27 minutes on this checkout. Ordinary commands
+do not force that prewarm; users request it explicitly with
+`index --semantic`, then reuse the exact generation. The controlled release
+methodology and exact gate measurements live in
+[Release Readiness](docs/RELEASE_READINESS.md).
+
 ## Supported languages
 
 The release includes 20 Tree-sitter frontends:
