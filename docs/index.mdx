@@ -6,14 +6,18 @@ description: "Entry points for using, understanding, integrating, and extending 
 # bonsai-ninja Documentation
 
 bonsai-ninja indexes source code, resolves cross-file call paths, and runs
-rulepack-driven security analysis across 20 parser adapters. Every supported
-language uses the compiler-owned source/sink/sanitizer taint architecture.
-These docs are plain MDX: readable on GitHub and enhanced by Mintlify where
-supported.
+rulepack-driven security analysis across 20 language frontends. Each adapter
+owns its Tree-sitter grammar and syntax lowering. Shared compiler passes own
+resolution and dataflow, while rule data owns sources, sinks, sanitizers,
+package identities, and security policy.
 
 The analyzer is a content-addressed compiler: Tree-sitter adapters publish
-immutable per-file typed objects, the linker and one-pass IDG compiler consume
-one atomic generation, and all query/security/export modes share those facts.
+immutable per-file typed objects, the linker and IDG compiler consume one
+atomic generation, and query, security, and export modes share those facts.
+
+Use the first two groups below for normal operation. The coverage pages record
+generated or measured validation evidence; contributor specifications define
+implementation contracts and are not required reading for CLI users.
 
 - [Getting Started](getting-started.mdx) - install the CLI, run a first scan, and learn how to read the finding IDs and flow output.
 - [Platform And Architecture Support](platform-support.mdx) - understand release targets, source-build targets, and cross-target checks.
@@ -26,9 +30,11 @@ one atomic generation, and all query/security/export modes share those facts.
 - [Rule Authoring](rule-authoring-tutorial.mdx) - write and test workspace-local or shipped rules using the same schema as the bundled security-patterns pack.
 - [Release Readiness](RELEASE_READINESS.md) - current local validation status, scale measurements, and the pre-release gate.
 
-Coverage references: [mega-flow fixtures](MEGA_FLOW_COVERAGE.md),
+Validation references: [release readiness](RELEASE_READINESS.md),
+[mega-flow fixtures](MEGA_FLOW_COVERAGE.md),
 [engine coverage baseline](COVERAGE_BASELINE.md), and
-[taint matrix](TAINT_COVERAGE_MATRIX.md).
+[taint matrix](TAINT_COVERAGE_MATRIX.md). Dated measurements belong only in
+the release-readiness page.
 
 Contributor references live under [Contributing](contributing/contributing.mdx),
 including the [compiler architecture](contributing/architecture.mdx), the

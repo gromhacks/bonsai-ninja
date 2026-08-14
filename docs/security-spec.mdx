@@ -204,11 +204,11 @@ The finding is attributed to the proven configuration span while its code
 flow retains the real parse call and tainted argument.
 
 Do not classify `new XSSFWorkbook(InputStream)` as an Apache POI XXE sink.
-Apache POI's historical CVE-2019-12415 boundary was the versioned
-`XSSFExportToXml` conversion path before 4.1.1, not ordinary workbook
-construction. Java, Kotlin, and Scala keep the legacy constructor-shaped rule
-disabled with this rationale. Archive bombs and duplicate ZIP entries require
-separate version/configuration-aware rules; neither is evidence of CWE-611.
+The relevant historical vulnerability boundary was a versioned XML-export
+conversion path, not ordinary workbook construction. The constructor-shaped
+Java, Kotlin, and Scala rule remains disabled for that reason. Archive bombs
+and duplicate ZIP entries require separate version/configuration-aware rules;
+neither is evidence of CWE-611.
 
 Use `receiver_tainted: true` for receiver-state sinks where the security
 operand is left of the call operator, such as Scala `cmd.!`. Use

@@ -1,6 +1,6 @@
 ---
 title: "Output Formats"
-description: "Text, JSON, graph, training, SARIF, and dependency output shapes."
+description: "Text, JSON, graph, SARIF, HTML, and dependency output shapes."
 ---
 
 # Output Formats
@@ -92,9 +92,11 @@ bonsai-ninja export ./src --format graphml --output-path graph.graphml
 bonsai-ninja export ./src --format cypher --output-path graph.cypher
 ```
 
-## Train
+## JSON for automation and evaluation
 
-Training or evaluation pipelines usually consume native JSON because it preserves exact rule IDs, locations, tainted args, chains, taint path steps, and stable IDs.
+Automation and evaluation pipelines usually consume native JSON because it
+preserves exact rule IDs, locations, tainted arguments, chains, taint-path
+steps, completeness metadata, and stable IDs.
 
 Use `security taint-analysis --summary --format json` when a tool only
 needs aggregate triage counts. Summary mode emits the summary object

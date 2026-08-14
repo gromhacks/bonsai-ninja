@@ -577,8 +577,8 @@ reuse the prior graph.
 Native export has one exact call-relation representation: the resolved
 callgraph. It never enumerates simple paths or exposes a capped/BFS prefix
 mode through the CLI or SDK; dense cyclic graphs would make that product
-exponential. The legacy `complete_chains` switch is therefore intentionally
-absent, while schema compatibility fields report
+exponential. A `complete_chains` switch is intentionally absent, while schema
+compatibility fields report
 `mode=compressed_callgraph`, zero truncation, and explain that concrete path
 rows are represented by the graph.
 Schema v7 serializes code locations relative to the workspace root and carries
