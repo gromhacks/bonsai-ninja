@@ -22,6 +22,11 @@ GitHub releases build and smoke-run the CLI on these artifact targets:
 
 Those are the deployment targets with first-class binary artifacts. Other CPUs, including RISC-V, are source-build targets unless a release workflow is added for them.
 
+Each native package job runs the archived binary from a relocated directory
+with an empty user/parser cache and an empty analysis cache. The job therefore
+proves that the platform's parser bundle can be fetched and loaded on first
+use; it cannot pass by reusing a grammar downloaded by an earlier test step.
+
 ## Parser Bundle Constraint
 
 bonsai-ninja gets tree-sitter grammars through `tree-sitter-language-pack` with runtime dynamic loading and parser downloads enabled. That keeps normal builds small and lets the binary download only the parsers it uses, but it also means runtime parsing needs a prebuilt parser bundle for the current OS/CPU platform key.

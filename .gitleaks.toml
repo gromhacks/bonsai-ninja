@@ -1,0 +1,5 @@
+title = "bonsai-ninja secret scanning"
+useDefault = true
+
+# Reviewed false positives are suppressed by exact commit/path/rule/line
+# fingerprints in .gitleaksignore. Do not add broad path or rule exclusions.

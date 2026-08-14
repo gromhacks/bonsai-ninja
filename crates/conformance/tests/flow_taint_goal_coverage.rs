@@ -667,7 +667,7 @@ fn cli_reference_documents_stable_id_and_cache_surfaces() {
             "cache stats ./src",
             "cache clear ./src --dataflow-only",
             "cache rebuild ./src",
-            "does not run the legacy full-workspace dataflow prewarm",
+            "does not run all-entry dataflow prewarm",
             "taint-graph",
             "export sidecar",
         ],

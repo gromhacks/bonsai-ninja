@@ -42,13 +42,40 @@ remain reliable across operating systems.
 
 ### Use a release archive
 
-Extract the archive for your operating system and CPU, then run the binary
-from its directory. Release archives include the bundled rulepack.
+Release archives include the bundled rulepack, a separate SHA-256 checksum,
+and signed GitHub/Sigstore provenance. Verify the downloaded archive before
+extracting it:
+
+```bash
+shasum -a 256 -c bonsai-ninja-x86_64-unknown-linux-gnu.tar.gz.sha256
+gh attestation verify bonsai-ninja-x86_64-unknown-linux-gnu.tar.gz \
+  --repo gromhacks/bonsai-ninja
+```
+
+`gh attestation verify` uses the GitHub CLI to verify the artifact digest,
+Sigstore signature, source repository, workflow identity, and build commit.
+The SHA-256 file is still useful for offline integrity checks; the signed
+attestation establishes provenance.
+
+After verification, extract the archive for your operating system and CPU,
+then run the binary from its directory:
 
 ```bash
 tar -xzf bonsai-ninja-x86_64-unknown-linux-gnu.tar.gz
 cd bonsai-ninja-x86_64-unknown-linux-gnu
 ./bonsai-ninja --version
+```
+
+On Windows, verify and extract the `.zip` in PowerShell:
+
+```powershell
+$archive = "bonsai-ninja-x86_64-pc-windows-msvc.zip"
+$expected = (Get-Content "$archive.sha256").Split()[0].ToLower()
+$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+if ($actual -ne $expected) { throw "SHA-256 checksum mismatch" }
+gh attestation verify $archive --repo gromhacks/bonsai-ninja
+Expand-Archive $archive
+& ".\bonsai-ninja-x86_64-pc-windows-msvc\bonsai-ninja.exe" --version
 ```
 
 See [Platform And Architecture Support](platform-support.mdx) for release

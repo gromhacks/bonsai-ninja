@@ -82,7 +82,15 @@ cargo build --release --locked -p bonsai_cli
 
 Release archives target Linux, macOS, and Windows on x64 and arm64. See
 [Platform And Architecture Support](docs/platform-support.mdx) for source-build
-requirements and parser delivery constraints on other targets.
+requirements and parser delivery constraints on other targets. Each archive
+has a SHA-256 checksum and signed GitHub/Sigstore provenance. Verify both before
+installing:
+
+```bash
+shasum -a 256 -c bonsai-ninja-<target>.tar.gz.sha256
+gh attestation verify bonsai-ninja-<target>.tar.gz \
+  --repo gromhacks/bonsai-ninja
+```
 
 ## Quickstart
 
@@ -286,8 +294,11 @@ Current validation evidence and exact release commands live in
 
 Contributions should preserve the compiler/rule boundary and include the
 smallest positive and negative tests that prove the behavior. Start with
-[Contributing](docs/contributing/contributing.mdx) and the
+[Contributing](CONTRIBUTING.md) and the
 [PR Review Checklist](docs/contributing/review-checklist.mdx).
+
+Report exploitable vulnerabilities through the private process in
+[Security Policy](SECURITY.md), not through a public issue.
 
 bonsai-ninja is licensed under the [MIT License](LICENSE). Dependency license
 policy is documented in

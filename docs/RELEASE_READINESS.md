@@ -6,7 +6,7 @@ not duplicate dated performance history.
 
 ## Status
 
-Validated on 2026-08-13. Local `main` has no known failing release gate.
+Validated on 2026-08-14. Local `main` has no known failing release gate.
 Publishing still requires the tag workflow because signing, packaging, and
 platform-specific execution happen there.
 
@@ -41,8 +41,17 @@ The final local pass completed these checks with zero failures:
 | Corpus-independence audit | 0 violations |
 | Shared production clone audit | 0 clones at the configured threshold |
 | Dependency advisories, unused edges, and SPDX policy | Passed |
+| Full reachable-history secret scan | Passed |
+| GitHub Actions syntax and immutable action pins | Passed |
+| Cargo and public repository metadata | Passed |
 | Documentation structure, links, navigation, and skill copies | Passed |
-| Build-artifact size gate | 5.96 GiB / 32 GiB limit |
+| Native archive checksum and fresh-profile relocation smoke | Passed on macOS arm64 |
+| Build-artifact size gate | 16.53 GiB / 32 GiB limit |
+
+The build-artifact measurement is the transient peak after the full debug test
+matrix and optimized CLI build. Final cleanup removes Cargo intermediates and
+retains only the release binary; generated analysis caches and test outputs are
+not release inputs.
 
 The rulepack replay command was:
 
@@ -211,8 +220,10 @@ The release workflow verifies:
 - standalone HTML generation;
 - native JSON and graph export formats;
 - stable IDs and page/cursor reopening;
-- relocated archive execution with the packaged `security-patterns/` tree;
+- relocated archive execution with the packaged `security-patterns/` tree,
+  an empty user/parser cache, and an empty workspace cache;
 - checksums and immutable workflow action pins;
+- signed GitHub/Sigstore provenance for every tagged archive and checksum;
 - Linux, macOS, and Windows archives for x64 and arm64.
 
 `tree` is separately pinned as a filesystem-only command: it does not open the
@@ -231,11 +242,16 @@ The tag workflow is authoritative. A release tag must:
 5. pass all six native build/test jobs;
 6. pass the pinned large-workspace scale job;
 7. produce archives and checksum files that execute from a relocated
-   directory.
+   directory;
+8. sign archive provenance through GitHub artifact attestations before
+   publication;
+9. verify every downloaded archive and checksum attestation again in the
+   isolated publish job before creating the release.
 
-The implementation is locally ready for that workflow. Signing credentials,
-remote CI state, and publication permissions are external deployment
-conditions and are not asserted by a local test run.
+The implementation is locally ready for that workflow. GitHub's tag-triggered
+OIDC identity signs provenance without a long-lived signing key. Remote CI
+state and publication permissions remain external deployment conditions and
+are not asserted by a local test run.
 
 ## Commands to repeat before tagging
 
@@ -247,7 +263,10 @@ RUSTDOCFLAGS="-D warnings" \
   cargo doc --workspace --no-deps --document-private-items --release --locked
 
 python3 scripts/audit-docs.py
+python3 scripts/audit-release-metadata.py
 python3 scripts/sync_skill.py --check
+bash scripts/audit-workflows.sh
+bash scripts/audit-secrets.sh
 bash scripts/audit-layering.sh
 bash scripts/audit-hardcoded.sh --check /tmp/bonsai-hardcoded-release
 python3 scripts/audit-corpus-independence.py
