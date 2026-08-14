@@ -170,6 +170,60 @@ def check_command_examples() -> list[str]:
     return failures
 
 
+def check_product_contract_language() -> list[str]:
+    """Keep documentation aligned with the compiler/rule ownership boundary."""
+
+    failures: list[str] = []
+    retired_phrases = {
+        "compiler-owned source/sink/sanitizer": (
+            "adapters own syntax and rule data owns sources, sinks, and sanitizers"
+        ),
+        "## taint\n": "use the full `security taint-analysis` command heading",
+        "## source-analysis\n": "use the full `security source-analysis` command heading",
+        "Out of scope (Phase 10-12)": "document current analysis boundaries, not old phase labels",
+    }
+    checked = active_docs() + [REPO / "README.md", REPO / "AGENTS.md", REPO / "SKILLS.md"]
+    for path in checked:
+        text = path.read_text(errors="replace")
+        for phrase, replacement in retired_phrases.items():
+            if phrase in text:
+                line_number = text[: text.index(phrase)].count("\n") + 1
+                failures.append(
+                    f"{path.relative_to(REPO)}:{line_number}: stale documentation phrase "
+                    f"`{phrase.strip()}`; {replacement}"
+                )
+
+    cli_reference = (DOCS / "cli-reference.mdx").read_text(errors="replace")
+    for flag, owner in (("--framework", "security deps"), ("--lang", "security pack")):
+        if flag not in cli_reference:
+            failures.append(
+                f"docs/cli-reference.mdx does not document `{owner} {flag}`"
+            )
+    return failures
+
+
+def check_mdx_frontmatter() -> list[str]:
+    failures: list[str] = []
+    for path in active_docs():
+        if path.suffix != ".mdx":
+            continue
+        text = path.read_text(errors="replace")
+        if not text.startswith("---\n"):
+            failures.append(f"{path.relative_to(REPO)}: missing MDX frontmatter")
+            continue
+        end = text.find("\n---\n", 4)
+        if end < 0:
+            failures.append(f"{path.relative_to(REPO)}: unclosed MDX frontmatter")
+            continue
+        frontmatter = text[4:end]
+        for key in ("title:", "description:"):
+            if not any(line.startswith(key) for line in frontmatter.splitlines()):
+                failures.append(
+                    f"{path.relative_to(REPO)}: frontmatter is missing `{key[:-1]}`"
+                )
+    return failures
+
+
 def check_markdown_structure(files: list[Path]) -> list[str]:
     failures: list[str] = []
     for path in files:
@@ -260,6 +314,8 @@ def main() -> int:
         + check_navigation()
         + check_retired_surface()
         + check_command_examples()
+        + check_product_contract_language()
+        + check_mdx_frontmatter()
         + check_markdown_structure(files)
         + check_measurement_ownership()
         + check_language_counts()

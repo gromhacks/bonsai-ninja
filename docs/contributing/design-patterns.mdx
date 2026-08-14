@@ -411,11 +411,11 @@ The justification typically takes one of three shapes:
   and `resolve_class_with_context` are the canonical narrow
   resolvers; their `find_by_name` calls feed the immediate
   `visibility_allows` + receiver-type filter.
-- **Display-only legacy paths** — `bonsai_resolve::resolve_callable`
+- **Display-only compatibility paths** — `bonsai_resolve::resolve_callable`
   is `#[doc(hidden)]` and consumed by browse output / CLI
   trace-source resolution where cross-context candidate
   enumeration is acceptable.
-- **Diagnostic-only compatibility paths** — legacy or debug-only code
+- **Diagnostic-only compatibility paths** — compatibility or debug-only code
   may parse broad precision labels, but public analysis commands must
   filter them out or report explicit incompleteness.
 

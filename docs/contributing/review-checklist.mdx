@@ -308,9 +308,16 @@ class and verify each box.
       signatures referenced in docs match the current code.
 - [ ] **Cross-links resolve.** Markdown links point at existing files
       and sections; `python3 scripts/audit-docs.py` passes.
+- [ ] **Ownership language is exact.** Adapters own source syntax, shared
+      compiler passes own language-neutral algorithms, and rule data owns
+      package/API/security meaning. Documentation does not call sources,
+      sinks, or sanitizers compiler-owned.
 - [ ] **Command surface checked against the binary.** Run
       `./target/release/bonsai-ninja --help` and the affected
       `<command> --help` output before updating CLI docs.
+- [ ] **Agent skill copies are synchronized.** When the canonical skill or
+      command workflow changes, run `python3 scripts/sync_skill.py` and verify
+      `python3 scripts/sync_skill.py --check`.
 - [ ] **Help layout documented consistently.** Root help keeps
       `COMMAND GROUPS` before global `OPTIONS`, and CLI docs preserve
       the uppercase section casing used by the binary (`USAGE`,

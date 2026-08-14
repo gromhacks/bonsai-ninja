@@ -169,27 +169,59 @@ gates, framework gates, enabled/disabled state, severity, tag, and
 description remain readable; JSON returns the same rule rows under `rows`.
 See [Rule Testing](./rule-testing.mdx).
 
-Common inventory flags for `sources`, `sinks`, `sanitizers`, and `deps`:
+Inventory filters are command-specific. The table states exactly where each
+flag is accepted; the paging and output controls apply to all four inventory
+commands.
+
+| Flag | Commands | Default | Description |
+|---|---|---:|---|
+| `--rules-dir <DIR>` | all | Auto-discovered | Rulepack directory. Also reads `BONSAI_RULES_DIR`. |
+| `--rule <RULE>` | `sources`, `sinks`, `sanitizers` | None | Exact rule ID filter. |
+| `--rule-regex <REGEX>` | `sources`, `sinks`, `sanitizers` | None | Regex rule ID filter. |
+| `--trust <TRUST>` | `sources` | None | Source trust filter such as `remote`, `local`, `service`, `ipc`, `database`, `library`, `config`, or `physical`. |
+| `--category <CATEGORY>` | `sources`, `sinks`, `sanitizers` | None | Rule category or canonical family filter. |
+| `--tag <TAG>` | `sources`, `sinks`, `sanitizers` | None | Source, sink, or sanitizer tag filter. |
+| `--severity <LEVEL>` | `sinks`, `sanitizers`, `deps` | None | Severity floor: `info`, `low`, `medium`, `high`, or `critical`. |
+| `--framework <KEY>` | `deps` | None | Exact package or framework key. |
+| `--file <TEXT>` | all | None | Include only workspace-relative paths containing this text. Repeatable; explicit absolute paths are accepted. |
+| `--exclude-file <TEXT>` | all | None | Exclude workspace-relative paths containing this text. Repeatable; explicit absolute paths are accepted. |
+| `--limit <N>` | all | 0 | Maximum rows per page. `0` uses only token-budget pagination; later rows remain reachable with `--page`. |
+| `--context <BUDGET>` | all | 32k | Token budget for text and JSON output. |
+| `--page <PAGE>` | all | 1 | Page number, `P:xxxxxxxx` cursor, or `next`. |
+| `--all` | all | false | Emit all rows without paging. |
+| `--format <FORMAT>` | all | text | `text` or `json`. |
+| `--output-path <PATH>` | all | stdout | Write the selected `--format` output to a file. |
+
+### `security pack`
+
+`security <workspace> pack` inspects and validates rule data. Listing, audit,
+tree, and schema-validation modes do not scan the selected workspace source;
+`--taint-replay` additionally compiles each taint-dependent positive example
+as an isolated fixture. The workspace operand is still required so rule
+discovery has the same deterministic context as the other security commands.
+
+```bash
+bonsai-ninja security ./src pack --lang python --category sqli
+bonsai-ninja security ./src pack --validate --format json
+bonsai-ninja security ./src pack --validate --taint-replay --format json
+```
 
 | Flag | Default | Description |
 |---|---:|---|
-| `--rules-dir <DIR>` | Auto-discovered | Rulepack directory. Also reads `BONSAI_RULES_DIR`. |
-| `--rule <RULE>` | None | Exact rule ID filter. |
-| `--rule-regex <REGEX>` | None | Regex rule ID filter. |
-| `--trust <TRUST>` | None | Source trust filter such as `remote`, `local`, `service`, `ipc`, `database`, `library`, `config`, or `physical`. |
-| `--category <CATEGORY>` | None | Source category filter. |
-| `--tag <TAG>` | None | Source or sink tag filter. |
-| `--severity <LEVEL>` | None | Severity floor where supported: `info`, `low`, `medium`, `high`, `critical`. |
-| `--file <TEXT>` | None | Include only paths containing this text. Repeatable. |
-| `--exclude-file <TEXT>` | None | Exclude paths containing this text. Repeatable. |
-| `--limit <N>` | 0 | Maximum rows per page. `0` uses only token-budget pagination; later rows remain reachable with `--page`. |
-| `--context <BUDGET>` | 32k | Token budget for text and JSON output. |
-| `--page <PAGE>` | 1 | Page number, `P:xxxxxxxx` cursor, or `next`. |
-| `--all` | false | Emit all rows or findings without paging. |
+| `--rules-dir <DIR>` | Auto-discovered | Rulepack directory. |
+| `--lang <LANG>` | None | Restrict the listing or audit to one language key. |
+| `--category <CATEGORY>` | None | Restrict to one tag or rule-ID family. |
+| `--kind <KIND>` | None | Restrict to `source`, `sink`, or `sanitizer`. |
+| `--severity <LEVEL>` | None | Keep rules at or above one strict severity value. |
+| `--audit` | false | Render the per-language and per-family coverage audit. |
+| `--tree` | false | Group rules by language, kind, family, and source YAML file. |
+| `--validate` | false | Validate schemas, metadata, examples, and enabled-rule collisions. |
+| `--taint-replay` | false | With `--validate`, replay taint-dependent positive examples through the engine. |
+| `--limit`, `--context`, `--page`, `--all` | standard paging | Control presentation only. |
 | `--format <FORMAT>` | text | `text` or `json`. |
-| `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
+| `--output-path <PATH>` | stdout | Write the selected output to a file. |
 
-## taint
+## `security taint-analysis`
 
 The taint command surface is `security <workspace> taint-analysis`.
 
@@ -512,7 +544,7 @@ A one-shot cache miss streams directly to the selected output; use
 `cache rebuild <workspace> --export` only when repeated exports justify a
 persisted copy.
 
-## source-analysis
+## `security source-analysis`
 
 The source-analysis surface is `security <workspace> source-analysis`.
 
@@ -532,8 +564,10 @@ cache hit/miss notes on stderr while progress is enabled. JSON stdout and
 `--output-path` payloads remain clean.
 
 JSON rows include `analysis_complete`, `analysis_incomplete_reasons`, and
-`lineage`, so any bounded representative-lineage status is machine-readable.
-`--all` removes both row paging and source-lineage path limits.
+`lineage`. The source reachability closure is exact; lineage paths are a
+presentation of that closure and carry explicit truncation metadata when a
+paged view omits later paths. `--all` renders every row and lineage path
+without changing the closure.
 
 | Flag | Default | Description |
 |---|---:|---|
@@ -572,7 +606,7 @@ bonsai-ninja cache rebuild ./src
 | `stats --output-path <PATH>` | stdout | Write the selected `stats --format` output to a file. |
 | `clear [WORKSPACE]` | current directory | Remove persisted analysis sidecars from the workspace's external cache. |
 | `--dataflow-only` | false | For `clear`, remove only `dataflow.v3.factstore` and the compatibility `dataflow.v2.bin`. |
-| `rebuild [WORKSPACE]` | current directory | Remove persisted analysis sidecars and rebuild reusable structural artifacts: compiler objects, callgraph, linkage, streamed IDG, and retrieval factstore. It does not run the legacy full-workspace dataflow prewarm. |
+| `rebuild [WORKSPACE]` | current directory | Remove persisted analysis sidecars and rebuild reusable structural artifacts: compiler objects, callgraph, linkage, streamed IDG, and retrieval factstore. It does not run the optional full-workspace compatibility dataflow prewarm. |
 | `rebuild --export` | false | Also warm the default export JSON cache. |
 
 `index --semantic`, SDK semantic/full-prewarm facades, `cache rebuild`, and

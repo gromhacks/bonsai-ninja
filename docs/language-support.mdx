@@ -35,6 +35,30 @@ Security coverage is rulepack-driven. Each supported language uses the same
 source-sink-sanitizer contracts while its adapter remains solely responsible
 for recognizing and lowering that language's syntax.
 
+## Frontend selection
+
+File extensions are declared by adapters, not duplicated in CLI or parser
+code. An adapter that owns several grammar variants also selects the variant;
+for example, the TypeScript frontend chooses the TSX grammar only for TSX
+paths.
+
+When more than one adapter claims an extension, bonsai-ninja parses the exact
+snapshot with every candidate. Grammar-owned syntax can prove ownership; parse
+quality and deterministic registry order are fallbacks. This matters for
+ambiguous headers: Objective-C or C++ constructs select their specialized
+frontend, while a C-compatible `.h` file remains C. Shared analysis never
+guesses the language from API names or a token inventory.
+
+## What support means
+
+“Supported” means the adapter parses source, emits compiler facts, declares
+its capability levels, participates in cross-language conformance tests, and
+can drive the shared CLI/security/export surfaces. It does not mean runtime
+reflection, generated code, macro expansion, or computed dispatch can always
+be resolved statically. Use `diagnostics` and `dump-resolution` to review those
+gaps. An unresolved construct is reported as incomplete where it affects the
+requested semantic result; it is never replaced with a guessed edge.
+
 | Language | Sources | Sinks | Lifecycle | Adapter-owned dispatch facts | Inherent limitations |
 |---|---|---|---|---|---|
 | C | Yes | Yes | Limited | Functions, structs, pointers, out-params, field places | Preprocessor expansion and indirect pointers can be unresolved |

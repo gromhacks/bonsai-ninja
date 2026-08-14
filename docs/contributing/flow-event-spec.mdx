@@ -484,80 +484,52 @@ These are universal — every adapter, every language, every variant.
    the `Loop::body` field, not in a sibling list with implicit
    sequencing. The engine's CFG builder relies on the tree.
 
-## Out of scope (Phase 10-12)
+## Analysis boundaries
 
-The engine improvement plan explicitly defers three classes of work that
-would require a separate non-tree-sitter front end. These are documented
-here for completeness; they are **not** roadmap items the conformance
-suite gates on.
+`FlowEvent` describes source-visible syntax. The compiler does not execute a
+language toolchain, package manager, macro expander, template compiler, or
+bytecode decompiler while indexing a workspace.
 
-### Phase 10 — Macro / template expansion
+### Generated and expanded code
 
-Languages with significant macro / template machinery (Rust
-declarative + procedural macros, C/C++ preprocessor, Elixir macros,
-Lisp-family quote/unquote) cannot be analysed at the source level
-alone. The expanded form is what executes, and tree-sitter sees only
-the unexpanded surface.
+Adapters lower the concrete syntax that Tree-sitter parsed. Macro calls,
+preprocessor directives, and template/DSL forms can contribute ordinary
+surface facts, but code produced only after expansion is unavailable unless
+the generated source is also present in the selected workspace. Resolver and
+diagnostic surfaces report the resulting static gaps; shared analysis must not
+invent the expanded declarations or calls.
 
-Concretely, `lazy_static! { static ref X: Mutex<HashMap<…>> = … }` in
-Rust, `#define LOG(...)` in C, Elixir's `use GenServer`, and Common
-Lisp's `defmacro` all produce executable code the adapter never sees.
-The engine reports `UnsupportedConstruct` for these forms and marks affected
-analysis incomplete instead of emitting guessed public flows.
+### Cross-language FFI
 
-A correct treatment requires either:
+Each source file is lowered by its selected adapter. The engine does not infer
+an ABI bridge between independently parsed declarations such as Rust
+`extern "C"`, Python `ctypes`, JNI, P/Invoke, or native Node modules merely
+because names look alike. A future bridge must be an explicit typed ABI model
+with binding evidence, never a cross-language string match. Rulepacks can
+describe security boundaries on either side, but that does not synthesize a
+source-to-sink edge across the ABI.
 
-- Running each language's macro expander as a pre-step, parsing the
-  expanded output (slow; tooling churn; rustc / cpp / etc. as runtime
-  dependencies).
-- Or a hand-rolled macro expander per language, kept in sync with the
-  upstream compiler (significant maintenance burden).
+### Compiled-only artifacts
 
-Either approach is out of scope for the tree-sitter-based engine.
-
-### Phase 11 — FFI bindings
-
-Cross-language calls (Python `ctypes` / `cffi` into C, Rust `extern
-"C"` into anything, Java JNI, .NET P/Invoke, Node.js native addons)
-flow data across language boundaries the engine doesn't bridge.
-
-Tree-sitter parses each language independently and the workspace
-indexes them in separate adapter passes. A `c_function` exported via
-`#[no_mangle] pub extern "C" fn …` is a Rust `Decl`; the
-matching `ctypes.CDLL("libfoo.so").c_function` call in Python is a
-Python `FlowEvent::Call`. Bridging them would require a
-language-agnostic ABI model the analyser doesn't have.
-
-Workarounds in the matcher: rules that need cross-language coverage
-declare both sides separately (a Rust sink rule + a Python source
-rule) and rely on the user's threat model to connect them.
-
-### Phase 12 — Bytecode backends
-
-Pre-compiled artefacts (Python `.pyc`, Java `.class` / `.jar`, .NET
-`.dll`, Ruby `.rbc`, Lua bytecode, WebAssembly modules) ship without
-source. The engine ingests source text; bytecode is invisible.
-
-Decompilation is technically possible but loses semantic fidelity
-(Java decompilers struggle with `invokedynamic`; Python `dis` doesn't
-recover original AST). The pragmatic stance: report bytecode
-artefacts as `UnsupportedConstruct` at ingest time and rely on the
-user to provide source. Closed-source dependencies remain a known
-blind spot.
+The workspace ingests supported source text. Bytecode and binary artifacts
+such as `.class`, `.jar`, `.dll`, `.pyc`, native libraries, and WebAssembly are
+not decompiled into `FlowEvent`s. Analyze available source or generated source
+when those components must participate in a path.
 
 ## Adapter migration
 
 Adding a new event variant or field is a **two-step** rollout:
 
 1. **Define the field with a sensible default** (`Option<T>` /
-   `Vec<T>` / `bool`). Existing adapters and serialized fixtures keep
-   working — the default produces the pre-rollout behaviour.
+   `Vec<T>` / `bool`) and bump the compiler-object frontend ABI. Defaults keep
+   source compatibility during the adapter rollout; the ABI bump prevents an
+   older serialized object from masquerading as current compiler output.
 2. **Populate it adapter-by-adapter**, gating progress on the
-   capability matrix. Each adapter PR moves one cell from ❌ to ✅
-   and includes the per-adapter fixture that exercises it.
+   capability matrix. Each adapter change includes positive and negative
+   fixtures for the fact it now emits.
 
-Removing a field or renaming a variant is a **MATCHER_POLICY_FINGERPRINT
-bump** (see [specification.mdx](./specification.mdx#3-stability)).
-Sidecar caches keyed on the fingerprint are invalidated; existing
-fixtures and serialized snapshots fail to deserialize at the
-`#[serde(default)]` boundary. Plan for a major version bump.
+Removing or renaming a persisted field requires a compiler-object schema/ABI
+bump and updates to every derived pipeline fingerprint. If the change also
+alters matching or transfer semantics, bump the corresponding matcher or IDG
+policy identity. Public SDK or output-schema changes follow the separate
+stability rules in [specification.mdx](./specification.mdx#3-stability).

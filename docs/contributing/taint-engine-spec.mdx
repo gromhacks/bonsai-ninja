@@ -544,8 +544,8 @@ The taint stack is layered:
   for security, inspect, dump-taint, and compatibility callers.
 - **Layer 4 — compatibility surfaces** (`assignment.rs`, `intra.rs`, and
   `idg_api.rs`): preserves local helper and public result types while
-  interprocedural answers come exclusively from the IDG. There is no second
-  interprocedural worklist engine.
+  interprocedural answers come exclusively from the IDG. These projections do
+  not implement a second interprocedural engine.
 
 Native JSON export follows the same boundary. `taint_graph.assign_chains` is a
 per-parameter, function-local projection of the IDG closure. The stable
