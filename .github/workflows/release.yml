@@ -97,7 +97,10 @@ jobs:
           cargo machete --with-metadata
           cargo audit --deny warnings
           python3 scripts/audit-dependency-licenses.py
+          python3 scripts/audit-release-metadata.py
           bash scripts/audit-github-actions.sh
+          bash scripts/audit-workflows.sh
+          bash scripts/audit-secrets.sh
           bash scripts/audit-layering.sh
           bash scripts/audit-hardcoded.sh --check /tmp/hardcoded-audit
           python3 scripts/audit-corpus-independence.py
@@ -223,6 +226,10 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     needs: preflight
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -363,16 +370,22 @@ jobs:
           artifact="bonsai-ninja-${{ matrix.target }}"
           mkdir -p "dist/$artifact"
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/$artifact/"
-          cp README.md SKILLS.md AGENTS.md LICENSE Cargo.lock docs.json "dist/$artifact/"
+          cp README.md CONTRIBUTING.md SECURITY.md SKILLS.md AGENTS.md LICENSE \
+            Cargo.lock docs.json "dist/$artifact/"
           mkdir -p "dist/$artifact/.agents/skills"
           cp -R .agents/skills/bonsai-ninja "dist/$artifact/.agents/skills/bonsai-ninja"
           cp -R docs "dist/$artifact/docs"
           cp -R security-patterns "dist/$artifact/security-patterns"
           smoke_dir="$(mktemp -d)"
           trap 'rm -rf "$smoke_dir"' EXIT
+          mkdir -p "$smoke_dir/home" "$smoke_dir/parser-cache" \
+            "$smoke_dir/workspace-cache"
           (
             cd "$smoke_dir"
-            "$GITHUB_WORKSPACE/dist/$artifact/${{ matrix.bin }}" \
+            HOME="$smoke_dir/home" \
+              XDG_CACHE_HOME="$smoke_dir/parser-cache" \
+              BONSAI_WORKSPACE_DIR="$smoke_dir/workspace-cache" \
+              "$GITHUB_WORKSPACE/dist/$artifact/${{ matrix.bin }}" \
               security "$GITHUB_WORKSPACE/examples/python/micro" taint-analysis \
               --format json --all --no-color --no-progress \
               > packaged-security.json
@@ -393,6 +406,14 @@ jobs:
           tar -czf "$artifact.tar.gz" -C dist "$artifact"
           shasum -a 256 "$artifact.tar.gz" > "$artifact.tar.gz.sha256"
 
+      - name: Attest tarball provenance
+        if: matrix.package == 'tar' && startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            bonsai-ninja-${{ matrix.target }}.tar.gz
+            bonsai-ninja-${{ matrix.target }}.tar.gz.sha256
+
       - name: Package zip
         if: matrix.package == 'zip'
         shell: pwsh
@@ -401,15 +422,29 @@ jobs:
           $artifact = "bonsai-ninja-${{ matrix.target }}"
           New-Item -ItemType Directory -Force "dist/$artifact" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/$artifact/"
-          Copy-Item README.md, SKILLS.md, AGENTS.md, LICENSE, Cargo.lock, docs.json "dist/$artifact/"
+          Copy-Item README.md, CONTRIBUTING.md, SECURITY.md, SKILLS.md, AGENTS.md, LICENSE, Cargo.lock, docs.json "dist/$artifact/"
           New-Item -ItemType Directory -Force "dist/$artifact/.agents/skills" | Out-Null
           Copy-Item .agents/skills/bonsai-ninja "dist/$artifact/.agents/skills/bonsai-ninja" -Recurse
           Copy-Item docs "dist/$artifact/docs" -Recurse
           Copy-Item security-patterns "dist/$artifact/security-patterns" -Recurse
           $repo = (Get-Location).Path
           $smoke = "$env:RUNNER_TEMP/bonsai-packaged-security.json"
+          $profile = "$env:RUNNER_TEMP/bonsai-packaged-profile"
+          @(
+            $profile
+            "$profile/AppData/Local"
+            "$profile/AppData/Roaming"
+            "$profile/workspace-cache"
+          ) | ForEach-Object {
+            New-Item -ItemType Directory -Force $_ | Out-Null
+          }
           Push-Location $env:RUNNER_TEMP
           try {
+            $env:HOME = $profile
+            $env:USERPROFILE = $profile
+            $env:LOCALAPPDATA = "$profile/AppData/Local"
+            $env:APPDATA = "$profile/AppData/Roaming"
+            $env:BONSAI_WORKSPACE_DIR = "$profile/workspace-cache"
             & "$repo/dist/$artifact/${{ matrix.bin }}" security "$repo/examples/python/micro" taint-analysis --format json --all --no-color --no-progress > $smoke
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally {
@@ -425,6 +460,14 @@ jobs:
           Compress-Archive -Path "dist/$artifact" -DestinationPath "$artifact.zip" -Force
           $hash = (Get-FileHash "$artifact.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $artifact.zip" | Out-File -Encoding ascii "$artifact.zip.sha256"
+
+      - name: Attest zip provenance
+        if: matrix.package == 'zip' && startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            bonsai-ninja-${{ matrix.target }}.zip
+            bonsai-ninja-${{ matrix.target }}.zip.sha256
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -456,10 +499,22 @@ jobs:
           cd artifacts
           sha256sum -c *.sha256
 
+      - name: Verify signed provenance before publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd artifacts
+          for artifact in *.tar.gz *.tar.gz.sha256 *.zip *.zip.sha256; do
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY"
+          done
+
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           fail_on_unmatched_files: true
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             artifacts/*.tar.gz
             artifacts/*.tar.gz.sha256

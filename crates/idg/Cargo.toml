@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Workspace-wide Interprocedural Dataflow Graph (IFDS-style) — single graph that all bonsai-ninja consumers query"
 
 [dependencies]

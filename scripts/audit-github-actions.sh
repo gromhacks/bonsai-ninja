@@ -50,11 +50,26 @@ required_release_commands=(
     'python3 scripts/pack_audit.py --duplicates --fail-on-family-file-mismatch'
     'python3 scripts/fp_audit.py'
     'python3 scripts/category_audit.py'
+    'python3 scripts/audit-release-metadata.py'
+    'bash scripts/audit-workflows.sh'
+    'bash scripts/audit-secrets.sh'
     'scripts/audit-loop.sh --quick'
+    'uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6'
+    'gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY"'
+    "prerelease: \${{ contains(github.ref_name, '-') }}"
+    'XDG_CACHE_HOME="$smoke_dir/parser-cache"'
+    '$env:LOCALAPPDATA = "$profile/AppData/Local"'
 )
 for command in "${required_release_commands[@]}"; do
     if ! rg -Fq -- "$command" "$release_workflow"; then
         printf 'release workflow omits required gate: %s\n' "$command" >&2
+        violations=$((violations + 1))
+    fi
+done
+
+for permission in 'attestations: write' 'id-token: write'; do
+    if ! rg -Fq -- "$permission" "$release_workflow"; then
+        printf 'release workflow omits attestation permission: %s\n' "$permission" >&2
         violations=$((violations + 1))
     fi
 done
