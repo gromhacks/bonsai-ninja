@@ -54,6 +54,15 @@ do not force that prewarm; users request it explicitly with
 methodology and exact gate measurements live in
 [Release Readiness](docs/RELEASE_READINESS.md).
 
+**A complete production-scale graph export takes minutes, not hours.** Against
+the same warmed 30,055-file generation, native JSON streamed 4.54 GB of
+compiler, callgraph, flow, and IDG-backed facts in 4 minutes 5 seconds. Explicit
+`--full-propagations` materialized the same exact propagation relation as
+individual rows: 6.42 GB in 7 minutes 36 seconds. The default therefore saved
+1.88 GB and 3 minutes 31 seconds without reducing accuracy. These whole-repo
+exports peaked near 4.8 GB RSS; the 3 GiB setting schedules semantic workers
+and is not a hard operating-system RSS limit.
+
 ## Supported languages
 
 The release includes 20 Tree-sitter frontends:
