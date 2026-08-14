@@ -299,6 +299,12 @@ projection. Request `--full-propagations` only when a consumer explicitly
 needs materialized per-entry propagation rows; the default compressed graph
 representation remains exact.
 
+Treat a whole-workspace native export as a bulk artifact, not agent-readable
+prompt text. It can be multi-gigabyte on a production repository, so write it
+with `--output-path` and let downstream code stream or index it. Do not request
+`--full-propagations` merely to improve accuracy; it changes representation
+only.
+
 ## Rulepack work
 
 Rules live under

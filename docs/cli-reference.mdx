@@ -543,6 +543,10 @@ identities or agent prompts.
 A one-shot cache miss streams directly to the selected output; use
 `cache rebuild <workspace> --export` only when repeated exports justify a
 persisted copy.
+Whole-repository native JSON can be a multi-gigabyte, minutes-long artifact;
+write it with `--output-path` rather than placing it in an agent context. The
+current production-scale time, size, and memory measurements are recorded in
+[Release Readiness](RELEASE_READINESS.md#production-scale-native-export-measurement).
 
 ## `security source-analysis`
 

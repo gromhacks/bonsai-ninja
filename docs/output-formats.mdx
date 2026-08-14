@@ -86,6 +86,13 @@ phases; the IDG can be unloaded and reloaded between them from the same
 validated generation. Large output files therefore do not need a matching
 in-memory JSON document.
 
+Treat a whole-repository native export as a bulk artifact, not as model prompt
+text. Production-scale exports can be multi-gigabyte and take minutes even
+when the semantic generation is warm. Prefer `--output-path`, keep the exact
+compressed default unless a consumer explicitly requires materialized
+propagation rows, and provision storage and memory from the current measured
+baseline in [Release Readiness](RELEASE_READINESS.md#production-scale-native-export-measurement).
+
 ```bash
 bonsai-ninja export ./src --format networkx --output-path graph.node_link.json
 bonsai-ninja export ./src --format graphml --output-path graph.graphml

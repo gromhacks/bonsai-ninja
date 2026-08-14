@@ -211,6 +211,42 @@ was explicitly cleared. The resulting cache is 7,113,741,889 bytes (about
 only pay this full prewarm when they explicitly run `index --semantic`. A
 fresh process reused the completed semantic generation in 2.37 seconds.
 
+## Production-scale native export measurement
+
+Native export is a bulk artifact path rather than an interactive navigation
+command. It was measured separately on August 14, 2026 because the regular
+large-workspace gate intentionally does not write a multi-gigabyte export on
+every CI runner.
+
+The measurement used bonsai-ninja commit
+`9823bf443c32ee4c3a0f263078486ac6d1498c91`, Elasticsearch commit
+`e9741368da0cb5465f5cf76c668a09fd780583be`, an Apple M1 Pro with 16 GiB of
+physical memory, macOS 26.3.1, and `BONSAI_MEMORY_BUDGET_MB=3072`. Output was
+streamed through a byte counter instead of being retained on disk. Both export
+commands were fresh processes reading the same validated semantic generation;
+no reusable default-export cache existed.
+
+| Operation | Wall time | Output bytes | Maximum RSS |
+|---|---:|---:|---:|
+| Cold semantic generation | 1,613.79 s (26m 53.8s) | 7,113,425,453 cache bytes | 3,199,107,072 bytes |
+| Default native JSON (`compiled_idg`) | 244.98 s (4m 05.0s) | 4,540,419,571 | 4,815,470,592 bytes |
+| Native JSON with `--full-propagations` | 456.43 s (7m 36.4s) | 6,421,445,325 | 4,744,691,712 bytes |
+| Full-materialization delta | +211.45 s (+86.3%) | +1,881,025,754 (+41.4%) | no material increase |
+
+The default and full forms represent the same exact interprocedural
+propagation relation. Default export retains it as the compiled IDG and avoids
+enumerating every per-entry row. `--full-propagations` is for consumers that
+require those concrete rows; it does not make analysis more accurate.
+
+The 3 GiB memory value is a semantic-worker scheduling budget, not a hard RSS
+limit. The cold semantic build stayed within that profile and completed
+without swaps. Both export forms peaked near 4.8 GB RSS while streaming their
+multi-gigabyte JSON. Streaming means the exporter does not construct one
+matching in-memory JSON document, but its shared semantic projection still has
+a larger resident set than the scheduling budget. Treat the table as the
+current production export baseline and review any increase in time, bytes, or
+memory as a regression.
+
 ## Output and packaging gates
 
 The release workflow verifies:
