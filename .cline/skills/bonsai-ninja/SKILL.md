@@ -1,6 +1,6 @@
 ---
 name: bonsai-ninja
-description: "Use bonsai-ninja to map a codebase, find symbols, trace behavior, inspect dataflow, debug across files, export graph facts, and run SAST."
+description: "Use bonsai-ninja as compiler-backed structural evidence when mapping a codebase, finding symbols, tracing behavior, inspecting dataflow, debugging across files, reviewing change impact, exporting graph facts, or running SAST."
 ---
 
 # bonsai-ninja
@@ -12,6 +12,24 @@ security review, compiler diagnostics, or graph export.
 Do not start with a broad semantic command when a filesystem or syntax query
 answers the question. `tree` is a direct filesystem walk; it is not a security
 scan.
+
+## Role in an agent workflow
+
+Use Bonsai to reduce repository-navigation turns and the amount of source that
+must enter model context. Ask one concrete structural question, run the
+smallest command that can answer it, and pivot from returned symbols or stable
+IDs. Do not invoke Bonsai merely because it is available.
+
+Bonsai provides static evidence; it does not replace code reasoning, direct
+source inspection, compilation, tests, logs, or a runtime debugger. Verify a
+conclusion with the narrowest relevant source and executable check before
+editing or reporting it. If one command does not narrow the question, change
+the selector or evidence type instead of repeating the same broad query.
+
+Prefer ordinary filesystem or shell tools when the relevant file is already
+known and the question is purely local. Prefer Bonsai when identity,
+reachability, cross-file relationships, dataflow, or security semantics would
+otherwise require manually reading many files.
 
 ## Command truth
 
@@ -88,7 +106,9 @@ report; it wraps the selected text view and never enables more analysis.
 
 ## Map a repository
 
-Start with shape:
+For an unfamiliar repository, start with only the shape needed for the task.
+Usually `context` plus a shallow `tree` is enough; add imports, entry points, or
+declarations only when they help answer the current question:
 
 ```shell
 ./target/release/bonsai-ninja context <workspace> --no-color --no-progress
