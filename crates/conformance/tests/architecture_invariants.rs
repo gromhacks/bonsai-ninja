@@ -3568,6 +3568,8 @@ fn compiler_objects_are_exact_single_frontend_inputs() {
     let prepare = function_body(&compiler_object, "prepare_compiler_object");
     let save = function_body(&compiler_object, "save_compiler_object_sidecar");
     let write_generation = function_body(&compiler_object, "write_compiler_object_generation");
+    let parallel_compiler_work = function_body(&compiler_object, "try_visit_parallel");
+    let append_compiler_object = function_body(&compiler_object, "append_prepared_compiler_object");
     assert!(
         compiler_object.contains("pub struct CompiledFileObject")
             && compiler_object.contains("Sha256")
@@ -3582,15 +3584,25 @@ fn compiler_objects_are_exact_single_frontend_inputs() {
             && load_browse.contains("wire::decode")
             && prepare.contains("CompilerBrowseHeader::from_indexes")
             && prepare.contains("browse_payload_digest")
-            && write_generation.contains("browse_key(descriptor.file)")
+            && append_compiler_object.contains("browse_key(descriptor.file)")
             && prepare.matches("ensure_source_version").count() == 3
             && prepare.contains("Ok(Some(prepared)) => {")
             && save.contains("write_compiler_object_generation")
             && write_generation.contains("PreparedFactStorePayload")
-            && write_generation.contains("compiler_weighted_batches")
+            && write_generation.contains("syntax_worker_count_for_sources")
+            && write_generation.contains("SyntaxMemoryPermitPool")
+            && write_generation.contains("try_visit_parallel")
+            && write_generation.contains("append_prepared_compiler_object")
+            && write_generation.contains("collect::<Option<Vec<_>>>()")
+            && parallel_compiler_work.contains("sync_channel")
+            && parallel_compiler_work.contains("completed_count")
+            && parallel_compiler_work.contains("visit(index, result?)")
+            && parallel_compiler_work.contains("max_in_flight")
+            && !parallel_compiler_work.contains("BTreeMap")
+            && !parallel_compiler_work.contains("compiler_weighted_batches")
             && !write_generation.contains(".take(")
             && !write_generation.contains(".truncate("),
-        "compiler objects must be atomic, strongly content-identified, relocatable by relative path, and complete"
+        "compiler objects must be atomic, strongly content-identified, continuously scheduled without physical head-of-line blocking, canonically indexed, relocatable by relative path, and complete"
     );
     assert!(
         function_body(&db, "decl_index_uncached").contains("compiler_file_object_uncached")
@@ -3655,7 +3667,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
         (
             "compiler objects",
             function_body(&compiler_object, "write_compiler_object_generation"),
-            "compiler_weighted_batches",
+            "SyntaxMemoryPermitPool",
         ),
         (
             "callgraph",
