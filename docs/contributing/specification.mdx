@@ -45,10 +45,12 @@ same rulepack typing model without reparsing or guessing. Declared type
 identity is case-sensitive; capitalization alone is never type evidence.
 
 Semantic prewarm publishes one atomic compiler-object generation and all broad
-phases stream it. Persisted IDG transfer lowers each function once, then
-replays a typed stitch object against the canonical segment. Caching or disk
-spilling must not create a second semantic frontend, omit diagnostics, or cap
-the fixed point.
+phases stream it. Persisted IDG transfer lowers each function once through a
+bounded source-weighted worker window, publishes completed segments in
+canonical `SegmentId` order, then replays a typed stitch object against the
+canonical segment. Caching, parallel completion, or disk spilling must not
+create a second semantic frontend, change stable node identity, omit
+diagnostics, or cap the fixed point.
 
 ## 2. Output schema
 

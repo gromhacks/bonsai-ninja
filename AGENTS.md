@@ -79,11 +79,16 @@ identity includes the compiler-object frontend ABI; a lowering change
 invalidates older callgraph/IDG sidecars even when source bytes are unchanged,
 and root-only validators reconstruct the same identity as a full workspace
 open. Persisted IDG construction lowers transfer facts once, spools typed
-stitch records/node maps, and replays them per segment. Memory scheduling may
-weight or serialize units, but must never cap semantic work. After the
-isolated workers finish, the parent validates that every sidecar describes one
-current workspace snapshot and reruns the exact sequence if a file changed
-between phases.
+stitch records/node maps, and replays them per segment. Independent transfer
+segments lower continuously on bounded dedicated workers under exact
+source-size memory permits. Completed output retains its permit until a
+bounded reorder map publishes canonical ascending `SegmentId` order to the
+serial stitcher. Do not reintroduce per-batch barriers, and do not accept an
+earlier phase-local speedup without measuring its allocator/RSS effect on the
+complete cold pipeline. Memory scheduling may weight or serialize units, but
+must never cap semantic work. After the isolated workers finish, the parent
+validates that every sidecar describes one current workspace snapshot and
+reruns the exact sequence if a file changed between phases.
 
 When a rulepack-only external type is required for receiver-state transfer,
 compile the complete rule match to exact AST call spans before IDG
@@ -262,6 +267,11 @@ canonical cached dataflow graph retained only as the compatibility fallback.
 Broad raw-flow reports compute every exact path before pagination, reuse
 worker-precomputed row costs, and format/cache only the requested page. Follow
 the printed page or cursor for more; page 1 never eagerly renders later pages.
+Use plain `inspect`, `refs`, or `calls` for symbol lookup. `--graph-flow`
+deliberately computes the complete structural path language attached to every
+match before paging, so shared helpers can expand a narrow spelling query into
+a large exact artifact. When both endpoints are known, prefer `--from` and
+`--to` so the compiler projects the exact graph corridor first.
 
 Record understanding as:
 

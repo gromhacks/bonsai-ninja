@@ -47,7 +47,7 @@ separate the first explicit semantic index from commands run after it exists:
 
 | Cache state and operation | Measured time | Result |
 |---|---:|---|
-| Empty cache: `index --semantic` | 10m 06.5s | 7.11 GB validated reusable cache; 3.48 GB maximum RSS; no swaps |
+| Empty cache: `index --semantic` | 9m 16.6s | 7.11 GB validated reusable cache; 3.19 GB maximum RSS; no swaps |
 | After index: semantic generation reopen | 2.5s | Existing compiler objects, linkage, callgraph, retrieval, and IDG validated and reused |
 | After index: search | 4.1s | Exact requested matches |
 | After index: call lookup | 3.9s | Compiler-resolved call rows |
@@ -66,9 +66,12 @@ The empty-cache run compiles 30,055 Tree-sitter source units into exact IR,
 resolves the workspace callgraph and linkage, builds retrieval headers, and
 constructs a 4.16 GB sparse IDG before publishing 7.11 GB of validated
 sidecars. It is a one-time whole-workspace build, not command startup. The
-continuous compiler-object scheduler reduced this same completed workload
-from 26m 53.8s to 10m 06.5s (2.66x faster, 62.4% less wall time) without
-changing its files, facts, graph, or fixed point.
+continuous compiler-object scheduler and the bounded, canonically ordered IDG
+transfer pipeline reduced this same completed workload from 26m 53.8s to 9m
+16.6s (2.90x faster, 65.5% less wall time) without changing its files, facts,
+graph, or fixed point. The IDG stage compiles independent source segments in
+parallel under source-size memory permits, then publishes them in stable
+segment order; it does not trade correctness for throughput.
 
 For whole-repository export, the compressed default saved 1.88 GB and 3 minutes
 31 seconds without reducing accuracy. Both export forms peaked near 4.8 GB

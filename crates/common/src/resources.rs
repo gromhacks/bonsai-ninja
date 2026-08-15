@@ -273,6 +273,33 @@ impl SyntaxMemoryPermitPool {
             admitted_bytes,
         }
     }
+
+    /// Admit one exact source unit immediately when it fits the current
+    /// working-memory envelope.
+    ///
+    /// Callers with ordered output pipelines use this to fill idle worker
+    /// slots without blocking the thread that must consume completed units
+    /// and release their permits. An oversize unit is admitted when the pool
+    /// is otherwise empty, matching [`Self::acquire`].
+    #[must_use]
+    pub fn try_acquire(&self, source_bytes: u64) -> Option<SyntaxMemoryPermit<'_>> {
+        let Some(capacity) = self.capacity_bytes else {
+            return Some(SyntaxMemoryPermit {
+                pool: self,
+                admitted_bytes: 0,
+            });
+        };
+        let admitted_bytes = weighted_compiler_unit_bytes(source_bytes).min(capacity);
+        let mut used = lock_unpoisoned(&self.used_bytes);
+        if *used > 0 && used.saturating_add(admitted_bytes) > capacity {
+            return None;
+        }
+        *used = used.saturating_add(admitted_bytes);
+        Some(SyntaxMemoryPermit {
+            pool: self,
+            admitted_bytes,
+        })
+    }
 }
 
 /// RAII admission returned by [`SyntaxMemoryPermitPool::acquire`].
@@ -952,6 +979,30 @@ mod tests {
             .expect("released capacity admits the waiting exact unit");
         drop(second);
         waiter.join().expect("weighted permit worker");
+    }
+
+    #[test]
+    fn nonblocking_weighted_admission_preserves_capacity_and_forward_progress() {
+        let unit = weighted_compiler_unit_bytes(1);
+        let permits = SyntaxMemoryPermitPool::with_capacity(Some(2 * unit));
+        let first = permits.acquire(1);
+        let second = permits.try_acquire(1).expect("second exact unit fits");
+        assert!(
+            permits.try_acquire(1).is_none(),
+            "a continuous producer must not block its ordered consumer when capacity is full"
+        );
+        drop(first);
+        let replacement = permits
+            .try_acquire(1)
+            .expect("released exact unit admits replacement work");
+        drop(second);
+        drop(replacement);
+
+        let oversize = permits
+            .try_acquire(u64::MAX)
+            .expect("an oversize exact compiler unit runs alone");
+        assert!(permits.try_acquire(1).is_none());
+        drop(oversize);
     }
 
     #[test]

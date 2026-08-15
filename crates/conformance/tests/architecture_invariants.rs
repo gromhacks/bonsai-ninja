@@ -3676,8 +3676,8 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
         ),
         (
             "IDG transfer",
-            function_body(&idg, "idg_transfer_batches"),
-            "compiler_weighted_batches",
+            function_body(&idg, "build_with_file_info_and_options_scoped"),
+            "SyntaxMemoryPermitPool",
         ),
         (
             "security matcher",
@@ -3699,10 +3699,17 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             );
         }
     }
+    let transfer_sizes = function_body(&idg, "idg_transfer_source_bytes");
+    let transfer_window = function_body(&idg, "fill_window");
     assert!(
-        function_body(&idg, "idg_transfer_batches").contains("file_to_source_bytes")
-            && function_body(&idg, "idg_transfer_batches").contains("compiler_weighted_batches"),
-        "IDG transfer concurrency must use exact compiler-unit size where the syntax provider exposes it"
+        transfer_sizes.contains("file_to_source_bytes")
+            && transfer_window.contains("memory_permits.acquire")
+            && transfer_window.contains("memory_permits.try_acquire")
+            && transfer_window.contains("source_bytes[self.next_to_schedule]")
+            && idg.contains("struct OrderedTransferBatches")
+            && idg.contains("BTreeMap<usize, CompletedTransferWork")
+            && function_body(&idg, "lower_transfer_segment").contains("body_for_file"),
+        "IDG transfer concurrency must use exact compiler-unit size, bounded continuous admission, and canonical ordered publication"
     );
     let reachable_taint_scope = function_body(&security_execution, "compile_reachable_taint_scope");
     assert!(
@@ -3917,7 +3924,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
                 .contains("metadata.func_segments")
             && !function_body(&idg_workspace, "load_query_from_disk")
                 .contains("segment_view")
-            && function_body(&idg, "lower_transfer_segment_batch").contains("body_for_file")
+            && function_body(&idg, "lower_transfer_segment").contains("body_for_file")
             && function_body(&index, "insert_linkage_header_preprocessed")
                 .contains("decl.flow_events.clear()")
             && function_body(&index, "insert_linkage_header_preprocessed").contains("function_linkage_facts")
@@ -3965,7 +3972,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && function_body(&idg, "build_with_file_info_and_options_scoped")
                 .contains("stitch_idg_from_spooled_segment_batches")
             && function_body(&idg, "build_with_file_info_and_options_scoped")
-                .matches("lower_transfer_segment_batch")
+                .matches("lower_transfer_segment")
                 .count()
                 == 1
             && function_body(&idg_workspace, "rebuild_indexes").contains("self.maintain_indexes = true"),

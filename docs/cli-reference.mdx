@@ -106,15 +106,18 @@ when a workflow deliberately wants to front-load the full semantic sidecar cost.
 Semantic prewarm uses ordered process phases: compiler objects, callgraph,
 retrieval, linkage, then IDG/manifest. The first phase lowers each immutable
 source snapshot once; later phases stream those objects. IDG transfer lowering
-also runs once and replays a compact typed stitch spool. Process exits reclaim
-phase arenas, and file-size-weighted scheduling subtracts current process RSS
-and safety headroom from detected memory before adapting concurrency, without
-capping semantic work. A 3 GiB process budget serializes transient exact
-compiler units. The workspace linker keeps only compact declaration/type/module
-headers and stable symbols; consumers stream exact bodies and remap them to
-those symbols. Repeated exact-body consumers share a byte-weighted hot cache
-derived from the same memory budget; eviction causes exact recomputation, not
-missing files or facts. After the IDG worker, the parent validates
+also runs once: a bounded source-weighted worker window lowers independent
+segments ahead of the stitcher, and a reorder buffer publishes only canonical
+segment order before replaying the compact typed stitch spool. Process exits
+reclaim phase arenas, and file-size-weighted scheduling subtracts current
+process RSS and safety headroom from detected memory before adapting
+concurrency, without capping semantic work. A 3 GiB process budget may
+serialize large transient units while allowing small units to overlap. The
+workspace linker keeps only compact declaration/type/module headers and stable
+symbols; consumers stream exact bodies and remap them to those symbols.
+Repeated exact-body consumers share a byte-weighted hot cache derived from the
+same memory budget; eviction causes exact recomputation, not missing files or
+facts. After the IDG worker, the parent validates
 that every artifact describes the same workspace snapshot; an intervening edit
 restarts the exact worker sequence until a coherent generation is current.
 
@@ -310,6 +313,15 @@ format and cache only the requested page. Conservative row costs are recorded
 while closure workers build the rows, so rendering does not serialize or
 rescan every path merely to plan page boundaries. Follow the printed page or
 cursor to continue; `--all` changes presentation only.
+
+Keep lookup and relational questions separate. A plain `inspect --query`,
+`refs`, or `calls` query is the lightweight choice for locating a symbol or
+call site. `--graph-flow` deliberately computes the complete structural path
+language attached to every matching occurrence before it pages the result;
+shared helpers can therefore turn a narrow spelling match into a very large
+exact artifact. Use it only when those entry-to-match relationships are the
+requested result. When both ends are known, prefer `--from` and `--to` so the
+compiler can project the exact corridor first.
 
 ```bash
 bonsai-ninja inspect ./src --query os.system --kind call

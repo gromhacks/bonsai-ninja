@@ -75,8 +75,10 @@ missing match. The linkage generation stores symbol headers, receiver
 ancestry, and call linkage as independent payloads so each command loads only
 its required compiler product. The IDG persistence phase replays typed stitch
 records from its first transfer pass instead of running transfer lowering
-twice. IDG writers hold a target-specific advisory lock for the complete
-generation, recheck a peer's completed sidecar before rebuilding, and remove
+twice. That pass continuously overlaps memory-admitted source segments, holds
+each result's admission through consumption, and restores canonical segment
+order before stitching. IDG writers hold a target-specific advisory lock for
+the complete generation, recheck a peer's completed sidecar before rebuilding, and remove
 only lock-proven FactStore staging files left by a terminated writer. Lock
 files in `$CACHE_DIR` are ownership metadata and may remain after the process
 exits; the operating system releases their locks automatically.
@@ -131,7 +133,7 @@ paths.
 | `BONSAI_MEMORY_BUDGET_MB` | positive integer MiB | detected host/container limit | Lower the compiler's scheduling/spill budget. Linux resolves the current process's nested cgroup v1/v2 memory controller, not only the root controller. Weighted phases subtract measured process RSS and safety headroom before admitting transient units; the exact-body hot cache derives from the same value. This is not an OS hard-RSS limit: clean memory-mapped factstore pages, allocator arenas, stacks, the binary, and output buffers can make RSS/physical footprint exceed it and are reclaimed or paged by the OS under pressure. A smaller value serializes work, evicts bodies sooner, and can cause exact recomputation/I/O; it cannot reduce analyzed files, facts, or graph closure. |
 | `BONSAI_DEBUG` | comma-separated categories | unset | Emit selected diagnostic categories to stderr; `*` enables all categories. Equivalent to global `--debug`. Common categories include `idg-closure`, `idg-resolve`, `recv-state`, `find-group`, `taint-graph`, and `xcall`; security progress notes also use categories such as `security-progress` and `security-phase`. |
 | `BONSAI_COMPILER_JOBS` | positive integer | available CPU count | Upper bound on compiler-object workers before file-size/memory weighting. Every file is still compiled. |
-| `BONSAI_IDG_TRANSFER_BATCH_SEGMENTS` | positive integer | available Rayon workers | Upper bound on concurrently lowered IDG source-file segments before exact VFS-size/memory weighting. Every segment and transfer fact is still compiled. |
+| `BONSAI_IDG_TRANSFER_BATCH_SEGMENTS` | positive integer | available CPU workers | Compatibility name for the upper bound on dedicated IDG transfer workers. Exact VFS source size and the live memory permit pool determine actual overlap; completed results retain admission until canonical `SegmentId`-ordered stitching consumes them. Every segment and transfer fact is still compiled. |
 | `BONSAI_SECURITY_JOBS` | positive integer | available CPU count | Upper bound on the continuous security header/body CPU worklist. Source-size-weighted permits independently bound memory overlap, so small files can use available CPUs while a large file consumes more of the scheduling budget. It changes throughput only, never the scanned file, rule set, or derived evidence. |
 | `BONSAI_SOURCE_ANALYSIS_JOBS` | positive integer | available CPU count | Upper bound on concurrent source-analysis compiler units before the shared memory scheduler. |
 | `BONSAI_TAINT_ANALYSIS_JOBS` | positive integer | `RAYON_NUM_THREADS` or available CPU count | Upper bound on concurrent exact source closures. Constrained machines run the same closures serially. |

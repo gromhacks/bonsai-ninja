@@ -210,6 +210,13 @@ class and verify each box.
 - [ ] **Memory changes scheduling only.** `BONSAI_MEMORY_BUDGET_MB` and worker
       settings may alter parallelism, cache retention, or spill frequency, but
       never files, facts, closure, iterations, or findings.
+- [ ] **IDG transfer lowering is continuously admitted and canonically
+      published.** Independent source segments use bounded dedicated workers
+      and exact source-size permits; completed output retains admission until
+      the serial stitcher consumes ascending `SegmentId` order. There are no
+      project-sized transfer vectors or per-batch barriers. Measure the full
+      empty-cache semantic build: a faster earlier phase is a regression if
+      allocator/RSS history reduces later exact-work concurrency.
 - [ ] **External-memory acceleration stays lazy.** Resident-only IDG fixed
       points do not reserve maximum spill pages, dense workspace bitsets,
       Bloom/positive caches, or temporary files. Promotion/spill is covered by

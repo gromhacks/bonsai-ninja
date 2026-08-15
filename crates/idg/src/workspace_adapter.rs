@@ -24,8 +24,13 @@ use bonsai_common::{FileId, FuncId};
 use bonsai_index::{CallLinkageFact, GlobalIndex};
 use bonsai_lang_api::{DeclKind, FlowEvent, ModulePath};
 use parking_lot::RwLock;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use std::{path::Path, time::Instant};
+use std::{
+    collections::{btree_map::Entry, BTreeMap},
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
+    path::Path,
+    sync::{mpsc, Arc, Mutex},
+    time::Instant,
+};
 
 use crate::builder::{
     stitch_idg_from_segment_batches, stitch_idg_from_spooled_segment_batches, CalleeResolver, ResolvedCallee,
@@ -2970,27 +2975,25 @@ where
                 .collect::<AHashSet<_>>()
         });
     // Transfer outputs are the largest transient compiler IR in this build.
-    // Construct every resolver index first, then lower deterministic segment
-    // batches lazily. The stitcher consumes each batch before the next one is
-    // created, so project size no longer determines transient transfer RAM.
+    // Construct every resolver index first, then lower source-file segments
+    // continuously behind a memory-admitted reorder window. The stitcher
+    // still consumes strict SegmentId order, so parallel completion changes
+    // neither stable node ids nor fixed-point semantics.
     let phase_started = Instant::now();
     let transfer_inputs =
         transfer_inputs_by_segment(global, &maps.func_to_seg, included_files, included_funcs);
     let function_count = transfer_inputs.iter().map(|(_, _, funcs)| funcs.len()).sum();
     let aggregate_layouts = unambiguous_aggregate_layouts(global);
-    let transfer_batches = idg_transfer_batches(global, &maps.file_to_source_bytes, &transfer_inputs);
-    let maximum_batch_width = transfer_batches
-        .iter()
-        .map(std::ops::Range::len)
-        .max()
-        .unwrap_or(0);
+    let transfer_source_bytes =
+        idg_transfer_source_bytes(global, &maps.file_to_source_bytes, &transfer_inputs);
+    let transfer_workers = idg_transfer_worker_count(transfer_inputs.len());
     idg_build_log(format_args!(
-        "transfer schedule: {:.3}s funcs={} segments={} batches={} max_batch_segments={}",
+        "transfer schedule: {:.3}s funcs={} segments={} workers={} max_in_flight={}",
         phase_started.elapsed().as_secs_f64(),
         function_count,
         transfer_inputs.len(),
-        transfer_batches.len(),
-        maximum_batch_width
+        transfer_workers,
+        transfer_workers
     ));
     let phase_started = Instant::now();
     let stream_sidecar_segments = reverse_lookup_retention == ReverseLookupRetention::SidecarOnly
@@ -2998,39 +3001,79 @@ where
         && !transfer_options.include_diagnostic_field_flows
         && !transfer_options.include_receiver_method_propagation;
     let transfer_matchers = CompiledTransferMatchers::new(transfer_options);
-    let batches = transfer_batches.iter().map(|range| {
-        lower_transfer_segment_batch(
-            global,
-            transfer_options,
-            &transfer_matchers,
-            &aggregate_layouts,
-            &transfer_inputs[range.clone()],
-            body_for_file,
-        )
-    });
-    let mut ws = if stream_sidecar_segments {
-        stitch_idg_from_spooled_segment_batches(
-            batches,
-            function_count,
-            &resolver,
-            SpooledStitchOptions {
-                spool_path: spool_path.expect("streaming sidecar path checked above"),
-                include_field_argument_forwarding: transfer_options.include_field_argument_forwarding,
-                symbolic_field_forwarding: transfer_options.symbolic_field_forwarding,
-                symbolic_funcs: symbolic_funcs.as_ref(),
-                capture_funcs: Some(&capture_funcs),
-            },
-        )
-    } else {
-        Ok(stitch_idg_from_segment_batches(
-            batches,
-            function_count,
-            &resolver,
-            transfer_options.include_field_argument_forwarding,
-            transfer_options.symbolic_field_forwarding,
-            symbolic_funcs.as_ref(),
-        ))
-    }?;
+    let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
+    let mut ws = std::thread::scope(|scope| {
+        let (work_tx, work_rx) = mpsc::sync_channel::<AdmittedTransferWork<'_>>(transfer_workers);
+        let (result_tx, result_rx) = mpsc::sync_channel::<CompletedTransferWork<'_>>(transfer_workers);
+        let work_rx = Arc::new(Mutex::new(work_rx));
+        for _ in 0..transfer_workers {
+            let result_tx = result_tx.clone();
+            let work_rx = Arc::clone(&work_rx);
+            let transfer_inputs = &transfer_inputs;
+            let transfer_matchers = &transfer_matchers;
+            let aggregate_layouts = &aggregate_layouts;
+            scope.spawn(move || loop {
+                let work = {
+                    let receiver = work_rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match receiver.recv() {
+                        Ok(work) => work,
+                        Err(_) => break,
+                    }
+                };
+                let outcome = catch_unwind(AssertUnwindSafe(|| {
+                    lower_transfer_segment(
+                        global,
+                        transfer_options,
+                        transfer_matchers,
+                        aggregate_layouts,
+                        &transfer_inputs[work.index],
+                        body_for_file,
+                    )
+                }));
+                if result_tx
+                    .send(CompletedTransferWork {
+                        index: work.index,
+                        outcome,
+                        permit: work.permit,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            });
+        }
+        drop(result_tx);
+        let batches = OrderedTransferBatches::new(
+            work_tx,
+            result_rx,
+            &transfer_source_bytes,
+            &memory_permits,
+            transfer_workers,
+        );
+        if stream_sidecar_segments {
+            stitch_idg_from_spooled_segment_batches(
+                batches,
+                function_count,
+                &resolver,
+                SpooledStitchOptions {
+                    spool_path: spool_path.expect("streaming sidecar path checked above"),
+                    include_field_argument_forwarding: transfer_options.include_field_argument_forwarding,
+                    symbolic_field_forwarding: transfer_options.symbolic_field_forwarding,
+                    symbolic_funcs: symbolic_funcs.as_ref(),
+                    capture_funcs: Some(&capture_funcs),
+                },
+            )
+        } else {
+            Ok(stitch_idg_from_segment_batches(
+                batches,
+                function_count,
+                &resolver,
+                transfer_options.include_field_argument_forwarding,
+                transfer_options.symbolic_field_forwarding,
+                symbolic_funcs.as_ref(),
+            ))
+        }
+    })?;
     stitch_declared_exception_hierarchy(&mut ws, &resolver)?;
     idg_build_log(format_args!(
         "stitch-idg: {:.3}s segments={} funcs={} intra_edges={} cross_edges={} field_links={}",
@@ -4754,6 +4797,147 @@ fn ws_node_to_local(
 }
 
 type SegmentTransferInputs = (SegmentId, FileId, Vec<FuncId>);
+type LoweredTransferSegment = (SegmentId, Vec<TransferOutput>);
+
+struct AdmittedTransferWork<'a> {
+    index: usize,
+    permit: bonsai_common::resources::SyntaxMemoryPermit<'a>,
+}
+
+struct CompletedTransferWork<'a> {
+    index: usize,
+    outcome: std::thread::Result<LoweredTransferSegment>,
+    permit: bonsai_common::resources::SyntaxMemoryPermit<'a>,
+}
+
+/// One canonically ordered segment batch whose memory admission remains held
+/// until the stitcher consumes its transfer output.
+struct AdmittedTransferBatch<'a> {
+    output: Option<LoweredTransferSegment>,
+    _permit: bonsai_common::resources::SyntaxMemoryPermit<'a>,
+}
+
+impl Iterator for AdmittedTransferBatch<'_> {
+    type Item = LoweredTransferSegment;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.output.take()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = usize::from(self.output.is_some());
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for AdmittedTransferBatch<'_> {}
+
+/// Continuous exact transfer lowering with a bounded, canonically published
+/// reorder window. Workers may finish out of order, but the stitcher observes
+/// the same ascending SegmentId sequence as the serial compiler pipeline.
+struct OrderedTransferBatches<'a> {
+    work_tx: mpsc::SyncSender<AdmittedTransferWork<'a>>,
+    result_rx: mpsc::Receiver<CompletedTransferWork<'a>>,
+    pending: BTreeMap<usize, CompletedTransferWork<'a>>,
+    source_bytes: &'a [u64],
+    memory_permits: &'a bonsai_common::SyntaxMemoryPermitPool,
+    worker_count: usize,
+    next_to_schedule: usize,
+    next_to_yield: usize,
+}
+
+impl<'a> OrderedTransferBatches<'a> {
+    fn new(
+        work_tx: mpsc::SyncSender<AdmittedTransferWork<'a>>,
+        result_rx: mpsc::Receiver<CompletedTransferWork<'a>>,
+        source_bytes: &'a [u64],
+        memory_permits: &'a bonsai_common::SyntaxMemoryPermitPool,
+        worker_count: usize,
+    ) -> Self {
+        Self {
+            work_tx,
+            result_rx,
+            pending: BTreeMap::new(),
+            source_bytes,
+            memory_permits,
+            worker_count: worker_count.max(1),
+            next_to_schedule: 0,
+            next_to_yield: 0,
+        }
+    }
+
+    fn fill_window(&mut self) {
+        while self.next_to_schedule < self.source_bytes.len()
+            && self.next_to_schedule.saturating_sub(self.next_to_yield) < self.worker_count
+        {
+            let source_bytes = self.source_bytes[self.next_to_schedule];
+            let permit = if self.next_to_schedule == self.next_to_yield {
+                Some(self.memory_permits.acquire(source_bytes))
+            } else {
+                self.memory_permits.try_acquire(source_bytes)
+            };
+            let Some(permit) = permit else {
+                break;
+            };
+            let work = AdmittedTransferWork {
+                index: self.next_to_schedule,
+                permit,
+            };
+            self.work_tx
+                .send(work)
+                .unwrap_or_else(|_| panic!("IDG transfer work queue disconnected"));
+            self.next_to_schedule += 1;
+        }
+    }
+}
+
+impl<'a> Iterator for OrderedTransferBatches<'a> {
+    type Item = AdmittedTransferBatch<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next_to_yield == self.source_bytes.len() {
+            return None;
+        }
+        self.fill_window();
+        while !self.pending.contains_key(&self.next_to_yield) {
+            let completed = self
+                .result_rx
+                .recv()
+                .unwrap_or_else(|_| panic!("IDG transfer result queue disconnected"));
+            assert!(
+                completed.index >= self.next_to_yield && completed.index < self.next_to_schedule,
+                "IDG transfer worker returned stale or unscheduled item {}",
+                completed.index
+            );
+            match self.pending.entry(completed.index) {
+                Entry::Vacant(slot) => {
+                    slot.insert(completed);
+                }
+                Entry::Occupied(_) => panic!("IDG transfer worker returned duplicate item"),
+            }
+        }
+        let completed = self
+            .pending
+            .remove(&self.next_to_yield)
+            .expect("completed canonical IDG transfer must be buffered");
+        self.next_to_yield += 1;
+        let output = match completed.outcome {
+            Ok(output) => output,
+            Err(payload) => resume_unwind(payload),
+        };
+        Some(AdmittedTransferBatch {
+            output: Some(output),
+            _permit: completed.permit,
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.source_bytes.len().saturating_sub(self.next_to_yield);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for OrderedTransferBatches<'_> {}
 
 /// Group lightweight declaration references by their deterministic segment.
 /// The heavy transfer outputs are deliberately absent from this schedule.
@@ -4792,112 +4976,88 @@ fn transfer_inputs_by_segment(
     grouped
 }
 
-/// Lower one resource-bounded segment batch in parallel, then restore segment
-/// order before handing it to the deterministic stitcher.
-fn lower_transfer_segment_batch(
+/// Lower one exact compiler segment into typed IDG transfer facts.
+fn lower_transfer_segment(
     global: &GlobalIndex,
     transfer_options: &TransferOptions,
     transfer_matchers: &CompiledTransferMatchers,
     aggregate_layouts: &AHashMap<String, Vec<String>>,
-    batch: &[SegmentTransferInputs],
+    input: &SegmentTransferInputs,
     body_for_file: Option<&FileBodyProvider<'_>>,
-) -> Vec<(SegmentId, Vec<TransferOutput>)> {
-    let lower = |(segment, file, funcs): &SegmentTransferInputs| {
-        let streamed;
-        let file_index = if let Some(provider) = body_for_file {
-            streamed = provider(*file)
-                .unwrap_or_else(|| panic!("missing streamed compiler body for indexed file {}", file.raw()));
-            &streamed
-        } else {
-            global
-                .file_index(*file)
-                .unwrap_or_else(|| panic!("missing resident compiler body for indexed file {}", file.raw()))
-        };
-        let assignment_values = file_index.assignment_values.as_slice();
-        let call_receivers = file_index.call_receivers.as_slice();
-        let call_argument_values = file_index.call_argument_values.as_slice();
-        let finite_literal_selections = file_index.finite_literal_selections.as_slice();
-        let decls_by_func: AHashMap<FuncId, &bonsai_lang_api::Decl> = file_index
-            .defs
-            .iter()
-            .filter(|decl| {
-                matches!(
-                    decl.kind,
-                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+) -> LoweredTransferSegment {
+    let (segment, file, funcs) = input;
+    let streamed;
+    let file_index = if let Some(provider) = body_for_file {
+        streamed = provider(*file)
+            .unwrap_or_else(|| panic!("missing streamed compiler body for indexed file {}", file.raw()));
+        &streamed
+    } else {
+        global
+            .file_index(*file)
+            .unwrap_or_else(|| panic!("missing resident compiler body for indexed file {}", file.raw()))
+    };
+    let assignment_values = file_index.assignment_values.as_slice();
+    let call_receivers = file_index.call_receivers.as_slice();
+    let call_argument_values = file_index.call_argument_values.as_slice();
+    let finite_literal_selections = file_index.finite_literal_selections.as_slice();
+    let decls_by_func: AHashMap<FuncId, &bonsai_lang_api::Decl> = file_index
+        .defs
+        .iter()
+        .filter(|decl| {
+            matches!(
+                decl.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+            )
+        })
+        .map(|decl| (FuncId::new(decl.symbol.raw()), decl))
+        .collect();
+    let outputs = funcs
+        .iter()
+        .map(|func| {
+            let decl = decls_by_func.get(func).copied().unwrap_or_else(|| {
+                panic!(
+                    "streamed compiler body for file {} is missing function {}",
+                    file.raw(),
+                    func.raw()
                 )
-            })
-            .map(|decl| (FuncId::new(decl.symbol.raw()), decl))
-            .collect();
-        let outputs = funcs
-            .iter()
-            .map(|func| {
-                let decl = decls_by_func.get(func).copied().unwrap_or_else(|| {
-                    panic!(
-                        "streamed compiler body for file {} is missing function {}",
-                        file.raw(),
-                        func.raw()
-                    )
-                });
-                if aggregate_layouts.is_empty() || !flow_events_contain_aggregate_assign(&decl.flow_events) {
-                    return transfer_function_for_with_compiled_options_and_syntax_facts(
-                        decl,
-                        transfer_options,
-                        transfer_matchers,
-                        assignment_values,
-                        call_receivers,
-                        call_argument_values,
-                        finite_literal_selections,
-                    );
-                }
-                let mut resolved = decl.clone();
-                resolve_aggregate_assignments(
-                    &mut resolved.flow_events,
-                    &resolved.type_aliases,
-                    aggregate_layouts,
-                );
-                transfer_function_for_with_compiled_options_and_syntax_facts(
-                    &resolved,
+            });
+            if aggregate_layouts.is_empty() || !flow_events_contain_aggregate_assign(&decl.flow_events) {
+                return transfer_function_for_with_compiled_options_and_syntax_facts(
+                    decl,
                     transfer_options,
                     transfer_matchers,
                     assignment_values,
                     call_receivers,
                     call_argument_values,
                     finite_literal_selections,
-                )
-            })
-            .collect();
-        (*segment, outputs)
-    };
-
-    // A cold IDG may be requested by a caller that is already executing a
-    // batch of closure queries on Rayon. The semantic service is single-flight:
-    // sibling queries wait for the first graph build. Starting another Rayon
-    // traversal from that initializer lets work stealing select those blocked
-    // siblings and can starve the transfer jobs needed to release them. Lower
-    // serially on the owning worker in that case. Top-level compiler builds
-    // retain the parallel path, and both branches run the identical AST-to-IDG
-    // transfer with no semantic budget or depth limit.
-    let lowered: Vec<_> = if rayon::current_thread_index().is_some() {
-        batch.iter().map(lower).collect()
-    } else {
-        batch.par_iter().map(lower).collect()
-    };
-    lowered
+                );
+            }
+            let mut resolved = decl.clone();
+            resolve_aggregate_assignments(
+                &mut resolved.flow_events,
+                &resolved.type_aliases,
+                aggregate_layouts,
+            );
+            transfer_function_for_with_compiled_options_and_syntax_facts(
+                &resolved,
+                transfer_options,
+                transfer_matchers,
+                assignment_values,
+                call_receivers,
+                call_argument_values,
+                finite_literal_selections,
+            )
+        })
+        .collect();
+    (*segment, outputs)
 }
 
-fn idg_transfer_batches(
+fn idg_transfer_source_bytes(
     global: &GlobalIndex,
     file_to_source_bytes: &AHashMap<FileId, u64>,
     inputs: &[SegmentTransferInputs],
-) -> Vec<std::ops::Range<usize>> {
-    let cpu_workers = rayon::current_num_threads().max(1);
-    let requested = std::env::var("BONSAI_IDG_TRANSFER_BATCH_SEGMENTS")
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-        .unwrap_or(cpu_workers)
-        .max(1)
-        .min(cpu_workers);
-    let source_bytes = inputs
+) -> Vec<u64> {
+    inputs
         .iter()
         .map(|(_, file, _)| {
             file_to_source_bytes.get(file).copied().unwrap_or_else(|| {
@@ -4909,12 +5069,18 @@ fn idg_transfer_batches(
                     .unwrap_or(0)
             })
         })
-        .collect::<Vec<_>>();
-    // Persistent segments are consumed between batches. Weight comes from
-    // the exact VFS byte length (or adapter-derived declaration-span fallback
-    // for embedders that do not expose it), never a language table. Scheduling
-    // affects concurrency only; every input range is returned exactly once.
-    bonsai_common::compiler_weighted_batches(&source_bytes, requested)
+        .collect()
+}
+
+fn idg_transfer_worker_count(input_count: usize) -> usize {
+    let cpu_workers = rayon::current_num_threads().max(1);
+    std::env::var("BONSAI_IDG_TRANSFER_BATCH_SEGMENTS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(cpu_workers)
+        .max(1)
+        .min(cpu_workers)
+        .min(input_count.max(1))
 }
 
 fn unambiguous_aggregate_layouts(global: &GlobalIndex) -> AHashMap<String, Vec<String>> {

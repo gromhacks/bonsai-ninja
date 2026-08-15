@@ -200,6 +200,13 @@ Reopen evidence with:
 source-body paths or `--taint-flow` for raw taint-engine paths. Those flags
 change requested output scope, not accuracy.
 
+For symbol lookup, start with plain `inspect`, `refs`, or `calls` and add a
+flow mode only when you need relational evidence. `--graph-flow` computes all
+exact structural paths attached to the matches before paging, so shared helper
+code can produce a much larger artifact than the original text query. If both
+ends are known, use `--from` and `--to` to request the narrower compiler graph
+corridor directly.
+
 ## Next steps
 
 - [Concepts](concepts.mdx)
