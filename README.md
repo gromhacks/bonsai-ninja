@@ -12,9 +12,8 @@
 > performance problems, and ordinary bugs. The current local release gates
 > pass and the tool is ready for people to use, but it is not perfect and
 > should not be the sole basis for a security decision. We are publishing it
-> now to gather
-> real-world feedback, failing examples, rule contributions, and engineering
-> help from the community.
+> now to gather real-world feedback, failing examples, rule contributions, and
+> engineering help from the community.
 
 bonsai-ninja is a local code-intelligence and static-analysis engine. It maps
 repositories, resolves symbols and calls, traces behavior across files,
@@ -52,8 +51,8 @@ improves a model.
 ## Scale, measured
 
 **30,055 source files. Completed modeled analysis. Warm navigation in
-seconds.** Current
-Elasticsearch measurements under a 3 GiB semantic-worker scheduling budget
+seconds.** The current Elasticsearch measurements use a 3 GiB semantic-worker
+scheduling budget and
 separate the first explicit semantic index from commands run after it exists:
 
 | Cache state and operation | Measured time | Result |
@@ -73,22 +72,12 @@ Ordinary `index` is the lighter syntax/declaration warm-up and does not force a
 whole-workspace callgraph or IDG build; ordinary commands can also compute
 their requested facts on demand.
 
-The empty-cache run compiles 30,055 Tree-sitter source units into exact IR,
-resolves the workspace callgraph and linkage, builds retrieval headers, and
-constructs a 4.16 GB sparse IDG before publishing 7.11 GB of validated
-sidecars. It is a one-time whole-workspace build, not command startup. The
-continuous compiler-object scheduler and the bounded, canonically ordered IDG
-transfer pipeline reduced this same completed workload from 26m 53.8s to 9m
-16.6s (2.90x faster, 65.5% less wall time) without changing its files, facts,
-graph, or fixed point. The IDG stage compiles independent source segments in
-parallel under source-size memory permits, then publishes them in stable
-segment order; it does not trade correctness for throughput.
-
-For whole-repository export, the compressed default saved 1.88 GB and 3 minutes
-31 seconds without reducing accuracy. Both export forms peaked near 4.8 GB
-RSS; the 3 GiB setting schedules semantic workers and is not a hard
-operating-system RSS limit. The controlled methodology and exact measurements
-live in [Release Readiness](docs/RELEASE_READINESS.md).
+The cold row is an intentional one-time whole-workspace prewarm, not normal
+command startup. The 3 GiB setting schedules semantic workers rather than
+limiting operating-system RSS, and compressed export changes representation,
+not graph meaning. Full methodology, component sizes, memory measurements, and
+the optimization history live in
+[Release Readiness](docs/RELEASE_READINESS.md).
 
 ## Supported languages
 
@@ -97,31 +86,10 @@ The release includes 20 Tree-sitter frontends:
 C, C++, C#, Dart, Elixir, Erlang, Go, Java, JavaScript, Kotlin, Lua,
 Objective-C, Perl, PHP, Python, Ruby, Rust, Scala, Swift, and TypeScript.
 
-Each adapter owns its grammar and lowers language-specific syntax into typed
-declarations, imports, call sites, receiver/type evidence, assignments,
-branches, fields, callbacks, and flow events. Shared resolver, callgraph, IDG,
-taint, security, SDK, and export layers consume that IR. They do not select
-behavior from language IDs or shared API-name lists.
-
-Library, framework, package, trust, severity, CWE, sanitizer, and
-configuration knowledge belongs in `security-patterns/`. This keeps the
-compiler reusable across projects and keeps security policy reviewable as
-data.
-
-## What it does
-
-- Maps workspace structure, manifests, languages, imports, declarations, and
-  entry points.
-- Finds definitions, references, calls, arguments, variables, strings,
-  comments, and operations using compiler facts.
-- Resolves qualified symbols and traces paths across files.
-- Inspects structural graph paths and rulepack-free raw taint paths.
-- Runs rule-driven source, sink, sanitizer, dependency, and taint analysis.
-- Exposes AST, HIR, CFG, resolution, call-edge, and taint diagnostics.
-- Exports native JSON, GraphML, Cypher, NetworkX, and other supported graph
-  formats for downstream tools.
-- Produces terminal, JSON, SARIF 2.1.0, and standalone HTML reports where the
-  selected command supports them.
+Each adapter owns its grammar and language syntax; shared analysis consumes
+typed compiler facts, while framework and security meaning stays in
+`security-patterns/`. See [Language Support](docs/language-support.mdx) for the
+frontend contract and known dynamic limits.
 
 ## Accuracy contract
 
@@ -188,31 +156,11 @@ workflows.
 # Explain workspace roots and language coverage.
 ./target/release/bonsai-ninja context ./my-app --no-color --no-progress
 
-# Optional syntax/declaration warm-up for a query session.
-./target/release/bonsai-ninja index ./my-app --no-progress
-
-# Map and search the repository.
-./target/release/bonsai-ninja tree ./my-app --max-depth 3 \
-  --context 16k --no-color --no-progress
+# Find an anchor before requesting heavier semantic work.
 ./target/release/bonsai-ninja search ./my-app --query verify_token \
   --context 8k --no-color --no-progress
 
-# Pivot from an anchor to compiler facts.
-./target/release/bonsai-ninja refs ./my-app --symbol verify_token \
-  --context 8k --no-color --no-progress
-./target/release/bonsai-ninja calls ./my-app --callee verify_token \
-  --context 8k --no-color --no-progress
-
-# Follow behavior.
-./target/release/bonsai-ninja inspect ./my-app --query verify_token \
-  --context 16k --no-color --no-progress
-./target/release/bonsai-ninja trace ./my-app --symbol handle_request \
-  --context 16k --no-color --no-progress
-./target/release/bonsai-ninja path ./my-app \
-  --from handle_request --to verify_token \
-  --context 16k --no-color --no-progress
-
-# Request rulepack-free raw taint paths explicitly.
+# Inspect the target and request raw dataflow only when needed.
 ./target/release/bonsai-ninja inspect ./my-app --query verify_token \
   --taint-flow --context 16k --no-color --no-progress
 
@@ -220,21 +168,15 @@ workflows.
 ./target/release/bonsai-ninja security ./my-app taint-analysis \
   --profile production --context 16k --no-color --no-progress
 
-# Write a complete SARIF artifact for CI.
+# Or write an exhaustive SARIF artifact for CI.
 ./target/release/bonsai-ninja security ./my-app taint-analysis \
   --profile production --format sarif --all \
   --output-path findings.sarif.json --no-color --no-progress
 ```
 
-Run `./target/release/bonsai-ninja --help` and the relevant command's
-`--help` before relying on an unfamiliar option.
-
-Workspace paths are normal positional operands. Query-like values have named
-forms such as `--query`, `--symbol`, `--file`, `--from`, `--to`, and `--id`;
-prefer those in scripts and agent workflows. The concise positional selector
-forms remain available for interactive use, but passing both forms is an
-error instead of silently choosing one. Output files accept
-`-o`, `--output`, or the canonical `--output-path` spelling.
+The complete walkthrough is in [Getting Started](docs/getting-started.mdx).
+For any unfamiliar option, use the binary's `--help` and the
+[CLI Reference](docs/cli-reference.mdx).
 
 ## Choose the smallest command
 
@@ -259,95 +201,7 @@ error instead of silently choosing one. Output files accept
 rulepack, callgraph, IDG, or security engine. Syntax inventory commands also
 avoid whole-workspace semantic work unless their requested result requires it.
 
-## Index and cache behavior
-
-Commands compute exact requested facts on demand. Indexing is useful when a
-workspace will receive several queries:
-
-```bash
-# Normal syntax and declaration warm-up.
-./target/release/bonsai-ninja index ./my-app --no-progress
-
-# Explicit semantic prewarm for repeated broad inspect/security/export work.
-./target/release/bonsai-ninja index ./my-app --semantic --no-progress
-
-# Keep saved-file changes warm during active editing.
-./target/release/bonsai-ninja index ./my-app --watch --no-progress
-```
-
-Analysis sidecars live in a canonical-path-keyed operating-system cache, not
-inside the inspected repository. `cache stats <workspace>` prints the exact
-location and `BONSAI_WORKSPACE_DIR` overrides it. Repository-local
-`.bonsai/rules/` is reserved for rule overlays and is not an analysis cache.
-
-Compiler objects and semantic sidecars are validated against source content,
-adapter/frontend ABI, dependency metadata, and analysis policy before reuse.
-Stale or corrupt artifacts are rejected and rebuilt.
-
-## Output and paging
-
-- Use `--context 16k --no-color --no-progress` for readable agent output.
-- Use `--format json --no-color --no-progress` for automation.
-- Use `--output-path <file>` for large artifacts.
-- Use `--html-output <file>` for a standalone themed human report. It wraps
-  the command's text view and never enables additional analysis.
-- Preserve stable IDs such as `S:`, `F:`, `G:`, `T:`, `E:`, `R:`, and `N:`;
-  reopen them with `show` or the command that emitted them.
-
-Security `S:` identifiers name findings, `F:` identifiers name taint paths,
-and `G:` identifiers name finding groups. Structural commands also emit flow
-and group IDs; use the command context shown in the report when reopening
-them.
-
-## Security rules
-
-Bundled rules live under:
-
-```text
-security-patterns/langs/<language>/{sources,sinks,sanitizers,typing}
-```
-
-`typing` entries are non-finding compiler models for external return and
-callback types. Passthrough rules preserve taint and appear as taint
-transforms; they are not sanitizers. `security sanitizers` lists only matched
-rules eligible to make a credit-bearing sanitizer claim.
-
-Validate rule changes with:
-
-```bash
-./target/release/bonsai-ninja security . pack --validate --taint-replay \
-  --rules-dir security-patterns --format json --no-color --no-progress
-./target/release/bonsai-ninja security . pack --audit \
-  --context 16k --no-color --no-progress
-cargo test --release --locked -p bonsai_security --test rulepack_conformance
-```
-
-See [Rule Authoring Tutorial](docs/rule-authoring-tutorial.mdx),
-[Pattern Guide](docs/pattern-guide.mdx), and
-[Security Analysis Specification](docs/security-spec.mdx).
-
-## Rust SDK
-
-The `bonsai_sdk` crate exposes the same workspace, browse, inspect, trace,
-security, diagnostics, show, and export facades used by the CLI. Long-lived
-projects refresh saved files before command facades run.
-
-```rust
-use bonsai_sdk::Bonsai;
-
-let project = Bonsai::new()
-    .with_rulepack("./security-patterns")?
-    .index("./my-app")?;
-
-let report = project.security().taint_analysis(Default::default())?;
-for finding in report.findings {
-    println!("{}", finding.finding_id);
-}
-```
-
-See [SDK](docs/contributing/sdk.mdx) for the complete API surface.
-
-## Documentation
+## Go deeper
 
 - [Documentation home](docs/index.mdx)
 - [Getting Started](docs/getting-started.mdx)
@@ -357,24 +211,16 @@ See [SDK](docs/contributing/sdk.mdx) for the complete API surface.
 - [Output Formats](docs/output-formats.mdx)
 - [Configuration](docs/configuration.mdx)
 - [CI Integration](docs/ci-integration.mdx)
+- [Rule Authoring Tutorial](docs/rule-authoring-tutorial.mdx)
+- [Rust SDK](docs/contributing/sdk.mdx)
 - [Contributing](docs/contributing/contributing.mdx)
 - [Release Readiness](docs/RELEASE_READINESS.md)
 
 Generated and executable coverage evidence lives in
 [Taint Coverage Matrix](docs/TAINT_COVERAGE_MATRIX.md),
 [Coverage Baseline](docs/COVERAGE_BASELINE.md), and
-[mega_flow Coverage](docs/MEGA_FLOW_COVERAGE.md).
-
-## Project status
-
-bonsai-ninja is pre-1.0 software. A green test suite does not prove the absence
-of every bug, and static analysis cannot recover runtime facts absent from
-source. The release gates require deterministic, complete requested analysis;
-positive and negative fixtures for every supported adapter; rule replay;
-cross-platform builds; output-contract smokes; self-analysis; and a pinned
-production-scale repository test.
-
-Current validation evidence and exact release commands live in
+[mega_flow Coverage](docs/MEGA_FLOW_COVERAGE.md). Current validation evidence
+and release commands live only in
 [Release Readiness](docs/RELEASE_READINESS.md).
 
 ## Contributing and license
