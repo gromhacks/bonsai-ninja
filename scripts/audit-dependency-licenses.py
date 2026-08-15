@@ -9,6 +9,7 @@ import subprocess
 import sys
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 
 
 ALLOWED = {
@@ -44,6 +45,7 @@ REVIEWED_DENIED = {
     "SSPL-1.0",
 }
 TOKEN = re.compile(r"\s*(\(|\)|AND\b|OR\b|WITH\b|[A-Za-z0-9.+-]+)")
+REPO = Path(__file__).resolve().parent.parent
 
 
 @dataclass(frozen=True)
@@ -155,6 +157,7 @@ def main() -> int:
     metadata = json.loads(
         subprocess.check_output(
             ["cargo", "metadata", "--locked", "--format-version", "1"],
+            cwd=REPO,
             text=True,
         )
     )
@@ -188,6 +191,24 @@ def main() -> int:
         print("dependency-license violations:", file=sys.stderr)
         for violation in violations:
             print(f"  {violation}", file=sys.stderr)
+        return 1
+
+    workspace_count = len(metadata["workspace_members"])
+    external_count = len(metadata["packages"]) - workspace_count
+    license_doc = REPO / "docs" / "contributing" / "third-party-licenses.mdx"
+    doc_text = license_doc.read_text(errors="replace")
+    expected_fragments = (
+        f"{len(metadata['packages'])} packages",
+        f"({workspace_count} workspace crates + {external_count} external packages)",
+        f"{len(licenses)} distinct SPDX metadata expressions",
+    )
+    missing = [fragment for fragment in expected_fragments if fragment not in doc_text]
+    if missing:
+        for fragment in missing:
+            print(
+                f"dependency-license documentation: missing current `{fragment}`",
+                file=sys.stderr,
+            )
         return 1
     print(
         "dependency-licenses: 0 violations "

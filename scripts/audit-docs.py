@@ -224,6 +224,22 @@ def check_github_community_files() -> list[str]:
     ]
 
 
+def check_maturity_disclaimer() -> list[str]:
+    readme = (REPO / "README.md").read_text(errors="replace")
+    required = (
+        "**Project maturity:**",
+        "ambitious early-stage project",
+        "it is not perfect",
+        "feedback",
+        "help from the community",
+    )
+    return [
+        f"README.md project-maturity disclaimer is missing `{phrase}`"
+        for phrase in required
+        if phrase not in readme
+    ]
+
+
 def check_command_examples() -> list[str]:
     """Reject known-invalid public command shapes.
 
@@ -263,6 +279,12 @@ def check_product_contract_language() -> list[str]:
         "## taint\n": "use the full `security taint-analysis` command heading",
         "## source-analysis\n": "use the full `security source-analysis` command heading",
         "Out of scope (Phase 10-12)": "document current analysis boundaries, not old phase labels",
+        "statically proven behavior": (
+            "say compiler-evidenced behavior and retain the documented static-model boundary"
+        ),
+        "`Exact` — proven correct": (
+            "scope Exact to admitted static facts rather than all runtime behavior"
+        ),
     }
     checked = public_documentation_files()
     for path in checked:
@@ -384,19 +406,72 @@ def check_language_counts() -> list[str]:
 def check_workspace_counts() -> list[str]:
     crate_count = len(list((REPO / "crates").glob("*/Cargo.toml")))
     failures: list[str] = []
-    pattern = re.compile(r"\b(\d+)-crate Rust workspace\b", re.IGNORECASE)
+    patterns = (
+        re.compile(r"\b(\d+)-crate Rust workspace\b", re.IGNORECASE),
+        re.compile(r"\b(\d+) workspace crates\b", re.IGNORECASE),
+    )
+    for path in public_documentation_files():
+        for line_number, line in enumerate(
+            path.read_text(errors="replace").splitlines(), start=1
+        ):
+            for pattern in patterns:
+                for match in pattern.finditer(line):
+                    documented = int(match.group(1))
+                    if documented != crate_count:
+                        failures.append(
+                            f"{path.relative_to(REPO)}:{line_number}: documents {documented} "
+                            f"workspace crates, repository has {crate_count} crate manifests"
+                        )
+    return failures
+
+
+def check_dependency_counts() -> list[str]:
+    lock_text = (REPO / "Cargo.lock").read_text(errors="replace")
+    package_count = len(re.findall(r"^\[\[package\]\]$", lock_text, re.MULTILINE))
+    if package_count == 0:
+        return ["could not derive the locked package count from Cargo.lock"]
+
+    failures: list[str] = []
+    pattern = re.compile(r"\b(\d[\d,]*) packages\b", re.IGNORECASE)
     for path in public_documentation_files():
         for line_number, line in enumerate(
             path.read_text(errors="replace").splitlines(), start=1
         ):
             for match in pattern.finditer(line):
-                documented = int(match.group(1))
-                if documented != crate_count:
+                documented = int(match.group(1).replace(",", ""))
+                if documented != package_count:
                     failures.append(
-                        f"{path.relative_to(REPO)}:{line_number}: documents {documented} crates, "
-                        f"workspace has {crate_count} crate manifests"
+                        f"{path.relative_to(REPO)}:{line_number}: documents {documented} "
+                        f"locked packages, Cargo.lock has {package_count}"
                     )
     return failures
+
+
+def check_rule_counts() -> list[str]:
+    rule_count = 0
+    disabled_count = 0
+    for path in sorted((REPO / "security-patterns").rglob("*.yml")):
+        text = path.read_text(errors="replace")
+        rule_count += len(re.findall(r"^\s*-\s+id:\s*\S+", text, re.MULTILINE))
+        disabled_count += len(
+            re.findall(r"^\s+enabled:\s*false\s*(?:#.*)?$", text, re.MULTILINE)
+        )
+    if rule_count == 0:
+        return ["could not derive bundled rule counts from security-patterns"]
+
+    enabled_count = rule_count - disabled_count
+    readiness = (DOCS / "RELEASE_READINESS.md").read_text(errors="replace")
+    expected = (
+        f"{rule_count:,} bundled rules, of which {enabled_count:,} are enabled",
+        f"| Rules | {rule_count:,} |",
+        f"| Enabled rules | {enabled_count:,} |",
+        f"| Disabled rules | {disabled_count:,} |",
+    )
+    return [
+        f"docs/RELEASE_READINESS.md is missing current rulepack count `{fragment}`"
+        for fragment in expected
+        if fragment not in readiness
+    ]
 
 
 def check_script_inventory() -> list[str]:
@@ -439,6 +514,7 @@ def main() -> int:
         + check_retired_surface()
         + check_publication_hygiene()
         + check_github_community_files()
+        + check_maturity_disclaimer()
         + check_command_examples()
         + check_product_contract_language()
         + check_mdx_frontmatter()
@@ -446,6 +522,8 @@ def main() -> int:
         + check_measurement_ownership()
         + check_language_counts()
         + check_workspace_counts()
+        + check_dependency_counts()
+        + check_rule_counts()
         + check_script_inventory()
     )
     if failures:

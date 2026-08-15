@@ -20,7 +20,7 @@ atomic generation, and query, security, and export modes share those facts.
 - **Give agents facts, not file dumps:** use symbol, file, and kind selectors to
   retrieve a focused definition, reference set, call path, slice, or dataflow
   instead of repeatedly loading a repository into the prompt.
-- **Trace cause to effect:** follow statically proven behavior across files
+- **Trace cause to effect:** follow compiler-evidenced behavior across files
   from an entry point through validation and business logic to storage or an
   external side effect; unresolved runtime edges stay explicit.
 - **Debug with compiler evidence:** inspect AST, HIR, CFG, resolution, call
@@ -29,9 +29,15 @@ atomic generation, and query, security, and export modes share those facts.
   metadata as JSON, GraphML, Cypher, or NetworkX for retrieval, training-set
   construction, evaluation, or tool-using agents.
 - **Work at production scale:** the release gate covers 30,055 Elasticsearch
-  source files, exact warm queries, and complete production taint without
-  semantic caps. Current timings are recorded in
+  source files, completed warm query work, and production taint without
+  product-imposed semantic caps. Current timings are recorded in
   [Release Readiness](RELEASE_READINESS.md).
+
+In these docs, **exact** or **exhaustive** means the requested computation
+finishes over the static facts admitted by the compiler pipeline without a
+hidden product cap. It is not a claim that static analysis recovers all runtime
+behavior or that the implementation and rulepack are perfect. Check completion
+metadata and diagnostics before relying on an empty result.
 
 Use the first two groups below for normal operation. The coverage pages record
 generated or measured validation evidence; contributor specifications define

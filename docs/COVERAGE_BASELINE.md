@@ -21,8 +21,8 @@ will leave unrecognized forms as diagnostic incompleteness.
 > incomplete/unsupported," not "the test fails." Both views are correct
 > simultaneously.
 >
-> **Should everything here be `Exact`?** No - and that is principled,
-> not a gap. `Exact` means a closed static model exists for that
+> **Should everything here be `Exact`?** No. `Exact` means a closed static
+> model exists for that
 > construct. Real-world languages do not admit closed static models for
 > reflection, FFI, runtime imports, macro expansion, actor messages, or
 > framework event dispatch without extra runtime/build facts. The
@@ -31,8 +31,9 @@ will leave unrecognized forms as diagnostic incompleteness.
 > - exactly what `Partial` denotes.
 >
 > **Should everything here be supported (no `Unsupported` cells)?**
-> The remaining `Unsupported` cells are deliberate engineering
-> tradeoffs, not omissions:
+> The remaining `Unsupported` cells are explicit coverage boundaries. Some
+> reflect deliberate precision tradeoffs and some remain opportunities for
+> future frontend or build-system integration:
 >
 > - **Macros** (C, C++, Elixir, Erlang, Objective-C) - modeling
 >   un-expanded macros would invent flow that may not exist after
@@ -46,9 +47,10 @@ will leave unrecognized forms as diagnostic incompleteness.
 > - **FFI** - foreign function calls cross the language boundary; we
 >   cannot analyze code that isn't in the workspace.
 >
-> Rather than fire imprecise findings on these, the engine rejects
-> rules that anchor on them at rulepack load time. That guarantees a
-> clean signal-to-noise ratio over silent imprecision.
+> Rather than fire findings that depend on unsupported evidence, the engine
+> rejects rules that anchor on those capabilities at rulepack load time. This
+> reduces false precision, but it does not guarantee a noise-free result or
+> make the supported models bug-free.
 
 ## TL;DR
 
@@ -73,7 +75,7 @@ will leave unrecognized forms as diagnostic incompleteness.
 
 | Level | Internal evidence declaration | Effect on rules | When you'd see it |
 |---|---|---|---|
-| `Exact` | Construct has a closed static model. Findings may use `Precision::Exact`. | Rule fires whenever the static model proves a match. | Set only when an adapter has a closed-form analysis for the category. |
+| `Exact` | Construct has a closed static model for the admitted source evidence. Findings may use `Precision::Exact`; this is not a claim about unmodeled runtime behavior. | Rule fires whenever that static model proves a match. | Set only when an adapter has a closed-form analysis for the category. |
 | `Partial` | Recognized forms produce semantic evidence; unrecognized forms are marked incomplete/unsupported. | Rule fires only when exact/narrowed semantic evidence exists. | The conservative default. Most cells. Means "the engine works here, with honest completion metadata." |
 | `Unsupported` | Construct has no static evidence model. | **Rules requiring this category are rejected at rulepack load time.** | A deliberate gate: prevents false-precision findings on shapes the engine would not analyze correctly. |
 | `n/a` | Construct doesn't exist in this language. | No rule could target it anyway. | E.g. macros in JS, exceptions in Rust, generics in Lua. |

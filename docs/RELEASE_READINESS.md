@@ -6,7 +6,9 @@ not duplicate dated performance history.
 
 ## Status
 
-Validated on 2026-08-14. Local `main` has no known failing release gate.
+The full local release pass completed on 2026-08-14. Documentation claims,
+links, command examples, current repository counts, and the rulepack validator
+were rechecked on 2026-08-15. Local `main` has no known failing release gate.
 Publishing still requires the tag workflow because signing, packaging, and
 platform-specific execution happen there.
 
@@ -30,7 +32,7 @@ The final local pass completed these checks with zero failures:
 | Formatting and diff hygiene | Passed |
 | 20 adapter/parser conformance suites | Passed |
 | Adapter `FlowEvent` behavioral audit | Passed |
-| 1,386-case cross-language taint matrix | Passed |
+| Cross-language taint target | 1,386 tests passed, including 1,233 applicable scenario/language cells |
 | IDG, taint, resolver, callgraph, workspace, and conformance suites | Passed |
 | Full optimized security package | Passed |
 | Rulepack taint replay | 0 errors, 0 warnings, 0 misses |
@@ -44,7 +46,7 @@ The final local pass completed these checks with zero failures:
 | Full reachable-history secret scan | Passed |
 | GitHub Actions syntax and immutable action pins | Passed |
 | Cargo and public repository metadata | Passed |
-| Documentation structure, links, navigation, and skill copies | Passed |
+| Documentation structure, links, navigation, binary help claims, and skill copies | Passed |
 | Native archive checksum and fresh-profile relocation smoke | Passed on macOS arm64 |
 | Build-artifact size gate | 16.53 GiB / 32 GiB limit |
 
@@ -130,11 +132,11 @@ repository contains no defect.
 
 ## Real-project language matrix
 
-The release candidate was exercised against one current, public production
-repository for every registered language adapter. Each checkout was shallow,
-pinned to the tested commit, processed alone, and deleted before the next
-checkout. The matrix covered jq, fmt, CommandLineParser, args, Plug, Cowboy,
-chi, Gson, Express, Timber, LuaSocket, AFNetworking, Mojolicious, Slim,
+On 2026-08-14, the release candidate was exercised against one public
+production repository for every registered language adapter. Each checkout
+was shallow, pinned to the tested commit, processed alone, and deleted before
+the next checkout. The matrix covered jq, fmt, CommandLineParser, args, Plug,
+Cowboy, chi, Gson, Express, Timber, LuaSocket, AFNetworking, Mojolicious, Slim,
 Requests, Rack, ripgrep, os-lib, Alamofire, and Axios.
 
 Across the 20 checkouts, the CLI indexed 2,388 source files, 38,264
@@ -267,8 +269,9 @@ peaked near 4.8 GB RSS while streaming their
 multi-gigabyte JSON. Streaming means the exporter does not construct one
 matching in-memory JSON document, but its shared semantic projection still has
 a larger resident set than the scheduling budget. Treat the table as the
-current production export baseline and review any increase in time, bytes, or
-memory as a regression.
+recorded production export baseline for the identified commits and review any
+increase in time, bytes, or memory as a possible regression under comparable
+conditions.
 
 ## Output and packaging gates
 
@@ -322,6 +325,7 @@ RUSTDOCFLAGS="-D warnings" \
   cargo doc --workspace --no-deps --document-private-items --release --locked
 
 python3 scripts/audit-docs.py
+python3 scripts/audit-cli-docs.py --binary ./target/release/bonsai-ninja
 python3 scripts/audit-release-metadata.py
 python3 scripts/realworld-lang-benchmark.py --check
 python3 scripts/sync_skill.py --check
@@ -343,5 +347,5 @@ bash scripts/audit-loop.sh
 
 Run the large-workspace command from the preceding section whenever compiler,
 adapter, resolver, IDG, taint, query, cache, security, or export semantics
-change. Documentation-only changes still require documentation, formatting,
-link, skill-sync, and rustdoc gates.
+change. Documentation-only changes still require documentation, binary-help
+claim, formatting, link, skill-sync, and rustdoc gates.

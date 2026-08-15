@@ -44,9 +44,13 @@ changes must pass:
 
 ```bash
 python3 scripts/audit-docs.py
+python3 scripts/audit-cli-docs.py --binary ./target/release/bonsai-ninja
 python3 scripts/sync_skill.py --check
 cargo fmt --all -- --check
 ```
+
+Build the release CLI first when it is missing; the command audit treats the
+binary's generated help as the source of truth.
 
 The pull-request template links the additional gates for compiler, adapter,
 security, dependency, release-workflow, and large-workspace changes.

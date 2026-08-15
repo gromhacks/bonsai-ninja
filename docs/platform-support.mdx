@@ -9,7 +9,8 @@ Publishing to crates.io does not by itself make bonsai-ninja work on every CPU a
 
 ## Release Targets
 
-GitHub releases build and smoke-run the CLI on these artifact targets:
+The tag workflow is configured to build and smoke-run the CLI on these
+artifact targets:
 
 | OS | CPU | Rust target |
 |---|---|---|
@@ -20,11 +21,13 @@ GitHub releases build and smoke-run the CLI on these artifact targets:
 | Windows | x64 | `x86_64-pc-windows-msvc` |
 | Windows | arm64 | `aarch64-pc-windows-msvc` |
 
-Those are the deployment targets with first-class binary artifacts. Other CPUs, including RISC-V, are source-build targets unless a release workflow is added for them.
+Those are the intended first-class binary artifact targets. Other CPUs,
+including RISC-V, are source-build targets unless a release workflow is added
+for them.
 
-Each native package job runs the archived binary from a relocated directory
+Each successful native package job runs the archived binary from a relocated directory
 with an empty user/parser cache and an empty analysis cache. The job therefore
-proves that the platform's parser bundle can be fetched and loaded on first
+verifies that the platform's parser bundle can be fetched and loaded on first
 use; it cannot pass by reusing a grammar downloaded by an earlier test step.
 
 ## Parser Bundle Constraint

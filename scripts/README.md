@@ -14,6 +14,8 @@ cannot silently accumulate here.
 - `audit-adapter-capabilities.sh` — verifies the documented adapter capability matrix.
 - `audit-adapter-flow-events.sh` — executes typed `FlowEvent` conformance tests for every adapter.
 - `audit-build-artifacts.sh` — enforces the local and CI Cargo artifact-size budget.
+- `audit-cli-docs.py` — verifies documented commands and flags against the
+  release binary's help surface.
 - `audit-corpus-independence.py` — rejects benchmark identities and developer
   paths in production logic.
 - `audit-dependency-licenses.py` — validates licenses across the locked Cargo dependency graph.
