@@ -24,7 +24,10 @@ use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 /// Current per-file compiler-object wire and semantic ABI.
 ///
@@ -236,6 +239,10 @@ const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;
 const METADATA_KEY: u64 = 0;
 const COMPILER_OBJECT_COMPRESSION_LEVEL: i32 = 1;
+// Keep several units available per worker so compiler threads never wait for
+// the dispatcher between ordinary files. This changes scheduling only and
+// never the admitted file set or canonical logical metadata order.
+const COMPILER_OBJECT_PREFETCH_PER_WORKER: usize = 4;
 const ATTRIBUTION_PAYLOAD_MAGIC: [u8; 8] = *b"BNSATTR1";
 const ATTRIBUTION_PAYLOAD_PREFIX_BYTES: usize = 8 + 4 + 32;
 
@@ -364,6 +371,169 @@ struct CompilerObjectFileMetadata {
     /// compiler projection.
     browse_payload_digest: [u8; 32],
     browse_payload_len: u32,
+}
+
+/// Run a bounded continuous worklist and visit results as workers finish.
+///
+/// Physical payload order is not semantic: FactStore sorts its key index and
+/// validates each payload independently. Visiting completion order therefore
+/// removes head-of-line stalls while callers retain canonical logical metadata
+/// by the supplied item index. The bounded queues and caller-owned memory
+/// permits keep encoded payloads independent of workspace size.
+fn try_visit_parallel<T, R>(
+    items: &[T],
+    worker_count: usize,
+    max_in_flight: usize,
+    work: impl Fn(usize, &T) -> std::io::Result<R> + Sync,
+    mut visit: impl FnMut(usize, R) -> std::io::Result<()>,
+) -> std::io::Result<()>
+where
+    T: Sync,
+    R: Send,
+{
+    if items.is_empty() {
+        return Ok(());
+    }
+    let worker_count = worker_count.max(1).min(items.len());
+    let max_in_flight = max_in_flight.max(worker_count).min(items.len());
+    let (work_tx, work_rx) = std::sync::mpsc::sync_channel::<usize>(max_in_flight);
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel::<(usize, std::io::Result<R>)>(worker_count);
+    let work_rx = std::sync::Mutex::new(work_rx);
+    let cancelled = AtomicBool::new(false);
+
+    // Seed the complete bounded window before workers start. This makes the
+    // first canonical item immediately available without a dispatcher thread.
+    let mut next_to_schedule = 0usize;
+    while next_to_schedule < max_in_flight {
+        work_tx
+            .send(next_to_schedule)
+            .map_err(|_| std::io::Error::other("compiler work queue disconnected"))?;
+        next_to_schedule += 1;
+    }
+
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let result_tx = result_tx.clone();
+            let work_rx = &work_rx;
+            let work = &work;
+            let cancelled = &cancelled;
+            scope.spawn(move || loop {
+                if cancelled.load(Ordering::Acquire) {
+                    break;
+                }
+                let index = {
+                    let receiver = work_rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match receiver.recv() {
+                        Ok(index) => index,
+                        Err(_) => break,
+                    }
+                };
+                if cancelled.load(Ordering::Acquire) {
+                    break;
+                }
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(index, &items[index])))
+                        .unwrap_or_else(|_| {
+                            Err(std::io::Error::other(format!(
+                                "compiler worker panicked for item {index}"
+                            )))
+                        });
+                if result_tx.send((index, result)).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(result_tx);
+
+        let outcome = (|| {
+            let mut completed = vec![false; items.len()];
+            let mut completed_count = 0usize;
+            while completed_count < items.len() {
+                let (index, result) = result_rx
+                    .recv()
+                    .map_err(|_| std::io::Error::other("compiler result queue disconnected"))?;
+                if index >= items.len() || std::mem::replace(&mut completed[index], true) {
+                    return Err(invalid_data("duplicate or stale compiler work result"));
+                }
+                visit(index, result?)?;
+                completed_count += 1;
+                if next_to_schedule < items.len() {
+                    work_tx
+                        .send(next_to_schedule)
+                        .map_err(|_| std::io::Error::other("compiler work queue disconnected"))?;
+                    next_to_schedule += 1;
+                }
+            }
+            Ok(())
+        })();
+        if outcome.is_err() {
+            cancelled.store(true, Ordering::Release);
+        }
+        drop(work_tx);
+        drop(result_rx);
+        outcome
+    })
+}
+
+fn append_prepared_compiler_object(
+    prepared: &mut PreparedFactStorePayload,
+    prepared_entries: &mut Vec<PreparedFactStoreEntry>,
+    descriptor: &SourceDescriptor,
+    encoded: PreparedCompilerObject,
+) -> std::io::Result<CompilerObjectFileMetadata> {
+    let (payload_offset, persisted_len) = prepared.append(&encoded.compressed).map_err(factstore_io)?;
+    debug_assert_eq!(encoded.payload_len, persisted_len);
+    prepared_entries.push(PreparedFactStoreEntry {
+        key: object_key(descriptor.file),
+        body_hash: object_body_hash(descriptor),
+        payload_offset,
+        payload_len: encoded.payload_len,
+    });
+    let (header_payload_offset, header_persisted_len) = prepared
+        .append(&encoded.header_compressed)
+        .map_err(factstore_io)?;
+    debug_assert_eq!(encoded.header_payload_len, header_persisted_len);
+    prepared_entries.push(PreparedFactStoreEntry {
+        key: header_key(descriptor.file),
+        body_hash: header_body_hash(descriptor),
+        payload_offset: header_payload_offset,
+        payload_len: encoded.header_payload_len,
+    });
+    let (attribution_payload_offset, attribution_persisted_len) = prepared
+        .append(&encoded.attribution_compressed)
+        .map_err(factstore_io)?;
+    debug_assert_eq!(encoded.attribution_payload_len, attribution_persisted_len);
+    prepared_entries.push(PreparedFactStoreEntry {
+        key: attribution_key(descriptor.file),
+        body_hash: attribution_body_hash(descriptor),
+        payload_offset: attribution_payload_offset,
+        payload_len: encoded.attribution_payload_len,
+    });
+    let (browse_payload_offset, browse_persisted_len) = prepared
+        .append(&encoded.browse_compressed)
+        .map_err(factstore_io)?;
+    debug_assert_eq!(encoded.browse_payload_len, browse_persisted_len);
+    prepared_entries.push(PreparedFactStoreEntry {
+        key: browse_key(descriptor.file),
+        body_hash: browse_body_hash(descriptor),
+        payload_offset: browse_payload_offset,
+        payload_len: encoded.browse_payload_len,
+    });
+    Ok(CompilerObjectFileMetadata {
+        file: descriptor.file.raw(),
+        path: descriptor.path.clone(),
+        language: descriptor.language.clone(),
+        source_digest: descriptor.source_digest,
+        source_hash: descriptor.source_hash,
+        payload_digest: encoded.payload_digest,
+        payload_len: encoded.payload_len,
+        header_payload_digest: encoded.header_payload_digest,
+        header_payload_len: encoded.header_payload_len,
+        attribution_payload_digest: encoded.attribution_payload_digest,
+        attribution_payload_len: encoded.attribution_payload_len,
+        browse_payload_digest: encoded.browse_payload_digest,
+        browse_payload_len: encoded.browse_payload_len,
+    })
 }
 
 /// v11 stored every per-file import/syntax projection inside one monolithic
@@ -1388,93 +1558,50 @@ impl AnalyzerDb {
         let generation_digest = generation_digest(&descriptors);
         let mut prepared = PreparedFactStorePayload::create_near(path).map_err(factstore_io)?;
         let mut prepared_entries = Vec::with_capacity(descriptors.len().saturating_mul(4));
-        let mut files = Vec::with_capacity(descriptors.len());
+        let mut files = (0..descriptors.len()).map(|_| None).collect::<Vec<_>>();
         let cpu_workers = compiler_object_cpu_workers();
         let source_bytes = descriptors
             .iter()
             .map(|descriptor| descriptor.source_bytes)
             .collect::<Vec<_>>();
-        let batches = bonsai_common::compiler_weighted_batches(&source_bytes, cpu_workers);
-        let parallel_width = batches.iter().map(std::ops::Range::len).max().unwrap_or(1);
-        let pool = (parallel_width > 1)
-            .then(|| {
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(parallel_width)
-                    .build()
-                    .ok()
-            })
-            .flatten();
-        for range in batches {
-            let compile = || {
-                use rayon::prelude::*;
-                descriptors[range.clone()]
-                    .par_iter()
-                    .map(|descriptor| prepare_compiler_object(self, descriptor))
-                    .collect::<Vec<_>>()
-            };
-            let encoded = if let Some(pool) = &pool {
-                pool.install(compile)
-            } else {
-                compile()
-            };
-            for (descriptor, encoded) in descriptors[range].iter().zip(encoded) {
-                let encoded = encoded?;
-                let (payload_offset, persisted_len) =
-                    prepared.append(&encoded.compressed).map_err(factstore_io)?;
-                debug_assert_eq!(encoded.payload_len, persisted_len);
-                prepared_entries.push(PreparedFactStoreEntry {
-                    key: object_key(descriptor.file),
-                    body_hash: object_body_hash(descriptor),
-                    payload_offset,
-                    payload_len: encoded.payload_len,
-                });
-                let (header_payload_offset, header_persisted_len) = prepared
-                    .append(&encoded.header_compressed)
-                    .map_err(factstore_io)?;
-                debug_assert_eq!(encoded.header_payload_len, header_persisted_len);
-                prepared_entries.push(PreparedFactStoreEntry {
-                    key: header_key(descriptor.file),
-                    body_hash: header_body_hash(descriptor),
-                    payload_offset: header_payload_offset,
-                    payload_len: encoded.header_payload_len,
-                });
-                let (attribution_payload_offset, attribution_persisted_len) = prepared
-                    .append(&encoded.attribution_compressed)
-                    .map_err(factstore_io)?;
-                debug_assert_eq!(encoded.attribution_payload_len, attribution_persisted_len);
-                prepared_entries.push(PreparedFactStoreEntry {
-                    key: attribution_key(descriptor.file),
-                    body_hash: attribution_body_hash(descriptor),
-                    payload_offset: attribution_payload_offset,
-                    payload_len: encoded.attribution_payload_len,
-                });
-                let (browse_payload_offset, browse_persisted_len) = prepared
-                    .append(&encoded.browse_compressed)
-                    .map_err(factstore_io)?;
-                debug_assert_eq!(encoded.browse_payload_len, browse_persisted_len);
-                prepared_entries.push(PreparedFactStoreEntry {
-                    key: browse_key(descriptor.file),
-                    body_hash: browse_body_hash(descriptor),
-                    payload_offset: browse_payload_offset,
-                    payload_len: encoded.browse_payload_len,
-                });
-                files.push(CompilerObjectFileMetadata {
-                    file: descriptor.file.raw(),
-                    path: descriptor.path.clone(),
-                    language: descriptor.language.clone(),
-                    source_digest: descriptor.source_digest,
-                    source_hash: descriptor.source_hash,
-                    payload_digest: encoded.payload_digest,
-                    payload_len: encoded.payload_len,
-                    header_payload_digest: encoded.header_payload_digest,
-                    header_payload_len: encoded.header_payload_len,
-                    attribution_payload_digest: encoded.attribution_payload_digest,
-                    attribution_payload_len: encoded.attribution_payload_len,
-                    browse_payload_digest: encoded.browse_payload_digest,
-                    browse_payload_len: encoded.browse_payload_len,
-                });
-            }
-        }
+        let parallel_width = bonsai_common::syntax_worker_count_for_sources(&source_bytes, cpu_workers);
+        let max_in_flight = parallel_width
+            .saturating_mul(COMPILER_OBJECT_PREFETCH_PER_WORKER)
+            .max(1)
+            .min(descriptors.len().max(1));
+        let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
+        bonsai_diagnostics::debug_log!(
+            "compiler-object",
+            "continuous generation files={} workers={} max_in_flight={}",
+            descriptors.len(),
+            parallel_width,
+            max_in_flight
+        );
+        try_visit_parallel(
+            &descriptors,
+            parallel_width,
+            max_in_flight,
+            |_, descriptor| {
+                let permit = memory_permits.acquire(descriptor.source_bytes);
+                prepare_compiler_object(self, descriptor).map(|encoded| (encoded, permit))
+            },
+            |index, (encoded, _permit)| {
+                let metadata = append_prepared_compiler_object(
+                    &mut prepared,
+                    &mut prepared_entries,
+                    &descriptors[index],
+                    encoded,
+                )?;
+                if files[index].replace(metadata).is_some() {
+                    return Err(invalid_data("duplicate compiler-object metadata"));
+                }
+                Ok(())
+            },
+        )?;
+        let files = files
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| invalid_data("missing compiler-object metadata"))?;
         let metadata = CompilerObjectMetadata {
             version: COMPILER_OBJECT_CACHE_VERSION,
             semantic_fingerprint: compiler_frontend_semantic_fingerprint(),
@@ -2655,6 +2782,123 @@ mod tests {
     use bonsai_lang_api::LanguageRegistry;
     use bonsai_vfs::Vfs;
     use std::io::{Read, Seek, SeekFrom, Write};
+
+    #[test]
+    fn parallel_visit_crosses_slow_head_and_preserves_every_index() {
+        let items = (0usize..16).collect::<Vec<_>>();
+        let release_head = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut visited = Vec::new();
+
+        try_visit_parallel(
+            &items,
+            3,
+            9,
+            {
+                let release_head = Arc::clone(&release_head);
+                let active = Arc::clone(&active);
+                let max_active = Arc::clone(&max_active);
+                move |index, value| {
+                    let now_active = active.fetch_add(1, Ordering::AcqRel) + 1;
+                    max_active.fetch_max(now_active, Ordering::AcqRel);
+                    if index == 0 {
+                        let (lock, ready) = &*release_head;
+                        let released = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let (released, timeout) = ready
+                            .wait_timeout_while(released, std::time::Duration::from_secs(2), |released| {
+                                !*released
+                            })
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if !*released || timeout.timed_out() {
+                            active.fetch_sub(1, Ordering::AcqRel);
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "continuous workers did not cross the slow head",
+                            ));
+                        }
+                    }
+                    active.fetch_sub(1, Ordering::AcqRel);
+                    Ok(*value)
+                }
+            },
+            |index, value| {
+                visited.push(value);
+                if index >= 9 {
+                    let (lock, ready) = &*release_head;
+                    *lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+                    ready.notify_all();
+                }
+                Ok(())
+            },
+        )
+        .expect("continuous parallel visit");
+
+        assert_ne!(
+            visited[0], 0,
+            "a slow canonical head must not block physical publication"
+        );
+        visited.sort_unstable();
+        assert_eq!(
+            visited, items,
+            "every scheduled item must be published exactly once"
+        );
+        assert!(
+            max_active.load(Ordering::Acquire) <= 3,
+            "the configured worker ceiling must remain authoritative"
+        );
+    }
+
+    #[test]
+    fn parallel_visit_bounds_workers_and_propagates_errors() {
+        let items = (0usize..12).collect::<Vec<_>>();
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut visited = Vec::new();
+        try_visit_parallel(
+            &items,
+            2,
+            4,
+            {
+                let active = Arc::clone(&active);
+                let max_active = Arc::clone(&max_active);
+                move |_, value| {
+                    let now_active = active.fetch_add(1, Ordering::AcqRel) + 1;
+                    max_active.fetch_max(now_active, Ordering::AcqRel);
+                    std::thread::yield_now();
+                    active.fetch_sub(1, Ordering::AcqRel);
+                    Ok(*value)
+                }
+            },
+            |_, value| {
+                visited.push(value);
+                Ok(())
+            },
+        )
+        .expect("bounded parallel visit");
+        visited.sort_unstable();
+        assert_eq!(visited, items);
+        assert!(
+            max_active.load(Ordering::Acquire) <= 2,
+            "the worker bound must remain authoritative"
+        );
+
+        let error = try_visit_parallel(
+            &items,
+            3,
+            6,
+            |index, value| {
+                if index == 3 {
+                    Err(std::io::Error::other("injected compiler failure"))
+                } else {
+                    Ok(*value)
+                }
+            },
+            |_, _| Ok(()),
+        )
+        .expect_err("worker errors must abort publication");
+        assert_eq!(error.to_string(), "injected compiler failure");
+    }
 
     #[test]
     fn compiler_object_cache_maintenance_is_versioned_and_lock_safe() {
