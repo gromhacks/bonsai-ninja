@@ -2,7 +2,20 @@
 **/*.rs.bk
 .vscode/
 .idea/
-.claude/worktrees/
+
+# Agent integrations publish only their skill definitions. Runtime state,
+# drafts, checkpoints, and other local agent files must stay out of Git.
+/.agents/*
+!/.agents/skills/
+!/.agents/skills/**
+/.claude/*
+!/.claude/skills/
+!/.claude/skills/**
+/.cline/*
+!/.cline/skills/
+!/.cline/skills/**
+/.codex/
+
 *.swp
 .DS_Store
 *.log
@@ -60,4 +73,3 @@ scripts/__pycache__/
 .mypy_cache/
 /.ruff_cache/
 scripts/.ruff_cache/
-.claude/scheduled_tasks.lock
