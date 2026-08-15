@@ -632,9 +632,10 @@ coverage and fingerprints; command hot paths still use the binary factstores
 and validate sidecar headers and payload readability before reuse. Retrieval
 sidecars are also checked against the same query-time
 source/dependency/schema pipeline fingerprint, so copied or moved candidate
-indexes are stale until rebuilt. Exact indexes decide candidates; canonical
-facts and semantic graph verification decide truth. Vector similarity is
-never evidence. Retrieval sidecars are complete-workspace artifacts; scoped
+indexes are stale until rebuilt. Retrieval follows the candidate-only
+evidence contract defined in
+[Architecture](contributing/architecture.mdx#query-browse-trace).
+Retrieval sidecars are complete-workspace artifacts; scoped
 query opens do not persist partial retrieval snapshots. Path-scoped security
 runs likewise keep taint graph reuse in memory for that command and do not
 overwrite full-workspace `taint_graph.v*.<mode>.<config>.factstore` files in that cache.

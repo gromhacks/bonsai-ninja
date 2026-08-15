@@ -15,29 +15,18 @@ The analyzer is a content-addressed compiler: Tree-sitter adapters publish
 immutable per-file typed objects, the linker and IDG compiler consume one
 atomic generation, and query, security, and export modes share those facts.
 
-## What it unlocks
+## Start here
 
-- **Give agents facts, not file dumps:** use symbol, file, and kind selectors to
-  retrieve a focused definition, reference set, call path, slice, or dataflow
-  instead of repeatedly loading a repository into the prompt.
-- **Trace cause to effect:** follow compiler-evidenced behavior across files
-  from an entry point through validation and business logic to storage or an
-  external side effect; unresolved runtime edges stay explicit.
-- **Debug with compiler evidence:** inspect AST, HIR, CFG, resolution, call
-  edges, and taint propagation when source behavior or analysis is unclear.
-- **Build model-ready code data:** export typed graph facts and completeness
-  metadata as JSON, GraphML, Cypher, or NetworkX for retrieval, training-set
-  construction, evaluation, or tool-using agents.
-- **Work at production scale:** the release gate covers 30,055 Elasticsearch
-  source files, completed warm query work, and production taint without
-  product-imposed semantic caps. Current timings are recorded in
-  [Release Readiness](RELEASE_READINESS.md).
+The normal workflow is small and evidence-first: find an anchor, open its
+compiler facts, follow one behavior, and request security or bulk graph work
+only when the question requires it. [Getting Started](getting-started.mdx)
+walks through that sequence; [Release Readiness](RELEASE_READINESS.md) owns the
+current scale measurements and validation record.
 
-In these docs, **exact** or **exhaustive** means the requested computation
-finishes over the static facts admitted by the compiler pipeline without a
-hidden product cap. It is not a claim that static analysis recovers all runtime
-behavior or that the implementation and rulepack are perfect. Check completion
-metadata and diagnostics before relying on an empty result.
+Accuracy terms follow the [README contract](../README.md#accuracy-contract):
+**exact** and **exhaustive** apply to uncapped work over the admitted static
+model, not all runtime behavior. Check completion metadata and diagnostics
+before relying on an empty result.
 
 Use the first two groups below for normal operation. The coverage pages record
 generated or measured validation evidence; contributor specifications define

@@ -108,9 +108,8 @@ the persistence size policy is returned normally and simply is not cached;
 pagination or path-preview limits report more pages/truncation instead of
 claiming exhaustive coverage.
 
-Retrieval follows the same validation rules: exact indexes decide candidates;
-canonical facts and semantic graph verification decide truth. Vector
-similarity is never evidence.
+Retrieval follows the candidate-only evidence and validation contract in
+[Architecture](contributing/architecture.mdx#query-browse-trace).
 The taint-graph sidecar is default-on for `security taint-analysis` and
 `security source-analysis`. Each exact analysis configuration gets a distinct
 filename, so source-analysis and taint-analysis do not overwrite each other's

@@ -33,20 +33,13 @@ derived from the directory - never declared in YAML.
 
 ## Rule schema essentials
 
-Required for every rule:
+The [Pattern Guide](pattern-guide.mdx#minimum-viable-rule) owns the
+author-facing required-field contract and match-kind catalog. The security
+loader consumes that same validated schema; it does not maintain a second set
+of defaults. Engine-specific consequences begin here: sinks carry CWE and
+severity, sources carry trust, and typing entries provide non-finding compiler
+models.
 
-- `id` - globally unique within (language, kind).
-- `language` - one of the 20 supported languages.
-- `match.kind` - `call`, `new`, `read`, `write`, `return`, `param`, or
-  `missing`; typing rules may additionally use `type`.
-- `match.callee` (call/new) or `match.target` (read/write/return/param)
-  - at least one structural selector such as `name`, `attribute`, `regex`,
-    `annotation`, `default_call`, or `call_kind_in`.
-- `description` - at least 15 chars, explains the API and risk.
-- `match_examples` - at least one entry whose `code` triggers the rule.
-
-Sinks also need `cwe: [CWE-NNN]` and `severity: low|medium|high|critical|info`.
-Sources also need `trust: remote|local|service|ipc|database|library|config|physical`.
 Use source `tag` values to describe the trust boundary, not the sink
 class; for example `network-input`, `archive-input`, `graphql-input`,
 `env-input`, or `cli-input`.

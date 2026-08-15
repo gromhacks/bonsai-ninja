@@ -847,13 +847,10 @@ same-size artifacts. Retrieval payload validation uses the same query-time
 source/dependency/schema pipeline fingerprint, which rejects copied or moved
 candidate indexes before they can narrow a query.
 
-- `DataFlowCache` (`dataflow.rs`) — per-`FuncId` `KindedTokens` +
-  `EntryTaintGraph` + transitive-dependency file set. Loaded when a
-  persisted sidecar is present, computed on demand for exact queries, and
-  fully rebuilt by explicit full-prewarm SDK opens or by the compatibility
-  dataflow-only path, `index --prewarm-dataflow`; persisted to
-  external-cache `dataflow.v3.factstore` (the older `dataflow.v2.bin` is still
-  readable for warm reopens).
+- `DataFlowCache` (`dataflow.rs`) — compatibility per-function tokens, entry
+  graph, and transitive-dependency set. Its exact prewarm, persistence, and
+  invalidation contract is specified once under
+  [Workspace-level result caches](taint-engine-spec.mdx#workspace-level-result-caches).
 - `SyntaxFlowQuery` (`flow_query.rs`) — the command-facing facade for
   rulepack-free entry taint graphs. Inspect first records exact Tree-sitter
   match spans and releases syntax-body/callgraph ownership before opening a

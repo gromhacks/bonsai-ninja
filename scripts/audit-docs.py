@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 from pathlib import Path
@@ -361,6 +362,48 @@ def check_markdown_structure(files: list[Path]) -> list[str]:
     return failures
 
 
+def check_duplicate_prose() -> list[str]:
+    """Reject long prose copied between public pages.
+
+    Commands and generated snippets may be repeated intentionally, so fenced
+    blocks are excluded. A 24-word window is long enough to identify copied
+    explanation while allowing short terminology and contract phrases to
+    recur where a page needs local context.
+    """
+
+    window_size = 24
+    owners: dict[tuple[str, ...], set[Path]] = {}
+    reader_files = active_docs() + [
+        REPO / "README.md",
+        REPO / "CONTRIBUTING.md",
+        REPO / "CODE_OF_CONDUCT.md",
+        REPO / "SECURITY.md",
+    ]
+    for path in reader_files:
+        text = path.read_text(errors="replace")
+        text = re.sub(r"```.*?```|~~~.*?~~~", " ", text, flags=re.DOTALL)
+        if text.startswith("---\n"):
+            text = re.sub(r"\A---\n.*?\n---\n", " ", text, flags=re.DOTALL)
+        text = re.sub(r"\[([^]]+)\]\([^)]+\)", r"\1", text)
+        words = re.findall(r"[a-z0-9]+", text.lower())
+        for index in range(len(words) - window_size + 1):
+            window = tuple(words[index : index + window_size])
+            owners.setdefault(window, set()).add(path)
+
+    duplicate_pairs: dict[tuple[Path, Path], tuple[str, ...]] = {}
+    for window, paths in owners.items():
+        if len(paths) < 2:
+            continue
+        for left, right in itertools.combinations(sorted(paths), 2):
+            duplicate_pairs.setdefault((left, right), window)
+
+    return [
+        f"{left.relative_to(REPO)} and {right.relative_to(REPO)} repeat a "
+        f"{window_size}-word prose block: `{' '.join(window)}`"
+        for (left, right), window in sorted(duplicate_pairs.items())
+    ]
+
+
 def check_measurement_ownership() -> list[str]:
     failures: list[str] = []
     date_re = re.compile(r"\b20\d{2}-\d{2}-\d{2}\b")
@@ -519,6 +562,7 @@ def main() -> int:
         + check_product_contract_language()
         + check_mdx_frontmatter()
         + check_markdown_structure(files)
+        + check_duplicate_prose()
         + check_measurement_ownership()
         + check_language_counts()
         + check_workspace_counts()
