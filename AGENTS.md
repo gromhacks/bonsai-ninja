@@ -170,6 +170,14 @@ projection in the derived-fact cache identity. This changes recomputation
 only: the compiler object remains complete. Do not reintroduce per-CPU-batch
 barriers or eagerly derive every optional view for every candidate body.
 
+Compiler-object generation follows the same continuous-work rule. Retain each
+source-weighted permit through compression and prepared-payload append, and
+write completed physical payloads without waiting for the lowest unfinished
+`FileId`. FactStore owns the deterministic sorted key index and generation
+metadata remains in canonical file order; physical payload order is not a
+semantic contract. Do not add batch barriers or a workspace-growing reorder
+buffer to make internal payload bytes appear canonically ordered.
+
 Performance gates measure completed exact work; they never terminate, skip, or
 cap analysis. When query/cache/engine code changes, build release and run
 `cargo test --release -p bonsai_cli --test elasticsearch_large_repo

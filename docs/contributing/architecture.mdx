@@ -61,14 +61,14 @@ LRU cache.
 `crates/common::resources` also owns resource scheduling. Memory limits are
 detected from the host and the process's active nested Linux cgroup v1/v2
 memory controller, optionally lowered by
-`BONSAI_MEMORY_BUDGET_MB`. Weighted compiler batches use each source unit's
-actual byte size after subtracting the process's measured resident set and a
-safety margin. The weighted scheduler charges a fixed per-unit frontend cost
-plus measured source bytes, so several small files can run concurrently under
-a 3 GiB budget while one genuinely large unit runs alone. IDG transfer obtains
-the same exact VFS byte length through the compiler semantics provider after
-linkage/resolver state is resident. Unsupported RSS probes fall back to a
-conservative reserve. This is never an analysis budget. The workspace's
+`BONSAI_MEMORY_BUDGET_MB`. Continuous compiler worklists use each source
+unit's actual byte size after subtracting the process's measured resident set
+and a safety margin. The weighted scheduler charges a fixed per-unit frontend
+cost plus measured source bytes, so several small files can run concurrently
+under a 3 GiB budget while one genuinely large unit runs alone. IDG transfer
+obtains the same exact VFS byte length through the compiler semantics provider
+after linkage/resolver state is resident. Unsupported RSS probes fall back to
+a conservative reserve. This is never an analysis budget. The workspace's
 exact-body cache also derives its byte budget from this effective memory
 limit. That cache changes how much adapter-lowered IR is retained between
 exact lookups, not which IR is produced or which files are analyzed. The
@@ -169,6 +169,16 @@ then exact syntax targets. Only surviving files decompress declarations and
 flow events. The full body remains the canonical source when a surviving file
 needs matching, transfer, or rendered evidence; this is one compiler IR with
 staged decoding, not a second parser.
+
+Cold generation uses one bounded continuous worklist rather than a sequence of
+parallel batches. A source-size-weighted permit remains held through lowering,
+compression, and prepared-payload append, so faster scheduling cannot turn
+into workspace-sized buffering. Completed physical payloads are appended as
+workers finish; waiting for the lowest unfinished `FileId` would recreate a
+head-of-line barrier. Physical payload order is not semantic: FactStore sorts
+and validates its key index, and generation metadata is assembled by the
+canonical file ordinal before publication. Do not reintroduce batch barriers
+or an in-memory canonical reorder buffer here.
 
 Declaration linkage headers also retain exact direct-call receiver-field
 initializer facts. An adapter proves only that construction executes an

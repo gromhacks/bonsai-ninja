@@ -47,12 +47,12 @@ separate the first explicit semantic index from commands run after it exists:
 
 | Cache state and operation | Measured time | Result |
 |---|---:|---|
-| Empty cache: `index --semantic` | 26m 53.8s | 7.11 GB validated reusable cache; 3.20 GB maximum RSS; no swaps |
-| After index: semantic generation reopen | 3.2s | Existing compiler objects, linkage, callgraph, retrieval, and IDG validated and reused |
+| Empty cache: `index --semantic` | 10m 06.5s | 7.11 GB validated reusable cache; 3.48 GB maximum RSS; no swaps |
+| After index: semantic generation reopen | 2.5s | Existing compiler objects, linkage, callgraph, retrieval, and IDG validated and reused |
 | After index: search | 4.1s | Exact requested matches |
-| After index: call lookup | 4.1s | Compiler-resolved call rows |
-| After index: default inspect | 7.3s | Structural evidence for the requested target |
-| After index: complete production taint analysis | 27.9s | Exact requested fixed point |
+| After index: call lookup | 3.9s | Compiler-resolved call rows |
+| After index: default inspect | 7.6s | Structural evidence for the requested target |
+| After index: complete production taint analysis | 29.6s | Exact requested fixed point |
 | After index: default native export | 4m 05s | 4.54 GB compiler, callgraph, flow, and compiled-IDG facts |
 | After index: `--full-propagations` export | 7m 36s | 6.42 GB with the same exact propagation relation materialized as individual rows |
 
@@ -61,6 +61,14 @@ request when they want every reusable semantic sidecar prepared up front.
 Ordinary `index` is the lighter syntax/declaration warm-up and does not force a
 whole-workspace callgraph or IDG build; ordinary commands can also compute
 their requested exact facts on demand.
+
+The empty-cache run compiles 30,055 Tree-sitter source units into exact IR,
+resolves the workspace callgraph and linkage, builds retrieval headers, and
+constructs a 4.16 GB sparse IDG before publishing 7.11 GB of validated
+sidecars. It is a one-time whole-workspace build, not command startup. The
+continuous compiler-object scheduler reduced this same completed workload
+from 26m 53.8s to 10m 06.5s (2.66x faster, 62.4% less wall time) without
+changing its files, facts, graph, or fixed point.
 
 For whole-repository export, the compressed default saved 1.88 GB and 3 minutes
 31 seconds without reducing accuracy. Both export forms peaked near 4.8 GB
