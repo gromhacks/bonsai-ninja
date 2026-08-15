@@ -314,13 +314,8 @@ fn bonsai_with_rulepack(
     if let Some(dir) = rules_dir {
         return bonsai.with_rulepack(dir);
     }
-    let Some(dir) = bonsai_sdk::Bonsai::discover_rulepack_root(workspace) else {
-        return Ok(bonsai);
-    };
-    match bonsai.clone().with_rulepack(&dir) {
-        Ok(with_pack) => Ok(with_pack),
-        Err(_) => Ok(bonsai),
-    }
+    let dir = bonsai_sdk::Bonsai::default_rulepack_root(workspace)?;
+    bonsai.with_rulepack(&dir)
 }
 
 pub(crate) fn bonsai_for_cli() -> bonsai_sdk::Bonsai {

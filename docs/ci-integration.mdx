@@ -167,14 +167,16 @@ The workflow builds archives for:
 - macOS Intel and Apple Silicon;
 - Windows x64 and arm64.
 
-Archives include the binary, `security-patterns/`, human documentation,
+Archives include the self-contained binary, readable `security-patterns/`
+source for inspection/customization, human documentation,
 `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `AGENTS.md`,
 `SKILLS.md`, the installable agent skill, license information, and checksums.
 Each tagged archive and checksum manifest receives a signed GitHub/Sigstore
 artifact attestation. A
-relocated-package smoke uses an empty user/parser cache and an empty workspace
-cache, proving both native parser delivery and rule discovery without relying
-on earlier runner state or the source checkout.
+relocated binary-only smoke uses no adjacent rulepack plus an empty user/parser
+cache and an empty workspace cache. This proves native parser delivery and the
+embedded rulepack fallback without relying on earlier runner state or the
+source checkout.
 
 ## Large-workspace regression gate
 

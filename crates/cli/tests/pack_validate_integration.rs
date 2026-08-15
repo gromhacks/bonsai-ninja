@@ -184,3 +184,80 @@ fn pack_validate_json_accepts_clean_rulepack() {
     assert_eq!(report["errors"], 0);
     assert!(report["issues"].as_array().expect("issues array").is_empty());
 }
+
+#[test]
+fn bundled_rulepack_is_the_out_of_directory_default() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let tmp = TempDir::new("bundled-default");
+    let workspace = tmp.path().join("workspace");
+    let unrelated_cwd = tmp.path().join("cwd");
+    std::fs::create_dir(&workspace).expect("create workspace");
+    std::fs::create_dir(&unrelated_cwd).expect("create unrelated cwd");
+    std::fs::write(workspace.join("app.py"), "def main():\n    return 0\n").expect("write source");
+
+    let output = Command::new(&bin)
+        .current_dir(&unrelated_cwd)
+        .env_remove("BONSAI_RULES_DIR")
+        .args([
+            "security",
+            workspace.to_str().expect("workspace path"),
+            "pack",
+            "--lang",
+            "python",
+            "--limit",
+            "3",
+            "--format",
+            "json",
+            "--no-color",
+            "--no-progress",
+        ])
+        .output()
+        .expect("run with bundled rulepack");
+    assert!(
+        output.status.success(),
+        "bundled rulepack failed outside the source tree\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_stdout_json(&output);
+    let rows = report["rows"].as_array().expect("pack rows");
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|row| row["language"] == "python"));
+}
+
+#[test]
+fn invalid_explicit_rulepack_does_not_fall_back_to_the_bundle() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let tmp = TempDir::new("invalid-explicit");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("create workspace");
+    std::fs::write(workspace.join("app.py"), "pass\n").expect("write source");
+    let missing = tmp.path().join("missing-rules");
+
+    let output = Command::new(&bin)
+        .current_dir(tmp.path())
+        .env_remove("BONSAI_RULES_DIR")
+        .args([
+            "security",
+            workspace.to_str().expect("workspace path"),
+            "pack",
+            "--rules-dir",
+            missing.to_str().expect("missing path"),
+            "--format",
+            "json",
+            "--no-color",
+            "--no-progress",
+        ])
+        .output()
+        .expect("run with invalid explicit rulepack");
+    assert!(!output.status.success(), "invalid explicit path must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("rulepack load failed") && stderr.contains("missing-rules"),
+        "explicit-path error should identify the failed rulepack:\n{stderr}"
+    );
+}

@@ -767,6 +767,8 @@ dependencies = [
  "bonsai_taint",
  "bonsai_testkit",
  "bonsai_workspace",
+ "dirs",
+ "fs2",
  "lru",
  "parking_lot",
  "rayon",
@@ -775,8 +777,11 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
+ "sha2",
+ "tempfile",
  "thiserror",
  "tracing",
+ "zstd",
 ]
 
 [[package]]

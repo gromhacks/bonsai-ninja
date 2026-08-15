@@ -381,12 +381,15 @@ jobs:
           trap 'rm -rf "$smoke_dir"' EXIT
           mkdir -p "$smoke_dir/home" "$smoke_dir/parser-cache" \
             "$smoke_dir/workspace-cache"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" \
+            "$smoke_dir/${{ matrix.bin }}"
+          chmod 755 "$smoke_dir/${{ matrix.bin }}"
           (
             cd "$smoke_dir"
             HOME="$smoke_dir/home" \
               XDG_CACHE_HOME="$smoke_dir/parser-cache" \
               BONSAI_WORKSPACE_DIR="$smoke_dir/workspace-cache" \
-              "$GITHUB_WORKSPACE/dist/$artifact/${{ matrix.bin }}" \
+              "$smoke_dir/${{ matrix.bin }}" \
               security "$GITHUB_WORKSPACE/examples/python/micro" taint-analysis \
               --format json --all --no-color --no-progress \
               > packaged-security.json
@@ -431,6 +434,7 @@ jobs:
           $repo = (Get-Location).Path
           $smoke = "$env:RUNNER_TEMP/bonsai-packaged-security.json"
           $profile = "$env:RUNNER_TEMP/bonsai-packaged-profile"
+          $standalone = "$profile/${{ matrix.bin }}"
           @(
             $profile
             "$profile/AppData/Local"
@@ -439,6 +443,7 @@ jobs:
           ) | ForEach-Object {
             New-Item -ItemType Directory -Force $_ | Out-Null
           }
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin }}" $standalone
           Push-Location $env:RUNNER_TEMP
           try {
             $env:HOME = $profile
@@ -446,7 +451,7 @@ jobs:
             $env:LOCALAPPDATA = "$profile/AppData/Local"
             $env:APPDATA = "$profile/AppData/Roaming"
             $env:BONSAI_WORKSPACE_DIR = "$profile/workspace-cache"
-            & "$repo/dist/$artifact/${{ matrix.bin }}" security "$repo/examples/python/micro" taint-analysis --format json --all --no-color --no-progress > $smoke
+            & $standalone security "$repo/examples/python/micro" taint-analysis --format json --all --no-color --no-progress > $smoke
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally {
             Pop-Location

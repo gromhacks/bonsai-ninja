@@ -266,7 +266,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
         | SecurityAction::SourceAnalysis { rules_dir, .. }
         | SecurityAction::Pack { rules_dir, .. } => rules_dir.as_deref(),
     };
-    let rules_dir = resolve_rules_dir(workspace, action_rules_dir);
+    let rules_dir = resolve_rules_dir(workspace, action_rules_dir)?;
     let stage = progress::ScopedSpinner::new("loading security rules");
     let mut pack = load_rulepack(&rules_dir)
         .map_err(|e| anyhow::anyhow!("security: rulepack load failed at `{}`: {e}", rules_dir.display()))?;
@@ -619,14 +619,13 @@ fn apply_profile(
 }
 
 /// Resolve the rulepack directory: explicit `--rules-dir` wins; otherwise
-/// fall back to the SDK's centralised workspace/package discovery, then the
-/// conventional cwd-relative `security-patterns/` path for a useful error.
-fn resolve_rules_dir(workspace: &Path, rules_dir: Option<&Path>) -> PathBuf {
+/// use the SDK's centralized external discovery and built-in fallback.
+fn resolve_rules_dir(workspace: &Path, rules_dir: Option<&Path>) -> Result<PathBuf> {
     if let Some(d) = rules_dir {
-        return d.to_path_buf();
+        return Ok(d.to_path_buf());
     }
-    bonsai_sdk::Bonsai::discover_rulepack_root(workspace)
-        .unwrap_or_else(|| PathBuf::from("security-patterns"))
+    bonsai_sdk::Bonsai::default_rulepack_root(workspace)
+        .map_err(|error| anyhow::anyhow!("security: bundled rulepack is unavailable: {error:#}"))
 }
 
 // ---- sources ----

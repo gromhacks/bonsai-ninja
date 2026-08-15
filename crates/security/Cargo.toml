@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "Security rulepack loader, matcher, and source/sink/sanitizer wrapper for bonsai-ninja."
 
+# cargo-machete scans library targets but not this crate's build script.
+[package.metadata.cargo-machete]
+ignored = ["sha2"]
+
 [dependencies]
 bonsai_common = { workspace = true }
 bonsai_callgraph = { workspace = true }
@@ -31,8 +35,16 @@ tracing = { workspace = true }
 parking_lot = { workspace = true }
 rayon = { workspace = true }
 lru = { workspace = true }
+dirs = { workspace = true }
+fs2 = { workspace = true }
+zstd = { workspace = true }
+
+[build-dependencies]
+sha2 = { workspace = true }
+zstd = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 bonsai_testkit = { workspace = true }
 bonsai_lang_python = { workspace = true }
 bonsai_lang_c = { workspace = true }
