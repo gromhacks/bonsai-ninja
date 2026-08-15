@@ -150,6 +150,8 @@ jobs:
           persist-credentials: false
       - name: Verify documentation structure and public surface
         run: python3 scripts/audit-docs.py
+      - name: Verify real-world benchmark language inventory
+        run: python3 scripts/realworld-lang-benchmark.py --check
 
   release-metadata:
     name: Public release metadata

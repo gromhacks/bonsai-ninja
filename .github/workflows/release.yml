@@ -98,6 +98,7 @@ jobs:
           cargo audit --deny warnings
           python3 scripts/audit-dependency-licenses.py
           python3 scripts/audit-release-metadata.py
+          python3 scripts/realworld-lang-benchmark.py --check
           bash scripts/audit-github-actions.sh
           bash scripts/audit-workflows.sh
           bash scripts/audit-secrets.sh

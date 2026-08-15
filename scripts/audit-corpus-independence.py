@@ -15,7 +15,9 @@ CORPUS_PATTERNS = {
 }
 HOST_PATH_PATTERNS = {
     "developer-home": re.compile(r"(?:/Users/|/home/)[A-Za-z0-9._-]+/"),
-    "windows-developer-home": re.compile(r"[A-Za-z]:[\\/]Users[\\/][^\\/]+[\\/]", re.IGNORECASE),
+    "windows-developer-home": re.compile(
+        r"[A-Za-z]:[\\/]Users[\\/][^\\/]+[\\/]", re.IGNORECASE
+    ),
 }
 
 
@@ -56,7 +58,9 @@ def main() -> int:
         for number, line in production_rust_lines(path):
             for label, pattern in {**CORPUS_PATTERNS, **HOST_PATH_PATTERNS}.items():
                 if pattern.search(line):
-                    violations.append((label, path.relative_to(ROOT), number, line.strip()))
+                    violations.append(
+                        (label, path.relative_to(ROOT), number, line.strip())
+                    )
 
     rule_files = sorted((ROOT / "security-patterns" / "langs").glob("**/*.yml"))
     rule_files += sorted((ROOT / "security-patterns" / "langs").glob("**/*.yaml"))
@@ -64,14 +68,18 @@ def main() -> int:
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             for label, pattern in {**CORPUS_PATTERNS, **HOST_PATH_PATTERNS}.items():
                 if pattern.search(line):
-                    violations.append((label, path.relative_to(ROOT), number, line.strip()))
+                    violations.append(
+                        (label, path.relative_to(ROOT), number, line.strip())
+                    )
 
     if violations:
         print("corpus-independence violations:", file=sys.stderr)
         for label, path, number, line in violations:
             print(f"{label}\t{path}:{number}\t{line}", file=sys.stderr)
         return 1
-    print(f"corpus-independence: 0 violations ({len(rust_files)} Rust files, {len(rule_files)} rule files)")
+    print(
+        f"corpus-independence: 0 violations ({len(rust_files)} Rust files, {len(rule_files)} rule files)"
+    )
     return 0
 
 

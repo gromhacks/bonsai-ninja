@@ -152,11 +152,7 @@ def generic_receiver_risk(
     ):
         return 0, []
     receiver, method = attribute
-    if (
-        receiver.lower() not in GENERIC_RECEIVERS
-        or has_package
-        or has_typed_constraint
-    ):
+    if receiver.lower() not in GENERIC_RECEIVERS or has_package or has_typed_constraint:
         return 0, []
     return 3, [
         f"generic receiver `{receiver}.{method}` with no argument-boundary constraint"
@@ -219,7 +215,9 @@ def score_rule(rule: dict, family: str, _kind: str) -> tuple[int, list[str]]:
     constraints = rule.get("constraints") or []
     has_typed_constraint = bool(
         isinstance(constraints, list)
-        and any(isinstance(constraint, dict) and constraint for constraint in constraints)
+        and any(
+            isinstance(constraint, dict) and constraint for constraint in constraints
+        )
     )
 
     match = rule.get("match") or {}

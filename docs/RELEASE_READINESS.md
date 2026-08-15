@@ -323,6 +323,7 @@ RUSTDOCFLAGS="-D warnings" \
 
 python3 scripts/audit-docs.py
 python3 scripts/audit-release-metadata.py
+python3 scripts/realworld-lang-benchmark.py --check
 python3 scripts/sync_skill.py --check
 bash scripts/audit-workflows.sh
 bash scripts/audit-secrets.sh
