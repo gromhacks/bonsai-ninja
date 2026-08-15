@@ -161,13 +161,13 @@ and their generated workspace caches are not retained after the gate.
 
 The required release test uses the sibling 30,055-source Elasticsearch
 checkout pinned by the release workflow at `e9741368da0`. The measured
-empty-cache run rebuilt the semantic generation in 606.50
+empty-cache run rebuilt the semantic generation in 556.61
 seconds. The following complete five-scenario gate passed in 248.86 seconds
 under the 3 GiB scheduler.
 
 | Operation | Time | Enforced SLO |
 |---|---:|---:|
-| Cold semantic generation | 606.50 s | completion required |
+| Cold semantic generation | 556.61 s | completion required |
 | Fresh-process semantic reuse | 2.53 s | 15 s |
 | Default inspect | 7.62 s | 30 s |
 | Exact raw-taint inspect | 28.87 s | 30 s |
@@ -217,9 +217,18 @@ Commit `2128b161e3f6464b3fae3d040b1859859cd0e4d6` replaced compiler-object
 batch barriers with a continuous, source-weighted worklist. Completed payloads
 are persisted immediately while the FactStore key index and metadata remain
 canonical. On the identical repository, cache schema, and 3 GiB schedule,
-that reduced cold generation from 1,613.79 seconds to 606.50 seconds: 2.66x
-faster and 62.4% less wall time, with the same 7,113,425,453-byte semantic
-generation.
+that reduced cold generation from 1,613.79 seconds to 606.50 seconds. The
+current candidate also replaces 29,522 one-segment IDG lowering barriers with
+a bounded source-weighted worker window. Workers lower independent typed
+segments concurrently, memory permits remain held until the canonical
+stitcher consumes each result, and a bounded reorder map preserves ascending
+`SegmentId` publication. The IDG build fell from 117.36 seconds to 95.55
+seconds, and complete cold generation fell to 556.61 seconds: 2.90x faster and
+65.5% less wall time than the original baseline, with the same
+7,113,425,453-byte semantic generation. A candidate that parallelized global
+header replay was rejected after the complete cold gate slowed to 572.00
+seconds; phase-local speedups are not accepted when allocator residency
+reduces later exact-work concurrency.
 
 ## Production-scale native export measurement
 
@@ -230,7 +239,7 @@ every CI runner.
 
 The export measurement used bonsai-ninja commit
 `9823bf443c32ee4c3a0f263078486ac6d1498c91`; the optimized cold semantic row
-was remeasured on `2128b161e3f6464b3fae3d040b1859859cd0e4d6`. Both used
+was remeasured on the current release candidate. Both used
 Elasticsearch commit `e9741368da0cb5465f5cf76c668a09fd780583be`, an Apple
 M1 Pro with 16 GiB of
 physical memory, macOS 26.3.1, and `BONSAI_MEMORY_BUDGET_MB=3072`. Output was
@@ -240,7 +249,7 @@ no reusable default-export cache existed.
 
 | Operation | Wall time | Output bytes | Maximum RSS |
 |---|---:|---:|---:|
-| Cold semantic generation | 606.50 s (10m 06.5s) | 7,113,425,453 cache bytes | 3,478,913,024 bytes |
+| Cold semantic generation | 556.61 s (9m 16.6s) | 7,113,425,453 cache bytes | 3,189,686,272 bytes |
 | Default native JSON (`compiled_idg`) | 244.98 s (4m 05.0s) | 4,540,419,571 | 4,815,470,592 bytes |
 | Native JSON with `--full-propagations` | 456.43 s (7m 36.4s) | 6,421,445,325 | 4,744,691,712 bytes |
 | Full-materialization delta | +211.45 s (+86.3%) | +1,881,025,754 (+41.4%) | no material increase |
@@ -253,7 +262,7 @@ require those concrete rows; it does not make analysis more accurate.
 The 3 GiB memory value is a semantic-worker scheduling budget, not a hard RSS
 limit. Clean file-backed pages and allocator arenas are reclaimable under
 pressure, so maximum RSS can exceed that scheduling value; the cold build
-peaked at 3,478,913,024 bytes and completed without swaps. Both export forms
+peaked at 3,189,686,272 bytes and completed without swaps. Both export forms
 peaked near 4.8 GB RSS while streaming their
 multi-gigabyte JSON. Streaming means the exporter does not construct one
 matching in-memory JSON document, but its shared semantic projection still has

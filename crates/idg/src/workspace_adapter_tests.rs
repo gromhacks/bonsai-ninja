@@ -5,6 +5,66 @@ use bonsai_common::{Precision, Span, SymbolId};
 use bonsai_lang_api::{Decl, DeclKind, FlowEvent, ModulePath, Visibility};
 
 #[test]
+fn ordered_transfer_window_restores_canonical_segment_publication() {
+    fn complete(work: AdmittedTransferWork<'_>) -> CompletedTransferWork<'_> {
+        CompletedTransferWork {
+            index: work.index,
+            outcome: Ok((
+                SegmentId(u32::try_from(work.index).expect("fixture segment id")),
+                vec![TransferOutput::new(FuncId::new(
+                    u32::try_from(work.index).expect("fixture function id"),
+                ))],
+            )),
+            permit: work.permit,
+        }
+    }
+
+    let source_bytes = [0_u64; 4];
+    let permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
+    let can_overlap = {
+        let first = permits.acquire(0);
+        let second = permits.try_acquire(0);
+        let can_overlap = second.is_some();
+        drop(second);
+        drop(first);
+        can_overlap
+    };
+
+    let published = std::thread::scope(|scope| {
+        let worker_count = usize::from(can_overlap) + 1;
+        let (work_tx, work_rx) = std::sync::mpsc::sync_channel(worker_count);
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(worker_count);
+        scope.spawn(move || {
+            if can_overlap {
+                let first = work_rx.recv().expect("first admitted transfer");
+                let second = work_rx.recv().expect("second admitted transfer");
+                result_tx
+                    .send(complete(second))
+                    .expect("publish later physical completion");
+                result_tx
+                    .send(complete(first))
+                    .expect("publish delayed canonical completion");
+            }
+            for work in work_rx {
+                result_tx
+                    .send(complete(work))
+                    .expect("publish transfer completion");
+            }
+        });
+
+        OrderedTransferBatches::new(work_tx, result_rx, &source_bytes, &permits, worker_count)
+            .flatten()
+            .map(|(segment, _)| segment)
+            .collect::<Vec<_>>()
+    });
+
+    assert_eq!(
+        published,
+        vec![SegmentId(0), SegmentId(1), SegmentId(2), SegmentId(3)]
+    );
+}
+
+#[test]
 fn path_module_resolution_uses_only_adapter_extensions() {
     assert_eq!(
         import_module_candidates("src.app", "./render.ts", &["js", "ts"]),

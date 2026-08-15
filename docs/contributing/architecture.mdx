@@ -287,13 +287,24 @@ flowchart LR
   G --> L[Headers and linker]
   G --> C[Resolved callgraph]
   G --> R[Retrieval candidates]
-  G --> X[One-pass transfer lowering]
+  G --> X[Bounded parallel transfer lowering]
   X --> P[Typed stitch spool]
   P --> I[Exact IDG closure substrate]
   I --> A[Validated query accelerator]
   I --> Q[Inspect, security, taint, export]
   A --> Q
 ```
+
+IDG transfer lowering is a continuous, source-size-admitted compiler stage.
+Dedicated bounded workers may finish independent file segments out of order,
+but each completed transfer retains its memory permit until the stitcher
+consumes it. A bounded reorder map exposes only ascending `SegmentId` order to
+the canonical stitcher, preserving stable node ids and byte-identical graph
+semantics. The stitcher remains the serial publication boundary; memory policy
+changes overlap only and never the scheduled segments, functions, facts, or
+fixed-point scope. Do not replace this window with per-batch barriers, and do
+not parallelize an earlier ordered phase without measuring its effect on later
+memory admission in the complete cold pipeline.
 
 `index --semantic` runs compiler objects, callgraph, retrieval, linkage, and
 IDG as ordered worker processes. The IDG worker also compiles the default
