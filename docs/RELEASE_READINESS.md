@@ -160,32 +160,32 @@ and their generated workspace caches are not retained after the gate.
 ## Large-workspace scale gate
 
 The required release test uses the sibling 30,055-source Elasticsearch
-checkout pinned by the release workflow at `e9741368da0`. The frontend-ABI
-migration rebuilt the semantic generation from an empty cache in 1,571.52
-seconds. The following complete five-scenario gate passed in 214.27 seconds
+checkout pinned by the release workflow at `e9741368da0`. The measured
+empty-cache run rebuilt the semantic generation in 606.50
+seconds. The following complete five-scenario gate passed in 248.86 seconds
 under the 3 GiB scheduler.
 
 | Operation | Time | Enforced SLO |
 |---|---:|---:|
-| Cold semantic generation | 1,571.52 s | completion required |
-| Fresh-process semantic reuse | 2.30 s | 15 s |
-| Default inspect | 7.04 s | 30 s |
-| Exact raw-taint inspect | 24.82 s | 30 s |
-| Fresh-cache production taint | 30.18 s | 45 s |
-| Warm production taint | 25.27 s | 30 s |
+| Cold semantic generation | 606.50 s | completion required |
+| Fresh-process semantic reuse | 2.53 s | 15 s |
+| Default inspect | 7.62 s | 30 s |
+| Exact raw-taint inspect | 28.87 s | 30 s |
+| Fresh-cache production taint | 32.38 s | 45 s |
+| Warm production taint | 29.61 s | 30 s |
 | `tree --max-depth 1` | 0.02 s | 30 s |
-| Search | 3.62 s | 30 s |
-| Definitions | 12.83 s | 30 s |
-| Imports | 7.09 s | 30 s |
-| Classes | 7.40 s | 30 s |
-| Entry points | 25.76 s | 30 s |
-| Calls | 3.42 s | 30 s |
-| Arguments | 3.36 s | 30 s |
-| Scoped `read-file` | 1.60 s | 30 s |
-| Source inventory | 3.32 s | 30 s |
-| High-severity sink inventory | 22.52 s | 30 s |
-| Sanitizer inventory | 19.16 s | 30 s |
-| Dependency inventory | 9.81 s | 30 s |
+| Search | 4.06 s | 30 s |
+| Definitions | 14.25 s | 30 s |
+| Imports | 8.03 s | 30 s |
+| Classes | 8.68 s | 30 s |
+| Entry points | 28.85 s | 30 s |
+| Calls | 3.86 s | 30 s |
+| Arguments | 4.16 s | 30 s |
+| Scoped `read-file` | 1.75 s | 30 s |
+| Source inventory | 3.56 s | 30 s |
+| High-severity sink inventory | 25.22 s | 30 s |
+| Sanitizer inventory | 21.64 s | 30 s |
+| Dependency inventory | 11.16 s | 30 s |
 
 Command:
 
@@ -202,14 +202,24 @@ completeness. It never uses a timeout to turn incomplete work into a pass.
 Memory scheduling may serialize workers, but the test does not cap files,
 rules, graph edges, closure steps, paths, or findings.
 
-The cold semantic row is a deliberate one-time frontend-ABI migration, not a
+The cold semantic row is a deliberate one-time whole-workspace build, not a
 normal command startup cost. It rebuilt exact compiler objects, linkage,
 callgraph, retrieval, and IDG sidecars for all 30,055 sources after the cache
-was explicitly cleared. The resulting cache is 7,113,741,889 bytes (about
-6.62 GiB), including an 888,832,952-byte compiler-object store (about
-847.66 MiB). Ordinary commands compute exact requested facts on demand; users
-only pay this full prewarm when they explicitly run `index --semantic`. A
-fresh process reused the completed semantic generation in 2.37 seconds.
+was explicitly cleared. The published generation was 7,113,425,453 bytes
+(about 6.62 GiB): 888,833,015 bytes of compiler objects, 317,799,303 bytes of
+callgraph, 1,505,969,092 bytes of linkage, 224,728,416 bytes of retrieval, and
+4,160,252,580 bytes of IDG. Ordinary commands compute exact requested facts
+on demand; users only pay this full prewarm when they explicitly run
+`index --semantic`. A fresh process reused the completed semantic generation
+in 2.53 seconds.
+
+Commit `2128b161e3f6464b3fae3d040b1859859cd0e4d6` replaced compiler-object
+batch barriers with a continuous, source-weighted worklist. Completed payloads
+are persisted immediately while the FactStore key index and metadata remain
+canonical. On the identical repository, cache schema, and 3 GiB schedule,
+that reduced cold generation from 1,613.79 seconds to 606.50 seconds: 2.66x
+faster and 62.4% less wall time, with the same 7,113,425,453-byte semantic
+generation.
 
 ## Production-scale native export measurement
 
@@ -218,9 +228,11 @@ command. It was measured separately on August 14, 2026 because the regular
 large-workspace gate intentionally does not write a multi-gigabyte export on
 every CI runner.
 
-The measurement used bonsai-ninja commit
-`9823bf443c32ee4c3a0f263078486ac6d1498c91`, Elasticsearch commit
-`e9741368da0cb5465f5cf76c668a09fd780583be`, an Apple M1 Pro with 16 GiB of
+The export measurement used bonsai-ninja commit
+`9823bf443c32ee4c3a0f263078486ac6d1498c91`; the optimized cold semantic row
+was remeasured on `2128b161e3f6464b3fae3d040b1859859cd0e4d6`. Both used
+Elasticsearch commit `e9741368da0cb5465f5cf76c668a09fd780583be`, an Apple
+M1 Pro with 16 GiB of
 physical memory, macOS 26.3.1, and `BONSAI_MEMORY_BUDGET_MB=3072`. Output was
 streamed through a byte counter instead of being retained on disk. Both export
 commands were fresh processes reading the same validated semantic generation;
@@ -228,7 +240,7 @@ no reusable default-export cache existed.
 
 | Operation | Wall time | Output bytes | Maximum RSS |
 |---|---:|---:|---:|
-| Cold semantic generation | 1,613.79 s (26m 53.8s) | 7,113,425,453 cache bytes | 3,199,107,072 bytes |
+| Cold semantic generation | 606.50 s (10m 06.5s) | 7,113,425,453 cache bytes | 3,478,913,024 bytes |
 | Default native JSON (`compiled_idg`) | 244.98 s (4m 05.0s) | 4,540,419,571 | 4,815,470,592 bytes |
 | Native JSON with `--full-propagations` | 456.43 s (7m 36.4s) | 6,421,445,325 | 4,744,691,712 bytes |
 | Full-materialization delta | +211.45 s (+86.3%) | +1,881,025,754 (+41.4%) | no material increase |
@@ -239,8 +251,10 @@ enumerating every per-entry row. `--full-propagations` is for consumers that
 require those concrete rows; it does not make analysis more accurate.
 
 The 3 GiB memory value is a semantic-worker scheduling budget, not a hard RSS
-limit. The cold semantic build stayed within that profile and completed
-without swaps. Both export forms peaked near 4.8 GB RSS while streaming their
+limit. Clean file-backed pages and allocator arenas are reclaimable under
+pressure, so maximum RSS can exceed that scheduling value; the cold build
+peaked at 3,478,913,024 bytes and completed without swaps. Both export forms
+peaked near 4.8 GB RSS while streaming their
 multi-gigabyte JSON. Streaming means the exporter does not construct one
 matching in-memory JSON document, but its shared semantic projection still has
 a larger resident set than the scheduling budget. Treat the table as the
