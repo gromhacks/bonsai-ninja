@@ -215,7 +215,7 @@ on demand; users only pay this full prewarm when they explicitly run
 `index --semantic`. A fresh process reused the completed semantic generation
 in 2.53 seconds.
 
-Commit `2128b161e3f6464b3fae3d040b1859859cd0e4d6` replaced compiler-object
+Commit `e0029eacacb7db97a6af130ac5b0cf59d936b1f1` replaced compiler-object
 batch barriers with a continuous, source-weighted worklist. Completed payloads
 are persisted immediately while the FactStore key index and metadata remain
 canonical. On the identical repository, cache schema, and 3 GiB schedule,
@@ -240,7 +240,7 @@ large-workspace gate intentionally does not write a multi-gigabyte export on
 every CI runner.
 
 The export measurement used bonsai-ninja commit
-`9823bf443c32ee4c3a0f263078486ac6d1498c91`; the optimized cold semantic row
+`150c06e0fe2fb51e56dc210ec840fdaa15396e5d`; the optimized cold semantic row
 was remeasured on the current release candidate. Both used
 Elasticsearch commit `e9741368da0cb5465f5cf76c668a09fd780583be`, an Apple
 M1 Pro with 16 GiB of
