@@ -53,7 +53,8 @@ compiled-IDG facts in a machine-readable form. GraphML, Cypher, and NetworkX
 views support graph tooling. These artifacts can be inputs to retrieval,
 training-data construction, evaluations, code-reasoning experiments, or
 tool-using agents; bonsai-ninja produces the evidence and does not train or
-validate a model by itself.
+validate a model by itself. The versioned native contract is published as
+[JSON Schema v7](schemas/bonsai-native-export-v7.schema.json).
 
 Our small exploratory tests produced encouraging results, but they are not a
 general model-quality claim. We would love to see independent teams take the

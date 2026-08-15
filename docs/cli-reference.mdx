@@ -553,7 +553,8 @@ Native JSON schema v7 makes every code location workspace-relative. The
 top-level `workspace_root` is the sole absolute anchor; consumers reconstruct
 an OS path by joining that root with a location. This keeps artifacts portable
 between hosts and prevents machine-specific prefixes from leaking into graph
-identities or agent prompts.
+identities or agent prompts. Its machine-readable Draft 2020-12 contract is
+[`schemas/bonsai-native-export-v7.schema.json`](../schemas/bonsai-native-export-v7.schema.json).
 A one-shot cache miss streams directly to the selected output; use
 `cache rebuild <workspace> --export` only when repeated exports justify a
 persisted copy.

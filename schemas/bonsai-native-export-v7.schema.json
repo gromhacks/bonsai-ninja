@@ -1,0 +1,1169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/gromhacks/bonsai-ninja/main/schemas/bonsai-native-export-v7.schema.json",
+  "title": "bonsai-ninja native export v7",
+  "description": "Compiler, callgraph, control-flow, dataflow, and IDG projections emitted by `bonsai-ninja export --format json`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "engine_version",
+    "workspace_root",
+    "generated_at_unix_ms",
+    "analysis_scope",
+    "summary",
+    "classes",
+    "callgraph",
+    "flow_chains",
+    "flow_chains_complete",
+    "flow_chains_mode",
+    "flow_chains_truncated_targets",
+    "flow_graph",
+    "files",
+    "analysis_complete",
+    "analysis_incomplete_reasons",
+    "taint_graph"
+  ],
+  "properties": {
+    "schema": { "const": "bonsai-native-export" },
+    "schema_version": { "const": 7 },
+    "engine_version": { "type": "string", "minLength": 1 },
+    "workspace_root": { "type": "string" },
+    "generated_at_unix_ms": { "$ref": "#/$defs/uint" },
+    "analysis_scope": { "$ref": "#/$defs/analysisScope" },
+    "summary": { "$ref": "#/$defs/summary" },
+    "classes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/class" }
+    },
+    "callgraph": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/callgraphEdge" }
+    },
+    "flow_chains": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/flowChain" }
+    },
+    "flow_chains_complete": { "type": "boolean" },
+    "flow_chains_mode": { "const": "compressed_callgraph" },
+    "flow_chains_truncated_targets": { "$ref": "#/$defs/uint" },
+    "flow_chains_incomplete_reason": { "type": "string" },
+    "flow_graph": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/flowGraphNode" }
+    },
+    "files": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/file" }
+    },
+    "analysis_complete": { "type": "boolean" },
+    "analysis_incomplete_reasons": { "$ref": "#/$defs/stringArray" },
+    "taint_graph": { "$ref": "#/$defs/taintGraph" }
+  },
+  "$defs": {
+    "uint": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "uint32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "stringArray": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "nullableString": {
+      "type": ["string", "null"]
+    },
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "start", "end"],
+      "properties": {
+        "file": { "$ref": "#/$defs/uint32" },
+        "start": { "$ref": "#/$defs/uint" },
+        "end": { "$ref": "#/$defs/uint" }
+      }
+    },
+    "analysisScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "semantic_max_precision",
+        "full_propagations",
+        "complete_chains",
+        "propagations_mode"
+      ],
+      "properties": {
+        "semantic_max_precision": { "const": "narrowed" },
+        "full_propagations": { "type": "boolean" },
+        "complete_chains": { "const": true },
+        "propagations_mode": {
+          "enum": ["compiled_idg", "materialized_entries", "omitted"]
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file_count",
+        "decl_count",
+        "class_count",
+        "function_count",
+        "method_count",
+        "call_site_count",
+        "call_edge_count",
+        "import_count",
+        "string_count",
+        "strings_by_category",
+        "languages"
+      ],
+      "properties": {
+        "file_count": { "$ref": "#/$defs/uint" },
+        "decl_count": { "$ref": "#/$defs/uint" },
+        "class_count": { "$ref": "#/$defs/uint" },
+        "function_count": { "$ref": "#/$defs/uint" },
+        "method_count": { "$ref": "#/$defs/uint" },
+        "call_site_count": { "$ref": "#/$defs/uint" },
+        "call_edge_count": { "$ref": "#/$defs/uint" },
+        "import_count": { "$ref": "#/$defs/uint" },
+        "string_count": { "$ref": "#/$defs/uint" },
+        "strings_by_category": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/uint" }
+        },
+        "languages": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "class": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "file", "line", "method_count", "methods"],
+      "properties": {
+        "name": { "type": "string" },
+        "kind": { "enum": ["class", "struct", "trait", "interface", "enum"] },
+        "file": { "type": "string" },
+        "line": { "$ref": "#/$defs/uint32" },
+        "method_count": { "$ref": "#/$defs/uint" },
+        "methods": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "callgraphEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "caller",
+        "caller_file",
+        "caller_line",
+        "callee",
+        "callee_kind",
+        "call_site_line",
+        "call_site_column",
+        "precision",
+        "resolver_stage",
+        "evidence",
+        "confidence"
+      ],
+      "properties": {
+        "caller": { "type": "string" },
+        "caller_file": { "type": "string" },
+        "caller_line": { "$ref": "#/$defs/uint32" },
+        "callee": { "type": "string" },
+        "callee_kind": { "$ref": "#/$defs/declKind" },
+        "call_site_line": { "$ref": "#/$defs/uint32" },
+        "call_site_column": { "$ref": "#/$defs/uint32" },
+        "precision": { "enum": ["exact", "narrowed"] },
+        "resolver_stage": { "type": "string", "minLength": 1 },
+        "evidence": { "type": "string", "minLength": 1 },
+        "confidence": { "type": "integer", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "declKind": {
+      "enum": [
+        "module",
+        "namespace",
+        "function",
+        "method",
+        "constructor",
+        "class",
+        "struct",
+        "trait",
+        "interface",
+        "enum",
+        "enumvariant",
+        "typealias",
+        "global",
+        "const",
+        "static",
+        "import",
+        "field",
+        "other"
+      ]
+    },
+    "flowChain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "chains", "truncated"],
+      "properties": {
+        "target": { "type": "string" },
+        "chains": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/stringArray" }
+        },
+        "truncated": { "type": "boolean" },
+        "truncation_reason": { "type": "string" }
+      }
+    },
+    "flowGraphNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["function", "callers", "outgoing", "entry_point"],
+      "properties": {
+        "function": { "type": "string" },
+        "callers": { "$ref": "#/$defs/stringArray" },
+        "outgoing": { "$ref": "#/$defs/stringArray" },
+        "entry_point": { "type": "boolean" }
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "language",
+        "decls",
+        "flow_events",
+        "imports",
+        "refs",
+        "assignment_values",
+        "runtime_type_narrowings",
+        "branch_conditions",
+        "strings"
+      ],
+      "properties": {
+        "path": { "type": "string" },
+        "language": { "type": "string" },
+        "decls": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/decl" }
+        },
+        "flow_events": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/flowEvent" }
+        },
+        "imports": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/import" }
+        },
+        "refs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/reference" }
+        },
+        "assignment_values": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/assignmentValue" }
+        },
+        "runtime_type_narrowings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/runtimeTypeNarrowing" }
+        },
+        "branch_conditions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/branchCondition" }
+        },
+        "strings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/stringFact" }
+        }
+      }
+    },
+    "decl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "symbol_id",
+        "name",
+        "qualified_name",
+        "kind",
+        "visibility",
+        "line",
+        "column",
+        "end_line",
+        "params",
+        "flow_event_ids",
+        "parent_symbol_id"
+      ],
+      "properties": {
+        "symbol_id": { "$ref": "#/$defs/uint32" },
+        "name": { "type": "string" },
+        "qualified_name": { "$ref": "#/$defs/nullableString" },
+        "kind": { "$ref": "#/$defs/declKind" },
+        "visibility": { "type": "string" },
+        "line": { "$ref": "#/$defs/uint32" },
+        "column": { "$ref": "#/$defs/uint32" },
+        "end_line": { "$ref": "#/$defs/uint32" },
+        "params": { "$ref": "#/$defs/stringArray" },
+        "flow_event_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/uint" }
+        },
+        "parent_symbol_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/uint32" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "import": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["module", "alias", "is_wildcard", "line"],
+      "properties": {
+        "module": { "type": "string" },
+        "alias": { "$ref": "#/$defs/nullableString" },
+        "original_name": { "type": "string" },
+        "is_wildcard": { "type": "boolean" },
+        "scope": { "type": "string" },
+        "line": { "$ref": "#/$defs/uint32" },
+        "local_bindings": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "line", "column", "resolved_symbol_id"],
+      "properties": {
+        "name": { "type": "string" },
+        "kind": { "type": "string" },
+        "line": { "$ref": "#/$defs/uint32" },
+        "column": { "$ref": "#/$defs/uint32" },
+        "resolved_symbol_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/uint32" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "assignmentValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assignment_start_byte",
+        "assignment_end_byte",
+        "value_start_byte",
+        "value_end_byte",
+        "call_sites",
+        "value_flow"
+      ],
+      "properties": {
+        "assignment_start_byte": { "$ref": "#/$defs/uint" },
+        "assignment_end_byte": { "$ref": "#/$defs/uint" },
+        "target_start_byte": { "$ref": "#/$defs/uint" },
+        "target_end_byte": { "$ref": "#/$defs/uint" },
+        "value_start_byte": { "$ref": "#/$defs/uint" },
+        "value_end_byte": { "$ref": "#/$defs/uint" },
+        "call_sites": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/span" }
+        },
+        "value_flow": { "$ref": "#/$defs/expressionFlow" },
+        "direct_call_name": { "type": "string" },
+        "direct_call_receiver": { "type": "string" }
+      }
+    },
+    "expressionFlow": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "place": { "type": "string" },
+        "projection": { "$ref": "#/$defs/expressionProjection" },
+        "source_names": { "$ref": "#/$defs/stringArray" },
+        "call_sites": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/span" }
+        },
+        "aggregate_fields": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/expressionField" }
+        },
+        "tuple_items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/expressionFlow" }
+        },
+        "spreads": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/expressionFlow" }
+        }
+      }
+    },
+    "expressionProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base"],
+      "properties": {
+        "base": { "type": "string" },
+        "path": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "expressionField": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value"],
+      "properties": {
+        "name": { "type": "string" },
+        "value_span": { "$ref": "#/$defs/span" },
+        "value": { "$ref": "#/$defs/expressionFlow" }
+      }
+    },
+    "runtimeTypeNarrowing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branch_span", "guarded_span", "subject", "type_name"],
+      "properties": {
+        "branch_span": { "$ref": "#/$defs/span" },
+        "guarded_span": { "$ref": "#/$defs/span" },
+        "subject": { "type": "string" },
+        "type_name": { "type": "string" }
+      }
+    },
+    "branchCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branch_span", "condition_span", "polarity"],
+      "properties": {
+        "branch_span": { "$ref": "#/$defs/span" },
+        "condition_span": { "$ref": "#/$defs/span" },
+        "polarity": { "enum": ["positive", "negated"] },
+        "membership": { "$ref": "#/$defs/membershipCondition" },
+        "expression": { "$ref": "#/$defs/conditionExpression" }
+      }
+    },
+    "membershipCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subject", "collection", "then_contains"],
+      "properties": {
+        "subject": { "type": "string" },
+        "collection": { "type": "string" },
+        "then_contains": { "type": "boolean" }
+      }
+    },
+    "conditionOperand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["span"],
+      "properties": {
+        "span": { "$ref": "#/$defs/span" },
+        "value_flow": { "$ref": "#/$defs/expressionFlow" },
+        "static_string": { "type": "string" },
+        "static_value": { "$ref": "#/$defs/staticScalarValue" }
+      }
+    },
+    "staticScalarValue": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "string" },
+            "value": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "boolean" },
+            "value": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "const": "null" }
+          }
+        }
+      ]
+    },
+    "conditionExpression": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "span"],
+          "properties": {
+            "kind": { "const": "atom" },
+            "span": { "$ref": "#/$defs/span" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "span", "operand"],
+          "properties": {
+            "kind": { "const": "truthy" },
+            "span": { "$ref": "#/$defs/span" },
+            "operand": { "$ref": "#/$defs/conditionOperand" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "span", "operand"],
+          "properties": {
+            "kind": { "const": "not" },
+            "span": { "$ref": "#/$defs/span" },
+            "operand": { "$ref": "#/$defs/conditionExpression" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "span", "operands"],
+          "properties": {
+            "kind": { "enum": ["all", "any"] },
+            "span": { "$ref": "#/$defs/span" },
+            "operands": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/conditionExpression" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "span", "relation", "left", "right"],
+          "properties": {
+            "kind": { "const": "equality" },
+            "span": { "$ref": "#/$defs/span" },
+            "relation": { "enum": ["equal", "not_equal"] },
+            "left": { "$ref": "#/$defs/conditionOperand" },
+            "right": { "$ref": "#/$defs/conditionOperand" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "span", "subject", "type_name"],
+          "properties": {
+            "kind": { "const": "type_test" },
+            "span": { "$ref": "#/$defs/span" },
+            "subject": { "$ref": "#/$defs/conditionOperand" },
+            "type_name": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "span", "subject", "collection", "then_contains"],
+          "properties": {
+            "kind": { "const": "membership" },
+            "span": { "$ref": "#/$defs/span" },
+            "subject": { "$ref": "#/$defs/conditionOperand" },
+            "collection": { "$ref": "#/$defs/conditionOperand" },
+            "then_contains": { "type": "boolean" }
+          }
+        }
+      ]
+    },
+    "callArg": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["span", "passing_mode", "value_text"],
+      "properties": {
+        "span": { "$ref": "#/$defs/span" },
+        "passing_mode": { "enum": ["value", "write_back"] },
+        "name": { "type": "string" },
+        "value_text": { "type": "string" },
+        "place": { "type": "string" },
+        "source_names": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "flowEventBaseProperties": {
+      "type": "object",
+      "properties": {
+        "event_id": { "$ref": "#/$defs/uint" },
+        "owner_symbol_id": { "$ref": "#/$defs/uint32" },
+        "parent_event_id": { "$ref": "#/$defs/uint" },
+        "region": { "enum": ["root", "then", "else", "body", "catch", "finally"] },
+        "ordinal": { "$ref": "#/$defs/uint" },
+        "span": { "$ref": "#/$defs/span" }
+      },
+      "required": ["event_id", "owner_symbol_id", "region", "ordinal", "kind", "span"]
+    },
+    "flowEvent": {
+      "oneOf": [
+        {
+          "allOf": [
+            { "$ref": "#/$defs/flowEventBaseProperties" },
+            {
+              "type": "object",
+              "required": ["name", "call_kind"],
+              "properties": {
+                "kind": { "const": "call" },
+                "name": { "type": "string" },
+                "receiver": { "type": "string" },
+                "receiver_types": { "$ref": "#/$defs/stringArray" },
+                "call_kind": {
+                  "enum": [
+                    "function",
+                    "method",
+                    "constructor",
+                    "macro",
+                    "operator",
+                    "indirect",
+                    "channel_send",
+                    "index_write"
+                  ]
+                },
+                "args": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/callArg" }
+                }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/flowEventBaseProperties" },
+            {
+              "type": "object",
+              "properties": {
+                "kind": { "const": "branch" },
+                "condition": { "type": "string" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/flowEventBaseProperties" },
+            {
+              "type": "object",
+              "required": ["loop_kind"],
+              "properties": {
+                "kind": { "const": "loop" },
+                "loop_kind": { "enum": ["for", "while", "do_while", "for_each", "loop"] }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/flowEventBaseProperties" },
+            {
+              "type": "object",
+              "required": ["target"],
+              "properties": {
+                "kind": { "const": "assign" },
+                "target": { "type": "string" },
+                "source_name": { "type": "string" },
+                "source_call": { "type": "string" },
+                "source_call_args": { "$ref": "#/$defs/stringArray" },
+                "source_names": { "$ref": "#/$defs/stringArray" },
+                "declares_new_binding": { "const": true },
+                "value_kind": {
+                  "enum": [
+                    "literal",
+                    "call_result",
+                    "yield_result",
+                    "destructure",
+                    "callable_reference",
+                    "compound",
+                    "unknown"
+                  ]
+                }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/flowEventBaseProperties" },
+            {
+              "type": "object",
+              "required": ["target"],
+              "properties": {
+                "kind": { "const": "aggregate_assign" },
+                "target": { "type": "string" },
+                "type_name": { "type": "string" },
+                "value_flow": { "$ref": "#/$defs/expressionFlow" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/flowEventBaseProperties" },
+            {
+              "type": "object",
+              "properties": {
+                "kind": { "const": "return" },
+                "value_kind": {
+                  "enum": [
+                    "literal",
+                    "call_result",
+                    "yield_result",
+                    "destructure",
+                    "callable_reference",
+                    "compound",
+                    "unknown"
+                  ]
+                },
+                "value_text": { "type": "string" },
+                "value_name": { "type": "string" },
+                "value_flow": { "$ref": "#/$defs/expressionFlow" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/flowEventBaseProperties" },
+            {
+              "type": "object",
+              "properties": {
+                "kind": { "const": "throw" },
+                "value_name": { "type": "string" },
+                "thrown_type": { "type": "string" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/flowEventBaseProperties" },
+            {
+              "type": "object",
+              "properties": {
+                "kind": { "const": "try" },
+                "catch_param": { "type": "string" },
+                "catch_types": { "$ref": "#/$defs/stringArray" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/flowEventBaseProperties" },
+            {
+              "type": "object",
+              "properties": {
+                "kind": { "enum": ["break", "continue"] },
+                "label": { "type": "string" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/flowEventBaseProperties" },
+            {
+              "type": "object",
+              "properties": {
+                "kind": { "const": "yield" },
+                "value_text": { "type": "string" },
+                "value_flow": { "$ref": "#/$defs/expressionFlow" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/flowEventBaseProperties" },
+            {
+              "type": "object",
+              "properties": {
+                "kind": { "const": "await" },
+                "value_name": { "type": "string" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/flowEventBaseProperties" },
+            {
+              "type": "object",
+              "properties": {
+                "kind": { "enum": ["defer", "using"] }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/flowEventBaseProperties" },
+            {
+              "type": "object",
+              "required": ["name", "transition"],
+              "properties": {
+                "kind": { "const": "lifecycle" },
+                "name": { "type": "string" },
+                "transition": { "type": "string" }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        }
+      ]
+    },
+    "stringFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "category", "line", "column"],
+      "properties": {
+        "text": { "type": "string" },
+        "category": { "type": "string" },
+        "line": { "$ref": "#/$defs/uint32" },
+        "column": { "$ref": "#/$defs/uint32" }
+      }
+    },
+    "taintGraph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "functions",
+        "call_edges",
+        "chains",
+        "chains_complete",
+        "chains_mode",
+        "chains_truncated_targets",
+        "flow_id_labels",
+        "flow_id_labels_complete",
+        "flow_id_labels_mode",
+        "flow_id_labels_truncated_functions",
+        "reachable_facts",
+        "intra_taint",
+        "alias_maps",
+        "class_fields",
+        "entry_points",
+        "function_summaries",
+        "assign_chains",
+        "propagations",
+        "propagations_complete",
+        "propagations_mode"
+      ],
+      "properties": {
+        "functions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/taintFunction" }
+        },
+        "call_edges": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/taintCallEdge" }
+        },
+        "chains": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/taintChain" }
+        },
+        "chains_complete": { "type": "boolean" },
+        "chains_mode": { "const": "compressed_callgraph" },
+        "chains_truncated_targets": { "$ref": "#/$defs/uint" },
+        "chains_incomplete_reason": { "type": "string" },
+        "flow_id_labels": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/flowIdLabels" }
+        },
+        "flow_id_labels_complete": { "type": "boolean" },
+        "flow_id_labels_mode": { "const": "compressed_callgraph" },
+        "flow_id_labels_truncated_functions": { "$ref": "#/$defs/uint" },
+        "flow_id_labels_incomplete_reason": { "type": "string" },
+        "reachable_facts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/reachableFacts" }
+        },
+        "intra_taint": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/intraTaint" }
+        },
+        "alias_maps": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/aliasMap" }
+        },
+        "class_fields": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/classFields" }
+        },
+        "entry_points": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/entryPoint" }
+        },
+        "function_summaries": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/functionSummary" }
+        },
+        "assign_chains": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/assignChain" }
+        },
+        "propagations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/propagation" }
+        },
+        "propagations_complete": { "type": "boolean" },
+        "propagations_mode": {
+          "enum": ["compiled_idg", "materialized_entries", "omitted"]
+        },
+        "propagations_omitted_reason": { "type": "string" }
+      }
+    },
+    "taintFunction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["func_id", "name", "qualified_name", "file", "line", "params", "kind"],
+      "properties": {
+        "func_id": { "$ref": "#/$defs/uint32" },
+        "name": { "type": "string" },
+        "qualified_name": { "$ref": "#/$defs/nullableString" },
+        "file": { "type": "string" },
+        "line": { "$ref": "#/$defs/uint32" },
+        "params": { "$ref": "#/$defs/stringArray" },
+        "kind": { "enum": ["function", "method", "constructor"] }
+      }
+    },
+    "taintCallEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "kind", "precision", "resolver_stage", "evidence", "confidence"],
+      "properties": {
+        "from": { "$ref": "#/$defs/uint32" },
+        "to": { "$ref": "#/$defs/uint32" },
+        "kind": { "enum": ["direct", "virtual", "indirect", "unknown"] },
+        "precision": { "enum": ["exact", "narrowed"] },
+        "resolver_stage": { "type": "string", "minLength": 1 },
+        "evidence": { "type": "string", "minLength": 1 },
+        "confidence": { "type": "integer", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "taintChain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_func_id", "target", "chains", "truncated"],
+      "properties": {
+        "target_func_id": { "$ref": "#/$defs/uint32" },
+        "target": { "type": "string" },
+        "chains": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/uint32" }
+          }
+        },
+        "truncated": { "type": "boolean" },
+        "truncation_reason": { "type": "string" }
+      }
+    },
+    "flowIdLabels": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["func_id", "function", "labels", "truncated"],
+      "properties": {
+        "func_id": { "$ref": "#/$defs/uint32" },
+        "function": { "type": "string" },
+        "labels": { "$ref": "#/$defs/stringArray" },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "reachableFacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["func_id", "function", "by_kind"],
+      "properties": {
+        "func_id": { "$ref": "#/$defs/uint32" },
+        "function": { "type": "string" },
+        "by_kind": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/stringArray" }
+        }
+      }
+    },
+    "intraTaint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["func_id", "function", "backend", "per_param"],
+      "properties": {
+        "func_id": { "$ref": "#/$defs/uint32" },
+        "function": { "type": "string" },
+        "backend": { "const": "cfg_local" },
+        "per_param": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/intraTaintParam" }
+        }
+      }
+    },
+    "intraTaintParam": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["param_index", "param_name", "iterations", "blocks"],
+      "properties": {
+        "param_index": { "$ref": "#/$defs/uint" },
+        "param_name": { "type": "string" },
+        "iterations": { "$ref": "#/$defs/uint32" },
+        "blocks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/intraBlock" }
+        }
+      }
+    },
+    "intraBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["block_id", "block_in", "block_out"],
+      "properties": {
+        "block_id": { "$ref": "#/$defs/uint32" },
+        "block_in": { "$ref": "#/$defs/stringArray" },
+        "block_out": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "aliasMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "entries"],
+      "properties": {
+        "file": { "type": "string" },
+        "entries": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/aliasEntry" }
+        }
+      }
+    },
+    "aliasEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["local", "target_kind", "module"],
+      "properties": {
+        "local": { "type": "string" },
+        "target_kind": { "enum": ["member", "namespace", "type"] },
+        "module": { "type": "string" },
+        "member": { "type": "string" }
+      }
+    },
+    "classFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class", "file", "line", "tainted_fields"],
+      "properties": {
+        "class": { "type": "string" },
+        "file": { "type": "string" },
+        "line": { "$ref": "#/$defs/uint32" },
+        "tainted_fields": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "entryPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["func_id", "function", "file", "line", "kind", "params"],
+      "properties": {
+        "func_id": { "$ref": "#/$defs/uint32" },
+        "function": { "type": "string" },
+        "file": { "type": "string" },
+        "line": { "$ref": "#/$defs/uint32" },
+        "kind": { "enum": ["decorator", "unreferenced", "class_field"] },
+        "params": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "functionSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["function", "file", "line", "returns_taint_of"],
+      "properties": {
+        "function": { "type": "string" },
+        "file": { "type": "string" },
+        "line": { "$ref": "#/$defs/uint32" },
+        "returns_taint_of": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/uint" }
+        }
+      }
+    },
+    "assignChain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["func_id", "function", "per_param"],
+      "properties": {
+        "func_id": { "$ref": "#/$defs/uint32" },
+        "function": { "type": "string" },
+        "per_param": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/assignChainParam" }
+        }
+      }
+    },
+    "assignChainParam": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["param_index", "param_name", "tainted"],
+      "properties": {
+        "param_index": { "$ref": "#/$defs/uint" },
+        "param_name": { "type": "string" },
+        "tainted": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "propagation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry", "entry_file", "entry_line", "precision", "pairs_analyzed", "records"],
+      "properties": {
+        "entry": { "type": "string" },
+        "entry_file": { "type": "string" },
+        "entry_line": { "$ref": "#/$defs/uint32" },
+        "precision": { "enum": ["exact", "narrowed"] },
+        "pairs_analyzed": { "$ref": "#/$defs/uint32" },
+        "records": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/taintRecord" }
+        }
+      }
+    },
+    "taintRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["caller", "callee", "call_line", "edge_kind", "edge_precision", "tainted_args"],
+      "properties": {
+        "caller": { "type": "string" },
+        "callee": { "type": "string" },
+        "call_line": { "$ref": "#/$defs/uint32" },
+        "edge_kind": { "enum": ["direct", "virtual", "indirect", "unknown"] },
+        "edge_precision": { "enum": ["exact", "narrowed"] },
+        "tainted_args": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/taintedArg" }
+        }
+      }
+    },
+    "taintedArg": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "value_text", "param_name"],
+      "properties": {
+        "index": { "$ref": "#/$defs/uint" },
+        "value_text": { "type": "string" },
+        "param_name": { "type": "string" }
+      }
+    }
+  }
+}

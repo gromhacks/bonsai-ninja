@@ -376,6 +376,7 @@ jobs:
           mkdir -p "dist/$artifact/.agents/skills"
           cp -R .agents/skills/bonsai-ninja "dist/$artifact/.agents/skills/bonsai-ninja"
           cp -R docs "dist/$artifact/docs"
+          cp -R schemas "dist/$artifact/schemas"
           cp -R security-patterns "dist/$artifact/security-patterns"
           smoke_dir="$(mktemp -d)"
           trap 'rm -rf "$smoke_dir"' EXIT
@@ -430,6 +431,7 @@ jobs:
           New-Item -ItemType Directory -Force "dist/$artifact/.agents/skills" | Out-Null
           Copy-Item .agents/skills/bonsai-ninja "dist/$artifact/.agents/skills/bonsai-ninja" -Recurse
           Copy-Item docs "dist/$artifact/docs" -Recurse
+          Copy-Item schemas "dist/$artifact/schemas" -Recurse
           Copy-Item security-patterns "dist/$artifact/security-patterns" -Recurse
           $repo = (Get-Location).Path
           $smoke = "$env:RUNNER_TEMP/bonsai-packaged-security.json"

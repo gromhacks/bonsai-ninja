@@ -42,5 +42,8 @@ comfy-table = { workspace = true }
 # language pack's highlight queries.
 tree-sitter = { workspace = true }
 
+[dev-dependencies]
+jsonschema = { workspace = true }
+
 [lints]
 workspace = true

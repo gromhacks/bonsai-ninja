@@ -10,17 +10,17 @@ licenses of its transitive dependencies for compliance and attribution.
 
 ## License audit summary
 
-Current `Cargo.lock` / `cargo metadata --locked` graph: 245 packages
-(46 workspace crates + 199 external packages).
+Current `Cargo.lock` / `cargo metadata --locked` graph: 299 packages
+(46 workspace crates + 253 external packages).
 
-The graph currently carries 21 distinct SPDX metadata expressions. The release
+The graph currently carries 25 distinct SPDX metadata expressions. The release
 gate evaluates each expression as an SPDX choice rather than treating a
 dual-licensed dependency as if every branch applied. Run the command under
 [Reproducing the audit](#reproducing-the-audit) for the authoritative current
 distribution; it is intentionally not duplicated as a hand-maintained count
 table here.
 
-All licenses are permissive (MIT, Apache-2.0, ISC, BSD-2/3-Clause, 0BSD,
+All licenses are permissive (MIT, MIT-0, Apache-2.0, ISC, BSD-2/3-Clause, 0BSD,
 Zlib, BSL-1.0, CC0-1.0, Unicode-3.0, CDLA-Permissive-2.0) or
 file-level weak copyleft (MPL-2.0). No GPL, AGPL, EUPL, SSPL, or
 LGPL-only dependencies.
@@ -64,6 +64,7 @@ certificate set. Compatible with MIT distribution.
 | crossbeam | Apache-2.0 OR MIT |
 | ignore | Apache-2.0 OR MIT |
 | indicatif | MIT |
+| jsonschema (test-only) | MIT |
 | parking_lot | Apache-2.0 OR MIT |
 | rayon | Apache-2.0 OR MIT |
 | regex | Apache-2.0 OR MIT |

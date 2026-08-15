@@ -361,7 +361,8 @@ Native JSON schema v7 emits workspace-relative code locations and one
 top-level absolute `workspace_root`. SDK consumers should join the two only at
 the filesystem boundary; storing or comparing location identities by absolute
 host path is unsupported. Explicit export-cache rebuilds validate the schema
-version before reuse.
+version before reuse. The complete machine-readable contract is
+[`schemas/bonsai-native-export-v7.schema.json`](../../schemas/bonsai-native-export-v7.schema.json).
 
 ---
 

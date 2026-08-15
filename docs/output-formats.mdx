@@ -86,6 +86,26 @@ phases; the IDG can be unloaded and reloaded between them from the same
 validated generation. Large output files therefore do not need a matching
 in-memory JSON document.
 
+### Native JSON schema
+
+The committed Draft 2020-12 schema for native export v7 is
+[`schemas/bonsai-native-export-v7.schema.json`](../schemas/bonsai-native-export-v7.schema.json).
+It defines the top-level document, compiler file tables, normalized flow-event
+variants, callgraph rows, completeness fields, and IDG/taint projections. The
+release archive includes this file under `schemas/`.
+
+`schema: "bonsai-native-export"` and `schema_version: 7` select this contract.
+Schema versions are immutable: an incompatible wire-format change requires a
+new schema file and a version increment. CI validates default exports for all
+supported language fixtures plus a materialized `--full-propagations` export
+against the committed schema, and rejects unknown top-level fields.
+
+```bash
+bonsai-ninja export ./src --format json --output-path bonsai-export.json
+# Validate bonsai-export.json with any Draft 2020-12 JSON Schema validator
+# against schemas/bonsai-native-export-v7.schema.json.
+```
+
 Treat a whole-repository native export as a bulk artifact, not as model prompt
 text. Production-scale exports can be multi-gigabyte and take minutes even
 when the semantic generation is warm. Prefer `--output-path`, keep the exact

@@ -22,6 +22,7 @@ ALLOWED = {
     "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
+    "MIT-0",
     "MPL-2.0",
     "Unicode-3.0",
     "Unlicense",
@@ -145,6 +146,7 @@ def expression_verdict(expression: str) -> Verdict:
 
 def self_test() -> None:
     assert expression_verdict("MIT").satisfiable
+    assert expression_verdict("MIT-0").satisfiable
     assert expression_verdict("MIT OR LGPL-2.1-or-later").satisfiable
     assert not expression_verdict("MIT AND LGPL-2.1-or-later").satisfiable
     assert expression_verdict("Apache-2.0 WITH LLVM-exception").satisfiable
