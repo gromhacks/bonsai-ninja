@@ -80,10 +80,9 @@ will leave unrecognized forms as diagnostic incompleteness.
 | `Unsupported` | Construct has no static evidence model. | **Rules requiring this category are rejected at rulepack load time.** | A deliberate gate: prevents false-precision findings on shapes the engine would not analyze correctly. |
 | `n/a` | Construct doesn't exist in this language. | No rule could target it anyway. | E.g. macros in JS, exceptions in Rust, generics in Lua. |
 
-So `Partial` everywhere is **not a second accuracy level**: it is the
-engine telling you "I will emit a finding only for proven static evidence,
-and where I cannot prove it I will report incompleteness/diagnostics
-instead of guessing."
+So `Partial` everywhere is **not a second accuracy level**. The engine emits
+findings only for proven static evidence; when it cannot prove a fact, it
+reports incompleteness or diagnostics instead of guessing.
 
 ## Capability matrix
 
