@@ -52,18 +52,32 @@ class Verdict:
     unknown: frozenset[str] = frozenset()
 
     def and_(self, other: "Verdict") -> "Verdict":
-        return Verdict(self.satisfiable and other.satisfiable, self.unknown | other.unknown)
+        return Verdict(
+            self.satisfiable and other.satisfiable, self.unknown | other.unknown
+        )
 
     def or_(self, other: "Verdict") -> "Verdict":
-        return Verdict(self.satisfiable or other.satisfiable, self.unknown | other.unknown)
+        return Verdict(
+            self.satisfiable or other.satisfiable, self.unknown | other.unknown
+        )
 
 
 class Parser:
     def __init__(self, expression: str) -> None:
         normalized = expression.replace("/", " OR ")
         self.tokens = TOKEN.findall(normalized)
-        compact = "".join(self.tokens).replace("AND", "").replace("OR", "").replace("WITH", "")
-        expected = re.sub(r"[\s/]", "", expression).replace("AND", "").replace("OR", "").replace("WITH", "")
+        compact = (
+            "".join(self.tokens)
+            .replace("AND", "")
+            .replace("OR", "")
+            .replace("WITH", "")
+        )
+        expected = (
+            re.sub(r"[\s/]", "", expression)
+            .replace("AND", "")
+            .replace("OR", "")
+            .replace("WITH", "")
+        )
         if compact != expected:
             raise ValueError(f"unsupported SPDX syntax: {expression!r}")
         self.index = 0
@@ -146,10 +160,14 @@ def main() -> int:
     )
     violations: list[str] = []
     licenses: Counter[str] = Counter()
-    for package in sorted(metadata["packages"], key=lambda item: (item["name"], item["version"])):
+    for package in sorted(
+        metadata["packages"], key=lambda item: (item["name"], item["version"])
+    ):
         expression = package.get("license")
         if not expression:
-            violations.append(f"{package['name']} {package['version']}: missing SPDX license expression")
+            violations.append(
+                f"{package['name']} {package['version']}: missing SPDX license expression"
+            )
             continue
         licenses[expression] += 1
         try:

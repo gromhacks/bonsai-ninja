@@ -14,35 +14,14 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
-
-SUPPORTED_LANGS = (
-    "c",
-    "cpp",
-    "csharp",
-    "dart",
-    "elixir",
-    "erlang",
-    "go",
-    "javascript",
-    "kotlin",
-    "lua",
-    "objc",
-    "perl",
-    "php",
-    "python",
-    "ruby",
-    "rust",
-    "scala",
-    "swift",
-    "typescript",
-)
 
 
 LANG_EXTENSIONS: dict[str, tuple[str, ...]] = {
@@ -53,6 +32,7 @@ LANG_EXTENSIONS: dict[str, tuple[str, ...]] = {
     "elixir": (".ex", ".exs"),
     "erlang": (".erl", ".hrl"),
     "go": (".go",),
+    "java": (".java",),
     "javascript": (".js", ".jsx", ".mjs", ".cjs"),
     "kotlin": (".kt", ".kts"),
     "lua": (".lua",),
@@ -106,6 +86,11 @@ TARGETS: tuple[RepoTarget, ...] = (
     RepoTarget("elixir", "elixir", "https://github.com/elixir-lang/elixir.git"),
     RepoTarget("erlang", "otp", "https://github.com/erlang/otp.git"),
     RepoTarget("go", "kubernetes", "https://github.com/kubernetes/kubernetes.git"),
+    RepoTarget(
+        "java",
+        "spring-framework",
+        "https://github.com/spring-projects/spring-framework.git",
+    ),
     RepoTarget("javascript", "node", "https://github.com/nodejs/node.git"),
     RepoTarget("kotlin", "kotlin", "https://github.com/JetBrains/kotlin.git"),
     RepoTarget("lua", "kong", "https://github.com/Kong/kong.git"),
@@ -135,6 +120,65 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def supported_languages(root: Path) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            path.name
+            for path in (root / "security-patterns" / "langs").iterdir()
+            if path.is_dir()
+        )
+    )
+
+
+def target_inventory_problems(root: Path) -> list[str]:
+    """Return drift between compiler adapters, rule data, and benchmark targets."""
+
+    rulepack = set(supported_languages(root))
+    adapters = {
+        path.name.removeprefix("lang_")
+        for path in (root / "crates").glob("lang_*")
+        if path.is_dir() and path.name != "lang_api"
+    }
+    target_counts = Counter(target.language for target in TARGETS)
+    targets = set(target_counts)
+    extensions = set(LANG_EXTENSIONS)
+    problems: list[str] = []
+
+    if adapters != rulepack:
+        problems.append(
+            "adapter/rulepack language mismatch: "
+            f"adapters_only={sorted(adapters - rulepack)}, "
+            f"rulepack_only={sorted(rulepack - adapters)}"
+        )
+    for label, actual in (("targets", targets), ("extension inventories", extensions)):
+        if actual != rulepack:
+            problems.append(
+                f"real-world {label} do not cover the supported languages: "
+                f"missing={sorted(rulepack - actual)}, extra={sorted(actual - rulepack)}"
+            )
+    duplicates = sorted(
+        language for language, count in target_counts.items() if count != 1
+    )
+    if duplicates:
+        problems.append(f"languages with duplicate repository targets: {duplicates}")
+
+    names = Counter(target.name for target in TARGETS)
+    duplicate_names = sorted(name for name, count in names.items() if count != 1)
+    if duplicate_names:
+        problems.append(f"duplicate repository target names: {duplicate_names}")
+    invalid_urls = sorted(
+        target.url
+        for target in TARGETS
+        if not target.url.startswith("https://github.com/")
+        or not target.url.endswith(".git")
+    )
+    if invalid_urls:
+        problems.append(
+            f"repository targets must use HTTPS GitHub clone URLs: {invalid_urls}"
+        )
+    return problems
+
+
 def find_binary(root: Path, explicit: str | None) -> Path:
     if explicit:
         binary = Path(explicit).expanduser().resolve()
@@ -149,11 +193,11 @@ def find_binary(root: Path, explicit: str | None) -> Path:
     )
 
 
-def parse_langs(raw: str | None) -> list[str]:
+def parse_langs(raw: str | None, supported: tuple[str, ...]) -> list[str]:
     if not raw or raw == "all":
-        return list(SUPPORTED_LANGS)
+        return list(supported)
     langs = [part.strip() for part in raw.split(",") if part.strip()]
-    unknown = sorted(set(langs) - set(SUPPORTED_LANGS))
+    unknown = sorted(set(langs) - set(supported))
     if unknown:
         raise SystemExit(f"unknown language(s): {', '.join(unknown)}")
     return langs
@@ -600,6 +644,11 @@ def run_target(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="validate language and repository-target coverage without cloning",
+    )
     parser.add_argument("--bin", dest="binary", help="bonsai-ninja binary path")
     parser.add_argument(
         "--langs", default="all", help="comma-separated language list, or all"
@@ -633,8 +682,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = repo_root()
+    inventory_problems = target_inventory_problems(root)
+    if inventory_problems:
+        for problem in inventory_problems:
+            print(f"real-world benchmark inventory: {problem}", file=sys.stderr)
+        return 1
+    supported = supported_languages(root)
+    if args.check:
+        print(
+            "real-world benchmark inventory: "
+            f"{len(supported)} supported languages and repository targets are consistent"
+        )
+        return 0
+
     binary = find_binary(root, args.binary)
-    langs = parse_langs(args.langs)
+    langs = parse_langs(args.langs, supported)
     tmp_root = Path(args.tmp_root).expanduser().resolve()
     tmp_root.mkdir(parents=True, exist_ok=True)
     out_dir = (

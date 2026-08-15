@@ -750,8 +750,8 @@ def main() -> int:
     langs = set(args.lang) if args.lang else None
     kinds = set(args.kind) if args.kind else None
     taint_dependent_rules = taint_dependent_rule_ids(rules_root)
-    inventory_excluded_rules = (
-        taint_dependent_rules | non_crediting_sanitizer_rule_ids(rules_root)
+    inventory_excluded_rules = taint_dependent_rules | non_crediting_sanitizer_rule_ids(
+        rules_root
     )
     tags_by_rule = rule_tags(rules_root)
 

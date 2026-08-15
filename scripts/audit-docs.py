@@ -10,6 +10,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 DOCS = REPO / "docs"
+SCRIPTS = REPO / "scripts"
 ROOT_DOCUMENTS = (
     "README.md",
     "CONTRIBUTING.md",
@@ -38,11 +39,14 @@ def documentation_files() -> list[Path]:
         REPO / ".claude",
         REPO / ".cline",
         REPO / "crates",
+        SCRIPTS,
     )
     for root in roots:
         for suffix in ("*.md", "*.mdx"):
             files.extend(root.rglob(suffix))
-    return sorted({path for path in files if path.is_file() and "target" not in path.parts})
+    return sorted(
+        {path for path in files if path.is_file() and "target" not in path.parts}
+    )
 
 
 def public_documentation_files() -> list[Path]:
@@ -53,11 +57,7 @@ def public_documentation_files() -> list[Path]:
 
 
 def active_docs() -> list[Path]:
-    return sorted(
-        path
-        for path in DOCS.rglob("*")
-        if path.suffix in {".md", ".mdx"}
-    )
+    return sorted(path for path in DOCS.rglob("*") if path.suffix in {".md", ".mdx"})
 
 
 def resolve_link(source: Path, raw: str) -> tuple[Path | None, str]:
@@ -74,11 +74,18 @@ def resolve_link(source: Path, raw: str) -> tuple[Path | None, str]:
     if " " in target and not target.startswith("/"):
         target = target.split()[0]
 
-    path = REPO / target.lstrip("/") if target.startswith("/") else source.parent / target
+    path = (
+        REPO / target.lstrip("/") if target.startswith("/") else source.parent / target
+    )
     candidates = [path]
     if not path.suffix:
         candidates.extend(
-            (Path(f"{path}.md"), Path(f"{path}.mdx"), path / "index.md", path / "index.mdx")
+            (
+                Path(f"{path}.md"),
+                Path(f"{path}.mdx"),
+                path / "index.md",
+                path / "index.mdx",
+            )
         )
     resolved = next(
         (candidate.resolve() for candidate in candidates if candidate.exists()),
@@ -137,7 +144,9 @@ def check_navigation() -> list[str]:
         failures.append("docs.json contains duplicate navigation pages")
 
     for page in pages:
-        if not any(Path(f"{REPO / page}{suffix}").is_file() for suffix in (".md", ".mdx")):
+        if not any(
+            Path(f"{REPO / page}{suffix}").is_file() for suffix in (".md", ".mdx")
+        ):
             failures.append(f"docs.json references missing page `{page}`")
 
     active = {str(path.relative_to(REPO).with_suffix("")) for path in active_docs()}
@@ -163,7 +172,9 @@ def check_retired_surface() -> list[str]:
         "docs/goal.md": "historical engineering logs are not product documentation",
     }
     for path in documentation_files():
-        for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+        for line_number, line in enumerate(
+            path.read_text(errors="replace").splitlines(), start=1
+        ):
             for token, replacement in retired_tokens.items():
                 if token in line:
                     failures.append(
@@ -184,7 +195,9 @@ def check_publication_hygiene() -> list[str]:
         "/private/tmp": "replace host-specific temporary paths with portable examples",
     }
     for path in documentation_files():
-        for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+        for line_number, line in enumerate(
+            path.read_text(errors="replace").splitlines(), start=1
+        ):
             lowered = line.lower()
             for token, replacement in retired.items():
                 if token in lowered:
@@ -223,7 +236,9 @@ def check_command_examples() -> list[str]:
     invalid_security_pack = re.compile(r"\bbonsai-ninja\s+security\s+pack\b")
     invalid_index = re.compile(r"\bbonsai-ninja\s+index\s+--")
     for path in public_documentation_files():
-        for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+        for line_number, line in enumerate(
+            path.read_text(errors="replace").splitlines(), start=1
+        ):
             if invalid_security_pack.search(line):
                 failures.append(
                     f"{path.relative_to(REPO)}:{line_number}: `security` requires "
@@ -297,7 +312,9 @@ def check_markdown_structure(files: list[Path]) -> list[str]:
         relative = path.relative_to(REPO)
         headings: dict[str, int] = {}
         fence: tuple[str, int] | None = None
-        for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+        for line_number, line in enumerate(
+            path.read_text(errors="replace").splitlines(), start=1
+        ):
             heading = HEADING_RE.match(line)
             if heading:
                 slug = heading_slug(heading.group(1))
@@ -328,7 +345,9 @@ def check_measurement_ownership() -> list[str]:
     for path in active_docs() + [REPO / "README.md"]:
         if path.name == "RELEASE_READINESS.md":
             continue
-        for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+        for line_number, line in enumerate(
+            path.read_text(errors="replace").splitlines(), start=1
+        ):
             if date_re.search(line) or re.search(r"\bABI-v\d+\b", line):
                 failures.append(
                     f"{path.relative_to(REPO)}:{line_number}: dated release evidence belongs in "
@@ -341,12 +360,16 @@ def check_language_counts() -> list[str]:
     registry_source = (REPO / "crates" / "adapters" / "src" / "lib.rs").read_text()
     adapter_count = len(re.findall(r"Arc::new\(bonsai_lang_[a-z_]+::", registry_source))
     if adapter_count == 0:
-        return ["could not derive the supported-language count from crates/adapters/src/lib.rs"]
+        return [
+            "could not derive the supported-language count from crates/adapters/src/lib.rs"
+        ]
 
     failures: list[str] = []
     current_files = public_documentation_files()
     for path in current_files:
-        for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+        for line_number, line in enumerate(
+            path.read_text(errors="replace").splitlines(), start=1
+        ):
             for pattern in LANGUAGE_COUNT_RES:
                 for match in pattern.finditer(line):
                     documented = int(match.group(1))
@@ -363,7 +386,9 @@ def check_workspace_counts() -> list[str]:
     failures: list[str] = []
     pattern = re.compile(r"\b(\d+)-crate Rust workspace\b", re.IGNORECASE)
     for path in public_documentation_files():
-        for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+        for line_number, line in enumerate(
+            path.read_text(errors="replace").splitlines(), start=1
+        ):
             for match in pattern.finditer(line):
                 documented = int(match.group(1))
                 if documented != crate_count:
@@ -371,6 +396,38 @@ def check_workspace_counts() -> list[str]:
                         f"{path.relative_to(REPO)}:{line_number}: documents {documented} crates, "
                         f"workspace has {crate_count} crate manifests"
                     )
+    return failures
+
+
+def check_script_inventory() -> list[str]:
+    """Require an explicit owner-facing description for every developer script."""
+
+    readme = SCRIPTS / "README.md"
+    if not readme.is_file():
+        return ["scripts/README.md is missing"]
+    expected = {
+        path.name
+        for path in SCRIPTS.iterdir()
+        if path.is_file() and path.name != readme.name
+    }
+    listed_rows = re.findall(
+        r"^- `([^`]+)` — ", readme.read_text(errors="replace"), re.MULTILINE
+    )
+    listed = set(listed_rows)
+    failures = [
+        f"scripts/README.md does not document `{name}`"
+        for name in sorted(expected - listed)
+    ]
+    failures.extend(
+        f"scripts/README.md lists missing script or data file `{name}`"
+        for name in sorted(listed - expected)
+    )
+    failures.extend(
+        f"scripts/README.md lists `{name}` more than once"
+        for name in sorted(
+            {name for name in listed_rows if listed_rows.count(name) > 1}
+        )
+    )
     return failures
 
 
@@ -389,6 +446,7 @@ def main() -> int:
         + check_measurement_ownership()
         + check_language_counts()
         + check_workspace_counts()
+        + check_script_inventory()
     )
     if failures:
         for failure in failures:

@@ -51,6 +51,7 @@ required_release_commands=(
     'python3 scripts/fp_audit.py'
     'python3 scripts/category_audit.py'
     'python3 scripts/audit-release-metadata.py'
+    'python3 scripts/realworld-lang-benchmark.py --check'
     'bash scripts/audit-workflows.sh'
     'bash scripts/audit-secrets.sh'
     'scripts/audit-loop.sh --quick'

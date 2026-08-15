@@ -64,11 +64,17 @@ def main() -> int:
     for matches in windows.values():
         for left_index, (left_path, left_offset) in enumerate(matches):
             for right_path, right_offset in matches[left_index + 1 :]:
-                if left_path == right_path or (is_adapter(left_path) and is_adapter(right_path)):
+                if left_path == right_path or (
+                    is_adapter(left_path) and is_adapter(right_path)
+                ):
                     continue
                 left = [line for _, line in sequences[left_path]]
                 right = [line for _, line in sequences[right_path]]
-                if left_offset and right_offset and left[left_offset - 1] == right[right_offset - 1]:
+                if (
+                    left_offset
+                    and right_offset
+                    and left[left_offset - 1] == right[right_offset - 1]
+                ):
                     continue
                 length = WINDOW
                 while (
@@ -88,9 +94,14 @@ def main() -> int:
                 )
 
     if violations:
-        print(f"exact production clones of at least {WINDOW} logical lines:", file=sys.stderr)
+        print(
+            f"exact production clones of at least {WINDOW} logical lines:",
+            file=sys.stderr,
+        )
         for left, left_line, right, right_line, length in sorted(violations):
-            print(f"{length}\t{left}:{left_line}\t{right}:{right_line}", file=sys.stderr)
+            print(
+                f"{length}\t{left}:{left_line}\t{right}:{right_line}", file=sys.stderr
+            )
         return 1
     print(f"rust-duplication: 0 shared production clones >= {WINDOW} logical lines")
     return 0

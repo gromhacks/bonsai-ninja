@@ -41,10 +41,14 @@ def main() -> int:
     for package in metadata["packages"]:
         name = package["name"]
         version = package.get("version")
-        if not isinstance(version, str) or re.fullmatch(
-            r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?",
-            version,
-        ) is None:
+        if (
+            not isinstance(version, str)
+            or re.fullmatch(
+                r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?",
+                version,
+            )
+            is None
+        ):
             violations.append(f"{name}: invalid or missing semantic version")
         else:
             versions.add(version)
@@ -60,7 +64,9 @@ def main() -> int:
     if len(versions) != 1:
         violations.append(f"workspace package versions differ: {sorted(versions)}")
     if len(repositories) != 1:
-        violations.append(f"workspace package repositories differ: {sorted(repositories)}")
+        violations.append(
+            f"workspace package repositories differ: {sorted(repositories)}"
+        )
 
     for relative in REQUIRED_ROOT_FILES:
         if not (ROOT / relative).is_file():
