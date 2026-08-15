@@ -23,7 +23,9 @@ findings from one compiler-style pipeline.
 The project is MIT licensed. It does not require a hosted service, upload
 source code, or reserve analysis features for a paid tier.
 
-## Why agents use it
+## Use cases
+
+### Code intelligence for agents and developers
 
 **Give agents facts, not file dumps.** With tight symbol, file, and kind
 selectors, bonsai-ninja lets an agent ask for the smallest useful slice of a
@@ -31,22 +33,46 @@ repository: the definition, callers, references, arguments, path, backward
 slice, raw dataflow, or source file around one symbol. That means less prompt
 waste, less repeated reading, and answers tied to compiler evidence.
 
+Use it to map an unfamiliar repository, find the code behind a symptom, follow
+behavior across files, review change impact, or debug the analyzer itself with
+AST, HIR, CFG, resolver, call-edge, and taint diagnostics.
+
+### Security review
+
+Use the same compiler facts to inventory sources, sinks, sanitizers, and
+dependencies, then prove modeled source-to-sink paths with the sparse IDG
+fixed point. Findings can be reviewed in the terminal, emitted as JSON or
+SARIF for automation, or shared as a standalone HTML report. The analysis is
+evidence for human review—not a guarantee that code is safe—and completion
+metadata makes unresolved static behavior visible.
+
+### Structured export for model and agent research
+
+Native export exposes compiler, symbol, callgraph, control-flow, dataflow, and
+compiled-IDG facts in a machine-readable form. GraphML, Cypher, and NetworkX
+views support graph tooling. These artifacts can be inputs to retrieval,
+training-data construction, evaluations, code-reasoning experiments, or
+tool-using agents; bonsai-ninja produces the evidence and does not train or
+validate a model by itself.
+
+Our small exploratory tests produced encouraging results, but they are not a
+general model-quality claim. We would love to see independent teams take the
+idea further, publish reproducible evaluations, and tell us where it fails—
+whether that is OpenAI, Anthropic, Google, Poolside/Laguna, Qwen, DeepSeek,
+academic and independent labs, or local-model hobbyists.
+
+### What the pipeline provides
+
 | Capability | Practical benefit |
 |---|---|
 | Tree-sitter compiler frontends | Parse 20 languages into typed declarations, calls, imports, values, control flow, and dataflow facts |
 | Focused `search`, `refs`, `calls`, and `read-file` | Retrieve a small, source-backed context slice before asking for heavier semantics |
 | Compiler-resolved `inspect`, `trace`, `path`, and `slice` | Follow compiler-evidenced behavior across files and report unresolved dynamic edges instead of inventing them |
-| AST, HIR, CFG, resolver, edge, and taint diagnostics | Debug both the target program and the analyzer's reasoning instead of guessing from text |
+| AST, HIR, CFG, resolver, edge, and taint diagnostics | Inspect both the target program and the analyzer's reasoning instead of guessing from text |
 | Sparse IDG taint fixed point | Complete source-to-sink reachability over the admitted static graph without a hidden depth, file, iteration, or result cap |
 | Stable IDs, explicit page cursors, JSON, and the Rust SDK | Let agents cite evidence, detect when coverage continues, and automate repeatable review workflows |
-| JSON, GraphML, Cypher, and NetworkX export | Build retrieval indexes, graph features, training examples, evaluation sets, or tool-using agents from structured code facts and explicit completeness metadata |
+| JSON, GraphML, Cypher, and NetworkX export | Feed structured compiler evidence and explicit completeness metadata into downstream research and tooling |
 | Local execution and external caches | Keep source on the machine while reusing validated compiler work across queries |
-
-**From symbol to side effect, across files.** Use it to map an unfamiliar
-codebase, explain behavior, trace a bug, triage a finding, or prepare
-structured code data for downstream models. Export supplies the data;
-task-specific evaluation still determines whether a training approach
-improves a model.
 
 ## Scale, measured
 
