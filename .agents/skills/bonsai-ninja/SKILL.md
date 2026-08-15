@@ -315,6 +315,10 @@ only.
 
 Rules live under
 `security-patterns/langs/<language>/{sources,sinks,sanitizers,typing}`.
+Ordinary security commands use the immutable rulepack embedded in the binary,
+so they work from any current directory. Pass `--rules-dir` only when selecting
+an editable/custom base pack; an invalid explicit path fails instead of falling
+back. Workspace-local `.bonsai/rules/` overlays remain additive.
 Validate changes with:
 
 ```shell

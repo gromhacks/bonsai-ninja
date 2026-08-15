@@ -16,7 +16,7 @@ Workspace-local rules live under `<workspace>/.bonsai/rules/` and use the same l
 
 | Layer | Precedence | Use case |
 |---|---:|---|
-| Bundled or `--rules-dir` pack | Base | Standard shipped rules. |
+| Embedded bundle or `--rules-dir` pack | Base | Portable shipped default or an explicitly selected editable/custom base. |
 | `<workspace>/.bonsai/rules/<lang>/...` | Overlay | Project-specific sources, sinks, sanitizers, and non-finding typing models (local layout drops the `langs/` wrapper). |
 | `<workspace>/.bonsai/rules/<kind>s/*.yml` | Overlay | Small flat local packs (rule must declare `language:`). |
 | Duplicate `id` in overlay | Replaces base rule | Disable or tighten a shipped rule for a workspace. |
@@ -43,6 +43,10 @@ Workspace-local rules live under `<workspace>/.bonsai/rules/` and use the same l
 ```bash
 bonsai-ninja security ./src taint-analysis --rules-dir ./security-patterns
 ```
+
+Omit `--rules-dir` for the immutable pack compiled into the binary. Passing an
+invalid explicit directory is an error; the CLI never silently substitutes the
+bundle for a requested custom pack.
 
 <Note>
 Rule IDs are stable API. Prefer adding a more specific rule ID over changing the meaning of an existing shipped ID.

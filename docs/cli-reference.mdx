@@ -146,6 +146,8 @@ bonsai-ninja context ./src --output-path workspace-context.json
 ## security
 
 `security` is the rulepack-driven command family. It takes a workspace and a subcommand.
+The compiled-in rulepack is the portable default; `--rules-dir` or
+`BONSAI_RULES_DIR` selects a custom/editable base pack.
 
 ```bash
 bonsai-ninja security ./src taint-analysis --severity high
@@ -178,7 +180,7 @@ commands.
 
 | Flag | Commands | Default | Description |
 |---|---|---:|---|
-| `--rules-dir <DIR>` | all | Auto-discovered | Rulepack directory. Also reads `BONSAI_RULES_DIR`. |
+| `--rules-dir <DIR>` | all | Bundled | Override the base rulepack directory. Also reads `BONSAI_RULES_DIR`. |
 | `--rule <RULE>` | `sources`, `sinks`, `sanitizers` | None | Exact rule ID filter. |
 | `--rule-regex <REGEX>` | `sources`, `sinks`, `sanitizers` | None | Regex rule ID filter. |
 | `--trust <TRUST>` | `sources` | None | Source trust filter such as `remote`, `local`, `service`, `ipc`, `database`, `library`, `config`, or `physical`. |
@@ -211,7 +213,7 @@ bonsai-ninja security ./src pack --validate --taint-replay --format json
 
 | Flag | Default | Description |
 |---|---:|---|
-| `--rules-dir <DIR>` | Auto-discovered | Rulepack directory. |
+| `--rules-dir <DIR>` | Bundled | Override the base rulepack directory. |
 | `--lang <LANG>` | None | Restrict the listing or audit to one language key. |
 | `--category <CATEGORY>` | None | Restrict to one tag or rule-ID family. |
 | `--kind <KIND>` | None | Restrict to `source`, `sink`, or `sanitizer`. |
@@ -264,7 +266,7 @@ redo work.
 
 | Flag | Default | Description |
 |---|---:|---|
-| `--rules-dir <DIR>` | Auto-discovered | Rulepack directory. |
+| `--rules-dir <DIR>` | Bundled | Override the base rulepack directory. |
 | `--profile <PROFILE>` | None | Rulepack-declared preset bundle. The bundled `production` profile applies production excludes, remote trust, high severity, and 16k context unless overridden. |
 | `--source <REGEX>` | None | Source rule ID regex. |
 | `--finding <S:ID>` | None | Re-render only one stable finding ID. |
@@ -408,7 +410,7 @@ bonsai-ninja show ./src --id T:aabbccdd --taint-source update_user --taint-seed 
 | `--context <BUDGET>` | 32k | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Disable delegated command output paging. Semantic work is unchanged. |
-| `--rules-dir <DIR>` | Auto-discovered | Rulepack directory for `S:` finding IDs and security-owned `F:` flow IDs. |
+| `--rules-dir <DIR>` | Bundled | Override the rulepack directory for `S:` finding IDs and security-owned `F:` flow IDs. |
 | `--format <FORMAT>` | text | `text` or native `json`. |
 | `--output-path <PATH>` | stdout | Write the delegated output to a file. |
 
@@ -587,7 +589,7 @@ without changing the closure.
 
 | Flag | Default | Description |
 |---|---:|---|
-| `--rules-dir <DIR>` | Auto-discovered | Rulepack directory. |
+| `--rules-dir <DIR>` | Bundled | Override the base rulepack directory. |
 | `--profile <PROFILE>` | None | Rulepack-declared preset bundle. The bundled `production` profile applies production excludes, remote trust, and 16k context unless overridden. |
 | `--source <REGEX>` | None | Source rule ID regex. |
 | `--trust <TRUST>` | None | Source trust filter. |

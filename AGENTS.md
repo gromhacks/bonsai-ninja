@@ -372,6 +372,12 @@ code-navigation commands.
 ## Rulepack Work
 
 Rules live under `security-patterns/langs/<lang>/{sources,sinks,sanitizers,typing}`.
+Release binaries embed the source-controlled default pack and materialize its
+content-addressed generation in the OS cache, so ordinary security commands do
+not depend on the checkout or current directory. Use `--rules-dir` only to
+select a specific editable/custom base; invalid explicit paths must fail rather
+than silently falling back. Project-local `.bonsai/rules/` remains the overlay
+layer.
 Enable rules when they represent a real security boundary and the current
 constraints can keep common safe APIs quiet. Do not enable generic print,
 log, join, or parse patterns without a security-specific constraint.

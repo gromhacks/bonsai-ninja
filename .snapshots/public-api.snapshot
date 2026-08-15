@@ -458,6 +458,7 @@ pub mod flow_evidence;
 pub mod loader;
 pub mod rule;
 pub use analysis::{
+pub use bundled::bundled_rulepack_root;
 pub use compile::{compile_rule_to_inspect_args, CompiledRule};
 pub use deps::{build_inventory, DependencyInventory, DependencyRow};
 pub use finding::{

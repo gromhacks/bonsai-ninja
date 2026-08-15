@@ -83,12 +83,12 @@ separate the first explicit semantic index from commands run after it exists:
 
 | Cache state and operation | Measured time | Result |
 |---|---:|---|
-| Empty cache: `index --semantic` | 9m 16.6s | 7.11 GB validated reusable cache; 3.19 GB maximum RSS; no swaps |
-| After index: semantic generation reopen | 2.5s | Existing compiler objects, linkage, callgraph, retrieval, and IDG validated and reused |
-| After index: search | 4.1s | Exact requested matches |
-| After index: call lookup | 3.9s | Compiler-resolved call rows |
-| After index: default inspect | 7.6s | Structural evidence for the requested target |
-| After index: complete production taint analysis | 29.6s | Requested fixed point completed without a semantic cap |
+| Empty cache: `index --semantic` | 9m 26.1s | 7.11 GB validated reusable cache under the 3 GiB scheduling profile |
+| After index: semantic generation reopen | 2.3s | Existing compiler objects, linkage, callgraph, retrieval, and IDG validated and reused |
+| After index: search | 3.9s | Exact requested matches |
+| After index: call lookup | 3.7s | Compiler-resolved call rows |
+| After index: default inspect | 7.4s | Structural evidence for the requested target |
+| After index: complete production taint analysis | 26.7s | Requested fixed point completed without a semantic cap |
 | After index: default native export | 4m 05s | 4.54 GB compiler, callgraph, flow, and compiled-IDG facts |
 | After index: `--full-propagations` export | 7m 36s | 6.42 GB with the same exact propagation relation materialized as individual rows |
 
@@ -116,6 +116,11 @@ Each adapter owns its grammar and language syntax; shared analysis consumes
 typed compiler facts, while framework and security meaning stays in
 `security-patterns/`. See [Language Support](docs/language-support.mdx) for the
 frontend contract and known dynamic limits.
+
+The release binary embeds that YAML rulepack and uses the same loader and
+validator after materializing a content-addressed OS-cache generation. Security
+commands therefore work outside the source checkout; `--rules-dir` remains the
+deterministic custom/editable-pack override.
 
 ## Accuracy contract
 

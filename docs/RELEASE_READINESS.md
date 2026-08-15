@@ -8,7 +8,11 @@ not duplicate dated performance history.
 
 The full local release pass completed on 2026-08-14. Documentation claims,
 links, command examples, current repository counts, and the rulepack validator
-were rechecked on 2026-08-15. Local `main` has no known failing release gate.
+were rechecked on 2026-08-15. The embedded-rulepack change also passed 226
+release security unit tests, 34 release rulepack conformance tests, 80
+architecture invariants, 1,280 command/switch checks, standalone execution,
+and the complete Elasticsearch gate on that date. Local `main` has no known
+failing release gate.
 Publishing still requires the tag workflow because signing, packaging, and
 platform-specific execution happen there.
 
@@ -163,31 +167,31 @@ and their generated workspace caches are not retained after the gate.
 
 The required release test uses the sibling 30,055-source Elasticsearch
 checkout pinned by the release workflow at `e9741368da0`. The measured
-empty-cache run rebuilt the semantic generation in 556.61
-seconds. The following complete five-scenario gate passed in 248.86 seconds
+empty-cache run rebuilt the semantic generation in 566.14
+seconds. The following complete five-scenario gate passed in 216.55 seconds
 under the 3 GiB scheduler.
 
 | Operation | Time | Enforced SLO |
 |---|---:|---:|
-| Cold semantic generation | 556.61 s | completion required |
-| Fresh-process semantic reuse | 2.53 s | 15 s |
-| Default inspect | 7.62 s | 30 s |
-| Exact raw-taint inspect | 28.87 s | 30 s |
-| Fresh-cache production taint | 32.38 s | 45 s |
-| Warm production taint | 29.61 s | 30 s |
+| Cold semantic generation | 566.14 s | completion required |
+| Fresh-process semantic reuse | 2.33 s | 15 s |
+| Default inspect | 7.39 s | 30 s |
+| Exact raw-taint inspect | 25.97 s | 30 s |
+| Fresh-cache production taint | 30.19 s | 45 s |
+| Warm production taint | 26.66 s | 30 s |
 | `tree --max-depth 1` | 0.02 s | 30 s |
-| Search | 4.06 s | 30 s |
-| Definitions | 14.25 s | 30 s |
-| Imports | 8.03 s | 30 s |
-| Classes | 8.68 s | 30 s |
-| Entry points | 28.85 s | 30 s |
-| Calls | 3.86 s | 30 s |
-| Arguments | 4.16 s | 30 s |
-| Scoped `read-file` | 1.75 s | 30 s |
-| Source inventory | 3.56 s | 30 s |
-| High-severity sink inventory | 25.22 s | 30 s |
-| Sanitizer inventory | 21.64 s | 30 s |
-| Dependency inventory | 11.16 s | 30 s |
+| Search | 3.92 s | 30 s |
+| Definitions | 13.44 s | 30 s |
+| Imports | 7.50 s | 30 s |
+| Classes | 7.89 s | 30 s |
+| Entry points | 26.83 s | 30 s |
+| Calls | 3.72 s | 30 s |
+| Arguments | 3.56 s | 30 s |
+| Scoped `read-file` | 1.54 s | 30 s |
+| Source inventory | 3.48 s | 30 s |
+| High-severity sink inventory | 22.40 s | 30 s |
+| Sanitizer inventory | 19.37 s | 30 s |
+| Dependency inventory | 10.32 s | 30 s |
 
 Command:
 
@@ -213,7 +217,7 @@ callgraph, 1,505,969,092 bytes of linkage, 224,728,416 bytes of retrieval, and
 4,160,252,580 bytes of IDG. Ordinary commands compute exact requested facts
 on demand; users only pay this full prewarm when they explicitly run
 `index --semantic`. A fresh process reused the completed semantic generation
-in 2.53 seconds.
+in 2.33 seconds.
 
 Commit `dd37c87afca7c4d5f606906410d3a02777b7675a` replaced compiler-object
 batch barriers with a continuous, source-weighted worklist. Completed payloads
@@ -225,8 +229,8 @@ a bounded source-weighted worker window. Workers lower independent typed
 segments concurrently, memory permits remain held until the canonical
 stitcher consumes each result, and a bounded reorder map preserves ascending
 `SegmentId` publication. The IDG build fell from 117.36 seconds to 95.55
-seconds, and complete cold generation fell to 556.61 seconds: 2.90x faster and
-65.5% less wall time than the original baseline, with the same
+seconds. The current end-to-end verification completed in 566.14 seconds:
+2.85x faster and 64.9% less wall time than the original baseline, with the same
 7,113,425,453-byte semantic generation. A candidate that parallelized global
 header replay was rejected after the complete cold gate slowed to 572.00
 seconds; phase-local speedups are not accepted when allocator residency
@@ -241,7 +245,7 @@ every CI runner.
 
 The export measurement used bonsai-ninja commit
 `d5c5fe418a3b86fdb1cbe2c4d1443ee8f2adef88`; the optimized cold semantic row
-was remeasured on the current release candidate. Both used
+is the controlled August 14 RSS measurement retained for comparison. Both used
 Elasticsearch commit `e9741368da0cb5465f5cf76c668a09fd780583be`, an Apple
 M1 Pro with 16 GiB of
 physical memory, macOS 26.3.1, and `BONSAI_MEMORY_BUDGET_MB=3072`. Output was
@@ -282,8 +286,10 @@ The release workflow verifies:
 - standalone HTML generation;
 - native JSON and graph export formats;
 - stable IDs and page/cursor reopening;
-- relocated archive execution with the packaged `security-patterns/` tree,
-  an empty user/parser cache, and an empty workspace cache;
+- relocated binary-only security execution with no adjacent rulepack, an empty
+  user/parser cache, and an empty workspace cache;
+- readable `security-patterns/` source in the archive for inspection and
+  customization, independently of the embedded runtime default;
 - checksums and immutable workflow action pins;
 - signed GitHub/Sigstore provenance for every tagged archive and checksum;
 - Linux, macOS, and Windows archives for x64 and arm64.

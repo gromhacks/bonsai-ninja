@@ -888,62 +888,47 @@ impl Bonsai {
         Ok(SecurityPack::with_registry(pack, self.registry.clone()))
     }
 
-    /// Find the rulepack directory for a workspace.
+    /// Find the rulepack selected by `BONSAI_RULES_DIR`, or materialize the
+    /// immutable rulepack compiled into this build.
     ///
-    /// Probes in order: `BONSAI_RULES_DIR`, `<root>/security-patterns`,
-    /// `<root>/../security-patterns`, the rulepack beside the current
-    /// executable, and `./security-patterns`. Returns the first existing
-    /// directory, or `None`. `--rules-dir` overrides.
+    /// Source-tree and executable-relative directories are never trusted
+    /// implicitly. Callers select an editable/custom pack explicitly through
+    /// `BONSAI_RULES_DIR` or [`Self::with_rulepack`].
     #[must_use]
     pub fn discover_rulepack_root(workspace_root: &Path) -> Option<PathBuf> {
-        Self::discover_rulepack_root_with_executable(
-            workspace_root,
-            |key| std::env::var_os(key).map(PathBuf::from),
-            std::env::current_exe().ok().as_deref(),
-        )
+        Self::default_rulepack_root(workspace_root).ok()
+    }
+
+    /// Resolve the configured rulepack and preserve invalid-override or
+    /// materialization errors so security entrypoints fail loudly.
+    pub fn default_rulepack_root(_workspace_root: &Path) -> Result<PathBuf> {
+        Self::default_rulepack_root_with(|key| std::env::var_os(key).map(PathBuf::from))
     }
 
     /// Test variant of [`Self::discover_rulepack_root`] that takes a
     /// custom env-lookup closure (Rust 2024 makes mutating the real
     /// process env unsafe and racy).
     #[must_use]
-    pub fn discover_rulepack_root_with<F>(workspace_root: &Path, env_lookup: F) -> Option<PathBuf>
+    pub fn discover_rulepack_root_with<F>(_workspace_root: &Path, env_lookup: F) -> Option<PathBuf>
     where
         F: Fn(&str) -> Option<PathBuf>,
     {
-        Self::discover_rulepack_root_with_executable(
-            workspace_root,
-            env_lookup,
-            std::env::current_exe().ok().as_deref(),
-        )
+        Self::default_rulepack_root_with(env_lookup).ok()
     }
 
-    fn discover_rulepack_root_with_executable<F>(
-        workspace_root: &Path,
-        env_lookup: F,
-        executable: Option<&Path>,
-    ) -> Option<PathBuf>
+    fn default_rulepack_root_with<F>(env_lookup: F) -> Result<PathBuf>
     where
         F: Fn(&str) -> Option<PathBuf>,
     {
         if let Some(env_path) = env_lookup("BONSAI_RULES_DIR") {
-            if env_path.is_dir() {
-                return Some(env_path);
-            }
+            anyhow::ensure!(
+                env_path.is_dir(),
+                "BONSAI_RULES_DIR does not name a rulepack directory: `{}`",
+                env_path.display()
+            );
+            return Ok(env_path);
         }
-        // The parent-less case is silently skipped (root filesystem,
-        // single-segment relative path) — fabricating a path would
-        // surface as a confusing "no such file" later.
-        let mut candidates: Vec<PathBuf> = Vec::with_capacity(4);
-        candidates.push(workspace_root.join("security-patterns"));
-        if let Some(parent) = workspace_root.parent() {
-            candidates.push(parent.join("security-patterns"));
-        }
-        if let Some(executable_dir) = executable.and_then(Path::parent) {
-            candidates.push(executable_dir.join("security-patterns"));
-        }
-        candidates.push(PathBuf::from("security-patterns"));
-        candidates.into_iter().find(|path| path.is_dir())
+        bonsai_security::bundled_rulepack_root().context("materializing the bundled security rulepack")
     }
 
     /// Wrap an opened workspace in the [`Project`] facade with the
@@ -1930,9 +1915,8 @@ impl WorkspaceCache {
         self
     }
 
-    /// Attach the rulepack root discovered by the same precedence the
-    /// CLI uses (`BONSAI_RULES_DIR`, workspace-local, parent-local,
-    /// then cwd-local). Useful for root-only cache reads before a
+    /// Attach the explicit `BONSAI_RULES_DIR` override or the bundled
+    /// rulepack used by the CLI. Useful for root-only cache reads before a
     /// [`Project`] has been opened.
     #[must_use]
     pub fn with_discovered_rulepack_root(mut self) -> Self {

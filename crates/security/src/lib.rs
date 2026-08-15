@@ -20,6 +20,7 @@
 // remaining submodules are internal — consumers go through the
 // re-exports.
 pub(crate) mod analysis;
+mod bundled;
 pub(crate) mod compile;
 pub(crate) mod deps;
 pub(crate) mod finding;
@@ -47,6 +48,7 @@ pub use analysis::{
     SourceAnalysisReport, SourceLineageLimits, SourceLineageStatus, SourceLineageSummary,
     TaintAnalysisOptions, TaintAnalysisReport,
 };
+pub use bundled::bundled_rulepack_root;
 pub use compile::{compile_rule_to_inspect_args, CompiledRule};
 pub use deps::{build_inventory, DependencyInventory, DependencyRow};
 pub use finding::{

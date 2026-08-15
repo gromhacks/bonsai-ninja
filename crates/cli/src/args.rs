@@ -2647,13 +2647,8 @@ pub(crate) enum Cmd {
         format: BrowseFormat,
         #[command(flatten)]
         output: OutputPathArg,
-        /// Directory containing the rulepack tree (for finding /
-        /// severity annotations). Lookup when omitted:
-        /// `BONSAI_RULES_DIR` env var, then
-        /// `<workspace>/security-patterns/`, then
-        /// `<workspace>/../security-patterns/`, then
-        /// `<executable-dir>/security-patterns/`, then
-        /// `./security-patterns/` (cwd-relative).
+        /// Override the bundled rulepack used for finding and severity
+        /// annotations. Also reads `BONSAI_RULES_DIR`.
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
     },
@@ -2687,12 +2682,8 @@ pub(crate) enum SecurityAction {
                       $ bonsai-ninja security ./src sources --format json --all")
     )]
     Sources {
-        /// Directory containing the `langs/<lang>/…` rulepack tree.
-        /// Lookup when omitted: `BONSAI_RULES_DIR` env var, then
-        /// `<workspace>/security-patterns/`, then
-        /// `<workspace>/../security-patterns/`, then
-        /// `<executable-dir>/security-patterns/`, then
-        /// `./security-patterns/` (cwd-relative).
+        /// Override the bundled `langs/<lang>/…` rulepack tree.
+        /// Also reads `BONSAI_RULES_DIR`.
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
         /// Filter to rules whose id matches this exact string.
@@ -2780,12 +2771,8 @@ pub(crate) enum SecurityAction {
                       $ bonsai-ninja security ./src sinks --file handlers/")
     )]
     Sinks {
-        /// Directory containing the `langs/<lang>/…` rulepack tree.
-        /// Lookup when omitted: `BONSAI_RULES_DIR` env var, then
-        /// `<workspace>/security-patterns/`, then
-        /// `<workspace>/../security-patterns/`, then
-        /// `<executable-dir>/security-patterns/`, then
-        /// `./security-patterns/` (cwd-relative).
+        /// Override the bundled `langs/<lang>/…` rulepack tree.
+        /// Also reads `BONSAI_RULES_DIR`.
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
         /// Filter to rules whose id matches this exact string.
@@ -2887,12 +2874,8 @@ pub(crate) enum SecurityAction {
                       $ bonsai-ninja security ./src sanitizers --rule python.sanitizer.shlex_quote")
     )]
     Sanitizers {
-        /// Directory containing the `langs/<lang>/…` rulepack tree.
-        /// Lookup when omitted: `BONSAI_RULES_DIR` env var, then
-        /// `<workspace>/security-patterns/`, then
-        /// `<workspace>/../security-patterns/`, then
-        /// `<executable-dir>/security-patterns/`, then
-        /// `./security-patterns/` (cwd-relative).
+        /// Override the bundled `langs/<lang>/…` rulepack tree.
+        /// Also reads `BONSAI_RULES_DIR`.
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
         /// Filter to rules whose id matches this exact string.
@@ -2968,12 +2951,8 @@ pub(crate) enum SecurityAction {
                       $ bonsai-ninja security ./src deps --framework flask")
     )]
     Deps {
-        /// Directory containing the `langs/<lang>/…` rulepack tree.
-        /// Lookup when omitted: `BONSAI_RULES_DIR` env var, then
-        /// `<workspace>/security-patterns/`, then
-        /// `<workspace>/../security-patterns/`, then
-        /// `<executable-dir>/security-patterns/`, then
-        /// `./security-patterns/` (cwd-relative).
+        /// Override the bundled `langs/<lang>/…` rulepack tree.
+        /// Also reads `BONSAI_RULES_DIR`.
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
         /// Filter to a single package / framework key.
@@ -3059,12 +3038,8 @@ pub(crate) enum SecurityAction {
                       $ bonsai-ninja security ./src taint-analysis --format json --all")
     )]
     TaintAnalysis {
-        /// Directory containing the `langs/<lang>/…` rulepack tree.
-        /// Lookup when omitted: `BONSAI_RULES_DIR` env var, then
-        /// `<workspace>/security-patterns/`, then
-        /// `<workspace>/../security-patterns/`, then
-        /// `<executable-dir>/security-patterns/`, then
-        /// `./security-patterns/` (cwd-relative).
+        /// Override the bundled `langs/<lang>/…` rulepack tree.
+        /// Also reads `BONSAI_RULES_DIR`.
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
         /// Review defaults. `production` excludes common non-production
@@ -3205,12 +3180,8 @@ pub(crate) enum SecurityAction {
                       $ bonsai-ninja security ./src source-analysis --format json --all")
     )]
     SourceAnalysis {
-        /// Directory containing the `langs/<lang>/…` rulepack tree.
-        /// Lookup when omitted: `BONSAI_RULES_DIR` env var, then
-        /// `<workspace>/security-patterns/`, then
-        /// `<workspace>/../security-patterns/`, then
-        /// `<executable-dir>/security-patterns/`, then
-        /// `./security-patterns/` (cwd-relative).
+        /// Override the bundled `langs/<lang>/…` rulepack tree.
+        /// Also reads `BONSAI_RULES_DIR`.
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
         /// Bundle of defaults for common postures. `production`
@@ -3312,12 +3283,8 @@ pub(crate) enum SecurityAction {
                       $ bonsai-ninja security ./src pack --kind sink --severity critical")
     )]
     Pack {
-        /// Directory containing the `langs/<lang>/…` rulepack tree.
-        /// Lookup when omitted: `BONSAI_RULES_DIR` env var, then
-        /// `<workspace>/security-patterns/`, then
-        /// `<workspace>/../security-patterns/`, then
-        /// `<executable-dir>/security-patterns/`, then
-        /// `./security-patterns/` (cwd-relative).
+        /// Override the bundled `langs/<lang>/…` rulepack tree.
+        /// Also reads `BONSAI_RULES_DIR`.
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
         /// Filter to a single language (`python`, `go`, …).

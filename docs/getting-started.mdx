@@ -16,35 +16,30 @@ cargo build --release --locked -p bonsai_cli
 
 ### Install from source on macOS or Linux
 
-The CLI needs the bundled `security-patterns/` directory for security
-commands. Build the native binary, install it beside that rulepack, and expose
-it through a launcher in `~/.local/bin`:
+The release binary contains the default security rulepack, so it can be
+installed and run from any directory without a companion data path:
 
 ```bash
 cargo build --release --locked -p bonsai_cli
 
 PREFIX="${HOME}/.local"
-APP_HOME="${PREFIX}/lib/bonsai-ninja"
-mkdir -p "${APP_HOME}/security-patterns" "${PREFIX}/bin"
-install -m 755 target/release/bonsai-ninja "${APP_HOME}/bonsai-ninja"
-cp -R security-patterns/. "${APP_HOME}/security-patterns/"
-printf '%s\n' '#!/bin/sh' \
-  "exec \"${APP_HOME}/bonsai-ninja\" \"\$@\"" \
-  > "${PREFIX}/bin/bonsai-ninja"
-chmod 755 "${PREFIX}/bin/bonsai-ninja"
+mkdir -p "${PREFIX}/bin"
+install -m 755 target/release/bonsai-ninja "${PREFIX}/bin/bonsai-ninja"
 
 "${PREFIX}/bin/bonsai-ninja" --version
 ```
 
-Add `~/.local/bin` to `PATH` if it is not already present. A launcher is used
-instead of a symbolic link because executable-sibling rulepack discovery must
-remain reliable across operating systems.
+Add `~/.local/bin` to `PATH` if it is not already present. Security commands
+materialize the embedded, content-addressed pack under the operating-system
+cache on first use. `--rules-dir <DIR>` or `BONSAI_RULES_DIR` selects an
+editable/custom base pack instead.
 
 ### Use a tagged release archive
 
-When a tagged release is published, its archives are configured to include the
-bundled rulepack, a separate SHA-256 checksum, and signed GitHub/Sigstore
-provenance. Verify the downloaded archive before extracting it:
+When a tagged release is published, its archives include the readable rulepack
+source for inspection and customization even though the binary also embeds
+that default. Archives also receive a separate SHA-256 checksum and signed
+GitHub/Sigstore provenance. Verify the downloaded archive before extracting it:
 
 ```bash
 shasum -a 256 -c bonsai-ninja-x86_64-unknown-linux-gnu.tar.gz.sha256

@@ -5,7 +5,13 @@ description: "CLI flags, environment variables, rulepack lookup, and precedence.
 
 # Configuration
 
-CLI flags take precedence over environment variables. Environment variables take precedence over built-in defaults. Rulepack lookup checks `--rules-dir`, then `BONSAI_RULES_DIR`, then workspace-local, workspace-parent, packaged-executable-sibling, and cwd-relative `security-patterns/` locations. This lets an extracted release archive work from any current directory while preserving explicit and project-local overrides.
+CLI flags take precedence over environment variables. Environment variables
+take precedence over built-in defaults. Rulepack lookup checks `--rules-dir`,
+then `BONSAI_RULES_DIR`; otherwise the binary materializes its embedded,
+content-addressed pack under the operating-system cache. Security therefore
+works from any current directory without implicitly trusting a rulepack inside
+the workspace being scanned. Editable and custom base packs require an
+explicit override.
 
 Generated analysis state lives in `$CACHE_DIR`, a canonical-workspace-keyed
 directory below the operating system cache root. Run `cache stats <workspace>`
@@ -31,7 +37,8 @@ bonsai-ninja does not require a project config file for normal scans. Workspace-
 | `$CACHE_DIR/taint_graph.v*.<mode>.<config>.factstore` | generated file | Security analysis commands | Versioned, mode/config-specific taint/source graph sidecar. Do not edit manually. |
 | `$CACHE_DIR/export.default.v*.json` | generated file | Explicit `cache rebuild --export` only | Reusable default native export. Normal one-shot `export` streams directly to stdout/`--output-path` and never creates then copies this potentially multi-gigabyte cache. The default export always uses the exact `compressed_callgraph`; capped path-prefix caches are not supported. |
 | `$CACHE_DIR/page-cache.v*/` | generated directory | Generated lazily | Versioned rendered-page cache for paginated CLI output. |
-| `security-patterns/` | directory | Auto-discovered | Rulepack root when `--rules-dir` and `BONSAI_RULES_DIR` are not set. |
+| OS cache `bonsai-ninja/rulepacks/<SHA-256>/security-patterns/` | generated directory | First default security command | Immutable materialization of the pack compiled into the binary. It is shared across workspaces and never written into the inspected repository. |
+| `security-patterns/` | directory | Optional | Editable rulepack source. Use `--rules-dir` when testing a specific tree. |
 
 Sidecars are validated by source-content hashes, dependency hashes, and
 pipeline-config fingerprints. Derived semantic pipeline identities also bind
@@ -127,7 +134,7 @@ paths.
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `BONSAI_RULES_DIR` | path | Auto-discover | Rulepack directory. |
+| `BONSAI_RULES_DIR` | path | Bundled rulepack | Explicit rulepack directory override. |
 | `BONSAI_PARSE_TIMEOUT_MS` | integer milliseconds | unset (uncapped) | Optional per-file tree-sitter parse timeout. `0` disables the timeout guard. |
 | `BONSAI_MEMORY_BUDGET_MB` | positive integer MiB | detected host/container limit | Lower the compiler's scheduling/spill budget. Linux resolves the current process's nested cgroup v1/v2 memory controller, not only the root controller. Weighted phases subtract measured process RSS and safety headroom before admitting transient units; the exact-body hot cache derives from the same value. This is not an OS hard-RSS limit: clean memory-mapped factstore pages, allocator arenas, stacks, the binary, and output buffers can make RSS/physical footprint exceed it and are reclaimed or paged by the OS under pressure. A smaller value serializes work, evicts bodies sooner, and can cause exact recomputation/I/O; it cannot reduce analyzed files, facts, or graph closure. |
 | `BONSAI_DEBUG` | comma-separated categories | unset | Emit selected diagnostic categories to stderr; `*` enables all categories. Equivalent to global `--debug`. Common categories include `idg-closure`, `idg-resolve`, `recv-state`, `find-group`, `taint-graph`, and `xcall`; security progress notes also use categories such as `security-progress` and `security-phase`. |
@@ -168,7 +175,7 @@ with `--no-progress` for quiet script/LLM runs.
 
 | Setting | Highest precedence | Then | Default |
 |---|---|---|---|
-| Rulepack directory | `--rules-dir` | `BONSAI_RULES_DIR`, workspace/package/cwd discovery | None |
+| Rulepack directory | `--rules-dir` | `BONSAI_RULES_DIR` | Embedded, content-addressed bundled pack |
 | Parse timeout | `--parse-timeout` | `BONSAI_PARSE_TIMEOUT_MS` | uncapped |
 | Compiler memory budget | `--memory-budget` | `BONSAI_MEMORY_BUDGET_MB` | detected host/container limit |
 | Debug categories | `--debug` | `BONSAI_DEBUG` | disabled |
