@@ -35,9 +35,10 @@ import/symbol alias maps where the fixture uses aliases, assignment
 chains, and intraprocedural taint. Dedicated cross-file and assignment
 audit tests pin source-to-sink chains across all 20 adapters. The complete
 release-binary CLI/switch sweep lives in
-`scripts/validate-mega-cli.py`; it runs every command family, output mode,
-public switch, stable-id drilldown, and cache command against every
-language's `mega_flow`.
+`scripts/validate-mega-cli.py`; it runs every command family and the maintained
+output-mode, public-switch, stable-id, and cache-command matrix against every
+language's `mega_flow`. It is not a claim that every possible flag combination
+is useful or tested.
 
 Run one language:
 

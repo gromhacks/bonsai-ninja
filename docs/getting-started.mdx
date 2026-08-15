@@ -40,11 +40,11 @@ Add `~/.local/bin` to `PATH` if it is not already present. A launcher is used
 instead of a symbolic link because executable-sibling rulepack discovery must
 remain reliable across operating systems.
 
-### Use a release archive
+### Use a tagged release archive
 
-Release archives include the bundled rulepack, a separate SHA-256 checksum,
-and signed GitHub/Sigstore provenance. Verify the downloaded archive before
-extracting it:
+When a tagged release is published, its archives are configured to include the
+bundled rulepack, a separate SHA-256 checksum, and signed GitHub/Sigstore
+provenance. Verify the downloaded archive before extracting it:
 
 ```bash
 shasum -a 256 -c bonsai-ninja-x86_64-unknown-linux-gnu.tar.gz.sha256

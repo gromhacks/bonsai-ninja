@@ -19,6 +19,7 @@
 #                          sanitizer rules that share a name
 #   6. matrix-tests      — taint engine language matrix
 #   7. cli-e2e-tests     — CLI / engine end-to-end matrix
+#   8. cli-docs          — documented commands and flags match the release CLI
 #
 # Use `--quick` to skip the long-running matrix + cli-e2e tests when
 # you want a fast structural sweep.
@@ -79,6 +80,11 @@ section_duplication() {
     python3 "$SCRIPT_DIR/audit_logic_alignment.py" --duplication-only
 }
 
+section_cli_docs() {
+    require_release_binary || return 1
+    python3 "$SCRIPT_DIR/audit-cli-docs.py" --binary "$BIN"
+}
+
 section_matrix_tests() {
     (cd "$REPO" && cargo test --release -q -p bonsai_taint --test language_matrix)
 }
@@ -92,6 +98,7 @@ run_section "mega-cli"          section_mega_cli
 run_section "sanitizer-credit"  section_sanitizer_credit
 run_section "logic-alignment"   section_logic_alignment
 run_section "duplication"       section_duplication
+run_section "cli-docs"          section_cli_docs
 if (( QUICK == 0 )); then
     run_section "matrix-tests"      section_matrix_tests
     run_section "cli-e2e"           section_cli_e2e

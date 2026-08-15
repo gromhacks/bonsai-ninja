@@ -6,6 +6,16 @@
 [![Hardening checks](https://github.com/gromhacks/bonsai-ninja/actions/workflows/hardening-checks.yml/badge.svg)](https://github.com/gromhacks/bonsai-ninja/actions/workflows/hardening-checks.yml)
 [![Rulepack audit](https://github.com/gromhacks/bonsai-ninja/actions/workflows/pack-audit.yml/badge.svg)](https://github.com/gromhacks/bonsai-ninja/actions/workflows/pack-audit.yml)
 
+> **Project maturity:** bonsai-ninja is an ambitious early-stage project.
+> Compiler-backed analysis and security modeling across 20 languages leave a
+> lot of room for parser gaps, unresolved dynamic behavior, incorrect findings,
+> performance problems, and ordinary bugs. The current local release gates
+> pass and the tool is ready for people to use, but it is not perfect and
+> should not be the sole basis for a security decision. We are publishing it
+> now to gather
+> real-world feedback, failing examples, rule contributions, and engineering
+> help from the community.
+
 bonsai-ninja is a local code-intelligence and static-analysis engine. It maps
 repositories, resolves symbols and calls, traces behavior across files,
 inspects dataflow, exports graph facts, and reports source-to-sink security
@@ -26,9 +36,9 @@ waste, less repeated reading, and answers tied to compiler evidence.
 |---|---|
 | Tree-sitter compiler frontends | Parse 20 languages into typed declarations, calls, imports, values, control flow, and dataflow facts |
 | Focused `search`, `refs`, `calls`, and `read-file` | Retrieve a small, source-backed context slice before asking for heavier semantics |
-| Compiler-resolved `inspect`, `trace`, `path`, and `slice` | Follow statically proven behavior across files and report unresolved dynamic edges instead of inventing them |
+| Compiler-resolved `inspect`, `trace`, `path`, and `slice` | Follow compiler-evidenced behavior across files and report unresolved dynamic edges instead of inventing them |
 | AST, HIR, CFG, resolver, edge, and taint diagnostics | Debug both the target program and the analyzer's reasoning instead of guessing from text |
-| Sparse IDG taint fixed point | Prove exact source-to-sink reachability without a hidden depth, file, iteration, or result cap |
+| Sparse IDG taint fixed point | Complete source-to-sink reachability over the admitted static graph without a hidden depth, file, iteration, or result cap |
 | Stable IDs, explicit page cursors, JSON, and the Rust SDK | Let agents cite evidence, detect when coverage continues, and automate repeatable review workflows |
 | JSON, GraphML, Cypher, and NetworkX export | Build retrieval indexes, graph features, training examples, evaluation sets, or tool-using agents from structured code facts and explicit completeness metadata |
 | Local execution and external caches | Keep source on the machine while reusing validated compiler work across queries |
@@ -41,7 +51,8 @@ improves a model.
 
 ## Scale, measured
 
-**30,055 source files. Exact analysis. Warm navigation in seconds.** Current
+**30,055 source files. Completed modeled analysis. Warm navigation in
+seconds.** Current
 Elasticsearch measurements under a 3 GiB semantic-worker scheduling budget
 separate the first explicit semantic index from commands run after it exists:
 
@@ -52,7 +63,7 @@ separate the first explicit semantic index from commands run after it exists:
 | After index: search | 4.1s | Exact requested matches |
 | After index: call lookup | 3.9s | Compiler-resolved call rows |
 | After index: default inspect | 7.6s | Structural evidence for the requested target |
-| After index: complete production taint analysis | 29.6s | Exact requested fixed point |
+| After index: complete production taint analysis | 29.6s | Requested fixed point completed without a semantic cap |
 | After index: default native export | 4m 05s | 4.54 GB compiler, callgraph, flow, and compiled-IDG facts |
 | After index: `--full-propagations` export | 7m 36s | 6.42 GB with the same exact propagation relation materialized as individual rows |
 
@@ -60,7 +71,7 @@ The measured cold operation is specifically `index --semantic`, which users
 request when they want every reusable semantic sidecar prepared up front.
 Ordinary `index` is the lighter syntax/declaration warm-up and does not force a
 whole-workspace callgraph or IDG build; ordinary commands can also compute
-their requested exact facts on demand.
+their requested facts on demand.
 
 The empty-cache run compiles 30,055 Tree-sitter source units into exact IR,
 resolves the workspace callgraph and linkage, builds retrieval headers, and
@@ -126,6 +137,12 @@ BFS name search, call-depth ceiling, iteration limit, file limit, or result
 cap. Memory budgets can change worker concurrency, cache retention, and spill
 behavior; they do not change semantic scope.
 
+Throughout this documentation, **exact** or **exhaustive** describes completion
+over the static facts admitted by the frontends and resolver: the engine does
+not silently stop that modeled work at a product-imposed cap. It does not mean
+that the static model recovers every possible runtime behavior, that every
+adapter or rule is bug-free, or that an empty result proves a program safe.
+
 Static analysis cannot resolve every runtime-generated call. Reflection,
 unexpanded macros, computed imports, dynamic dispatch, and metaprogramming can
 lack enough source evidence. In those cases the tool reports diagnostics or
@@ -149,11 +166,12 @@ cargo build --release --locked -p bonsai_cli
 ./target/release/bonsai-ninja --version
 ```
 
-Release archives target Linux, macOS, and Windows on x64 and arm64. See
+The tag workflow is configured to build release archives for Linux, macOS, and
+Windows on x64 and arm64. See
 [Platform And Architecture Support](docs/platform-support.mdx) for source-build
-requirements and parser delivery constraints on other targets. Each archive
-has a SHA-256 checksum and signed GitHub/Sigstore provenance. Verify both before
-installing:
+requirements and parser delivery constraints on other targets. When a tagged
+archive is published, verify its SHA-256 checksum and GitHub/Sigstore
+provenance before installing:
 
 ```bash
 shasum -a 256 -c bonsai-ninja-<target>.tar.gz.sha256

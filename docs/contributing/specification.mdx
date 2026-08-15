@@ -158,8 +158,10 @@ documented above and the cache-aware form have the same completeness contract.
 
 Every fact crossing a layer boundary carries a `Precision`:
 
-- `Exact` — proven correct.
-- `Narrowed` — precise modulo documented caveats.
+- `Exact` — derived without approximation from facts admitted by the modeled
+  static semantics; this does not claim that absent runtime/build evidence was
+  recovered.
+- `Narrowed` — precise within documented static-evidence constraints.
 - `OverApproximate` — may include spurious paths.
 - `Unknown` — gave up.
 

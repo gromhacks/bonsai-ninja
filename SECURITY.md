@@ -2,9 +2,10 @@
 
 ## Supported versions
 
-bonsai-ninja is pre-1.0 software. Security fixes are made on `main` and in the
-most recent GitHub release. Older release lines are not maintained unless a
-release advisory explicitly says otherwise.
+bonsai-ninja is pre-1.0 software. Before the first public release, security
+fixes are made on `main`. After releases begin, fixes will target `main` and the
+most recent GitHub release; older release lines will not be maintained unless
+a release advisory explicitly says otherwise.
 
 ## Report a vulnerability privately
 
@@ -30,6 +31,7 @@ exploitable weakness in the analyzer itself.
 
 ## Release integrity
 
-Release archives have SHA-256 checksum files and GitHub artifact attestations
-signed through Sigstore. Verify both before installing a downloaded binary;
-the commands are documented in `docs/getting-started.mdx`.
+The tag workflow is configured to publish SHA-256 checksum files and GitHub
+artifact attestations signed through Sigstore with each release archive.
+Verify both before installing a downloaded binary; the commands are documented
+in `docs/getting-started.mdx`.
