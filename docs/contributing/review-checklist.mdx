@@ -177,6 +177,18 @@ class and verify each box.
       sdk_cli_parity` passes.
 - [ ] **Documentation updated.** `docs/contributing/sdk.mdx` lists the new API.
 
+## Native export wire-format change (`crates/browse/src/native_export.rs`)
+
+- [ ] **Compatibility is explicit.** Compatible additions update the current
+      contract; incompatible changes increment `schema_version` and add a new,
+      immutable schema under `schemas/`.
+- [ ] **Schema drift gate passes.** `cargo test --release --locked -p
+      bonsai_cli --test export_schema_drift` validates every supported-language
+      fixture and `--full-propagations` output against the committed schema.
+- [ ] **Schema is packaged and documented.** Release archives retain
+      `schemas/`, and the CLI, SDK, output-format, skill, and release-readiness
+      documentation point consumers to the matching version.
+
 ## Cache / performance / large-workspace change
 
 - [ ] **Stable scoped identity holds.** Filtered workspaces preserve the

@@ -139,6 +139,10 @@ release all canonical callgraph owners, stream exact file-local body
 projections, release the body cache, and only then open the IDG. A one-shot
 export writes directly to its requested sink; only explicit
 `cache rebuild --export` may publish a reusable export cache.
+The native JSON wire contract is versioned and published under `schemas/`.
+Incompatible serializer changes require a new schema file and
+`schema_version`; update the all-language schema drift gate and package the
+schema with every release.
 
 Keep command phases intentional. `tree` is a direct filesystem walk. Syntax
 inventories (`search`, `defs`, `classes`, `entrypoints`, `calls`, `args`,

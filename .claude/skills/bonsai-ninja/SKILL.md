@@ -311,6 +311,11 @@ with `--output-path` and let downstream code stream or index it. Do not request
 `--full-propagations` merely to improve accuracy; it changes representation
 only.
 
+Native JSON documents identify themselves as `bonsai-native-export` plus a
+numeric `schema_version`. Validate v7 artifacts against
+`schemas/bonsai-native-export-v7.schema.json`; release archives include the
+same Draft 2020-12 schema.
+
 ## Rulepack work
 
 Rules live under

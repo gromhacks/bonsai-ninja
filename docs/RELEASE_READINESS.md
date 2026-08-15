@@ -285,11 +285,14 @@ The release workflow verifies:
 - SARIF 2.1.0 parsing and code-flow metadata;
 - standalone HTML generation;
 - native JSON and graph export formats;
+- native JSON schema v7 validation across every language fixture and
+  materialized propagation mode;
 - stable IDs and page/cursor reopening;
 - relocated binary-only security execution with no adjacent rulepack, an empty
   user/parser cache, and an empty workspace cache;
 - readable `security-patterns/` source in the archive for inspection and
   customization, independently of the embedded runtime default;
+- the versioned native export JSON Schema under `schemas/`;
 - checksums and immutable workflow action pins;
 - signed GitHub/Sigstore provenance for every tagged archive and checksum;
 - Linux, macOS, and Windows archives for x64 and arm64.

@@ -104,6 +104,7 @@ indicatif = "0.18.6"
 pretty_assertions = "1"
 insta = { version = "1", features = ["yaml", "json"] }
 criterion = { version = "0.5", features = ["html_reports"] }
+jsonschema = { version = "0.49.9", default-features = false }
 
 # Workspace crates
 bonsai_common = { path = "crates/common" }
