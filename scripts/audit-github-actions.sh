@@ -47,6 +47,18 @@ while IFS= read -r occurrence; do
 done < <(find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) \
     -exec grep -nHE 'pip[[:space:]]+install' {} + || true)
 
+ci_workflow=.github/workflows/ci.yml
+required_ci_commands=(
+    'uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065'
+    'python3 -m pip install --require-hashes -r .github/requirements/pack-audit.txt'
+)
+for command in "${required_ci_commands[@]}"; do
+    if ! grep -Fq -- "$command" "$ci_workflow"; then
+        printf 'CI workflow omits validator prerequisite: %s\n' "$command" >&2
+        violations=$((violations + 1))
+    fi
+done
+
 release_workflow=.github/workflows/release.yml
 required_release_commands=(
     'python3 scripts/audit-docs.py'
