@@ -68,7 +68,7 @@ description = "Local 20-language code intelligence and security analysis engine"
 tree-sitter = "0.26"
 # Pin the parser delivery contract: the release gate verifies that this exact
 # version publishes every grammar and native bundle in our support matrix.
-tree-sitter-language-pack = { version = "=1.8.0", default-features = false, features = ["dynamic-loading", "download"] }
+tree-sitter-language-pack = { version = "=1.15.0", default-features = false, features = ["dynamic-loading", "download"] }
 
 # Shared infra
 thiserror = "2"
