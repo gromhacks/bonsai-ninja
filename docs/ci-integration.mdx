@@ -161,6 +161,10 @@ high findings while allowing unchanged baseline findings.
 
 ## Repository release checks
 
+Ordinary `main` and pull-request CI runs the complete workspace test suite on
+Linux, macOS, and Windows x64. This catches platform-gated code and test
+warnings before a release tag is created.
+
 This repository's tag workflow is `.github/workflows/release.yml`. It verifies
 version/tag provenance, runs cross-platform build and test jobs, executes
 documentation and rulepack audits, performs self-analysis, checks packaged

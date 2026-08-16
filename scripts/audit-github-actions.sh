@@ -51,7 +51,7 @@ ci_workflow=.github/workflows/ci.yml
 required_ci_commands=(
     'RUSTUP_TOOLCHAIN: "1.88"'
     'uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97'
-    'python3 -m pip install --require-hashes -r .github/requirements/pack-audit.txt'
+    '-m pip install --require-hashes -r .github/requirements/pack-audit.txt'
 )
 for command in "${required_ci_commands[@]}"; do
     if ! grep -Fq -- "$command" "$ci_workflow"; then

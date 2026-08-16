@@ -59,6 +59,7 @@ fn sample_finding() -> Finding {
     }
 }
 
+#[cfg(unix)]
 fn temp_root(tag: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
