@@ -173,7 +173,9 @@ jobs:
       - name: Verify Cargo and repository metadata
         run: python3 scripts/audit-release-metadata.py
       - name: Verify crates.io package graph
-        run: python3 scripts/publish-crates.py
+        run: |
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+          python3 scripts/publish-crates.py
 
   capabilities:
     name: Adapter capability matrix drift

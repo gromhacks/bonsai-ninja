@@ -10,9 +10,12 @@ package.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import email.utils
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -27,6 +30,9 @@ USER_AGENT = "bonsai-ninja-release contact@gromhacks.com"
 PACKAGE_PREFIX = "bonsai-ninja"
 EXPECTED_OWNER = "gromhacks"
 REGISTRY_WAIT_SECONDS = 15 * 60
+RATE_LIMIT_FALLBACK_SECONDS = 10 * 60
+RATE_LIMIT_SAFETY_SECONDS = 5
+RATE_LIMIT_TIMESTAMP = re.compile(r"try again after (.+? GMT)", re.IGNORECASE)
 
 
 def run(*args: str, capture: bool = False) -> subprocess.CompletedProcess[str]:
@@ -41,6 +47,61 @@ def run(*args: str, capture: bool = False) -> subprocess.CompletedProcess[str]:
         # stderr before `cargo metadata` writes its JSON document.
         stderr=None,
     )
+
+
+def crates_io_retry_delay(
+    output: str, *, now: dt.datetime | None = None
+) -> float | None:
+    """Return the required delay for a crates.io 429 response, if present."""
+    if "429 Too Many Requests" not in output:
+        return None
+
+    match = RATE_LIMIT_TIMESTAMP.search(output)
+    if match is None:
+        return float(RATE_LIMIT_FALLBACK_SECONDS)
+
+    try:
+        retry_at = email.utils.parsedate_to_datetime(match.group(1))
+    except (TypeError, ValueError, OverflowError):
+        return float(RATE_LIMIT_FALLBACK_SECONDS)
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=dt.timezone.utc)
+    current = now or dt.datetime.now(dt.timezone.utc)
+    return max(0.0, (retry_at - current).total_seconds()) + RATE_LIMIT_SAFETY_SECONDS
+
+
+def publish_crate(name: str) -> None:
+    """Publish one verified crate, honoring crates.io's new-crate throttle."""
+    command = ("cargo", "publish", "-p", name, "--locked")
+    while True:
+        process = subprocess.Popen(
+            command,
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+        )
+        output: list[str] = []
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            output.append(line)
+        returncode = process.wait()
+        if returncode == 0:
+            return
+
+        delay = crates_io_retry_delay("".join(output))
+        if delay is None:
+            raise subprocess.CalledProcessError(returncode, command)
+        retry_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=delay)
+        print(
+            "  crates.io new-crate rate limit reached; "
+            f"retrying {name} at {retry_at:%Y-%m-%d %H:%M:%S} UTC "
+            f"({delay:.0f}s)",
+            flush=True,
+        )
+        time.sleep(delay)
 
 
 def metadata() -> dict[str, object]:
@@ -234,7 +295,7 @@ def publish(order: list[str], version: str, *, resume: bool) -> None:
             print("  existing registry archive is byte-identical; skipped", flush=True)
             continue
         run("cargo", "publish", "--dry-run", "-p", name, "--locked")
-        run("cargo", "publish", "-p", name, "--locked")
+        publish_crate(name)
         wait_for_registry(name, version)
 
 
