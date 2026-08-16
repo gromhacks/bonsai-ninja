@@ -9,7 +9,12 @@ use std::path::{Path, PathBuf};
 /// Normalize a user-facing path for comparison across Unix and Windows.
 #[must_use]
 pub fn normalize_path_for_filter(value: &str) -> String {
-    value.replace('\\', "/").trim_start_matches("./").to_string()
+    let normalized = value.replace('\\', "/");
+    let normalized = normalized
+        .strip_prefix("//?/UNC/")
+        .map(|path| format!("//{path}"))
+        .unwrap_or_else(|| normalized.strip_prefix("//?/").unwrap_or(&normalized).to_string());
+    normalized.trim_start_matches("./").to_string()
 }
 
 /// Canonicalize a path, or its existing parent when the final component does
@@ -78,7 +83,8 @@ pub fn filter_looks_like_absolute_path(filter: &str) -> bool {
     if normalized.len() >= 3 && normalized.as_bytes()[1] == b':' && normalized.as_bytes()[2] == b'/' {
         return true;
     }
-    Path::new(filter).is_absolute() && normalized.trim_matches('/').contains('/')
+    let unix_absolute = normalized.starts_with('/') && normalized.trim_matches('/').contains('/');
+    unix_absolute || (Path::new(filter).is_absolute() && normalized.trim_matches('/').contains('/'))
 }
 
 /// Match a normalized path with substring semantics for bare names and
@@ -166,6 +172,20 @@ mod tests {
     }
 
     #[test]
+    fn windows_verbatim_paths_relativize_against_ordinary_workspace_roots() {
+        let root = Path::new(r"C:\repo\chosen-workspace");
+        assert_eq!(
+            workspace_relative_filter_path(Some(root), r"\\?\C:\repo\chosen-workspace\src\app.py"),
+            "src/app.py"
+        );
+        assert!(path_filter_matches_with_root(
+            Some(root),
+            r"\\?\C:\repo\chosen-workspace\src\app.py",
+            "src/"
+        ));
+    }
+
+    #[test]
     fn rooted_filters_are_anchored_to_the_selected_workspace() {
         assert!(scoped_path_filter_matches(
             "src/app.py",
@@ -183,6 +203,14 @@ mod tests {
     fn absolute_filters_do_not_leak_into_relative_matching() {
         assert!(filter_looks_like_absolute_path("/repo/src/app.py"));
         assert!(filter_looks_like_absolute_path(r"C:\repo\src\app.py"));
+        assert_eq!(
+            normalize_path_for_filter(r"\\?\C:\repo\src\app.py"),
+            "C:/repo/src/app.py"
+        );
+        assert_eq!(
+            normalize_path_for_filter(r"\\?\UNC\server\share\app.py"),
+            "//server/share/app.py"
+        );
         assert!(!filter_looks_like_absolute_path("src/app.py"));
         assert!(!normalized_path_contains("src/app.py", ""));
     }

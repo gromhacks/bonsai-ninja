@@ -2526,6 +2526,10 @@ fn validate_yaml_language_field(rule: &Rule, issues: &mut Vec<PackValidationIssu
         );
         return;
     };
+    // Git may materialize YAML with CRLF on Windows. Validation is a
+    // semantic rulepack check, so line-ending policy must not change its
+    // verdict or turn every otherwise valid rule into a false error.
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let needle = format!("- id: {}", rule.id);
     let Some(rule_block_start) = text.find(&needle) else {
         push_validation_issue(

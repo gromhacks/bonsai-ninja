@@ -66,6 +66,7 @@ fn workspace_cache_persists_canonical_workspace_identity() {
 }
 
 #[test]
+#[cfg(unix)]
 fn unchanged_git_snapshot_reuses_manifest_source_hashes() {
     let Some(root) = init_git_workspace("git-manifest-reuse", "def original():\n    return 1\n") else {
         return;
@@ -86,6 +87,27 @@ fn unchanged_git_snapshot_reuses_manifest_source_hashes() {
     assert_eq!(
         validated[0].hash, sentinel,
         "an unchanged exact Git snapshot should reuse the manifest's compiler input table"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+#[cfg(not(unix))]
+fn unchanged_git_snapshot_rehashes_without_strong_file_identity() {
+    let Some(root) = init_git_workspace("git-manifest-rehash", "def original():\n    return 1\n") else {
+        return;
+    };
+    let cache = WorkspaceCache::new(&root);
+    let mut manifest = cache.manifest().expect("build manifest");
+    let sentinel = 0xfeed_beef_dead_cafe;
+    manifest.workspace_source_files[0].hash = sentinel;
+
+    let validated = source_file_fingerprints_for_cache_validation(&root, Some(&manifest))
+        .expect("validate unchanged Git snapshot");
+    assert_eq!(validated.len(), 1);
+    assert_ne!(
+        validated[0].hash, sentinel,
+        "platforms without ctime/device/inode identity must hash content instead of trusting the manifest"
     );
     let _ = std::fs::remove_dir_all(root);
 }

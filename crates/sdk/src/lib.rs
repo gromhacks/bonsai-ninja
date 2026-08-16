@@ -1215,11 +1215,10 @@ impl Project {
                     .vfs()
                     .path(file)
                     .map(|path| {
-                        root.as_deref()
-                            .and_then(|root| path.strip_prefix(root).ok())
-                            .unwrap_or(path.as_path())
-                            .to_string_lossy()
-                            .into_owned()
+                        bonsai_common::workspace_relative_filter_path(
+                            root.as_deref(),
+                            &path.to_string_lossy(),
+                        )
                     })
                     .unwrap_or_else(|_| format!("<unknown-file-{file}>"));
                 let language = db
@@ -3736,6 +3735,11 @@ fn source_file_fingerprints_for_cache_validation(
     root: &Path,
     manifest: Option<&CacheManifest>,
 ) -> Result<Vec<bonsai_workspace::SourceFileFingerprint>> {
+    match fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => anyhow::bail!("workspace path is not a directory: {}", root.display()),
+        Err(error) => anyhow::bail!("workspace not accessible: {} ({error})", root.display()),
+    }
     let stable_root = stable_root_path(root);
     let Some(manifest) = manifest.filter(|manifest| {
         manifest.schema_version == CACHE_MANIFEST_SCHEMA_VERSION
@@ -4936,6 +4940,77 @@ pub struct Security<'a> {
     project: &'a Project,
 }
 
+fn normalize_security_file(root: &Path, file: &str) -> String {
+    bonsai_common::workspace_relative_filter_path(Some(root), file)
+}
+
+fn normalize_rule_match_paths(root: &Path, matches: &mut [RuleMatch]) {
+    for rule_match in matches {
+        rule_match.file = normalize_security_file(root, &rule_match.file);
+    }
+}
+
+fn normalize_finding_match_path(root: &Path, finding_match: &mut FindingMatch) {
+    finding_match.file = normalize_security_file(root, &finding_match.file);
+}
+
+fn normalize_taint_path_files(root: &Path, path: &mut [TaintPropagationStep]) {
+    for step in path {
+        step.file = normalize_security_file(root, &step.file);
+    }
+}
+
+fn normalize_combined_finding_paths(root: &Path, combined: &mut CombinedFindingWithChain) {
+    let finding = &mut combined.finding;
+    normalize_finding_match_path(root, &mut finding.source);
+    normalize_finding_match_path(root, &mut finding.sink);
+    for finding_match in finding
+        .sanitizers_seen
+        .iter_mut()
+        .chain(finding.taint_transforms_seen.iter_mut())
+    {
+        normalize_finding_match_path(root, finding_match);
+    }
+    normalize_taint_path_files(root, &mut finding.taint_path);
+    for alternate in &mut finding.alternate_flows {
+        normalize_finding_match_path(root, &mut alternate.source);
+        for finding_match in alternate
+            .sanitizers_seen
+            .iter_mut()
+            .chain(alternate.taint_transforms_seen.iter_mut())
+        {
+            normalize_finding_match_path(root, finding_match);
+        }
+        normalize_taint_path_files(root, &mut alternate.taint_path);
+    }
+    for hop in &mut finding.hops {
+        hop.file = normalize_security_file(root, &hop.file);
+    }
+    for finding_match in combined
+        .additional_sources
+        .iter_mut()
+        .chain(combined.additional_sinks.iter_mut())
+    {
+        normalize_finding_match_path(root, finding_match);
+    }
+}
+
+fn normalize_taint_analysis_paths(root: &Path, report: &mut TaintAnalysisReport) {
+    for finding in &mut report.findings {
+        normalize_combined_finding_paths(root, finding);
+    }
+}
+
+fn normalize_source_analysis_paths(root: &Path, report: &mut SourceAnalysisReport) {
+    for candidate in &mut report.candidates {
+        normalize_finding_match_path(root, &mut candidate.source);
+        for source in &mut candidate.additional_sources {
+            normalize_finding_match_path(root, source);
+        }
+        normalize_taint_path_files(root, &mut candidate.taint_path);
+    }
+}
+
 impl Security<'_> {
     fn pack(&self) -> Result<&Rulepack> {
         self.project
@@ -4948,7 +5023,8 @@ impl Security<'_> {
         options: TaintAnalysisOptions,
     ) -> Result<bonsai_security::TaintAnalysisReport> {
         self.project.refresh_from_disk_best_effort();
-        let report = bonsai_security::run_taint_analysis(&self.project.workspace, self.pack()?, options)?;
+        let mut report = bonsai_security::run_taint_analysis(&self.project.workspace, self.pack()?, options)?;
+        normalize_taint_analysis_paths(&self.project.root, &mut report);
         self.refresh_cache_manifest_best_effort();
         Ok(report)
     }
@@ -4962,12 +5038,13 @@ impl Security<'_> {
         F: FnMut(&'static str),
     {
         self.project.refresh_from_disk_best_effort();
-        let report = bonsai_security::run_taint_analysis_with_progress(
+        let mut report = bonsai_security::run_taint_analysis_with_progress(
             &self.project.workspace,
             self.pack()?,
             options,
             on_rule,
         )?;
+        normalize_taint_analysis_paths(&self.project.root, &mut report);
         self.refresh_cache_manifest_best_effort();
         Ok(report)
     }
@@ -4986,12 +5063,13 @@ impl Security<'_> {
         F: FnMut(bonsai_security::AnalysisProgress),
     {
         self.project.refresh_from_disk_best_effort();
-        let report = bonsai_security::run_taint_analysis_with_phase_progress(
+        let mut report = bonsai_security::run_taint_analysis_with_phase_progress(
             &self.project.workspace,
             self.pack()?,
             options,
             on_progress,
         )?;
+        normalize_taint_analysis_paths(&self.project.root, &mut report);
         self.refresh_cache_manifest_best_effort();
         Ok(report)
     }
@@ -5001,7 +5079,9 @@ impl Security<'_> {
         options: SourceAnalysisOptions,
     ) -> Result<bonsai_security::SourceAnalysisReport> {
         self.project.refresh_from_disk_best_effort();
-        let report = bonsai_security::run_source_analysis(&self.project.workspace, self.pack()?, options)?;
+        let mut report =
+            bonsai_security::run_source_analysis(&self.project.workspace, self.pack()?, options)?;
+        normalize_source_analysis_paths(&self.project.root, &mut report);
         self.refresh_cache_manifest_best_effort();
         Ok(report)
     }
@@ -5015,12 +5095,13 @@ impl Security<'_> {
         F: FnMut(&'static str),
     {
         self.project.refresh_from_disk_best_effort();
-        let report = bonsai_security::run_source_analysis_with_progress(
+        let mut report = bonsai_security::run_source_analysis_with_progress(
             &self.project.workspace,
             self.pack()?,
             options,
             on_rule,
         )?;
+        normalize_source_analysis_paths(&self.project.root, &mut report);
         self.refresh_cache_manifest_best_effort();
         Ok(report)
     }
@@ -5037,12 +5118,13 @@ impl Security<'_> {
         F: FnMut(bonsai_security::AnalysisProgress),
     {
         self.project.refresh_from_disk_best_effort();
-        let report = bonsai_security::run_source_analysis_with_phase_progress(
+        let mut report = bonsai_security::run_source_analysis_with_phase_progress(
             &self.project.workspace,
             self.pack()?,
             options,
             on_progress,
         )?;
+        normalize_source_analysis_paths(&self.project.root, &mut report);
         self.refresh_cache_manifest_best_effort();
         Ok(report)
     }
@@ -5056,7 +5138,9 @@ impl Security<'_> {
 
     pub fn sources(&self, options: SecurityInventoryOptions) -> Result<Vec<bonsai_security::RuleMatch>> {
         self.project.refresh_from_disk_best_effort();
-        bonsai_security::source_inventory(&self.project.workspace, self.pack()?, options)
+        let mut matches = bonsai_security::source_inventory(&self.project.workspace, self.pack()?, options)?;
+        normalize_rule_match_paths(&self.project.root, &mut matches);
+        Ok(matches)
     }
 
     pub fn sources_with_progress<F>(
@@ -5068,17 +5152,21 @@ impl Security<'_> {
         F: FnMut(bonsai_security::AnalysisProgress),
     {
         self.project.refresh_from_disk_best_effort();
-        bonsai_security::source_inventory_with_progress(
+        let mut matches = bonsai_security::source_inventory_with_progress(
             &self.project.workspace,
             self.pack()?,
             options,
             on_progress,
-        )
+        )?;
+        normalize_rule_match_paths(&self.project.root, &mut matches);
+        Ok(matches)
     }
 
     pub fn sinks(&self, options: SecurityInventoryOptions) -> Result<Vec<bonsai_security::RuleMatch>> {
         self.project.refresh_from_disk_best_effort();
-        bonsai_security::sink_inventory(&self.project.workspace, self.pack()?, options)
+        let mut matches = bonsai_security::sink_inventory(&self.project.workspace, self.pack()?, options)?;
+        normalize_rule_match_paths(&self.project.root, &mut matches);
+        Ok(matches)
     }
 
     pub fn sinks_with_progress<F>(
@@ -5090,17 +5178,22 @@ impl Security<'_> {
         F: FnMut(bonsai_security::AnalysisProgress),
     {
         self.project.refresh_from_disk_best_effort();
-        bonsai_security::sink_inventory_with_progress(
+        let mut matches = bonsai_security::sink_inventory_with_progress(
             &self.project.workspace,
             self.pack()?,
             options,
             on_progress,
-        )
+        )?;
+        normalize_rule_match_paths(&self.project.root, &mut matches);
+        Ok(matches)
     }
 
     pub fn sanitizers(&self, options: SecurityInventoryOptions) -> Result<Vec<bonsai_security::RuleMatch>> {
         self.project.refresh_from_disk_best_effort();
-        bonsai_security::sanitizer_inventory(&self.project.workspace, self.pack()?, options)
+        let mut matches =
+            bonsai_security::sanitizer_inventory(&self.project.workspace, self.pack()?, options)?;
+        normalize_rule_match_paths(&self.project.root, &mut matches);
+        Ok(matches)
     }
 
     pub fn sanitizers_with_progress<F>(
@@ -5112,12 +5205,14 @@ impl Security<'_> {
         F: FnMut(bonsai_security::AnalysisProgress),
     {
         self.project.refresh_from_disk_best_effort();
-        bonsai_security::sanitizer_inventory_with_progress(
+        let mut matches = bonsai_security::sanitizer_inventory_with_progress(
             &self.project.workspace,
             self.pack()?,
             options,
             on_progress,
-        )
+        )?;
+        normalize_rule_match_paths(&self.project.root, &mut matches);
+        Ok(matches)
     }
 
     pub fn source_rows(

@@ -67,7 +67,8 @@ fn validate_mega_cli_script_language_matrix() {
     let Some(bin) = validator_bin() else { return };
     let root = repo_root();
     let script = root.join("scripts/validate-mega-cli.py");
-    let output = Command::new(&script)
+    let output = Command::new("python3")
+        .arg(&script)
         .arg("--bin")
         .arg(&bin)
         .arg("--skip-realworld")

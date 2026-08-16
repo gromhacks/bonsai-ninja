@@ -970,7 +970,7 @@ fn source_analysis_cli_flags_map_one_to_one_to_sdk_options() {
                 "source-analysis CLI file include should render one path-scoped source row"
             );
             let row = cli.iter().next().expect("one source row");
-            assert_eq!(row.source_file, "examples/python/micro/gateway.py");
+            assert_eq!(row.source_file, "gateway.py");
             assert_eq!(row.chain, vec!["handle_request".to_string()]);
             continue;
         }

@@ -361,7 +361,9 @@ fn check_or_bless(snapshot_relative: &str, live: &str) {
         )
     });
 
-    if snapshot.trim() != live.trim() {
+    let snapshot_normalized = snapshot.replace("\r\n", "\n").replace('\r', "\n");
+    let live_normalized = live.replace("\r\n", "\n").replace('\r', "\n");
+    if snapshot_normalized.trim() != live_normalized.trim() {
         eprintln!("--- snapshot ({snapshot_relative}) ---\n{snapshot}\n--- live ---\n{live}");
         panic!(
             "{snapshot_relative} drift — regenerate with: \

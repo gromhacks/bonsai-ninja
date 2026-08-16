@@ -5,7 +5,7 @@
 //! machine-readable output embeds the evidence rather than just the chain.
 
 use ahash::AHashMap;
-use bonsai_common::{cached_span_map_arc, FuncId, SymbolId};
+use bonsai_common::{cached_span_map_arc, workspace_relative_filter_path, FuncId, SymbolId};
 use bonsai_workspace::Workspace;
 use serde::{Deserialize, Serialize};
 
@@ -234,7 +234,10 @@ fn build_cached_function_body(ws: &Workspace, func: FuncId) -> Option<CachedFunc
 
     Some(CachedFunctionBody {
         function: decl.name.clone(),
-        file: snapshot.path.display().to_string(),
+        file: workspace_relative_filter_path(
+            ws.db().workspace_root().as_deref(),
+            &snapshot.path.display().to_string(),
+        ),
         start_line: first_line,
         end_line,
         lines,

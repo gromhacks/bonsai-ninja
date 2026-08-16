@@ -279,6 +279,42 @@ fn single_rule_pack(mut rule: Rule) -> Rulepack {
 }
 
 #[test]
+fn validator_accepts_crlf_rule_language_fields() {
+    let rule = validation_rule_from_yaml(
+        r"
+id: python.cmdi.test_sink
+enabled: true
+language: python
+tag: command-injection
+severity: high
+cwe: [CWE-78]
+match:
+  kind: call
+  callee:
+    name: test_sink
+description: Test-only command sink.
+",
+    );
+    let path = std::path::Path::new(&rule.source_path);
+    let source = std::fs::read_to_string(path).expect("read generated rule source");
+    std::fs::write(path, source.replace('\n', "\r\n")).expect("write CRLF rule source");
+
+    let report = validate_pack(
+        &single_rule_pack(rule),
+        &PackInventoryOptions::default(),
+        bonsai_adapters::all_languages_registry(),
+    );
+    assert!(
+        report
+            .issues
+            .iter()
+            .all(|issue| issue.code != "missing-yaml-language"),
+        "line-ending policy must not change rule-language validation: {:#?}",
+        report.issues
+    );
+}
+
+#[test]
 fn validator_reports_when_package_signal_is_not_adapter_visible() {
     // Use a dotted-but-fictitious package so the maven-artifact
     // validator does not fire — we want to exercise only the
@@ -714,11 +750,13 @@ fn workspace_relative_from_test_flag_ignores_test_ancestors() {
 
 #[test]
 fn explicit_absolute_path_filters_still_match_absolute_paths() {
-    let root = std::path::Path::new("/repo/target/chosen-workspace");
+    let root = std::env::temp_dir().join("bonsai-absolute-filter-workspace");
+    let file = root.join("app.py");
+    let file = file.to_string_lossy();
     assert!(path_filter_matches_with_root(
-        Some(root),
-        "/repo/target/chosen-workspace/app.py",
-        "/repo/target/chosen-workspace/app.py"
+        Some(&root),
+        file.as_ref(),
+        file.as_ref()
     ));
 }
 
