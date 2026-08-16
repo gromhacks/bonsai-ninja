@@ -20,6 +20,8 @@ DOCUMENTS = (
     REPO / ".github" / "PULL_REQUEST_TEMPLATE.md",
 )
 FLAG_TOKEN = re.compile(r"^--[a-z][a-z0-9-]*$")
+FENCE = re.compile(r"^\s*(?:`{3,}|~{3,})")
+BACKTICK_RUN = re.compile(r"(?<!\\)(`+)")
 
 
 def documentation_files() -> list[Path]:
@@ -34,13 +36,33 @@ def logical_lines(path: Path) -> list[tuple[int, str]]:
     rows: list[tuple[int, str]] = []
     pending = ""
     start = 0
+    inline_delimiter: str | None = None
     for number, raw in enumerate(path.read_text(errors="replace").splitlines(), 1):
         stripped = raw.strip()
+        # Fenced blocks already preserve command boundaries line-by-line. Treating
+        # their fence markers as inline delimiters would merge the entire block
+        # into one invocation.
+        if not pending and FENCE.match(raw):
+            rows.append((number, stripped))
+            continue
         if not pending:
             start = number
         pending = f"{pending} {stripped}".strip()
+
+        # Markdown permits an inline code span to wrap across source lines. Join
+        # those lines before tokenizing so a wrapped Cargo command cannot make a
+        # dependency package name look like a standalone bonsai-ninja command.
+        for match in BACKTICK_RUN.finditer(raw):
+            delimiter = match.group(1)
+            if inline_delimiter is None:
+                inline_delimiter = delimiter
+            elif delimiter == inline_delimiter:
+                inline_delimiter = None
+
         if pending.endswith("\\"):
             pending = pending[:-1].rstrip()
+            continue
+        if inline_delimiter is not None:
             continue
         rows.append((start, pending))
         pending = ""
