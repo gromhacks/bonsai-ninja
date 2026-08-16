@@ -12,8 +12,8 @@
 //!
 //! - `bonsai_abstract_interp` — intraprocedural trace stepping.
 //! - `bonsai-ninja dump-cfg` — the CLI debug dump.
-//! - (future) `bonsai_taint` — directionality check for sanitizer
-//!   attachment in security mode.
+//! - `bonsai_taint` — structured intra-function propagation and branch/order
+//!   evidence used by security analysis.
 
 // `builder` is internal; consumers use `bonsai_cfg::build_cfg_from_flow`.
 pub(crate) mod builder;

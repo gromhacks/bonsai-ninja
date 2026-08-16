@@ -1,12 +1,12 @@
 ---
 title: "Adapter Capabilities"
-description: "Optional Decl fields populated by each language adapter and what precision they unlock."
+description: "Optional compiler facts populated by each language adapter and what precision they unlock."
 ---
 
-# Adapter Decl-field population
+# Adapter capability and semantic-fact population
 
-Which **optional** `Decl` struct fields each language adapter
-populates. Core taint propagation runs on every supported language, but
+Which **optional** `Decl`, call, and adapter-capability facts each language
+adapter populates. Core taint propagation runs on every supported language, but
 semantic receiver dispatch, inheritance, and class-scoped rules depend on
 these fields being present. They are not cosmetic: when an adapter fills
 the field, the resolver can narrow virtual edges, the taint engine can
@@ -17,8 +17,11 @@ heuristics.
 
 - Every adapter populates the **required** `Decl` fields (name, kind,
   span, params, flow events). That's what makes taint analysis work.
-- The table below tracks **ten optional** fields. Most adapters
+- The matrix below tracks **nine cross-language columns**. Most adapters
   fill some of them and leave the rest unpopulated.
+- `has_implicit_returns` is described below but is intentionally not reduced
+  to one adapter-wide cell: it is a per-declaration fact whose value depends
+  on the parsed body form.
 - A `—` cell means *the language has the construct, but the adapter
   doesn't yet populate the field*. Treat it as a real precision backlog
   item.
@@ -92,10 +95,10 @@ no equivalent construct.
 If you're triaging a finding and wondering whether the adapter's
 gaps affect it:
 
-- **`Visibility = —`:** the engine includes private decls in the
-  candidate set across modules. Findings might cite a callee that
-  another module shouldn't be able to reach. Real risk for code
-  review; not a soundness issue (over-reporting, not under-reporting).
+- **`Visibility = —`:** diagnostic candidate sets can be wider across
+  modules. A public flow that would require that over-approximate edge is
+  omitted and the requested scope is marked incomplete; it is not promoted to
+  a finding.
 - **`bases = —` / `super_dispatch = —`:** virtual dispatch on this
   language's class hierarchy may not have enough type evidence to emit
   a complete semantic edge. Public analysis must report that gap as

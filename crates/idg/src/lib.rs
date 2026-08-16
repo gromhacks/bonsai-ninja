@@ -15,11 +15,12 @@
 //! Edge = (Node → Node, meta)   12 bytes interned + 6 bytes meta
 //! ```
 //!
-//! Built once at workspace index time, persisted via
-//! [`bonsai_factstore`] as one segment per source file plus a
-//! workspace-level cross-file edge index. mmap-friendly: opens with
-//! a single header read, keeps the place dictionary + adjacency
-//! tables resident in memory, pages payload bytes on demand.
+//! Built on semantic demand (or explicitly by `index --semantic`) and
+//! persisted via [`bonsai_factstore`] as one segment per source file plus a
+//! workspace-level cross-file edge index. Warm queries validate compact
+//! function/node directories and the default contextual accelerator without
+//! decoding every segment. Canonical segments and fixed-width query
+//! relations page from disk on demand.
 //!
 //! ## SSA-style CFG narrowing (Phase 8)
 //!
@@ -37,16 +38,14 @@
 //! with body-end writers live so reads can bind to values from the
 //! previous iteration. Duplicate transfer edges are suppressed.
 //!
-//! ## Hybrid path
+//! ## Evidence boundary
 //!
 //! The IDG forward closure models clean-overwrite kills and branch joins,
 //! and public queries accept evidence through `Precision::Narrowed` while
 //! excluding diagnostic-only edges. This is an evidence classification, not
-//! a traversal or result cap. Full
-//! security migration also needs adapter-uniform source-event
-//! anchoring for side-effecting output arguments, blockchain
-//! environment reads, and framework-specific patterns; those source
-//! semantics are layered above the IDG.
+//! a traversal or result cap. Adapters provide syntax/capability facts and
+//! the rulepack provides security meaning; source/sink selection and
+//! framework policy remain layers above this API-neutral graph.
 //!
 //! ## Why a single graph
 //!

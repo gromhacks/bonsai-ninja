@@ -621,7 +621,7 @@ bonsai-ninja cache rebuild ./src
 | Subcommand or flag | Default | Description |
 |---|---:|---|
 | `stats [WORKSPACE]` | current directory | Print cache configuration plus validated freshness/readiness for `manifest.json`, compiler objects, retrieval, dataflow, value-flow, flow-id, callgraph, linkage, IDG, taint-graph, and export sidecars. |
-| `stats --format <FORMAT>` | text | `text` or `json`; SARIF requests fall back to JSON for this non-finding command. |
+| `stats --format <FORMAT>` | text | `text` or `json`; every other value is rejected. |
 | `stats --output-path <PATH>` | stdout | Write the selected `stats --format` output to a file. |
 | `clear [WORKSPACE]` | current directory | Remove persisted analysis sidecars from the workspace's external cache. |
 | `--dataflow-only` | false | For `clear`, remove only `dataflow.v3.factstore` and the compatibility `dataflow.v2.bin`. |
@@ -676,7 +676,7 @@ bonsai-ninja search ./src --query "request.args"
 |---|---|---|
 | `defs` | Definitions: functions, methods, classes, structs, traits, interfaces, enums. | `--kind`, `--file`, `--name`, `--has-callee`, `--has-decorator`, `--has-param`, `--regex` |
 | `entrypoints` | Callable declarations with no resolved semantic in-workspace callers. | `--kind`, `--file`, `--name`, `--regex` |
-| `calls` | Call sites with caller, callee, location, and code. | `--callee`, `--file`, `--caller`, `--call-kind`, `--regex` |
+| `calls` | Syntactic call sites with caller, callee, location, and adapter-emitted call kind. | `--callee`, `--file`, `--caller`, `--call-kind`, `--regex` |
 | `imports` | Imports, uses, includes, aliases, and wildcard imports. | `--file`, `--module`, `--alias`, `--wildcard`, `--regex` |
 | `vars` | Assignment targets and simple RHS source names. | `--name`, `--file`, `--in-fn`, `--source`, `--regex` |
 | `strings` | String literals classified as `sql`, `url`, `shell`, `regex`, `path`, or `generic`. | `--category`, `--contains`, `--file`, `--in-fn`, `--min-len`, `--regex` |

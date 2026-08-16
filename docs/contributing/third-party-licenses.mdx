@@ -20,10 +20,11 @@ dual-licensed dependency as if every branch applied. Run the command under
 distribution; it is intentionally not duplicated as a hand-maintained count
 table here.
 
-All licenses are permissive (MIT, MIT-0, Apache-2.0, ISC, BSD-2/3-Clause, 0BSD,
-Zlib, BSL-1.0, CC0-1.0, Unicode-3.0, CDLA-Permissive-2.0) or
-file-level weak copyleft (MPL-2.0). No GPL, AGPL, EUPL, SSPL, or
-LGPL-only dependencies.
+Every locked expression offers an approved redistribution branch: permissive
+MIT, MIT-0, Apache-2.0, ISC, BSD-2/3-Clause, 0BSD, Zlib, BSL-1.0, CC0-1.0,
+Unicode-3.0, CDLA-Permissive-2.0, or Unlicense; the one accepted weak-copyleft
+branch is file-level MPL-2.0. No GPL, AGPL, EUPL, SSPL, or LGPL-only
+dependencies are accepted.
 
 ## Notes on specific licenses
 
@@ -59,10 +60,9 @@ certificate set. Compatible with MIT distribution.
 |---|---|
 | ahash | Apache-2.0 OR MIT |
 | anyhow | Apache-2.0 OR MIT |
-| bincode | Apache-2.0 OR MIT |
 | clap | Apache-2.0 OR MIT |
-| crossbeam | Apache-2.0 OR MIT |
-| ignore | Apache-2.0 OR MIT |
+| crossbeam-channel / crossbeam-utils | Apache-2.0 OR MIT |
+| ignore | Unlicense OR MIT |
 | indicatif | MIT |
 | jsonschema (test-only) | MIT |
 | parking_lot | Apache-2.0 OR MIT |
@@ -70,12 +70,17 @@ certificate set. Compatible with MIT distribution.
 | regex | Apache-2.0 OR MIT |
 | serde | Apache-2.0 OR MIT |
 | serde_json | Apache-2.0 OR MIT |
-| serde_yaml | Apache-2.0 OR MIT |
+| serde_yaml_ng (workspace alias `serde_yaml`) | MIT |
 | smallvec | Apache-2.0 OR MIT |
 | thiserror | Apache-2.0 OR MIT |
 | tracing | MIT |
 | tree-sitter | MIT |
-| tree-sitter-* (grammars) | MIT (predominantly) |
+| tree-sitter-language-pack | MIT |
+
+Parser bundles downloaded by `tree-sitter-language-pack` at runtime are not
+part of the bonsai-ninja release archive. Their grammar sources remain subject
+to their respective upstream licenses; review and preserve those notices when
+redistributing a populated parser cache or a custom parser bundle.
 
 ## Reproducing the audit
 

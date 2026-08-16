@@ -66,7 +66,10 @@ Use `--compact` on commands that support it, reduce `--context`, add `--severity
 
 <Accordion title="How do I get machine-readable output?">
 
-Use `--format json --all` for native JSON. SARIF is emitted by `security taint-analysis --format sarif`; `security source-analysis` is source-flow mapping and should use JSON.
+Use `--format json --all` for a command's complete machine-readable JSON.
+The versioned native export is specifically `export --format json`. SARIF is
+emitted by `security taint-analysis --format sarif`; `security
+source-analysis` is source-flow mapping and should use JSON.
 
 </Accordion>
 

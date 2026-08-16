@@ -5,14 +5,12 @@
 //! per-entry semantic taint graph, and the transitive file
 //! dependencies used for invalidation.
 //!
-//! Unlike `value_flow_disk`, this version does NOT yet intern strings
-//! across entries — the dominant memory pressure for the dataflow
-//! cache is the per-function `EntryTaintGraph` resident in RAM, and
-//! moving those graphs out of process memory through the factstore
-//! is the OOM fix. Cross-entry string interning is a future
-//! enhancement that further shrinks the on-disk size; the file format
-//! is opaque to the factstore so we can swap it in without changing
-//! the storage layer.
+//! Unlike `value_flow_disk`, this version does not intern payload strings
+//! across entries. Per-function `EntryTaintGraph` payloads stay in the
+//! factstore and decode on demand instead of being eagerly retained for the
+//! whole workspace. Cross-entry string interning could further reduce disk
+//! size; the payload format is opaque to the factstore, so that encoding can
+//! change behind the versioned table contract.
 //!
 //! Decode errors surface as typed [`DecodeError`] so callers can
 //! distinguish a corrupt blob from missing data.

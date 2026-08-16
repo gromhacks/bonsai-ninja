@@ -91,17 +91,19 @@ Disabled rules need a reason:
 ```yaml
 enabled: false
 disabled_reason:
-  code: subsumed | over-broad | requires-constraint | pending-adapter-fact
-  subsumed_by: other.rule.id   # required when code: subsumed
+  code: requires-constraint
+  reenable_when: "A receiver-type constraint is available."
 ```
 
-`subsumed_by` chains terminate at an enabled rule. The validator catches
-broken chains.
+Allowed codes are `subsumed`, `over-broad`, `requires-constraint`, and
+`pending-adapter-fact`. `subsumed` additionally requires `subsumed_by`; that
+chain must terminate at an enabled rule. The validator catches invalid codes
+and broken chains.
 
 ## Capability-gated loading
 
-The matcher reads each adapter's `LanguageCapabilities` (see
-the internal coverage baseline at rulepack load time. A rule that anchors on
+The matcher reads each adapter's `LanguageCapabilities` at rulepack load time;
+see the [Coverage Baseline](COVERAGE_BASELINE.md). A rule that anchors on
 a construct the adapter declares `Unsupported` is rejected - typically
 with `disabled_reason.code: pending-adapter-fact` - so it can't fire on
 shapes the engine wouldn't analyse precisely.
@@ -155,19 +157,34 @@ Constraints are post-filters applied after the basic match. All must pass.
 | Constraint | Effect |
 |---|---|
 | `receiver_type_in: [HttpClient, Request]` | Receiver type fact must match one of the listed types. Preferred whenever the receiver is typed — from annotations, fields, or a local constructor assignment (`x = Pkg.Class(...)`). A receiver-agnostic callee regex plus this constraint stays precise without relying on the package gate alone. |
+| `receiver_type_not_in: [SafeType]` | Reject the match when a known receiver type matches the list. Missing type evidence does not prove the safe exclusion. |
+| `receiver_matches_regex: <regex>` / `receiver_not_matches_regex: <regex>` | Match or reject the adapter-normalized receiver expression. A call without a receiver cannot satisfy either receiver-regex proof. |
+| `unless_prior_receiver_call: { call, static_string_args_regex }` | Keep the sink active unless a guaranteed earlier call on the same parsed receiver matches both the rule-owned target and decoded static-string argument sequence. Branch-only or dynamic arguments do not suppress it. |
+| `second_arg_equals: <value>` | Compatibility shorthand for exact text equality on positional argument 1. Prefer `arg_equals: { index: 1, value }` in new rules. |
 | `arg_equals: { index, value }` | Arg N must equal `value`. |
 | `arg_tainted: { index \| kw }` | Engine must prove the named arg flows from a source. |
 | `receiver_tainted: true` | Engine must prove the call receiver flows from a source. |
 | `any_arg_tainted: true` | Engine must prove at least one syntactic arg flows from a source. |
+| `receiver_origin_callback_param_reaches_call` | Prove a matched receiver came from the declared factory with a tainted selected argument, then prove an assigned callback parameter reaches the rule-declared callback call argument. |
 | `receiver_factory_argument_fields_equal` | The call receiver must be an immutable compiler place initialized by the rule-declared factory, with the selected aggregate argument containing every declared exact typed field. The proof follows lexical ownership, rejects sibling-scope bindings, spreads, ambiguous factory/configuration facts, and any later receiver or receiver-field assignment. When the rule declares `imports`, the factory binding itself must resolve through one of those exact compiler import aliases; a same-named local factory fails closed. |
 | `keyword_arg_equals: { name, value }` | Named arg equals. |
+| `namespace: <qualified-prefix>` | The normalized callee must be inside the declared qualified namespace. |
 | `arg_matches_regex: { index, regex }` | Arg N matches regex. |
 | `arg_not_matches_regex: { index, regex }` | Arg N must NOT match regex (exclude escaped / constant-built args). |
 | `any_arg_matches_regex: <regex>` | Any argument matches regex (varargs / option bags). |
+| `arg_value_not_aggregate: N` | Reject a compiler-proven aggregate, sequence, or spread at arg N. Missing value-shape evidence keeps the dangerous rule active. |
+| `arg_sequence_items_equal: { argument_index, items }` | Require selected positions in one completely decoded positional sequence to equal one of the listed typed scalar values. |
 | `format_arg_index: N` | Treat arg N as a format string. |
-| `top_level: true \| false` | Match must (`true`) or must not (`false`) be at module top-level. |
+| `top_level: true \| false` | Legacy name for callable qualification: `true` requires a bare/unqualified callee; `false` requires a receiver- or namespace-qualified callee. It does not test lexical module scope. |
 | `arg_count: N` / `max_args: N` / `min_args: N` | Exact / upper / lower argcount bounds. |
 | `enclosing_decorator_in: [name, ...]` | Enclosing decl carries one of the listed decorators. |
+| `enclosing_modifier_in: [name, ...]` | Enclosing declaration carries one of the adapter-emitted modifier tokens. |
+| `sink_tag_in: [tag, ...]` | Source-rule path predicate: retain the source only when a proven terminal sink has one of the declared semantic tags. |
+| `same_receiver_call_count_at_least: N` | The parsed receiver has at least N calls in the current structural scope. |
+| `arg_lt` / `arg_le` / `arg_gt` / `arg_ge` | Compare a decoded integer literal argument with the declared threshold; a non-literal fails closed. |
+| `requires_runtime_type` | Require a preceding, CFG-relevant runtime type guard for the selected argument. |
+| `must_alias` | Require the selected argument identities to share one compiler-proven must-alias root. |
+| `requires_state` | Require the selected binding or argument to be in the declared lifecycle state at the call site. |
 
 `arg_tainted` is intentionally narrow. For `call` and `new` rules it
 evaluates syntactic call arguments against engine `TaintedCallKind::Call`
@@ -333,7 +350,7 @@ matched sources         matched sinks
 
 The finding ID is stable for the complete semantic sink finding across
 runs. Different source-to-sink routes do not create duplicate findings:
-native JSON retains them in `alternate_flows`, and SARIF emits them as
+taint-analysis JSON retains them in `alternate_flows`, and SARIF emits them as
 multiple `codeFlows` on one result.
 
 Security taint analysis plans rule matches from compiler headers, opens the
@@ -451,9 +468,11 @@ Three:
   source id. Lifecycle-audit transition sites are not emitted as
   findings until later same-value use is proved.
 
-Finding JSON and SARIF are content-stable: the same workspace produces
-the same bytes (sorted findings, deterministic `finding_id`s, no
-timestamps in the default emission). Stable IDs are exercised by
+Each finding format is content-stable when the same snapshot, configuration,
+and canonical workspace root are used: rows are sorted, `finding_id`s are
+deterministic, and default emission contains no timestamps. Location fields
+currently include the selected workspace path, so moving an otherwise
+identical checkout can change serialized bytes and IDs. Stable IDs are exercised by
 `crates/security/tests/finding_id_stability.rs`; repeated CLI analysis and
 export rendering are covered by `crates/cli/tests/taint_engine_e2e.rs` and
 `crates/cli/tests/determinism.rs`.
@@ -497,7 +516,7 @@ Text output uses distinct labels for different evidence surfaces:
 
 JSON and SARIF expose the same underlying propagation as structured
 fields. In SARIF, every complete route is emitted through `codeFlows`; in
-native JSON, the representative route lives in `taint_path` and the other
+taint-analysis JSON, the representative route lives in `taint_path` and the other
 routes live in `alternate_flows`.
 
 ## Validation

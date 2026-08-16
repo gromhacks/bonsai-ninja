@@ -23,6 +23,12 @@ Workspace-local rules live under `<workspace>/.bonsai/rules/` and use the same l
 
 ## Disable A Shipped Rule
 
+This example assumes the overlay also defines the enabled
+`mycompany.cmdi.safe_exec_wrapper` replacement. The validator rejects a
+`subsumed_by` target that is missing, disabled, or part of a cycle. Use
+`over-broad`, `requires-constraint`, or `pending-adapter-fact` when there is
+no enabled replacement.
+
 ```yaml
 - id: python.cmdi.os_system
   enabled: false

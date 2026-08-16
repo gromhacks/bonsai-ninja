@@ -43,7 +43,7 @@ Call {
   name: String,               // adapter-normalized callee identifier
   receiver: Option<String>,   // explicit `obj.foo()` receiver text
   receiver_types: Vec<String>,// static types of `receiver`, post-kit pass
-  call_kind: CallKind,        // Function | Method | Constructor | Macro | Operator | Indirect | ChannelSend
+  call_kind: CallKind,        // Function | Method | Constructor | Macro | Operator | Indirect | ChannelSend | IndexWrite
   args: Vec<CallArg>,         // parsed positional/named argument facts
 }
 ```
@@ -68,6 +68,10 @@ Adapter obligations:
   method. When a language uses an ambiguous bare-call CST for `Foo()`, the
   callgraph refines it only after exact class/constructor resolution. Neither
   capitalization nor a shared constructor-name inventory is evidence.
+- `call_kind::IndexWrite` is structural too: it represents an assignment
+  through a parser-proven index/subscript place. The index and assigned value
+  remain typed arguments; shared analysis does not pretend the source invoked
+  a provider method.
 - Constructor delegation is also structural. An adapter emits the exact
   constructor event from its CST (`this(...)`, `super(...)`, or the
   language's equivalent); shared callgraph resolution selects the enclosing
@@ -162,7 +166,7 @@ Assign {
   source_call_args: Vec<String>,   // call-arg texts when source_call set
   source_names: Vec<String>,       // bare identifiers in a compound RHS
   declares_new_binding: bool,      // CST node is a declaration (let/var/val/...)
-  value_kind: Option<AssignValueKind>, // Literal | CallResult | Compound | Unknown
+  value_kind: Option<AssignValueKind>, // Literal | CallResult | YieldResult | Destructure | CallableReference | Compound | Unknown
 }
 ```
 
@@ -187,6 +191,11 @@ Adapter obligations:
   exact non-empty quoted token in `source_name` for runtime callable
   resolution. The value remains `Literal`, so IDG overwrite semantics still
   commit a clean writer and never treat the quoted token as value taint.
+- `YieldResult` marks a binding supplied by a callee yield/callback boundary;
+  `Destructure` marks one field or position projected from an aggregate; and
+  `CallableReference` marks a syntax-proven function value rather than an
+  invocation. These shapes preserve their typed transfer role without
+  inferring it from `source_name` text.
 - `declares_new_binding` is `true` when the CST kind unambiguously
   introduces a new local binding (`let`, `var`, `val`, `const`, `my`,
   `our`, `local`, Python first-assignment in scope, etc.). It is

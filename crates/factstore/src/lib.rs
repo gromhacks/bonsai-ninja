@@ -3,12 +3,11 @@
 //!
 //! ## What this crate is for
 //!
-//! bonsai-ninja's per-function analysis caches (dataflow facts,
-//! value-flow graphs, flow-id labels, source-seeded taint graphs)
-//! grow linearly with the number of callable functions in a
-//! workspace. Today they live entirely in process memory and are
-//! eagerly populated at workspace open. On large workspaces that
-//! pushes total RSS past available RAM.
+//! bonsai-ninja's compiler objects and semantic sidecars (dataflow facts,
+//! value-flow graphs, flow-id labels, callgraph/linkage partitions, IDG segments,
+//! source-seeded taint graphs, and retrieval facts) grow with the analyzed
+//! workspace. Keeping every decoded payload resident at once would make large
+//! workspaces impractical.
 //!
 //! This crate is the storage substrate for those caches:
 //!
