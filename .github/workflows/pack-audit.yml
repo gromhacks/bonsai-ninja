@@ -19,6 +19,7 @@ on:
       - "scripts/validate-pattern-pack.py"
       - "scripts/pattern_variants_na.yml"
       - "docs/pattern-variants.mdx"
+      - ".github/requirements/pack-audit.txt"
       - ".github/workflows/pack-audit.yml"
   push:
     branches: [main]
@@ -30,6 +31,8 @@ on:
       - "scripts/validate-pattern-pack.py"
       - "scripts/pattern_variants_na.yml"
       - "docs/pattern-variants.mdx"
+      - ".github/requirements/pack-audit.txt"
+      - ".github/workflows/pack-audit.yml"
   workflow_dispatch:
 
 permissions:
