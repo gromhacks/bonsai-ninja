@@ -231,6 +231,10 @@ incremental = false
 [profile.test]
 debug = 0
 incremental = false
+# Integration tests execute the compiler and CLI thousands of times. A small
+# amount of optimization keeps those semantic checks representative without
+# paying release ThinLTO costs or multiplying cold CI runtime on Windows.
+opt-level = 1
 
 [profile.bench]
 lto = "thin"

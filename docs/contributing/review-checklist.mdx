@@ -144,8 +144,10 @@ class and verify each box.
       tests pass.
 - [ ] **Sanitizer fixtures intact.** `cargo test -p bonsai-ninja --test
       sanitizer_fixtures` reports expected raw + sanitized findings.
-- [ ] **Validator matches CLI.** `cargo test -p bonsai-ninja --test
-      validate_script` passes.
+- [ ] **Rulepack validator passes.** Build the release binary, then run
+      `python3 scripts/validate-pattern-pack.py --binary
+      target/release/bonsai-ninja`. The Pack Audit workflow enforces the same
+      complete rulepack gate.
 - [ ] **Hardcoded-knowledge boundary passes.** `scripts/audit-hardcoded.sh
       --check` reports zero production violations.
 - [ ] **Documentation updated.** `docs/security-spec.mdx` reflects schema
@@ -372,9 +374,10 @@ class and verify each box.
       `#[cfg(test)] mod ...;` declaration.
 - [ ] `cargo build --release` is warning-free.
 - [ ] `cargo test --workspace` passes (full sweep before merging).
-- [ ] `[profile.test] debug = 0` remains enabled. The full workspace creates
-      hundreds of executables that each link the 20-language graph; opt in to
-      `CARGO_PROFILE_TEST_DEBUG=2` only for a focused debugger session.
+- [ ] `[profile.test] debug = 0` and `opt-level = 1` remain enabled. The full
+      workspace creates hundreds of executables that each link and execute the
+      20-language graph; opt in to `CARGO_PROFILE_TEST_DEBUG=2` and
+      `CARGO_PROFILE_TEST_OPT_LEVEL=0` only for a focused debugger session.
 - [ ] No `panic!` / `unwrap()` introduced on user input.
 - [ ] No `unsafe_code` introduced.
 - [ ] Commit message explains the why, not just the what.

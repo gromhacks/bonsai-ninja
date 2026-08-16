@@ -242,14 +242,22 @@ hash.
 
 ## Test-build performance
 
-`[profile.test] debug = 0` is intentional. The workspace links many integration
-executables that include all language adapters. Full DWARF substantially
-increases link time and artifact size without changing test behavior. For a
-local debugger session, opt in explicitly:
+`[profile.test] debug = 0` and `opt-level = 1` are intentional. The workspace
+links many integration executables that include all language adapters, and
+those tests invoke the compiler-backed CLI thousands of times. Full DWARF
+substantially increases link time and artifact size, while completely
+unoptimized analysis makes the exhaustive Windows gate disproportionately
+slow. Light optimization keeps this correctness profile compact without
+paying release ThinLTO costs. For a local debugger session, opt in explicitly:
 
 ```bash
-CARGO_PROFILE_TEST_DEBUG=2 cargo test -p <crate> <test-name>
+CARGO_PROFILE_TEST_DEBUG=2 CARGO_PROFILE_TEST_OPT_LEVEL=0 \
+  cargo test -p <crate> <test-name>
 ```
+
+The complete pattern-pack and mega-CLI validators run once against the release
+binary in their dedicated workflows. They are not duplicated inside each
+platform's debug-oriented workspace test process.
 
 Production runtime measurements always use release binaries.
 

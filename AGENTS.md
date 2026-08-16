@@ -197,7 +197,10 @@ measured baseline only for an intentional, reviewed architecture change.
 Run exhaustive correctness with the compact test profile (`cargo test
 --workspace`), not `cargo test --release --workspace`: ThinLTO-linking every
 integration target duplicates the complete language graph and is not a valid
-runtime-performance measurement. `scripts/audit-build-artifacts.sh` enforces
+runtime-performance measurement. Keep that profile at `debug = 0` and
+`opt-level = 1`: the tests invoke the compiler-backed CLI thousands of times,
+so fully unoptimized execution is also not a valid correctness-gate cost.
+`scripts/audit-build-artifacts.sh` enforces
 the 32 GiB generated-artifact budget; use `cargo clean` when accumulated local
 generations exceed it. Release optimization remains required for the CLI build
 and the named Elasticsearch SLO target.

@@ -5859,10 +5859,11 @@ fn taint_documentation_names_only_the_idg_api() {
 }
 
 /// Hundreds of integration-test executables otherwise each link full DWARF
-/// for the entire compiler stack. That is host work, not useful test
-/// coverage, and caused clean workspace gates to take tens of minutes.
+/// and repeatedly execute an unoptimized compiler stack. That is host work,
+/// not useful test coverage, and caused clean workspace gates to take tens of
+/// minutes (or hang in duplicated full-pack parity on Windows).
 #[test]
-fn workspace_test_profile_keeps_debug_link_graphs_disabled() {
+fn workspace_test_profile_stays_compact_and_lightly_optimized() {
     let cargo = read(&repo_root().join("Cargo.toml"));
     let profile = cargo
         .split_once("[profile.test]")
@@ -5871,6 +5872,12 @@ fn workspace_test_profile_keeps_debug_link_graphs_disabled() {
     assert!(
         profile.lines().any(|line| line.trim() == "debug = 0"),
         "[profile.test] must keep debug = 0 so exhaustive workspace gates do not relink full DWARF graphs"
+    );
+    assert!(
+        profile
+            .lines()
+            .any(|line| line.trim() == "opt-level = 1"),
+        "[profile.test] must keep opt-level = 1 so exhaustive compiler/CLI tests do not run fully unoptimized"
     );
 }
 

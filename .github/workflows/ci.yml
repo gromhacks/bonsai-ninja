@@ -45,6 +45,9 @@ jobs:
 
   test:
     name: cargo test (${{ matrix.os }})
+    # A watchdog makes a stuck child process fail visibly. It never turns an
+    # incomplete test run into a pass or narrows the requested test scope.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:

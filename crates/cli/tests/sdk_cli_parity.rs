@@ -1086,30 +1086,54 @@ fn security_pack_cli_json_matches_sdk() {
     let sdk = sdk();
     let pack = sdk.security_pack().expect("SDK security pack");
     let workspace = "examples/python/micro";
+    // CLI/SDK parity only needs one representative language slice. The
+    // dedicated Pack Audit gate validates the complete rulepack in release
+    // mode; repeating that audit and validation twice in this debug
+    // integration test made the Windows workspace gate spend tens of minutes
+    // in one opaque test process without adding parity coverage.
+    let options = bonsai_sdk::PackInventoryOptions {
+        lang: Some("python".to_string()),
+        ..Default::default()
+    };
 
     assert_json_rows_eq(
         "security pack",
-        rows_or_array(run_cli(&security_cli_args(workspace, "pack", &["--all"]))),
-        serde_json::to_value(pack.inventory(Default::default()).expect("pack inventory")).expect("pack json"),
+        rows_or_array(run_cli(&security_cli_args(
+            workspace,
+            "pack",
+            &["--all", "--lang", "python"],
+        ))),
+        serde_json::to_value(pack.inventory(options.clone()).expect("pack inventory")).expect("pack json"),
     );
 
     assert_json_eq(
         "security pack --audit",
-        run_cli(&security_cli_args(workspace, "pack", &["--audit"])),
-        serde_json::to_value(pack.audit(None).expect("pack audit")).expect("audit json"),
+        run_cli(&security_cli_args(
+            workspace,
+            "pack",
+            &["--audit", "--lang", "python"],
+        )),
+        serde_json::to_value(pack.audit(Some("python")).expect("pack audit")).expect("audit json"),
     );
 
     assert_json_eq(
         "security pack --tree",
-        run_cli(&security_cli_args(workspace, "pack", &["--tree", "--all"])),
-        serde_json::to_value(pack.tree(Default::default()).expect("pack tree")).expect("tree json"),
+        run_cli(&security_cli_args(
+            workspace,
+            "pack",
+            &["--tree", "--all", "--lang", "python"],
+        )),
+        serde_json::to_value(pack.tree(options.clone()).expect("pack tree")).expect("tree json"),
     );
 
     assert_json_eq(
         "security pack --validate",
-        run_cli(&security_cli_args(workspace, "pack", &["--validate"])),
-        serde_json::to_value(pack.validate(Default::default()).expect("pack validation"))
-            .expect("validation json"),
+        run_cli(&security_cli_args(
+            workspace,
+            "pack",
+            &["--validate", "--lang", "python"],
+        )),
+        serde_json::to_value(pack.validate(options).expect("pack validation")).expect("validation json"),
     );
 }
 
