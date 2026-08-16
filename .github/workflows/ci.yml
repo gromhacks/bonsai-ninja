@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: "1.88"
   RUSTFLAGS: "-D warnings"
   CARGO_INCREMENTAL: "0"
 
