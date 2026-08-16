@@ -19,8 +19,9 @@ cannot silently accumulate here.
 - `audit-corpus-independence.py` — rejects benchmark identities and developer
   paths in production logic.
 - `audit-dependency-licenses.py` — validates licenses across the locked Cargo dependency graph.
-- `audit-docs.py` — checks links, navigation, public wording, copied prose,
-  command shapes, repository-derived counts, and this script inventory.
+- `audit-docs.py` — checks every tracked Markdown surface, links, navigation,
+  public wording, copied prose, command shapes, repository-derived counts,
+  rule vocabulary, disabled-rule examples, and this script inventory.
 - `audit-github-actions.sh` — enforces immutable GitHub Action references and
   release-workflow requirements.
 - `audit-hardcoded.sh` — enforces the adapter/rulepack ownership boundary for

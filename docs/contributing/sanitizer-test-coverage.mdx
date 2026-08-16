@@ -11,14 +11,19 @@ raw form reaches the sink directly; the safe form keeps the tainted
 value flowing to the sink with the sanitizer wrapping it so the
 engine attaches sanitizer evidence to the finding.
 
-The fixtures drive `bonsai-ninja security <ws> taint-analysis` and are the
+The fixtures drive `bonsai-ninja security <ws> taint-analysis
+--show-sanitized` and are the
 regression surface for sanitizer behaviour — the engine must:
 
   1. Produce a finding for every `_raw` chain (no sanitizer in the
      path, taint reaches the sink directly).
-  2. Attach the sanitizer as evidence on the `_safe` chain — the
+  2. Attach the sanitizer as evidence on the `_safe` chain when sanitized
+     paths are requested — the
      finding's `sanitizers_seen` array lists the sanitizer rule id
      with its source location.
+
+Default taint output hides sanitizer-cleared paths. `--show-sanitized` is an
+audit view; it does not change propagation or sanitizer classification.
 
 Every language now has BOTH raw and sanitizer-evidence coverage
 (verified by `crates/cli/tests/sanitizer_fixtures.rs`).
@@ -70,7 +75,8 @@ the tainted value flowing to the sink.
 ## Running
 
 ```shell
-bonsai-ninja security examples/python/sanitizer_test taint-analysis --format json | \
+bonsai-ninja security examples/python/sanitizer_test taint-analysis \
+    --show-sanitized --format json --all | \
     jq '.rows[] | {id: .finding_id, sanitizers: (.sanitizers_seen | length)}'
 ```
 

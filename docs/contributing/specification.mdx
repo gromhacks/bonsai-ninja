@@ -75,9 +75,10 @@ semantic gap. Budget reasons live in `summary.truncation_reasons`;
 non-budget gaps such as unresolved call expansion live in
 `summary.analysis_incomplete_reasons`.
 
-`TraceStep` is `{ ordinal, kind, location, summary, value_id }` with
-`TraceStepKind` covering EnterFunction, EvalExpr, Assign, BranchSplit,
-Return, Throw, etc.
+`TraceStep` is `{ id, path_id, order, kind, message, function, module, file,
+span, code, state_before, state_after, precision, notes }` with
+`TraceStepKind` covering EnterFunction, EvalExpr, Assign, BranchSplit, Return,
+Throw, and the other typed interpreter steps.
 
 ### 2.2 `Finding` (produced by `security taint-analysis`)
 
@@ -91,9 +92,13 @@ Finding {
   source: FindingMatch,
   sink: FindingMatch,
   sanitizers_seen: Vec<FindingMatch>,
+  taint_transforms_seen: Vec<FindingMatch>,
+  analysis_complete, analysis_incomplete_reasons,
   taint_path: Vec<TaintPropagationStep>,
   chain_display: Vec<String>,
   alternate_flows: Vec<AlternateTaintFlow>,
+  hops: Vec<FlowFunctionBody>,
+  from_test,
 }
 ```
 
@@ -107,13 +112,13 @@ language, formatted as `S:xxxxxxxxxxxxxxxx` and stable across runs.
 
 Each browse command emits a stable shape:
 
-- `DefOut { name, qualified_name, kind, file, line, params }`
-- `CallOut { callee, file, line, caller, call_kind }`
-- `RefOut { kind, target, file, line, enclosing_fn }`
-- `ImportOut { module, file, line, kind }`
-- `VarOut { name, file, line, kind, type }`
-- `StringOut { value, file, line, kind }`
-- `ClassOut { name, kind, file, line, bases, fields, methods }`
+- `DefOut { name, qualified_name, kind, file, line, column, params }`
+- `CallOut { resolution_scope, callee, file, line, column, caller, call_kind }`
+- `RefOut { symbol, file, line, column, kind, snippet }`
+- `ImportOut { file, module, alias, original_name, is_wildcard, line, local_bindings }`
+- `VarOut { name, file, line, column, in_function, writes, source_name }`
+- `StringOut { text, category, file, line, column }`
+- `ClassOut { name, kind, file, line, method_count, methods }`
 
 Field names are part of the public contract.
 
@@ -176,9 +181,12 @@ reason instead of presenting spurious evidence as complete.
 The same workspace + same config produces the same output across:
 
 - Multiple processes (FNV-1a-64 hashes pin finding / flow / group ids).
-- Different machines (no platform-specific iteration order leaks into
-  output).
 - Cache reload (sidecar validation re-derives identical results).
+
+Security JSON location fields currently reflect the selected workspace's
+filesystem paths, so byte identity and `S:` IDs assume the same canonical
+workspace root as well as the same source/config. Native export instead uses
+workspace-relative code locations plus one top-level `workspace_root`.
 
 The pinning test is `finding_ids_deterministic_across_runs`.
 

@@ -67,14 +67,15 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: "1.88"
       - run: cargo build --release --locked -p bonsai_cli
       - name: Run bonsai-ninja
         run: |
           ./target/release/bonsai-ninja security . taint-analysis \
             --profile production \
-            --rules-dir security-patterns \
             --format sarif \
             --all \
             --output-path bonsai.sarif.json \
@@ -95,14 +96,13 @@ disabled by repository policy.
 stages: [security]
 
 bonsai_security:
-  image: rust:latest
+  image: rust:1.88
   stage: security
   script:
     - cargo build --release --locked -p bonsai_cli
     - |
         ./target/release/bonsai-ninja security . taint-analysis \
           --profile production \
-          --rules-dir security-patterns \
           --format json \
           --all \
           --output-path bonsai-findings.json \
@@ -122,14 +122,13 @@ version: 2.1
 jobs:
   bonsai-security:
     docker:
-      - image: cimg/rust:stable
+      - image: cimg/rust:1.88
     steps:
       - checkout
       - run: cargo build --release --locked -p bonsai_cli
       - run: |
           ./target/release/bonsai-ninja security . taint-analysis \
             --profile production \
-            --rules-dir security-patterns \
             --format json \
             --all \
             --output-path bonsai-findings.json \
@@ -143,6 +142,12 @@ workflows:
     jobs:
       - bonsai-security
 ```
+
+These examples intentionally use the rulepack embedded in the binary. Add
+`--rules-dir <DIR>` only when the job is meant to test or deploy a specific
+editable/custom pack. For production workflows, pin every third-party action
+and container to an immutable reviewed digest; the repository's own workflows
+are checked by `scripts/audit-github-actions.sh`.
 
 ## Failing a job on findings
 

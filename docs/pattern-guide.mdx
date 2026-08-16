@@ -383,6 +383,52 @@ adapter-visible `packages:` / `imports:` / `modules:` signals and
 taint/argument constraints — but expect lower precision than a
 `receiver_type_in` rule.
 
+### Receiver exclusions and parsed receiver text
+
+```yaml
+- receiver_type_not_in: [SecureRandom]
+- receiver_matches_regex: "^[A-Za-z_$][A-Za-z0-9_$]*$"
+- receiver_not_matches_regex: "(?i)^safe_client$"
+```
+
+`receiver_type_not_in` rejects a match only when compiler type evidence names
+one of the excluded types; absence of a type is not evidence of safety.
+Receiver regexes run on the adapter-normalized receiver expression, not raw
+file text. A call with no receiver cannot satisfy either receiver-regex
+constraint.
+
+### Prior receiver calls
+
+```yaml
+- unless_prior_receiver_call:
+    call: { name: set_header }
+    static_string_args_regex: "(?i)^content-type\\x1ftext/plain$"
+```
+
+This keeps a sink active unless the compiler proves a guaranteed earlier call
+on the same receiver whose rule-owned target and decoded static string
+arguments match. Static arguments are joined with the ASCII unit separator
+(`\x1f`). Calls seen on only
+one branch, dynamic arguments, and missing structural evidence do not suppress
+the sink.
+
+### Callback extension proof
+
+```yaml
+- receiver_origin_callback_param_reaches_call:
+    receiver_factory: { attribute: [xml, NewDecoder] }
+    factory_tainted_arg_index: 0
+    receiver_member: { regex: "^[^.]+\\.CharsetReader$" }
+    callback_param_index: 0
+    callback_call: { attribute: [http, Get] }
+    callback_call_arg_index: 0
+```
+
+The matcher proves factory origin, tainted factory input, receiver-member
+assignment, callback parameter binding, and the declared callback call
+argument from compiler facts. Every API identity and argument role remains in
+the rule.
+
 ### `format_arg_index`
 
 ```yaml
@@ -396,13 +442,36 @@ with a separate rule-owned argument regex/value constraint.
 ### `top_level`
 
 ```yaml
-- top_level: true     # match must be at module top-level
-- top_level: false    # match must NOT be at module top-level
+- top_level: true     # callee must be bare/unqualified
+- top_level: false    # callee must have a receiver or namespace
 ```
 
-`true` requires the match to sit at module top-level; `false` requires it
-to be nested (inside a function/class). Distinguishes a top-level
-`yaml.load(...)` from a method decoy like `obj.Load(...)`.
+`top_level` is a legacy schema name for callable qualification, not lexical
+scope. `true` distinguishes a bare function or language construct such as
+`open(...)` from a method decoy such as `stream.open(...)`; `false` requires
+the qualified form.
+
+### Exact call identity and value-shape constraints
+
+| Constraint | Use |
+|---|---|
+| `namespace: java.security` | Require the callee's normalized qualified prefix. |
+| `second_arg_equals: "True"` | Compatibility shorthand for exact arg 1 text; prefer `arg_equals` in new rules. |
+| `arg_value_not_aggregate: 0` | Reject a compiler-proven object/list/array/spread at arg 0; unknown shape keeps the dangerous rule active. |
+| `arg_sequence_items_equal` | Require typed scalar values at selected positions in one completely decoded positional sequence. |
+
+```yaml
+- arg_sequence_items_equal:
+    argument_index: 0
+    items:
+      - index: 0
+        accepted_values:
+          - { kind: string, value: sh }
+          - { kind: string, value: /bin/sh }
+      - index: 1
+        accepted_values:
+          - { kind: string, value: -c }
+```
 
 ### `in_class` / `in_method` / `decl_kind_in` / `visibility_in`
 
@@ -479,6 +548,26 @@ matches one of the listed names. Useful for scoping `kind: missing`
 rules to handler decls (`@app.route`) without firing on every
 helper. Splits dotted decorator names so `@app.route` matches
 both `route` and `app`.
+
+### `enclosing_modifier_in`
+
+```yaml
+- enclosing_modifier_in: [static]
+```
+
+Requires one of the adapter-emitted modifier tokens on the enclosing
+declaration. Matching is case-insensitive; missing declaration/modifier
+evidence fails closed.
+
+### `sink_tag_in`
+
+```yaml
+- sink_tag_in: [insecure-deserialization]
+```
+
+This is a source-rule compatibility predicate evaluated after a proven path
+reaches a sink. It prevents a narrowly purposed generic source from pairing
+with unrelated sink classes without naming sink rule IDs in shared analysis.
 
 ### `must_alias`
 

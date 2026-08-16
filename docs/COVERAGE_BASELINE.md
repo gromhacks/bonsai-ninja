@@ -35,11 +35,11 @@ will leave unrecognized forms as diagnostic incompleteness.
 > reflect deliberate precision tradeoffs and some remain opportunities for
 > future frontend or build-system integration:
 >
-> - **Macros** (C, C++, Elixir, Erlang, Objective-C) - modeling
->   un-expanded macros would invent flow that may not exist after
->   preprocessing. Rust has limited support (`println!` etc.) because
->   the kit recognizes the common shapes; C-style preprocessor macros
->   require a real preprocessor pass we deliberately don't run.
+> - **Macros** - adapters can lower grammar-proven invocation syntax where
+>   their capability is `Partial`, but bonsai-ninja does not expand macro
+>   bodies. Rust macro invocations therefore remain calls to unresolved
+>   generated behavior, while C-style preprocessing requires build-aware
+>   expansion that this frontend pipeline deliberately does not perform.
 > - **Reflection** (most langs) - runtime introspection
 >   (`getattr(obj, dyn_str)`, `Class.forName(...)`, etc.) cannot be
 >   resolved statically. Modeling it imprecisely would manufacture
@@ -201,9 +201,10 @@ A plain-English read of where each language stands today:
   is treated as incomplete. Macro expansion is not performed; rules
   anchored on macro-defined names won't fire. Smart-pointer move/copy
   isn't distinguished beyond the standard Assign event.
-- **C#** - Standard async/await flows analysed; reflection (`Type`
-  introspection, dynamic invocation) is opaque. Generic
-  monomorphisation works for the closed set of instantiations seen.
+- **C#** - Standard async/await flows are analyzed; reflection (`Type`
+  introspection, dynamic invocation) is opaque. Parsed generic/type evidence
+  can narrow calls, but bonsai-ninja does not run the language compiler's
+  monomorphization or runtime binder.
 - **Dart** - Standard analysis. Async/await modeled; FFI is library-
   level (not a language construct) so declared `n/a`.
 - **Elixir / Erlang** - Module + protocol/behaviour resolution works;
@@ -214,9 +215,9 @@ A plain-English read of where each language stands today:
 - **Go** - Standard module + interface dispatch analysis. Generics
   (1.18+) handled. `panic`/`recover` is not modeled as exceptions;
   goroutines record the spawn but happens-before is not tracked.
-- **Java / Kotlin** - Standard inheritance + method-resolution
-  analysis. Annotations (`@RequestBody`, etc.) are read by the
-  resolver; reflection (`Class.forName`) is opaque.
+- **Java / Kotlin** - Standard inheritance and method-resolution analysis.
+  Adapters retain parsed annotations for rule and entry-point constraints;
+  reflection without a statically proven target remains unresolved.
 - **JavaScript / TypeScript** - CommonJS + ES module analysis. The
   engine credits `module.exports = X` and `exports.X = …` to the
   module's public surface (the only languages that need this). Type
@@ -238,11 +239,11 @@ A plain-English read of where each language stands today:
   Decorators (Python) and modifiers (PHP attributes, Ruby method
   visibility) feed the resolver. Dynamic dispatch (Python `getattr`,
   Ruby `send`) is opaque when the method name is computed.
-- **Rust** - Trait-based dispatch analysis. `Box<dyn Trait>` calls
-  emit semantic virtual edges only when the receiver set is proven. No
-  exception model (Rust uses `Result`); macro expansion is partial
-  (we recognise common shapes like `println!`, but `macro_rules!`
-  and proc-macros aren't expanded).
+- **Rust** - Trait-based dispatch analysis. `Box<dyn Trait>` calls emit
+  semantic virtual edges only when the receiver set is proven. Rust uses
+  `Result` rather than exceptions. The adapter lowers grammar-proven macro
+  invocation facts, but `macro_rules!` bodies and procedural macros are not
+  expanded.
 - **Scala** - Inheritance + pattern-matching analysis. FFI via Scala-
   native isn't modeled (not a language-level construct).
 - **Swift** - Standard class + protocol analysis. FFI via the

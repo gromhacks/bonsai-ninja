@@ -45,14 +45,14 @@ Prefer rule fixes over suppressions. When a project needs local policy, disable 
 - id: python.cmdi.os_system
   enabled: false
   disabled_reason:
-    code: project-policy
+    code: over-broad
   language: python
   tag: command-injection
   match:
     kind: call
     callee:
       attribute: [os, system]
-  description: "Disabled locally by project policy."
+  description: "Disabled locally because this workspace's wrapper-only use makes the shipped match over-broad."
 ```
 
 ## Finding-ID Semantics

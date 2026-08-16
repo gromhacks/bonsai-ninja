@@ -429,10 +429,15 @@ For lower-level operations, `project.workspace()` returns a `&Workspace`:
 
 ```rust
 let ws = project.workspace();
-let global = ws.db().global_index();
+let global = ws.compiler_linkage_index();
 let cfg = ws.db().cfg(func_id);
 let resolved = ws.cached_resolved_call_graph(); // singleton Arc; share across queries
 ```
+
+Prefer the compiler linkage/header indexes for workspace-wide symbol work.
+Do not call `AnalyzerDb::global_index()` while an IDG query service is open:
+that reconstructs complete bodies beside the graph. IDG consumers should
+reuse `IdgQueryService::global_linkage_index()`.
 
 The workspace exposes accessors for the precomputed caches that
 power the "index once, query many times" model. Each one is

@@ -119,9 +119,10 @@ bonsai-ninja export ./src --format graphml --output-path graph.graphml
 bonsai-ninja export ./src --format cypher --output-path graph.cypher
 ```
 
-## JSON for automation and evaluation
+## Security JSON for automation and evaluation
 
-Automation and evaluation pipelines usually consume native JSON because it
+Security automation and evaluation pipelines usually consume
+`taint-analysis --format json` because it
 preserves exact rule IDs, locations, tainted arguments, chains, taint-path
 steps, completeness metadata, and stable IDs.
 
@@ -187,7 +188,9 @@ data.
 
 ## Deps
 
-Dependency output lists imports that match package names mentioned by the loaded rulepack.
+Dependency output emits one object per matched package/framework key. Each
+object groups the rules and rulepack signals that named the key with every
+workspace-relative file that supplied import evidence.
 
 ```bash
 bonsai-ninja security ./src deps --severity critical --format json --output-path deps.json
@@ -196,11 +199,13 @@ bonsai-ninja security ./src deps --severity critical --format json --output-path
 ```json
 [
   {
-    "package": "flask",
     "language": "python",
-    "file": "app.py",
-    "line": 14,
-    "rules": ["python.flask.request_args_get"]
+    "key": "flask",
+    "rule_ids": ["python.flask.request_args_get"],
+    "signals": ["frameworks:flask", "imports:flask"],
+    "evidence_files": ["app.py"],
+    "severity": "critical",
+    "tags": ["http-input"]
   }
 ]
 ```

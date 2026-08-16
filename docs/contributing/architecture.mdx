@@ -29,6 +29,7 @@ work in one or two layers at a time, so this doc is organised the same way.
         ┌──────────────┴──────────────┐
         │  Analysis core              │
         │  bonsai_taint               │
+        │  bonsai_idg                 │
         │  bonsai_callgraph           │
         │  bonsai_abstract_interp     │
         │  bonsai_resolve  index  db  cfg
@@ -45,6 +46,7 @@ work in one or two layers at a time, so this doc is organised the same way.
         ┌──────────────┴──────────────┐
         │  Foundation                 │
         │  bonsai_common  bonsai_hash │
+        │  bonsai_factstore           │
         └─────────────────────────────┘
 ```
 
@@ -100,6 +102,12 @@ after every CPU-sized group of files.
 **`crates/hash`** provides FNV-1a digests for every persisted ID. Sole API:
 `fnv1a_str_slice64`, `fnv1a_names64`, `fnv1a_bytes64`, `fnv1a_low32`. RFC
 vector verified.
+
+**`crates/factstore`** is the lossless, content-addressed persistence
+substrate for compiler objects and semantic sidecars. Its indexed binary
+format supports atomic writers, independently decodable payloads, lazy
+readers, a shared string pool, and bounded decoded-value retention. It
+changes storage and reuse only; it never selects or caps semantic facts.
 
 ## Parse and ingest
 
@@ -594,6 +602,13 @@ does not rescan the source and dependency trees. Any source edit clears that
 token together with the IDG and other semantic caches. A frontend ABI or
 transfer-semantic version change produces a different pipeline hash and cannot
 reuse the prior graph.
+
+**`crates/idg`** owns this canonical interprocedural dataflow graph: numeric
+places and nodes, transfer lowering, per-file segments, exact cross-file
+stitching, symbolic access-path transforms, persisted query accelerators, and
+the sparse fixed-point query service. Security, inspect, dump-taint, export,
+and the compatibility taint facade all consume the same graph; they do not
+maintain separate interprocedural engines.
 
 Native export has one exact call-relation representation: the resolved
 callgraph. It never enumerates simple paths or exposes a capped/BFS prefix

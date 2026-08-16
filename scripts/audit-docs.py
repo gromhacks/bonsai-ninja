@@ -40,6 +40,7 @@ def documentation_files() -> list[Path]:
         REPO / ".claude",
         REPO / ".cline",
         REPO / "crates",
+        REPO / "schemas",
         SCRIPTS,
     )
     for root in roots:
@@ -490,6 +491,33 @@ def check_dependency_counts() -> list[str]:
     return failures
 
 
+def check_selected_dependency_inventory() -> list[str]:
+    """Reject stale crate names in the selected third-party license table."""
+
+    lock_text = (REPO / "Cargo.lock").read_text(errors="replace")
+    locked_names = set(re.findall(r'^name = "([^"]+)"$', lock_text, re.MULTILINE))
+    document = (DOCS / "contributing" / "third-party-licenses.mdx").read_text(
+        errors="replace"
+    )
+    start = document.index("## Per-crate licenses (selected)")
+    end = document.index("## Reproducing the audit", start)
+    failures = []
+    for line_number, line in enumerate(document[:end].splitlines(), start=1):
+        if line_number <= document[:start].count("\n") + 1 or not line.startswith("|"):
+            continue
+        crate_cell = line.split("|", 2)[1].strip()
+        if crate_cell in {"Crate", "---"}:
+            continue
+        crate_cell = re.sub(r"\s*\([^)]*\)\s*$", "", crate_cell)
+        for crate in (part.strip().strip("`") for part in crate_cell.split(" / ")):
+            if crate and crate not in locked_names:
+                failures.append(
+                    "docs/contributing/third-party-licenses.mdx documents "
+                    f"unlocked crate `{crate}`"
+                )
+    return failures
+
+
 def check_rule_counts() -> list[str]:
     rule_count = 0
     disabled_count = 0
@@ -515,6 +543,84 @@ def check_rule_counts() -> list[str]:
         for fragment in expected
         if fragment not in readiness
     ]
+
+
+def check_rule_documentation_vocabulary() -> list[str]:
+    """Keep author-facing rule vocabulary synchronized with the compiler enum."""
+
+    source = (REPO / "crates" / "security" / "src" / "rule.rs").read_text()
+    start = source.index("pub fn name(&self) -> &'static str")
+    end = source.index("pub fn is_discriminating", start)
+    names = set(re.findall(r'"([a-z][a-z0-9_]+)"', source[start:end]))
+    guide = (DOCS / "pattern-guide.mdx").read_text(errors="replace")
+    failures = [
+        f"docs/pattern-guide.mdx does not document rule constraint `{name}`"
+        for name in sorted(names)
+        if name not in guide
+    ]
+
+    disabled_impl = source.index("impl DisabledReasonCode")
+    disabled_names = source.index("pub fn as_str", disabled_impl)
+    disabled_names_end = source.index("pub fn waits_on_reenable_work", disabled_names)
+    allowed_codes = set(
+        re.findall(r'"([a-z][a-z-]+)"', source[disabled_names:disabled_names_end])
+    )
+    security_spec = (DOCS / "security-spec.mdx").read_text(errors="replace")
+    for code in sorted(allowed_codes):
+        if code not in security_spec:
+            failures.append(
+                f"docs/security-spec.mdx does not document disabled reason code `{code}`"
+            )
+    concrete_code = re.compile(r"^\s+code:\s*([a-z][a-z-]*)\s*(?:#.*)?$")
+    for path in documentation_files():
+        for line_number, line in enumerate(
+            path.read_text(errors="replace").splitlines(), start=1
+        ):
+            match = concrete_code.match(line)
+            if match and match.group(1) not in allowed_codes:
+                failures.append(
+                    f"{path.relative_to(REPO)}:{line_number}: invalid disabled rule "
+                    f"reason code `{match.group(1)}`"
+                )
+    return failures
+
+
+def _rust_enum_variants(source: str, enum_name: str) -> set[str]:
+    """Extract top-level variants from one public Rust enum."""
+
+    marker = f"pub enum {enum_name}"
+    start = source.index(marker)
+    opening = source.index("{", start)
+    depth = 1
+    end = opening + 1
+    while depth and end < len(source):
+        if source[end] == "{":
+            depth += 1
+        elif source[end] == "}":
+            depth -= 1
+        end += 1
+    body = source[opening + 1 : end - 1]
+    return set(
+        re.findall(r"^    ([A-Z][A-Za-z0-9_]*)\s*(?:\{|\(|,)", body, re.MULTILINE)
+    )
+
+
+def check_flow_event_documentation_vocabulary() -> list[str]:
+    """Keep the normative FlowEvent vocabulary synchronized with lang_api."""
+
+    source = (REPO / "crates" / "lang_api" / "src" / "types.rs").read_text()
+    specification = (DOCS / "contributing" / "flow-event-spec.mdx").read_text(
+        errors="replace"
+    )
+    failures = []
+    for enum_name in ("FlowEvent", "CallKind", "AssignValueKind", "LoopKind"):
+        for variant in sorted(_rust_enum_variants(source, enum_name)):
+            if not re.search(rf"\b{re.escape(variant)}\b", specification):
+                failures.append(
+                    "docs/contributing/flow-event-spec.mdx does not document "
+                    f"`{enum_name}::{variant}`"
+                )
+    return failures
 
 
 def check_script_inventory() -> list[str]:
@@ -567,7 +673,10 @@ def main() -> int:
         + check_language_counts()
         + check_workspace_counts()
         + check_dependency_counts()
+        + check_selected_dependency_inventory()
         + check_rule_counts()
+        + check_rule_documentation_vocabulary()
+        + check_flow_event_documentation_vocabulary()
         + check_script_inventory()
     )
     if failures:
