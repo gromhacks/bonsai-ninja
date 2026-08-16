@@ -336,7 +336,7 @@ def publish(order: list[str], version: str, *, resume: bool) -> None:
                     f"{name} {version} already exists; rerun with --resume to verify and skip it"
                 )
             verify_existing_archive(name, version)
-            print("  existing registry archive is byte-identical; skipped", flush=True)
+            print("  existing registry package contents are identical; skipped", flush=True)
             continue
         run("cargo", "publish", "--dry-run", "-p", name, "--locked")
         publish_crate(name)
