@@ -25,8 +25,20 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::{
     fs,
+    sync::{Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+// Both validators fan out into large command matrices. Running them in
+// parallel competes for the same process and filesystem resources without
+// testing any supported concurrency contract, so keep this bridge serial.
+static VALIDATOR_LOCK: Mutex<()> = Mutex::new(());
+
+fn validator_guard() -> MutexGuard<'static, ()> {
+    VALIDATOR_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 fn repo_root() -> PathBuf {
     let mut p = std::env::current_dir().expect("cwd");
@@ -34,25 +46,25 @@ fn repo_root() -> PathBuf {
     p.canonicalize().expect("repo root")
 }
 
-fn release_bin() -> Option<PathBuf> {
+fn validator_bin() -> Option<PathBuf> {
+    let bin = repo_root().join("target/release/bonsai-ninja");
+    if bin.exists() {
+        return Some(bin);
+    }
     if let Some(path) = option_env!("CARGO_BIN_EXE_bonsai-ninja") {
         return Some(PathBuf::from(path));
     }
-    let bin = repo_root().join("target/release/bonsai-ninja");
-    if bin.exists() {
-        Some(bin)
-    } else {
-        eprintln!(
-            "skipping validator integration test: release binary not built ({})",
-            bin.display()
-        );
-        None
-    }
+    eprintln!(
+        "skipping validator integration test: release binary not built ({})",
+        bin.display()
+    );
+    None
 }
 
 #[test]
 fn validate_mega_cli_script_language_matrix() {
-    let Some(bin) = release_bin() else { return };
+    let _guard = validator_guard();
+    let Some(bin) = validator_bin() else { return };
     let root = repo_root();
     let script = root.join("scripts/validate-mega-cli.py");
     let output = Command::new(&script)
@@ -75,7 +87,10 @@ fn validate_mega_cli_script_language_matrix() {
 
 #[test]
 fn validate_pattern_pack_enforces_zero_collisions_and_example_drift() {
-    let Some(bin) = release_bin() else { return };
+    let _guard = validator_guard();
+    let Some(bin) = validator_bin() else {
+        return;
+    };
     let root = repo_root();
     let script = root.join("scripts/validate-pattern-pack.py");
     let stamp = SystemTime::now()
@@ -97,15 +112,19 @@ fn validate_pattern_pack_enforces_zero_collisions_and_example_drift() {
         .output()
         .expect("run validate-pattern-pack.py");
 
+    let report_raw = fs::read_to_string(&report_path).unwrap_or_default();
+    fs::remove_file(&report_path).ok();
+
     assert!(
         output.status.success(),
-        "validate-pattern-pack.py failed with {}\nstdout:\n{}\nstderr:\n{}",
+        "validate-pattern-pack.py failed with {}\nstdout:\n{}\nstderr:\n{}\nreport:\n{}",
         output.status,
         String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&output.stderr),
+        report_raw
     );
 
-    let report_raw = fs::read_to_string(&report_path).expect("read validator report");
+    assert!(!report_raw.is_empty(), "validator did not write its JSON report");
     let report: serde_json::Value = serde_json::from_str(&report_raw).expect("validator report json");
     let failed = report
         .get("failed")

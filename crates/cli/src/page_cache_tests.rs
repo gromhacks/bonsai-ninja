@@ -246,7 +246,7 @@ fn cache_freshness_rejects_source_metadata_change() {
 }
 
 #[test]
-fn cache_freshness_rejects_parent_rulepack_content_change() {
+fn cache_freshness_ignores_unconfigured_parent_rulepack_change() {
     let parent = tempdir("parent-rulepack");
     let workspace = parent.join("ws");
     let rulepack = parent.join("security-patterns");
@@ -260,8 +260,8 @@ fn cache_freshness_rejects_parent_rulepack_content_change() {
 
     std::fs::write(rulepack.join("rule.yml"), "id: after\n").expect("rewrite rule");
     assert!(
-        !cache_is_fresh(&workspace, &cache).expect("fresh after"),
-        "page cache must not replay when the discovered rulepack changes"
+        cache_is_fresh(&workspace, &cache).expect("fresh after"),
+        "an unconfigured parent rulepack must not affect the embedded rulepack cache identity"
     );
     std::fs::remove_dir_all(&parent).ok();
 }
