@@ -5,50 +5,48 @@ description: "The crate layout, dependency boundaries, and major data paths in b
 
 # Architecture
 
-bonsai-ninja is a 46-crate Rust workspace. The shape is concentric — each
-layer leans on the ones below and never reaches up. New contributors usually
-work in one or two layers at a time, so this doc is organised the same way.
+bonsai-ninja is a 46-crate Rust workspace. The production dependency graph is
+layered: each row below depends only on its own row or a lower row. Test-only
+dependencies do not define production layering. New contributors usually work
+in one or two layers at a time, so this doc is organised the same way.
 
 ```
-┌────────────────── CLI / SDK ──────────────────┐
-│  bonsai_cli   bonsai_sdk   bonsai_adapters    │
-└──────────────────────▲────────────────────────┘
-        ┌──────────────┴──────────────┐
-        │  Query / browse / trace     │
-        │  bonsai_inspect  browse  trace
-        │  bonsai_retrieval
-        └──────────────▲──────────────┘
-        ┌──────────────┴──────────────┐
-        │  Security                   │
-        │  bonsai_security            │
-        └──────────────▲──────────────┘
-        ┌──────────────┴──────────────┐
-        │  Workspace facade           │
-        │  bonsai_workspace           │
-        └──────────────▲──────────────┘
-        ┌──────────────┴──────────────┐
-        │  Analysis core              │
-        │  bonsai_taint               │
-        │  bonsai_idg                 │
-        │  bonsai_callgraph           │
-        │  bonsai_abstract_interp     │
-        │  bonsai_resolve  index  db  cfg
-        └──────────────▲──────────────┘
-        ┌──────────────┴──────────────┐
-        │  Parse + ingest             │
-        │  bonsai_parser  vfs  diagnostics
-        └──────────────▲──────────────┘
-        ┌──────────────┴──────────────┐
-        │  Adapter framework          │
-        │  bonsai_lang_api            │
-        │  bonsai_lang_*  (20 languages)
-        └──────────────▲──────────────┘
-        ┌──────────────┴──────────────┐
-        │  Foundation                 │
-        │  bonsai_common  bonsai_hash │
-        │  bonsai_factstore           │
-        └─────────────────────────────┘
+                         bonsai_cli
+                              ▲
+                         bonsai_sdk
+                              ▲
+       bonsai_browse  bonsai_security  bonsai_conformance
+                              ▲
+       bonsai_inspect  bonsai_retrieval  bonsai_testkit
+                              ▲
+                     bonsai_workspace
+                              ▲
+                       bonsai_taint
+                              ▲
+                         bonsai_db
+                              ▲
+                         bonsai_idg
+                              ▲
+       bonsai_adapters  bonsai_callgraph  bonsai_trace
+                              ▲
+ bonsai_abstract_interp  bonsai_resolve  bonsai_lang_typescript
+                              ▲
+ bonsai_parser  bonsai_cfg  bonsai_index  bonsai_lang_* adapters
+                              ▲
+                       bonsai_lang_api
+                              ▲
+                 bonsai_diagnostics  bonsai_vfs
+                              ▲
+                        bonsai_common
+                              ▲
+                  bonsai_hash  bonsai_factstore
 ```
+
+Rows group crates by maximum production dependency depth, not by runtime phase;
+for example, `bonsai_trace` is shared analysis used by `bonsai_db`, while
+`bonsai_adapters` is the registry over the individual language crates. The
+portable `scripts/audit-layering.sh` gate checks normal and build dependencies,
+ignores development-only edges, and rejects upward production edges.
 
 ## Foundation
 

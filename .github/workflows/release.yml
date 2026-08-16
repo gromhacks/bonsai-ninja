@@ -505,7 +505,7 @@ jobs:
         run: |
           set -euo pipefail
           cd artifacts
-          sha256sum -c *.sha256
+          sha256sum -c -- ./*.sha256
 
       - name: Verify signed provenance before publish
         shell: bash
@@ -514,7 +514,7 @@ jobs:
         run: |
           set -euo pipefail
           cd artifacts
-          for artifact in *.tar.gz *.tar.gz.sha256 *.zip *.zip.sha256; do
+          for artifact in ./*.tar.gz ./*.tar.gz.sha256 ./*.zip ./*.zip.sha256; do
             gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY"
           done
 

@@ -11,30 +11,35 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-# Tier definitions. Lower index = lower in DAG.
-# A crate may depend on any crate in its own tier or a lower tier, but
-# never on a crate in a higher tier.
-declare -a TIER_0=(bonsai_common bonsai_hash)
-declare -a TIER_1=(bonsai_diagnostics bonsai_vfs bonsai_parser bonsai_factstore)
-declare -a TIER_2=(bonsai_lang_api)
-declare -a TIER_3=(
+# Tier definitions follow the production dependency DAG. Lower index = lower
+# in the graph. A crate may depend on its own tier or a lower tier, but never
+# a higher tier. Development-only dependencies are intentionally excluded.
+declare -a TIER_0=(bonsai_factstore bonsai_hash)
+declare -a TIER_1=(bonsai_common)
+declare -a TIER_2=(bonsai_diagnostics bonsai_vfs)
+declare -a TIER_3=(bonsai_lang_api)
+declare -a TIER_4=(
     bonsai_lang_c bonsai_lang_cpp bonsai_lang_csharp bonsai_lang_scala
     bonsai_lang_rust bonsai_lang_go bonsai_lang_java bonsai_lang_kotlin
-    bonsai_lang_swift bonsai_lang_javascript bonsai_lang_typescript
+    bonsai_lang_swift bonsai_lang_javascript
     bonsai_lang_php bonsai_lang_python bonsai_lang_perl bonsai_lang_ruby
     bonsai_lang_dart bonsai_lang_objc bonsai_lang_lua bonsai_lang_elixir
-    bonsai_lang_erlang
+    bonsai_lang_erlang bonsai_cfg bonsai_index bonsai_parser
 )
-declare -a TIER_4=(bonsai_index bonsai_resolve bonsai_cfg bonsai_callgraph bonsai_abstract_interp bonsai_idg bonsai_db)
-declare -a TIER_5=(bonsai_taint)
-declare -a TIER_6=(bonsai_workspace)
-declare -a TIER_7=(bonsai_inspect bonsai_retrieval bonsai_browse bonsai_trace bonsai_security)
-declare -a TIER_8=(bonsai_sdk)
-declare -a TIER_9=(bonsai_adapters bonsai_cli bonsai_conformance bonsai_testkit)
+declare -a TIER_5=(bonsai_abstract_interp bonsai_lang_typescript bonsai_resolve)
+declare -a TIER_6=(bonsai_adapters bonsai_callgraph bonsai_trace)
+declare -a TIER_7=(bonsai_idg)
+declare -a TIER_8=(bonsai_db)
+declare -a TIER_9=(bonsai_taint)
+declare -a TIER_10=(bonsai_workspace)
+declare -a TIER_11=(bonsai_inspect bonsai_retrieval bonsai_testkit)
+declare -a TIER_12=(bonsai_browse bonsai_conformance bonsai_security)
+declare -a TIER_13=(bonsai_sdk)
+declare -a TIER_14=(bonsai_cli)
 
 tier_of() {
     local crate="$1"
-    for t in 0 1 2 3 4 5 6 7 8 9; do
+    for t in {0..14}; do
         local arr_name="TIER_$t[@]"
         for c in "${!arr_name}"; do
             if [[ "$c" == "$crate" ]]; then
@@ -72,7 +77,19 @@ for crate_dir in "$ROOT_DIR"/crates/*/; do
             echo "LAYERING VIOLATION: $crate_name (tier $crate_tier) depends on $dep (tier $dep_tier)"
             VIOLATIONS=$((VIOLATIONS + 1))
         fi
-    done < <(grep -E '^bonsai_[a-z_]+\s*=' "$crate_toml" | sed -E 's/^(bonsai_[a-z_]+)\s*=.*/\1/')
+    done < <(awk '
+        /^\[/ {
+            production = ($0 == "[dependencies]" || $0 == "[build-dependencies]" ||
+                $0 ~ /^\[target\..*\.dependencies\]$/ ||
+                $0 ~ /^\[target\..*\.build-dependencies\]$/)
+            next
+        }
+        production && /^bonsai_[a-z_]+[[:space:]]*=/ {
+            name = $0
+            sub(/[[:space:]]*=.*/, "", name)
+            print name
+        }
+    ' "$crate_toml")
 done
 
 if (( VIOLATIONS > 0 )); then
