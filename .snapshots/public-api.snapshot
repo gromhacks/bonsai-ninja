@@ -81,6 +81,7 @@ pub use builder::build_cfg_from_flow;
 === common ===
 pub mod atomic_file;
 pub mod dependency_metadata;
+pub mod file_lock;
 pub mod ids;
 pub mod names;
 pub mod path_filter;
@@ -91,6 +92,7 @@ pub mod span;
 pub mod span_cache;
 pub mod wire;
 pub use atomic_file::write_atomic_bytes;
+pub use file_lock::normalize_advisory_lock_error;
 pub use ids::{BasicBlockId, FileId, FuncId, PackageId, SymbolId, TraceStepId, TypeId, ValueId};
 pub use names::{
 pub use path_filter::{
