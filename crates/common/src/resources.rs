@@ -596,7 +596,7 @@ fn detect_memory_limit_bytes() -> Option<u64> {
     let physical = physical_memory_bytes();
     #[cfg(target_os = "linux")]
     {
-        return min_present(physical, linux_cgroup_memory_limit_bytes());
+        min_present(physical, linux_cgroup_memory_limit_bytes())
     }
     #[cfg(not(target_os = "linux"))]
     physical
