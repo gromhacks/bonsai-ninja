@@ -410,7 +410,7 @@ pub fn finalize(raw: RawTrace, ctx: FinalizeCtx<'_>, vfs: &Vfs) -> TraceResult {
 }
 
 fn portable_trace_path(workspace_root: &str, path: &str) -> String {
-    if path.is_empty() || path == "<unknown>" || !std::path::Path::new(path).is_absolute() {
+    if path.is_empty() || path == "<unknown>" || !bonsai_common::filter_looks_like_absolute_path(path) {
         return path.to_string();
     }
     let root = (!workspace_root.is_empty()).then(|| std::path::Path::new(workspace_root));

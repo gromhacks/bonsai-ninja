@@ -12,6 +12,7 @@
 
 pub mod atomic_file;
 pub mod dependency_metadata;
+pub mod file_lock;
 pub mod ids;
 pub mod names;
 pub mod path_filter;
@@ -23,6 +24,7 @@ pub mod span_cache;
 pub mod wire;
 
 pub use atomic_file::write_atomic_bytes;
+pub use file_lock::normalize_advisory_lock_error;
 pub use ids::{BasicBlockId, FileId, FuncId, PackageId, SymbolId, TraceStepId, TypeId, ValueId};
 pub use names::{
     ends_at_qualified_name_boundary, is_bonsai_case_probe_path, is_name_punctuation,

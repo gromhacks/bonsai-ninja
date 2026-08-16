@@ -1962,7 +1962,10 @@ fn prune_obsolete_compiler_object_sidecars(current_target: &Path) -> std::io::Re
 
 fn try_acquire_compiler_object_lock(target: &Path) -> std::io::Result<Option<File>> {
     let file = open_compiler_object_lock_file(target)?;
-    match file.try_lock_exclusive() {
+    match file
+        .try_lock_exclusive()
+        .map_err(bonsai_common::normalize_advisory_lock_error)
+    {
         Ok(()) => Ok(Some(file)),
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
         Err(error) => Err(error),

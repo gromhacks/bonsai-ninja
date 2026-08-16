@@ -224,19 +224,22 @@ fn acquire_persistence_lock(path: &Path) -> std::io::Result<File> {
         .create(true)
         .truncate(false)
         .open(&lock_path)?;
-    lock_file.try_lock_exclusive().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::WouldBlock {
-            std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                format!(
-                    "taint graph sidecar is owned by another process: {}",
-                    path.display()
-                ),
-            )
-        } else {
-            error
-        }
-    })?;
+    lock_file
+        .try_lock_exclusive()
+        .map_err(bonsai_common::normalize_advisory_lock_error)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!(
+                        "taint graph sidecar is owned by another process: {}",
+                        path.display()
+                    ),
+                )
+            } else {
+                error
+            }
+        })?;
     Ok(lock_file)
 }
 

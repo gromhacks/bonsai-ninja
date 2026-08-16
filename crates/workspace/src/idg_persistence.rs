@@ -29,7 +29,9 @@ impl IdgSidecarWriteGuard {
 
     pub(crate) fn try_acquire(target: &Path) -> std::io::Result<Self> {
         let lock_file = open_lock_file(target)?;
-        lock_file.try_lock_exclusive()?;
+        lock_file
+            .try_lock_exclusive()
+            .map_err(bonsai_common::normalize_advisory_lock_error)?;
         Self::finish_acquire(lock_file, target)
     }
 
@@ -139,7 +141,8 @@ fn cleanup_abandoned_idg_sidecar_temp_files(owned_target: &Path) -> std::io::Res
             continue;
         }
         let lock_file = match open_lock_file(&target).and_then(|file| {
-            file.try_lock_exclusive()?;
+            file.try_lock_exclusive()
+                .map_err(bonsai_common::normalize_advisory_lock_error)?;
             Ok(file)
         }) {
             Ok(lock_file) => lock_file,
@@ -204,7 +207,8 @@ fn prune_obsolete_idg_sidecars(current_target: &Path) -> std::io::Result<usize> 
         idg_sidecar_version,
         |target| {
             let file = open_lock_file(target)?;
-            file.try_lock_exclusive()?;
+            file.try_lock_exclusive()
+                .map_err(bonsai_common::normalize_advisory_lock_error)?;
             Ok(file)
         },
         "IDG",
@@ -276,7 +280,10 @@ mod tests {
             .write(true)
             .open(lock_path(&target))
             .expect("open peer lock handle");
-        let peer_error = peer.try_lock_exclusive().expect_err("owner excludes peer");
+        let peer_error = peer
+            .try_lock_exclusive()
+            .map_err(bonsai_common::normalize_advisory_lock_error)
+            .expect_err("owner excludes peer");
         assert_eq!(peer_error.kind(), std::io::ErrorKind::WouldBlock);
         let guard_error =
             IdgSidecarWriteGuard::try_acquire(&target).expect_err("non-blocking owner excludes peer");
