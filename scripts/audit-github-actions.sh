@@ -49,7 +49,7 @@ done < <(find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) \
 
 ci_workflow=.github/workflows/ci.yml
 required_ci_commands=(
-    'uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065'
+    'uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97'
     'python3 -m pip install --require-hashes -r .github/requirements/pack-audit.txt'
 )
 for command in "${required_ci_commands[@]}"; do
