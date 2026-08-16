@@ -1,6 +1,4 @@
 //! Kotlin language adapter.
-mod parse_recovery;
-
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_modifier_visibility, decl_index_with_handler, extract_imports_via,
@@ -15,7 +13,6 @@ use bonsai_lang_api::{
     ModifierVocabulary, PatternBindingSite, ReceiverFieldInitializer, TypeAliasBinding, Visibility,
     EMPTY_HANDLER,
 };
-use parse_recovery::kotlin_parse_recovery_edits;
 use tree_sitter::{Language, Node, Tree};
 
 fn kotlin_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
@@ -469,14 +466,6 @@ impl LanguageAdapter for KotlinAdapter {
     }
     fn tree_sitter_language(&self) -> Result<Language, AdapterError> {
         language_from_pack(PACK_NAME)
-    }
-    fn parse_recovery_edits(
-        &self,
-        snapshot: &bonsai_lang_api::FileSnapshot,
-        _vfs: &bonsai_lang_api::Vfs,
-        tree: &bonsai_lang_api::SyntaxTree,
-    ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
-        kotlin_parse_recovery_edits(snapshot, tree)
     }
     fn capabilities(&self) -> LanguageCapabilities {
         // Exceptions: the adapter populates `Throw::thrown_type` from

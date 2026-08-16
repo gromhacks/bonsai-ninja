@@ -1190,7 +1190,7 @@ fn check_security_flows(ws: &str, lang: &str, min: usize) {
         parsed.get("analysis_complete").and_then(|value| value.as_bool()),
         Some(true),
         "[{lang}] security taint-analysis incomplete: {:?}",
-        parsed.get("incomplete_reasons")
+        parsed.get("analysis_incomplete_reasons")
     );
     let rows = rows_of(&parsed);
     assert!(

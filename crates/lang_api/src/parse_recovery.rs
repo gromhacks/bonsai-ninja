@@ -63,17 +63,13 @@ pub fn syntax_damage_score(tree: &Tree) -> (usize, usize) {
             }
         }
     }
-    // Some grammars expose a hidden missing production through the root's
-    // damage flag and S-expression but do not make that hidden node iterable
-    // through the public Node API. Preserve a non-zero recovery/selection
-    // score for that exact condition so a clean recovery tree can win.
+    // A grammar may expose a hidden missing production through the root damage
+    // flag without making that node iterable through Tree-sitter's public API.
+    // Keep the damage count non-zero so a clean grammar/recovery candidate can
+    // win, but do not pretend the hidden zero-width production covers the
+    // entire file.
     if count == 0 && tree.root_node().has_error() {
-        (
-            1,
-            tree.root_node()
-                .end_byte()
-                .saturating_sub(tree.root_node().start_byte()),
-        )
+        (1, 0)
     } else {
         (count, covered_bytes)
     }
@@ -609,16 +605,23 @@ mod tests {
     }
 
     #[test]
-    fn syntax_damage_scores_hidden_missing_grammar_symbols() {
-        let source =
-            "package sample\n\nimport sample.Platform\n\n/** Docs. */\nactual class PlatformLogger\n";
+    fn syntax_damage_scores_concrete_error_nodes() {
+        let source = "def f():\n    @@@\n";
         let mut parser = tree_sitter::Parser::new();
         parser
-            .set_language(&crate::kit::language_from_pack("kotlin").expect("Kotlin grammar"))
-            .expect("set Kotlin grammar");
-        let tree = parser.parse(source, None).expect("parse Kotlin fixture");
+            .set_language(&crate::kit::language_from_pack("python").expect("Python grammar"))
+            .expect("set Python grammar");
+        let tree = parser
+            .parse(source, None)
+            .expect("parse malformed Python fixture");
 
         assert!(tree.root_node().has_error());
-        assert_eq!(syntax_damage_score(&tree), (1, source.len()));
+        let (count, covered_bytes) = syntax_damage_score(&tree);
+        assert!(count > 0, "syntax damage must count a concrete error node");
+        assert!(
+            covered_bytes > 0,
+            "syntax damage must retain its concrete byte extent"
+        );
+        assert!(covered_bytes <= source.len());
     }
 }

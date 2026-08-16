@@ -170,6 +170,12 @@ const HANDLER: GrammarHandler = GrammarHandler {
     call_member_field_names: &["fun"],
     call_argument_field_names: &["args"],
     call_argument_container_kinds: &["expr_args"],
+    // The pinned tree-sitter-erlang grammar represents `module:fun(args)` as a
+    // `remote { module, fun: call { expr, args } }` node. The remote node is
+    // the semantic call owner; declare its nested `call` as an argument
+    // wrapper so shared lowering reads the exact `expr_args` without
+    // duplicating the inner component as another call event.
+    call_argument_wrapper_kinds: &["call"],
     call_target_extractor: Some(erlang_call_target),
     call_ref_node_filter: Some(erlang_call_ref_node),
     lambda_body_field_names: &["body"],

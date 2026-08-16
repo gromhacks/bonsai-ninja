@@ -106,6 +106,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 scripts/check-parser-bundles.py
           cargo machete --with-metadata
           cargo audit --deny warnings
           python3 scripts/audit-dependency-licenses.py
@@ -233,6 +234,15 @@ jobs:
           BONSAI_REQUIRE_ELASTICSEARCH_GATE: "1"
           BONSAI_MEMORY_BUDGET_MB: "3072"
           MIMALLOC_PURGE_DELAY: "0"
+          # The public ubuntu-22.04 runner completed the same exact work
+          # 1.1x-3.4x slower than the recorded M1 Pro reference host. Keep the
+          # product/reference SLO defaults strict; calibrate only this shared
+          # runner class from the first complete release measurement.
+          BONSAI_ES_COLD_TAINT_MAX_SECS: "125"
+          BONSAI_ES_INSPECT_MAX_SECS: "85"
+          BONSAI_ES_NAVIGATION_MAX_SECS: "55"
+          BONSAI_ES_TAINT_MAX_SECS: "120"
+          BONSAI_ES_SECURITY_INVENTORY_MAX_SECS: "60"
         run: |
           cargo test --release --locked -p bonsai-ninja \
             --test elasticsearch_large_repo -- --nocapture

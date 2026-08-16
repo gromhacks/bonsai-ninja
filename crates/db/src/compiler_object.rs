@@ -35,6 +35,15 @@ use std::sync::{
 /// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
 /// or the object validation contract changes in a way that can alter compiler
 /// facts.
+// v90: the Swift adapter normalizes the valid unparenthesized conditional-cast
+// plus nil-coalescing form before lowering. Cached v89 objects can retain a
+// grammar diagnostic and omit the cast operand from exact value flow.
+// v89: tree-sitter-language-pack v1.8.0 supplies the complete six-platform
+// parser bundle matrix and updates the pinned grammar set. Erlang remote-call
+// arguments now follow their exact nested call wrapper; modern Dart unnamed
+// libraries and Kotlin multiplatform declarations parse without recovery.
+// Cached v88 objects were lowered by the v1.6.1 grammar set and are not
+// semantically interchangeable.
 // v88: C++ ownership proof derives exclusive syntax from the C and C++
 // Tree-sitter grammar inventories, with an exact structural distinction for
 // their shared compound-literal node. Cached v87 objects used a finite C++
@@ -233,7 +242,7 @@ use std::sync::{
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 88;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 90;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;

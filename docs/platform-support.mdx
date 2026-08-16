@@ -39,7 +39,15 @@ use; it cannot pass by reusing a grammar downloaded by an earlier test step.
 
 ## Parser Bundle Constraint
 
-bonsai-ninja gets tree-sitter grammars through `tree-sitter-language-pack` with runtime dynamic loading and parser downloads enabled. That keeps normal builds small and lets the binary download only the parsers it uses, but it also means runtime parsing needs a prebuilt parser bundle for the current OS/CPU platform key.
+bonsai-ninja gets tree-sitter grammars through a pinned
+`tree-sitter-language-pack` release with runtime dynamic loading and parser
+downloads enabled. That keeps normal builds small and lets the binary download
+only the parsers it uses, but it also means runtime parsing needs a prebuilt
+parser bundle for the current OS/CPU platform key. Release preflight runs
+`scripts/check-parser-bundles.py` against the locked version before native
+builds begin; the gate requires every adapter grammar and all six platform
+bundles. Each native package then proves download and loading from an empty
+cache.
 
 When a platform bundle is missing, the Rust code can still compile, but the first parse for a missing language can fail with a clear parser-download error. Non-release CPU architectures should be validated with the exact parser delivery mode planned for deployment: either an upstream parser bundle for that platform, or a build from parser sources selected with `TSLP_LANGUAGES` in an environment that has those parser sources available.
 

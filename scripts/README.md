@@ -39,6 +39,8 @@ cannot silently accumulate here.
 - `audit-rust-duplication.py` — rejects large exact clones in shared production Rust code.
 - `audit-secrets.sh` — scans reachable Git history with a checksum-pinned Gitleaks binary.
 - `audit-workflows.sh` — validates GitHub Actions syntax with a checksum-pinned Actionlint binary.
+- `check-parser-bundles.py` — verifies that the locked Tree-sitter parser pack
+  publishes every adapter grammar and all six native release bundles.
 
 ## Rulepack quality
 

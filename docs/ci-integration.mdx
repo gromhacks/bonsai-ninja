@@ -214,11 +214,19 @@ inspect, rule inventories, and production taint. It evaluates latency only
 after each command completes and verifies completeness, so an SLO cannot hide
 truncated semantic work.
 
+The test's default thresholds are the recorded reference-workstation SLOs.
+The tagged release workflow supplies separately recorded thresholds for the
+slower shared `ubuntu-22.04` runner class; those overrides do not change the
+local defaults or any analyzed files, rules, graph edges, closure steps, or
+results. Recalibrate either host class only from a completed exact run and
+record the reason with the release change.
+
 The 3 GiB value schedules concurrency and cache retention. It is not a result
 budget or a promise that operating-system RSS will equal the configured value.
-Do not raise SLOs to make a regression pass. Record the source snapshot, file
-count, cold/warm state, wall time, memory, swaps, and completeness, then review
-the architecture change. Current measurements live only in
+Do not raise a host-class SLO to conceal a regression. Record the source
+snapshot, runner class, file count, cold/warm state, wall time, memory, swaps,
+and completeness, then review the architecture change. Current reference
+measurements live only in
 [Release Readiness](RELEASE_READINESS.md).
 
 ## Native export changes

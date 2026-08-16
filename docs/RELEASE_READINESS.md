@@ -6,9 +6,9 @@ not duplicate dated performance history.
 
 ## Status
 
-The full local release pass completed on 2026-08-14. Documentation claims,
+The full local release pass completed on 2026-08-16. Documentation claims,
 links, command examples, current repository counts, and the rulepack validator
-were rechecked on 2026-08-15. The embedded-rulepack change also passed 226
+were rechecked on that date. The release candidate also passed 227
 release security unit tests, 34 release rulepack conformance tests, 80
 architecture invariants, 1,280 command/switch checks, standalone execution,
 and the complete Elasticsearch gate on that date. Local `main` has no known
@@ -52,7 +52,7 @@ The final local pass completed these checks with zero failures:
 | Cargo and public repository metadata | Passed |
 | Documentation structure, links, navigation, binary help claims, and skill copies | Passed |
 | Native archive checksum and fresh-profile relocation smoke | Passed on macOS arm64 |
-| Build-artifact size gate | 16.53 GiB / 32 GiB limit |
+| Build-artifact size gate | 31.63 GiB / 32 GiB limit |
 
 The build-artifact measurement is the transient peak after the full debug test
 matrix and optimized CLI build. Final cleanup removes Cargo intermediates and
@@ -167,31 +167,31 @@ and their generated workspace caches are not retained after the gate.
 
 The required release test uses the sibling 30,055-source Elasticsearch
 checkout pinned by the release workflow at `e9741368da0`. The measured
-empty-cache run rebuilt the semantic generation in 566.14
-seconds. The following complete five-scenario gate passed in 216.55 seconds
+empty-cache run rebuilt the semantic generation in 600.59
+seconds. The remaining four scenarios completed in 228.93 seconds
 under the 3 GiB scheduler.
 
 | Operation | Time | Enforced SLO |
 |---|---:|---:|
-| Cold semantic generation | 566.14 s | completion required |
-| Fresh-process semantic reuse | 2.33 s | 15 s |
-| Default inspect | 7.39 s | 30 s |
-| Exact raw-taint inspect | 25.97 s | 30 s |
-| Fresh-cache production taint | 30.19 s | 45 s |
-| Warm production taint | 26.66 s | 30 s |
+| Cold semantic generation | 600.59 s | completion required |
+| Fresh-process semantic reuse | 2.49 s | 15 s |
+| Default inspect | 7.29 s | 30 s |
+| Exact raw-taint inspect | 26.66 s | 30 s |
+| Fresh-cache production taint | 30.95 s | 45 s |
+| Warm production taint | 28.60 s | 30 s |
 | `tree --max-depth 1` | 0.02 s | 30 s |
-| Search | 3.92 s | 30 s |
-| Definitions | 13.44 s | 30 s |
-| Imports | 7.50 s | 30 s |
-| Classes | 7.89 s | 30 s |
-| Entry points | 26.83 s | 30 s |
-| Calls | 3.72 s | 30 s |
-| Arguments | 3.56 s | 30 s |
-| Scoped `read-file` | 1.54 s | 30 s |
-| Source inventory | 3.48 s | 30 s |
-| High-severity sink inventory | 22.40 s | 30 s |
-| Sanitizer inventory | 19.37 s | 30 s |
-| Dependency inventory | 10.32 s | 30 s |
+| Search | 4.05 s | 30 s |
+| Definitions | 14.06 s | 30 s |
+| Imports | 7.81 s | 30 s |
+| Classes | 8.23 s | 30 s |
+| Entry points | 28.23 s | 30 s |
+| Calls | 3.70 s | 30 s |
+| Arguments | 3.72 s | 30 s |
+| Scoped `read-file` | 1.51 s | 30 s |
+| Source inventory | 3.62 s | 30 s |
+| High-severity sink inventory | 25.66 s | 30 s |
+| Sanitizer inventory | 21.60 s | 30 s |
+| Dependency inventory | 10.69 s | 30 s |
 
 Command:
 
@@ -208,16 +208,25 @@ completeness. It never uses a timeout to turn incomplete work into a pass.
 Memory scheduling may serialize workers, but the test does not cap files,
 rules, graph edges, closure steps, paths, or findings.
 
+The table records the default SLO class on the identified M1 Pro reference
+host. The tag workflow also runs the complete gate on GitHub's shared
+`ubuntu-22.04` runner with runner-class thresholds calibrated from its first
+complete exact run (96.02 s fresh-cache taint, 62.93 s raw-taint inspect,
+41.00 s entry-point inventory, 90.00 s warm taint, and 42.86 s high-severity
+sink inventory). Hardware calibration changes only the post-completion latency
+assertion; analysis inputs, memory schedule, completeness checks, and results
+remain identical.
+
 The cold semantic row is a deliberate one-time whole-workspace build, not a
 normal command startup cost. It rebuilt exact compiler objects, linkage,
 callgraph, retrieval, and IDG sidecars for all 30,055 sources after the cache
-was explicitly cleared. The published generation was 7,113,425,453 bytes
-(about 6.62 GiB): 888,833,015 bytes of compiler objects, 317,799,303 bytes of
+was explicitly cleared. The validated cache directory was 7,113,750,880 bytes
+(about 6.62 GiB): 888,833,019 bytes of compiler objects, 317,799,303 bytes of
 callgraph, 1,505,969,092 bytes of linkage, 224,728,416 bytes of retrieval, and
 4,160,252,580 bytes of IDG. Ordinary commands compute exact requested facts
 on demand; users only pay this full prewarm when they explicitly run
 `index --semantic`. A fresh process reused the completed semantic generation
-in 2.33 seconds.
+in 2.49 seconds.
 
 Commit `dd37c87afca7c4d5f606906410d3a02777b7675a` replaced compiler-object
 batch barriers with a continuous, source-weighted worklist. Completed payloads
@@ -229,12 +238,13 @@ a bounded source-weighted worker window. Workers lower independent typed
 segments concurrently, memory permits remain held until the canonical
 stitcher consumes each result, and a bounded reorder map preserves ascending
 `SegmentId` publication. The IDG build fell from 117.36 seconds to 95.55
-seconds. The current end-to-end verification completed in 566.14 seconds:
-2.85x faster and 64.9% less wall time than the original baseline, with the same
-7,113,425,453-byte semantic generation. A candidate that parallelized global
-header replay was rejected after the complete cold gate slowed to 572.00
-seconds; phase-local speedups are not accepted when allocator residency
-reduces later exact-work concurrency.
+seconds. The current parser-pack/ABI verification completed in 600.59 seconds:
+2.69x faster and 62.8% less wall time than the original baseline, with the same
+semantic scope and a 7,113,750,880-byte validated cache directory. At the
+preceding compiler ABI, a candidate that parallelized global header replay was
+rejected after the controlled cold gate slowed from 566.14 to 572.00 seconds;
+phase-local speedups are not accepted when allocator residency reduces later
+exact-work concurrency.
 
 ## Production-scale native export measurement
 
@@ -288,6 +298,8 @@ The release workflow verifies:
 - native JSON schema v7 validation across every language fixture and
   materialized propagation mode;
 - stable IDs and page/cursor reopening;
+- the locked parser manifest contains every adapter grammar and all six native
+  platform bundles before package builds begin;
 - relocated binary-only security execution with no adjacent rulepack, an empty
   user/parser cache, and an empty workspace cache;
 - readable `security-patterns/` source in the archive for inspection and

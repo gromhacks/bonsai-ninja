@@ -1,5 +1,4 @@
 //! Dart language adapter.
-mod parse_recovery;
 
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
@@ -14,7 +13,6 @@ use bonsai_lang_api::{
     LanguageAdapter, LanguageCapabilities, LanguageId, PatternBindingSite, Ref, RefKind, TypeAliasBinding,
     Visibility,
 };
-use parse_recovery::dart_parse_recovery_edits;
 use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("dart");
@@ -723,14 +721,6 @@ impl LanguageAdapter for DartAdapter {
     }
     fn tree_sitter_language(&self) -> Result<Language, AdapterError> {
         language_from_pack(PACK_NAME)
-    }
-    fn parse_recovery_edits(
-        &self,
-        snapshot: &bonsai_lang_api::FileSnapshot,
-        _vfs: &bonsai_lang_api::Vfs,
-        tree: &Tree,
-    ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
-        dart_parse_recovery_edits(snapshot, tree)
     }
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
