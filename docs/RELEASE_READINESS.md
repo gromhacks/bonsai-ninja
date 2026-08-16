@@ -339,11 +339,13 @@ The implementation is locally ready for that workflow. GitHub's tag-triggered
 OIDC identity signs provenance without a long-lived signing key. crates.io uses
 the repository's `CARGO_REGISTRY_TOKEN` secret; `scripts/publish-crates.py`
 makes a partial upload resumable only after verifying the `gromhacks` registry
-owner and byte-for-byte identity of every already-published archive. New-crate
-HTTP 429 responses are retried at the registry-provided UTC time with a safety
-margin, so throttling pauses the release instead of leaving a failed partial
-publication. Remote CI state and publication permissions remain external
-deployment conditions and are not asserted by a local test run.
+owner and canonical identity of every already-published package path, file,
+mode, link, generated manifest, and VCS record. Gzip and tar container metadata
+do not affect that comparison. New-crate HTTP 429 responses are retried at the
+registry-provided UTC time with a safety margin, so throttling pauses the
+release instead of leaving a failed partial publication. Remote CI state and
+publication permissions remain external deployment conditions and are not
+asserted by a local test run.
 
 ## Commands to repeat before tagging
 

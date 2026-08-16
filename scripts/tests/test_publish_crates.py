@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import gzip
 import importlib.util
 import io
+import tarfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -26,6 +28,20 @@ class FakeProcess:
 
     def wait(self) -> int:
         return self.returncode
+
+
+def crate_archive(files: dict[str, bytes], *, gzip_mtime: int) -> bytes:
+    tar_buffer = io.BytesIO()
+    with tarfile.open(fileobj=tar_buffer, mode="w") as archive:
+        for path, payload in sorted(files.items()):
+            member = tarfile.TarInfo(path)
+            member.mode = 0o644
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+    output = io.BytesIO()
+    with gzip.GzipFile(fileobj=output, mode="wb", mtime=gzip_mtime) as compressed:
+        compressed.write(tar_buffer.getvalue())
+    return output.getvalue()
 
 
 class CratesIoRetryDelayTests(unittest.TestCase):
@@ -84,6 +100,48 @@ class CratesIoRetryDelayTests(unittest.TestCase):
         sleep.assert_called_once_with(
             float(publish_crates.RATE_LIMIT_FALLBACK_SECONDS)
         )
+
+
+class CanonicalCrateContentsTests(unittest.TestCase):
+    def test_ignores_container_compression_metadata(self) -> None:
+        files = {
+            "demo-0.1.0/.cargo_vcs_info.json": b'{"git":{"sha1":"abc"}}',
+            "demo-0.1.0/src/lib.rs": b"pub fn demo() {}\n",
+        }
+        first = crate_archive(files, gzip_mtime=1)
+        second = crate_archive(files, gzip_mtime=2)
+        self.assertNotEqual(first, second)
+        self.assertEqual(
+            publish_crates.canonical_crate_contents(
+                first, expected_root="demo-0.1.0"
+            ),
+            publish_crates.canonical_crate_contents(
+                second, expected_root="demo-0.1.0"
+            ),
+        )
+
+    def test_detects_changed_package_file(self) -> None:
+        first = crate_archive(
+            {"demo-0.1.0/src/lib.rs": b"pub fn demo() {}\n"}, gzip_mtime=1
+        )
+        second = crate_archive(
+            {"demo-0.1.0/src/lib.rs": b"pub fn changed() {}\n"}, gzip_mtime=1
+        )
+        self.assertNotEqual(
+            publish_crates.canonical_crate_contents(
+                first, expected_root="demo-0.1.0"
+            ),
+            publish_crates.canonical_crate_contents(
+                second, expected_root="demo-0.1.0"
+            ),
+        )
+
+    def test_rejects_member_outside_expected_package_root(self) -> None:
+        archive = crate_archive({"other/src/lib.rs": b""}, gzip_mtime=1)
+        with self.assertRaisesRegex(ValueError, "outside"):
+            publish_crates.canonical_crate_contents(
+                archive, expected_root="demo-0.1.0"
+            )
 
 
 if __name__ == "__main__":

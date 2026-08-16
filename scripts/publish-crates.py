@@ -13,15 +13,17 @@ import argparse
 import datetime as dt
 import email.utils
 import hashlib
+import io
 import json
 import os
 import re
 import subprocess
 import sys
+import tarfile
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -256,12 +258,54 @@ def download(url: str) -> bytes:
         return response.read()
 
 
+def canonical_crate_contents(
+    archive_bytes: bytes, *, expected_root: str
+) -> dict[str, tuple[str, int, str, str]]:
+    """Describe package payloads independently of gzip/tar container metadata."""
+    contents: dict[str, tuple[str, int, str, str]] = {}
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
+        for member in archive.getmembers():
+            path = PurePosixPath(member.name)
+            if path.is_absolute() or ".." in path.parts:
+                raise ValueError(f"unsafe crate archive path: {member.name!r}")
+            if not path.parts or path.parts[0] != expected_root:
+                raise ValueError(
+                    f"crate archive member {member.name!r} is outside {expected_root!r}"
+                )
+            relative = PurePosixPath(*path.parts[1:]).as_posix()
+            if not relative:
+                continue
+            if relative in contents:
+                raise ValueError(f"duplicate crate archive path: {relative!r}")
+
+            digest = ""
+            if member.isfile():
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    raise ValueError(f"cannot read crate archive member: {member.name!r}")
+                digest = hashlib.sha256(extracted.read()).hexdigest()
+                kind = "file"
+            elif member.isdir():
+                kind = "directory"
+            elif member.issym():
+                kind = "symlink"
+            elif member.islnk():
+                kind = "hardlink"
+            else:
+                raise ValueError(f"unsupported crate archive member: {member.name!r}")
+            contents[relative] = (kind, member.mode, member.linkname, digest)
+    return contents
+
+
 def verify_existing_archive(name: str, version: str) -> None:
     run("cargo", "package", "-p", name, "--locked", "--no-verify")
     local = (ROOT / "target" / "package" / f"{name}-{version}.crate").read_bytes()
     remote = download(f"{REGISTRY_API}/{name}/{version}/download")
-    if hashlib.sha256(local).digest() != hashlib.sha256(remote).digest():
-        raise ValueError(f"{name} {version}: registry archive differs from local package")
+    expected_root = f"{name}-{version}"
+    if canonical_crate_contents(
+        local, expected_root=expected_root
+    ) != canonical_crate_contents(remote, expected_root=expected_root):
+        raise ValueError(f"{name} {version}: registry package differs from local package")
 
 
 def assert_clean_checkout() -> None:
@@ -337,7 +381,7 @@ def main() -> int:
                     f"--publish requires --confirm-version {version} (got {args.confirm_version!r})"
                 )
             publish(order, version, resume=args.resume)
-    except (OSError, subprocess.CalledProcessError, ValueError) as error:
+    except (OSError, subprocess.CalledProcessError, tarfile.TarError, ValueError) as error:
         print(f"crates.io: {error}", file=sys.stderr)
         return 1
     return 0
