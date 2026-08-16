@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_index"
+name = "bonsai-ninja-index"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "Declaration and reference indices."
+
+[lib]
+name = "bonsai_index"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_common = { workspace = true }

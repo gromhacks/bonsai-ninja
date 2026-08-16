@@ -13,7 +13,7 @@
 //!   - `.snapshots/COVERAGE_BASELINE.rendered.snapshot` — the rendered
 //!     human-readable table with applicability + levels combined.
 //!
-//! Bless both with: `BLESS_BASELINE=1 cargo test -p bonsai_conformance
+//! Bless both with: `BLESS_BASELINE=1 cargo test -p bonsai-ninja-conformance
 //! --test coverage_baseline -- --nocapture`.
 
 use std::path::PathBuf;
@@ -355,7 +355,7 @@ fn check_or_bless(snapshot_relative: &str, live: &str) {
     let snapshot = std::fs::read_to_string(&snapshot_path).unwrap_or_else(|err| {
         panic!(
             "snapshot missing at {}: {err}\n\
-             regenerate with: BLESS_BASELINE=1 cargo test -p bonsai_conformance \
+             regenerate with: BLESS_BASELINE=1 cargo test -p bonsai-ninja-conformance \
              --test coverage_baseline -- --nocapture",
             snapshot_path.display()
         )
@@ -365,7 +365,7 @@ fn check_or_bless(snapshot_relative: &str, live: &str) {
         eprintln!("--- snapshot ({snapshot_relative}) ---\n{snapshot}\n--- live ---\n{live}");
         panic!(
             "{snapshot_relative} drift — regenerate with: \
-             BLESS_BASELINE=1 cargo test -p bonsai_conformance \
+             BLESS_BASELINE=1 cargo test -p bonsai-ninja-conformance \
              --test coverage_baseline -- --nocapture"
         );
     }

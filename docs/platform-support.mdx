@@ -5,7 +5,14 @@ description: "Supported CPU/OS targets, cross-target checks, and parser-pack con
 
 # Platform And Architecture Support
 
-Publishing to crates.io does not by itself make bonsai-ninja work on every CPU architecture. The Rust workspace is architecture-neutral: it forbids unsafe code, uses no inline assembly, and only has small OS-gated filesystem/process shims. The effective support boundary is the Rust target std library, the native C toolchain required by dependencies, and the parser bundle used by `tree-sitter-language-pack`.
+Publishing to crates.io does not by itself make bonsai-ninja work on every CPU
+architecture. `cargo install bonsai-ninja --locked` compiles the published
+source for the current host; it does not substitute for the native target
+matrix below. The Rust workspace is architecture-neutral: it forbids unsafe
+code, uses no inline assembly, and only has small OS-gated filesystem/process
+shims. The effective support boundary is the Rust target standard library, the
+native C toolchain required by dependencies, and the parser bundle used by
+`tree-sitter-language-pack`.
 
 ## Release Targets
 

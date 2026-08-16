@@ -1,10 +1,15 @@
 [package]
-name = "bonsai_cli"
+name = "bonsai-ninja"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "bonsai-ninja analyzer CLI."
 
 [[bin]]

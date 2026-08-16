@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_testkit"
+name = "bonsai-ninja-testkit"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
 description = "Shared test fixture helpers."
+
+[lib]
+name = "bonsai_testkit"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_lang_api = { workspace = true }

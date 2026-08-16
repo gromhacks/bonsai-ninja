@@ -3,7 +3,7 @@
 use bonsai_security::{
     load_rulepack, load_workspace_local_rules,
     rule::{MatchKind, NonTaintEvaluation},
-    FlowClass, LoadError,
+    rulepack_semantic_files, FlowClass, LoadError,
 };
 use std::fs;
 
@@ -46,6 +46,45 @@ fn loads_a_valid_python_pack() {
     assert_eq!(py.sinks.len(), 1);
     assert_eq!(py.sources[0].match_spec.kind, MatchKind::Read);
     assert_eq!(py.sinks[0].match_spec.kind, MatchKind::Call);
+}
+
+#[test]
+fn semantic_inventory_matches_loader_and_ignores_package_scaffolding() {
+    let tmp = tempdir();
+    write(&tmp.path().join("VERSION"), "test-pack\n");
+    write(&tmp.path().join("metadata.yml"), "profiles: {}\n");
+    write(&tmp.path().join("metadata.yaml"), "ignored: true\n");
+    write(&tmp.path().join("Cargo.toml"), "[package]\nname = \"fixture\"\n");
+    write(&tmp.path().join("build.rs"), "fn main() {}\n");
+    write(
+        &tmp.path().join("src/lib.rs"),
+        "pub const SCAFFOLD: bool = true;\n",
+    );
+    write(&tmp.path().join("README.md"), "not rule semantics\n");
+    write(&tmp.path().join("langs/x/sinks/x.yml"), "[]\n");
+    write(&tmp.path().join("langs/x/sinks/ignored.txt"), "ignored\n");
+    write(&tmp.path().join("sources/flat.yaml"), "[]\n");
+
+    let files = rulepack_semantic_files(tmp.path()).expect("semantic inventory");
+    let mut relative = files
+        .iter()
+        .map(|path| {
+            path.strip_prefix(tmp.path())
+                .expect("inventory path below root")
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect::<Vec<_>>();
+    relative.sort();
+    assert_eq!(
+        relative,
+        [
+            "VERSION",
+            "langs/x/sinks/x.yml",
+            "metadata.yml",
+            "sources/flat.yaml"
+        ]
+    );
 }
 
 #[test]

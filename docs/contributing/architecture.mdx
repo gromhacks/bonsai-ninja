@@ -5,13 +5,13 @@ description: "The crate layout, dependency boundaries, and major data paths in b
 
 # Architecture
 
-bonsai-ninja is a 46-crate Rust workspace. The production dependency graph is
+bonsai-ninja is a 47-crate Rust workspace. The production dependency graph is
 layered: each row below depends only on its own row or a lower row. Test-only
 dependencies do not define production layering. New contributors usually work
 in one or two layers at a time, so this doc is organised the same way.
 
 ```
-                         bonsai_cli
+                         bonsai-ninja
                               ▲
                          bonsai_sdk
                               ▲
@@ -39,7 +39,7 @@ in one or two layers at a time, so this doc is organised the same way.
                               ▲
                         bonsai_common
                               ▲
-                  bonsai_hash  bonsai_factstore
+          bonsai_hash  bonsai_factstore  bonsai_rulepack
 ```
 
 Rows group crates by maximum production dependency depth, not by runtime phase;
@@ -956,6 +956,17 @@ IDG over only the files/functions needed for the rendered lineage. Neither
   canonical IDG. The output formats (text / JSON / SARIF) live in
   `report.rs`. Sanitizer-credit calculation has its own generic module; the
   credit taxonomy lives in `security-patterns/metadata.yml`.
+
+**`security-patterns` / `bonsai_rulepack`** owns the source-controlled YAML
+and compiles only those rule files into a deterministic archive. The security
+crate consumes that archive through a normal versioned dependency, so a
+crates.io build embeds the exact default pack without a repository-relative
+filesystem lookup. Package/API identities and security meaning remain in YAML;
+the rulepack crate contributes no second matcher or language logic. Cache
+fingerprints use the loader's canonical semantic inventory (`VERSION`, the
+selected metadata file, and YAML in canonical or flat rule buckets), so Cargo
+packaging files and documentation cannot make source and embedded copies of
+the same rules appear different.
 
 ## Query / browse / trace
 

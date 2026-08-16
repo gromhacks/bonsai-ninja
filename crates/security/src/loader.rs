@@ -809,6 +809,75 @@ pub fn load_rulepack(root: &Path) -> Result<Rulepack, LoadError> {
     Ok(pack)
 }
 
+/// Return the canonical files that define a rulepack's security semantics.
+///
+/// Package scaffolding, documentation, VCS metadata, and other files beside a
+/// pack do not affect matching and therefore must not invalidate persisted
+/// analysis. The inventory mirrors [`load_rulepack`]: the selected metadata
+/// file, optional `VERSION`, canonical per-language rule buckets, and flat
+/// custom-pack rule buckets. Paths are sorted and deduplicated so cache
+/// fingerprints are deterministic on every filesystem.
+pub fn rulepack_semantic_files(root: &Path) -> Result<Vec<PathBuf>, LoadError> {
+    if !root.exists() || !root.is_dir() {
+        return Err(LoadError::MissingRoot(root.to_path_buf()));
+    }
+
+    let mut files = Vec::new();
+    let version = root.join("VERSION");
+    if version.is_file() {
+        files.push(version);
+    }
+    let metadata_yml = root.join("metadata.yml");
+    let metadata_yaml = root.join("metadata.yaml");
+    if metadata_yml.is_file() {
+        files.push(metadata_yml);
+    } else if metadata_yaml.is_file() {
+        files.push(metadata_yaml);
+    }
+
+    let kinds = [
+        RuleKind::Source,
+        RuleKind::Sink,
+        RuleKind::Sanitizer,
+        RuleKind::Typing,
+    ];
+    let langs_dir = root.join("langs");
+    if langs_dir.exists() {
+        for language in read_dir(&langs_dir)? {
+            let language_dir = language.path();
+            if !language_dir.is_dir() {
+                continue;
+            }
+            for kind in kinds {
+                collect_rule_yaml_files(&language_dir.join(kind.dir_name()), &mut files)?;
+            }
+        }
+    }
+    for kind in kinds {
+        collect_rule_yaml_files(&root.join(kind.dir_name()), &mut files)?;
+    }
+
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+fn collect_rule_yaml_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), LoadError> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in read_dir(dir)? {
+        let path = entry.path();
+        if matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("yml" | "yaml")
+        ) {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
 fn load_rulepack_metadata(root: &Path) -> Result<RulepackMetadata, LoadError> {
     let yaml = root.join("metadata.yml");
     let yaml_alt = root.join("metadata.yaml");

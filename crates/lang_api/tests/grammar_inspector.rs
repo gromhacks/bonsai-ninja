@@ -1,4 +1,4 @@
-// Run with: cargo test --release -p bonsai_lang_api --test grammar_inspector -- --nocapture
+// Run with: cargo test --release -p bonsai-ninja-lang-api --test grammar_inspector -- --nocapture
 use bonsai_lang_api::kit::language_from_pack;
 use tree_sitter::Parser;
 

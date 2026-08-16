@@ -189,7 +189,7 @@ def find_binary(root: Path, explicit: str | None) -> Path:
     if candidate.exists():
         return candidate
     raise SystemExit(
-        "missing release binary; run `cargo build --release -p bonsai_cli --bin bonsai-ninja`"
+        "missing release binary; run `cargo build --release -p bonsai-ninja --bin bonsai-ninja`"
     )
 
 

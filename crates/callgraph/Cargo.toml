@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_callgraph"
+name = "bonsai-ninja-callgraph"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "Cross-function call graph + function summaries."
+
+[lib]
+name = "bonsai_callgraph"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_common = { workspace = true }

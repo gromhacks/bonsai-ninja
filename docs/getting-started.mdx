@@ -7,10 +7,23 @@ description: "Install bonsai-ninja, map a workspace, run a security scan, and fo
 
 ## Install
 
+### Install with Cargo
+
+```bash
+# Requires Rust 1.88 or newer.
+cargo install bonsai-ninja --locked
+bonsai-ninja --version
+```
+
+Cargo compiles the published source for the current host. The package embeds
+the same content-addressed default rulepack as the release archives.
+Re-run the install command with `--force` to replace an older Cargo-installed
+release.
+
 ### Build from this repository
 
 ```bash
-cargo build --release --locked -p bonsai_cli
+cargo build --release --locked -p bonsai-ninja
 ./target/release/bonsai-ninja --version
 ```
 
@@ -20,7 +33,7 @@ The release binary contains the default security rulepack, so it can be
 installed and run from any directory without a companion data path:
 
 ```bash
-cargo build --release --locked -p bonsai_cli
+cargo build --release --locked -p bonsai-ninja
 
 PREFIX="${HOME}/.local"
 mkdir -p "${PREFIX}/bin"

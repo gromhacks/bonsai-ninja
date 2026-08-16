@@ -30,6 +30,8 @@ cannot silently accumulate here.
 - `audit-loop.sh` — runs the combined rulepack, fixture, sanitizer, and taint-engine health loop.
 - `audit-public-api.sh` — compares the public Rust API surface with its checked-in snapshot.
 - `audit-release-metadata.py` — validates public Cargo package and repository metadata.
+- `publish-crates.py` — audits the crates.io package graph and performs an
+  explicit, resumable dependency-ordered publication when requested.
 - `audit-rust-duplication.py` — rejects large exact clones in shared production Rust code.
 - `audit-secrets.sh` — scans reachable Git history with a checksum-pinned Gitleaks binary.
 - `audit-workflows.sh` — validates GitHub Actions syntax with a checksum-pinned Actionlint binary.

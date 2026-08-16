@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_lang_cpp"
+name = "bonsai-ninja-lang-cpp"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "C++ language adapter."
+
+[lib]
+name = "bonsai_lang_cpp"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_common = { workspace = true }
@@ -16,7 +25,7 @@ tree-sitter = { workspace = true }
 workspace = true
 
 [dev-dependencies]
-bonsai_conformance = { workspace = true }
-bonsai_diagnostics = { workspace = true }
-bonsai_vfs = { workspace = true }
+bonsai_conformance = { package = "bonsai-ninja-conformance", path = "../conformance" }
+bonsai_diagnostics = { package = "bonsai-ninja-diagnostics", path = "../diagnostics" }
+bonsai_vfs = { package = "bonsai-ninja-vfs", path = "../vfs" }
 parking_lot = { workspace = true }

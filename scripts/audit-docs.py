@@ -6,6 +6,7 @@ from __future__ import annotations
 import itertools
 import json
 import re
+import tomllib
 from pathlib import Path
 
 
@@ -448,7 +449,8 @@ def check_language_counts() -> list[str]:
 
 
 def check_workspace_counts() -> list[str]:
-    crate_count = len(list((REPO / "crates").glob("*/Cargo.toml")))
+    workspace_manifest = tomllib.loads((REPO / "Cargo.toml").read_text())
+    crate_count = len(workspace_manifest["workspace"]["members"])
     failures: list[str] = []
     patterns = (
         re.compile(r"\b(\d+)-crate Rust workspace\b", re.IGNORECASE),

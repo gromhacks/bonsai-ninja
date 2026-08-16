@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_parser"
+name = "bonsai-ninja-parser"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "Tree-sitter parse cache with incremental reparsing."
+
+[lib]
+name = "bonsai_parser"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_common = { workspace = true }

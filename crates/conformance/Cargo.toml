@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_conformance"
+name = "bonsai-ninja-conformance"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
 description = "Reusable conformance test macros for language adapters."
+
+[lib]
+name = "bonsai_conformance"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_common = { workspace = true }
@@ -14,9 +23,9 @@ bonsai_workspace = { workspace = true }
 bonsai_testkit = { workspace = true }
 
 [dev-dependencies]
-bonsai_adapters = { workspace = true }
-bonsai_diagnostics = { workspace = true }
-bonsai_vfs = { workspace = true }
+bonsai_adapters = { package = "bonsai-ninja-adapters", path = "../adapters" }
+bonsai_diagnostics = { package = "bonsai-ninja-diagnostics", path = "../diagnostics" }
+bonsai_vfs = { package = "bonsai-ninja-vfs", path = "../vfs" }
 parking_lot = { workspace = true }
 serde_yaml = { workspace = true }
 tree-sitter = { workspace = true }

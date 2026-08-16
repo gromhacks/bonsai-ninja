@@ -278,10 +278,10 @@ gate it in CI:
 
 ```sh
 # detect drift
-cargo test -p bonsai_conformance --test coverage_baseline
+cargo test -p bonsai-ninja-conformance --test coverage_baseline
 
 # accept drift after intentional adapter or applicability change
-BLESS_BASELINE=1 cargo test -p bonsai_conformance --test coverage_baseline -- --nocapture
+BLESS_BASELINE=1 cargo test -p bonsai-ninja-conformance --test coverage_baseline -- --nocapture
 ```
 
 - `.snapshots/COVERAGE_BASELINE.snapshot` - raw runtime levels (no

@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_browse"
+name = "bonsai-ninja-browse"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "Browse + dump command data layer — the SDK powering `bonsai-ninja defs/calls/imports/...` and `dump-*`."
+
+[lib]
+name = "bonsai_browse"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_common = { workspace = true }
@@ -30,8 +39,8 @@ tree-sitter = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
-bonsai_adapters = { workspace = true }
-bonsai_lang_python = { workspace = true }
+bonsai_adapters = { package = "bonsai-ninja-adapters", path = "../adapters" }
+bonsai_lang_python = { package = "bonsai-ninja-lang-python", path = "../lang_python" }
 tempfile = { workspace = true }
 
 [lints]

@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_idg"
+name = "bonsai-ninja-idg"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "Workspace-wide Interprocedural Dataflow Graph (IFDS-style) — single graph that all bonsai-ninja consumers query"
+
+[lib]
+name = "bonsai_idg"
+path = "src/lib.rs"
 
 [dependencies]
 ahash.workspace = true

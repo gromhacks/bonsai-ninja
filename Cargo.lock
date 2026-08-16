@@ -162,109 +162,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "bonsai_abstract_interp"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "bonsai_cfg",
- "bonsai_common",
- "bonsai_lang_api",
- "serde",
-]
-
-[[package]]
-name = "bonsai_adapters"
-version = "0.1.0"
-dependencies = [
- "bonsai_lang_api",
- "bonsai_lang_c",
- "bonsai_lang_cpp",
- "bonsai_lang_csharp",
- "bonsai_lang_dart",
- "bonsai_lang_elixir",
- "bonsai_lang_erlang",
- "bonsai_lang_go",
- "bonsai_lang_java",
- "bonsai_lang_javascript",
- "bonsai_lang_kotlin",
- "bonsai_lang_lua",
- "bonsai_lang_objc",
- "bonsai_lang_perl",
- "bonsai_lang_php",
- "bonsai_lang_python",
- "bonsai_lang_ruby",
- "bonsai_lang_rust",
- "bonsai_lang_scala",
- "bonsai_lang_swift",
- "bonsai_lang_typescript",
-]
-
-[[package]]
-name = "bonsai_browse"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "bonsai_adapters",
- "bonsai_callgraph",
- "bonsai_cfg",
- "bonsai_common",
- "bonsai_diagnostics",
- "bonsai_hash",
- "bonsai_idg",
- "bonsai_index",
- "bonsai_inspect",
- "bonsai_lang_api",
- "bonsai_lang_python",
- "bonsai_resolve",
- "bonsai_retrieval",
- "bonsai_taint",
- "bonsai_workspace",
- "parking_lot",
- "rayon",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "tree-sitter",
-]
-
-[[package]]
-name = "bonsai_callgraph"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "bonsai_common",
- "bonsai_index",
- "bonsai_lang_api",
- "bonsai_resolve",
- "rayon",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "bonsai_cfg"
-version = "0.1.0"
-dependencies = [
- "bonsai_common",
- "bonsai_lang_api",
- "serde",
-]
-
-[[package]]
-name = "bonsai_cli"
+name = "bonsai-ninja"
 version = "0.1.0"
 dependencies = [
  "ahash",
  "anyhow",
- "bonsai_adapters",
- "bonsai_callgraph",
- "bonsai_common",
- "bonsai_diagnostics",
- "bonsai_hash",
- "bonsai_lang_api",
- "bonsai_retrieval",
- "bonsai_sdk",
+ "bonsai-ninja-adapters",
+ "bonsai-ninja-callgraph",
+ "bonsai-ninja-common",
+ "bonsai-ninja-diagnostics",
+ "bonsai-ninja-hash",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-retrieval",
+ "bonsai-ninja-sdk",
  "clap",
  "comfy-table",
  "dirs",
@@ -283,10 +193,100 @@ dependencies = [
 ]
 
 [[package]]
-name = "bonsai_common"
+name = "bonsai-ninja-abstract-interp"
 version = "0.1.0"
 dependencies = [
- "bonsai_hash",
+ "ahash",
+ "bonsai-ninja-cfg",
+ "bonsai-ninja-common",
+ "bonsai-ninja-lang-api",
+ "serde",
+]
+
+[[package]]
+name = "bonsai-ninja-adapters"
+version = "0.1.0"
+dependencies = [
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-lang-c",
+ "bonsai-ninja-lang-cpp",
+ "bonsai-ninja-lang-csharp",
+ "bonsai-ninja-lang-dart",
+ "bonsai-ninja-lang-elixir",
+ "bonsai-ninja-lang-erlang",
+ "bonsai-ninja-lang-go",
+ "bonsai-ninja-lang-java",
+ "bonsai-ninja-lang-javascript",
+ "bonsai-ninja-lang-kotlin",
+ "bonsai-ninja-lang-lua",
+ "bonsai-ninja-lang-objc",
+ "bonsai-ninja-lang-perl",
+ "bonsai-ninja-lang-php",
+ "bonsai-ninja-lang-python",
+ "bonsai-ninja-lang-ruby",
+ "bonsai-ninja-lang-rust",
+ "bonsai-ninja-lang-scala",
+ "bonsai-ninja-lang-swift",
+ "bonsai-ninja-lang-typescript",
+]
+
+[[package]]
+name = "bonsai-ninja-browse"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "bonsai-ninja-adapters",
+ "bonsai-ninja-callgraph",
+ "bonsai-ninja-cfg",
+ "bonsai-ninja-common",
+ "bonsai-ninja-diagnostics",
+ "bonsai-ninja-hash",
+ "bonsai-ninja-idg",
+ "bonsai-ninja-index",
+ "bonsai-ninja-inspect",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-lang-python",
+ "bonsai-ninja-resolve",
+ "bonsai-ninja-retrieval",
+ "bonsai-ninja-taint",
+ "bonsai-ninja-workspace",
+ "parking_lot",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tree-sitter",
+]
+
+[[package]]
+name = "bonsai-ninja-callgraph"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "bonsai-ninja-common",
+ "bonsai-ninja-index",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-resolve",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "bonsai-ninja-cfg"
+version = "0.1.0"
+dependencies = [
+ "bonsai-ninja-common",
+ "bonsai-ninja-lang-api",
+ "serde",
+]
+
+[[package]]
+name = "bonsai-ninja-common"
+version = "0.1.0"
+dependencies = [
+ "bonsai-ninja-hash",
  "dirs",
  "rmp-serde",
  "serde",
@@ -294,39 +294,39 @@ dependencies = [
 ]
 
 [[package]]
-name = "bonsai_conformance"
+name = "bonsai-ninja-conformance"
 version = "0.1.0"
 dependencies = [
- "bonsai_adapters",
- "bonsai_common",
- "bonsai_diagnostics",
- "bonsai_lang_api",
- "bonsai_testkit",
- "bonsai_vfs",
- "bonsai_workspace",
+ "bonsai-ninja-adapters",
+ "bonsai-ninja-common",
+ "bonsai-ninja-diagnostics",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-testkit",
+ "bonsai-ninja-vfs",
+ "bonsai-ninja-workspace",
  "parking_lot",
  "serde_yaml_ng",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_db"
+name = "bonsai-ninja-db"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "bonsai_abstract_interp",
- "bonsai_cfg",
- "bonsai_common",
- "bonsai_diagnostics",
- "bonsai_factstore",
- "bonsai_hash",
- "bonsai_idg",
- "bonsai_index",
- "bonsai_lang_api",
- "bonsai_lang_python",
- "bonsai_parser",
- "bonsai_trace",
- "bonsai_vfs",
+ "bonsai-ninja-abstract-interp",
+ "bonsai-ninja-cfg",
+ "bonsai-ninja-common",
+ "bonsai-ninja-diagnostics",
+ "bonsai-ninja-factstore",
+ "bonsai-ninja-hash",
+ "bonsai-ninja-idg",
+ "bonsai-ninja-index",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-lang-python",
+ "bonsai-ninja-parser",
+ "bonsai-ninja-trace",
+ "bonsai-ninja-vfs",
  "fs2",
  "lru",
  "parking_lot",
@@ -339,15 +339,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "bonsai_diagnostics"
+name = "bonsai-ninja-diagnostics"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
+ "bonsai-ninja-common",
  "serde",
 ]
 
 [[package]]
-name = "bonsai_factstore"
+name = "bonsai-ninja-factstore"
 version = "0.1.0"
 dependencies = [
  "ahash",
@@ -360,22 +360,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "bonsai_hash"
+name = "bonsai-ninja-hash"
 version = "0.1.0"
 
 [[package]]
-name = "bonsai_idg"
+name = "bonsai-ninja-idg"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "bonsai_callgraph",
- "bonsai_common",
- "bonsai_diagnostics",
- "bonsai_factstore",
- "bonsai_hash",
- "bonsai_index",
- "bonsai_lang_api",
- "bonsai_resolve",
+ "bonsai-ninja-callgraph",
+ "bonsai-ninja-common",
+ "bonsai-ninja-diagnostics",
+ "bonsai-ninja-factstore",
+ "bonsai-ninja-hash",
+ "bonsai-ninja-index",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-resolve",
  "hashbrown 0.16.1",
  "parking_lot",
  "rayon",
@@ -387,42 +387,42 @@ dependencies = [
 ]
 
 [[package]]
-name = "bonsai_index"
+name = "bonsai-ninja-index"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "bonsai_common",
- "bonsai_lang_api",
+ "bonsai-ninja-common",
+ "bonsai-ninja-lang-api",
  "serde",
 ]
 
 [[package]]
-name = "bonsai_inspect"
+name = "bonsai-ninja-inspect"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "bonsai_callgraph",
- "bonsai_common",
- "bonsai_hash",
- "bonsai_index",
- "bonsai_lang_api",
- "bonsai_lang_python",
- "bonsai_resolve",
- "bonsai_taint",
- "bonsai_workspace",
+ "bonsai-ninja-callgraph",
+ "bonsai-ninja-common",
+ "bonsai-ninja-hash",
+ "bonsai-ninja-index",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-lang-python",
+ "bonsai-ninja-resolve",
+ "bonsai-ninja-taint",
+ "bonsai-ninja-workspace",
  "parking_lot",
  "rayon",
  "regex",
 ]
 
 [[package]]
-name = "bonsai_lang_api"
+name = "bonsai-ninja-lang-api"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "bonsai_common",
- "bonsai_diagnostics",
- "bonsai_vfs",
+ "bonsai-ninja-common",
+ "bonsai-ninja-diagnostics",
+ "bonsai-ninja-vfs",
  "parking_lot",
  "serde",
  "thiserror",
@@ -431,286 +431,286 @@ dependencies = [
 ]
 
 [[package]]
-name = "bonsai_lang_c"
+name = "bonsai-ninja-lang-c"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_diagnostics",
- "bonsai_lang_api",
- "bonsai_vfs",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-diagnostics",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-vfs",
  "parking_lot",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_cpp"
+name = "bonsai-ninja-lang-cpp"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_diagnostics",
- "bonsai_lang_api",
- "bonsai_vfs",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-diagnostics",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-vfs",
  "parking_lot",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_csharp"
+name = "bonsai-ninja-lang-csharp"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_lang_api",
- "bonsai_testkit",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-testkit",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_dart"
+name = "bonsai-ninja-lang-dart"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_db",
- "bonsai_lang_api",
- "bonsai_testkit",
- "bonsai_vfs",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-db",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-testkit",
+ "bonsai-ninja-vfs",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_elixir"
+name = "bonsai-ninja-lang-elixir"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_lang_api",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-lang-api",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_erlang"
+name = "bonsai-ninja-lang-erlang"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_lang_api",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-lang-api",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_go"
+name = "bonsai-ninja-lang-go"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_db",
- "bonsai_lang_api",
- "bonsai_testkit",
- "bonsai_vfs",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-db",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-testkit",
+ "bonsai-ninja-vfs",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_java"
+name = "bonsai-ninja-lang-java"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_db",
- "bonsai_lang_api",
- "bonsai_testkit",
- "bonsai_vfs",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-db",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-testkit",
+ "bonsai-ninja-vfs",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_javascript"
+name = "bonsai-ninja-lang-javascript"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_db",
- "bonsai_lang_api",
- "bonsai_testkit",
- "bonsai_vfs",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-db",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-testkit",
+ "bonsai-ninja-vfs",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_kotlin"
+name = "bonsai-ninja-lang-kotlin"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_lang_api",
- "bonsai_testkit",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-testkit",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_lua"
+name = "bonsai-ninja-lang-lua"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_db",
- "bonsai_lang_api",
- "bonsai_vfs",
+ "bonsai-ninja-common",
+ "bonsai-ninja-db",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-vfs",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_objc"
+name = "bonsai-ninja-lang-objc"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_diagnostics",
- "bonsai_lang_api",
- "bonsai_vfs",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-diagnostics",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-vfs",
  "parking_lot",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_perl"
+name = "bonsai-ninja-lang-perl"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_lang_api",
- "bonsai_testkit",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-testkit",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_php"
+name = "bonsai-ninja-lang-php"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_db",
- "bonsai_lang_api",
- "bonsai_testkit",
- "bonsai_vfs",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-db",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-testkit",
+ "bonsai-ninja-vfs",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_python"
+name = "bonsai-ninja-lang-python"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_db",
- "bonsai_lang_api",
- "bonsai_testkit",
- "bonsai_vfs",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-db",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-testkit",
+ "bonsai-ninja-vfs",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_ruby"
+name = "bonsai-ninja-lang-ruby"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_db",
- "bonsai_lang_api",
- "bonsai_testkit",
- "bonsai_vfs",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-db",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-testkit",
+ "bonsai-ninja-vfs",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_rust"
+name = "bonsai-ninja-lang-rust"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_lang_api",
- "bonsai_testkit",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-testkit",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_scala"
+name = "bonsai-ninja-lang-scala"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_db",
- "bonsai_lang_api",
- "bonsai_testkit",
- "bonsai_vfs",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-db",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-testkit",
+ "bonsai-ninja-vfs",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_swift"
+name = "bonsai-ninja-lang-swift"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_diagnostics",
- "bonsai_lang_api",
- "bonsai_testkit",
- "bonsai_vfs",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-diagnostics",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-testkit",
+ "bonsai-ninja-vfs",
  "parking_lot",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_lang_typescript"
+name = "bonsai-ninja-lang-typescript"
 version = "0.1.0"
 dependencies = [
- "bonsai_common",
- "bonsai_conformance",
- "bonsai_lang_api",
- "bonsai_lang_javascript",
- "bonsai_testkit",
+ "bonsai-ninja-common",
+ "bonsai-ninja-conformance",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-lang-javascript",
+ "bonsai-ninja-testkit",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_parser"
+name = "bonsai-ninja-parser"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "bonsai_common",
- "bonsai_diagnostics",
- "bonsai_lang_api",
- "bonsai_vfs",
+ "bonsai-ninja-common",
+ "bonsai-ninja-diagnostics",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-vfs",
  "parking_lot",
  "thiserror",
  "tree-sitter",
 ]
 
 [[package]]
-name = "bonsai_resolve"
+name = "bonsai-ninja-resolve"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "bonsai_common",
- "bonsai_index",
- "bonsai_lang_api",
+ "bonsai-ninja-common",
+ "bonsai-ninja-index",
+ "bonsai-ninja-lang-api",
 ]
 
 [[package]]
-name = "bonsai_retrieval"
+name = "bonsai-ninja-retrieval"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "bonsai_adapters",
- "bonsai_callgraph",
- "bonsai_common",
- "bonsai_diagnostics",
- "bonsai_factstore",
- "bonsai_hash",
- "bonsai_lang_api",
- "bonsai_workspace",
+ "bonsai-ninja-adapters",
+ "bonsai-ninja-callgraph",
+ "bonsai-ninja-common",
+ "bonsai-ninja-diagnostics",
+ "bonsai-ninja-factstore",
+ "bonsai-ninja-hash",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-workspace",
  "rayon",
  "regex",
  "serde",
@@ -719,24 +719,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "bonsai_sdk"
+name = "bonsai-ninja-rulepack"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+ "zstd",
+]
+
+[[package]]
+name = "bonsai-ninja-sdk"
 version = "0.1.0"
 dependencies = [
  "ahash",
  "anyhow",
- "bonsai_adapters",
- "bonsai_browse",
- "bonsai_callgraph",
- "bonsai_cfg",
- "bonsai_common",
- "bonsai_diagnostics",
- "bonsai_hash",
- "bonsai_inspect",
- "bonsai_lang_api",
- "bonsai_retrieval",
- "bonsai_security",
- "bonsai_trace",
- "bonsai_workspace",
+ "bonsai-ninja-adapters",
+ "bonsai-ninja-browse",
+ "bonsai-ninja-callgraph",
+ "bonsai-ninja-cfg",
+ "bonsai-ninja-common",
+ "bonsai-ninja-diagnostics",
+ "bonsai-ninja-hash",
+ "bonsai-ninja-inspect",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-retrieval",
+ "bonsai-ninja-security",
+ "bonsai-ninja-trace",
+ "bonsai-ninja-workspace",
  "fs2",
  "parking_lot",
  "regex",
@@ -745,44 +753,45 @@ dependencies = [
 ]
 
 [[package]]
-name = "bonsai_security"
+name = "bonsai-ninja-security"
 version = "0.1.0"
 dependencies = [
  "ahash",
  "anyhow",
- "bonsai_adapters",
- "bonsai_callgraph",
- "bonsai_common",
- "bonsai_diagnostics",
- "bonsai_hash",
- "bonsai_idg",
- "bonsai_index",
- "bonsai_inspect",
- "bonsai_lang_api",
- "bonsai_lang_c",
- "bonsai_lang_cpp",
- "bonsai_lang_csharp",
- "bonsai_lang_dart",
- "bonsai_lang_elixir",
- "bonsai_lang_erlang",
- "bonsai_lang_go",
- "bonsai_lang_java",
- "bonsai_lang_javascript",
- "bonsai_lang_kotlin",
- "bonsai_lang_lua",
- "bonsai_lang_objc",
- "bonsai_lang_perl",
- "bonsai_lang_php",
- "bonsai_lang_python",
- "bonsai_lang_ruby",
- "bonsai_lang_rust",
- "bonsai_lang_scala",
- "bonsai_lang_swift",
- "bonsai_lang_typescript",
- "bonsai_resolve",
- "bonsai_taint",
- "bonsai_testkit",
- "bonsai_workspace",
+ "bonsai-ninja-adapters",
+ "bonsai-ninja-callgraph",
+ "bonsai-ninja-common",
+ "bonsai-ninja-diagnostics",
+ "bonsai-ninja-hash",
+ "bonsai-ninja-idg",
+ "bonsai-ninja-index",
+ "bonsai-ninja-inspect",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-lang-c",
+ "bonsai-ninja-lang-cpp",
+ "bonsai-ninja-lang-csharp",
+ "bonsai-ninja-lang-dart",
+ "bonsai-ninja-lang-elixir",
+ "bonsai-ninja-lang-erlang",
+ "bonsai-ninja-lang-go",
+ "bonsai-ninja-lang-java",
+ "bonsai-ninja-lang-javascript",
+ "bonsai-ninja-lang-kotlin",
+ "bonsai-ninja-lang-lua",
+ "bonsai-ninja-lang-objc",
+ "bonsai-ninja-lang-perl",
+ "bonsai-ninja-lang-php",
+ "bonsai-ninja-lang-python",
+ "bonsai-ninja-lang-ruby",
+ "bonsai-ninja-lang-rust",
+ "bonsai-ninja-lang-scala",
+ "bonsai-ninja-lang-swift",
+ "bonsai-ninja-lang-typescript",
+ "bonsai-ninja-resolve",
+ "bonsai-ninja-rulepack",
+ "bonsai-ninja-taint",
+ "bonsai-ninja-testkit",
+ "bonsai-ninja-workspace",
  "dirs",
  "fs2",
  "lru",
@@ -793,7 +802,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
- "sha2",
  "tempfile",
  "thiserror",
  "tracing",
@@ -801,40 +809,40 @@ dependencies = [
 ]
 
 [[package]]
-name = "bonsai_taint"
+name = "bonsai-ninja-taint"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "bonsai_callgraph",
- "bonsai_cfg",
- "bonsai_common",
- "bonsai_db",
- "bonsai_diagnostics",
- "bonsai_idg",
- "bonsai_index",
- "bonsai_lang_api",
- "bonsai_lang_c",
- "bonsai_lang_cpp",
- "bonsai_lang_csharp",
- "bonsai_lang_dart",
- "bonsai_lang_elixir",
- "bonsai_lang_erlang",
- "bonsai_lang_go",
- "bonsai_lang_java",
- "bonsai_lang_javascript",
- "bonsai_lang_kotlin",
- "bonsai_lang_lua",
- "bonsai_lang_objc",
- "bonsai_lang_perl",
- "bonsai_lang_php",
- "bonsai_lang_python",
- "bonsai_lang_ruby",
- "bonsai_lang_rust",
- "bonsai_lang_scala",
- "bonsai_lang_swift",
- "bonsai_lang_typescript",
- "bonsai_resolve",
- "bonsai_vfs",
+ "bonsai-ninja-callgraph",
+ "bonsai-ninja-cfg",
+ "bonsai-ninja-common",
+ "bonsai-ninja-db",
+ "bonsai-ninja-diagnostics",
+ "bonsai-ninja-idg",
+ "bonsai-ninja-index",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-lang-c",
+ "bonsai-ninja-lang-cpp",
+ "bonsai-ninja-lang-csharp",
+ "bonsai-ninja-lang-dart",
+ "bonsai-ninja-lang-elixir",
+ "bonsai-ninja-lang-erlang",
+ "bonsai-ninja-lang-go",
+ "bonsai-ninja-lang-java",
+ "bonsai-ninja-lang-javascript",
+ "bonsai-ninja-lang-kotlin",
+ "bonsai-ninja-lang-lua",
+ "bonsai-ninja-lang-objc",
+ "bonsai-ninja-lang-perl",
+ "bonsai-ninja-lang-php",
+ "bonsai-ninja-lang-python",
+ "bonsai-ninja-lang-ruby",
+ "bonsai-ninja-lang-rust",
+ "bonsai-ninja-lang-scala",
+ "bonsai-ninja-lang-swift",
+ "bonsai-ninja-lang-typescript",
+ "bonsai-ninja-resolve",
+ "bonsai-ninja-vfs",
  "lru",
  "parking_lot",
  "rayon",
@@ -843,75 +851,75 @@ dependencies = [
 ]
 
 [[package]]
-name = "bonsai_testkit"
+name = "bonsai-ninja-testkit"
 version = "0.1.0"
 dependencies = [
- "bonsai_lang_api",
- "bonsai_workspace",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-workspace",
 ]
 
 [[package]]
-name = "bonsai_trace"
+name = "bonsai-ninja-trace"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "bonsai_abstract_interp",
- "bonsai_common",
- "bonsai_vfs",
+ "bonsai-ninja-abstract-interp",
+ "bonsai-ninja-common",
+ "bonsai-ninja-vfs",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "bonsai_vfs"
+name = "bonsai-ninja-vfs"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "bonsai_common",
+ "bonsai-ninja-common",
  "parking_lot",
  "serde",
  "thiserror",
 ]
 
 [[package]]
-name = "bonsai_workspace"
+name = "bonsai-ninja-workspace"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "bonsai_abstract_interp",
- "bonsai_callgraph",
- "bonsai_common",
- "bonsai_db",
- "bonsai_diagnostics",
- "bonsai_factstore",
- "bonsai_hash",
- "bonsai_idg",
- "bonsai_index",
- "bonsai_lang_api",
- "bonsai_lang_c",
- "bonsai_lang_cpp",
- "bonsai_lang_csharp",
- "bonsai_lang_dart",
- "bonsai_lang_elixir",
- "bonsai_lang_erlang",
- "bonsai_lang_go",
- "bonsai_lang_java",
- "bonsai_lang_javascript",
- "bonsai_lang_kotlin",
- "bonsai_lang_lua",
- "bonsai_lang_objc",
- "bonsai_lang_perl",
- "bonsai_lang_php",
- "bonsai_lang_python",
- "bonsai_lang_ruby",
- "bonsai_lang_rust",
- "bonsai_lang_scala",
- "bonsai_lang_swift",
- "bonsai_lang_typescript",
- "bonsai_resolve",
- "bonsai_taint",
- "bonsai_trace",
- "bonsai_vfs",
+ "bonsai-ninja-abstract-interp",
+ "bonsai-ninja-callgraph",
+ "bonsai-ninja-common",
+ "bonsai-ninja-db",
+ "bonsai-ninja-diagnostics",
+ "bonsai-ninja-factstore",
+ "bonsai-ninja-hash",
+ "bonsai-ninja-idg",
+ "bonsai-ninja-index",
+ "bonsai-ninja-lang-api",
+ "bonsai-ninja-lang-c",
+ "bonsai-ninja-lang-cpp",
+ "bonsai-ninja-lang-csharp",
+ "bonsai-ninja-lang-dart",
+ "bonsai-ninja-lang-elixir",
+ "bonsai-ninja-lang-erlang",
+ "bonsai-ninja-lang-go",
+ "bonsai-ninja-lang-java",
+ "bonsai-ninja-lang-javascript",
+ "bonsai-ninja-lang-kotlin",
+ "bonsai-ninja-lang-lua",
+ "bonsai-ninja-lang-objc",
+ "bonsai-ninja-lang-perl",
+ "bonsai-ninja-lang-php",
+ "bonsai-ninja-lang-python",
+ "bonsai-ninja-lang-ruby",
+ "bonsai-ninja-lang-rust",
+ "bonsai-ninja-lang-scala",
+ "bonsai-ninja-lang-swift",
+ "bonsai-ninja-lang-typescript",
+ "bonsai-ninja-resolve",
+ "bonsai-ninja-taint",
+ "bonsai-ninja-trace",
+ "bonsai-ninja-vfs",
  "fs2",
  "ignore",
  "lru",

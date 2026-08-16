@@ -44,7 +44,7 @@ match_examples:
 ## Pack Validation
 
 ```bash
-cargo build --release -p bonsai_cli
+cargo build --release -p bonsai-ninja
 
 ./target/release/bonsai-ninja security . pack --validate \
   --rules-dir security-patterns \
@@ -110,7 +110,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
   --document-private-items --release --locked
 
-cargo build --release -p bonsai_cli --locked
+cargo build --release -p bonsai-ninja --locked
 
 ./target/release/bonsai-ninja security . pack --validate --taint-replay \
   --rules-dir security-patterns \
@@ -119,12 +119,12 @@ cargo build --release -p bonsai_cli --locked
 ./target/release/bonsai-ninja security . pack --audit \
   --context 16k --no-color --no-progress
 
-cargo test -p bonsai_security --test rulepack_conformance
-cargo test -p bonsai_security --test security_pipeline_regressions
-cargo test -p bonsai_security --test branch_merge_audit
-cargo test -p bonsai_cli --test sanitizer_fixtures
-cargo test -p bonsai_cli --test per_lang_cli_matrix
-cargo test -p bonsai_conformance --test architecture_invariants
+cargo test -p bonsai-ninja-security --test rulepack_conformance
+cargo test -p bonsai-ninja-security --test security_pipeline_regressions
+cargo test -p bonsai-ninja-security --test branch_merge_audit
+cargo test -p bonsai-ninja --test sanitizer_fixtures
+cargo test -p bonsai-ninja --test per_lang_cli_matrix
+cargo test -p bonsai-ninja-conformance --test architecture_invariants
 
 python3 scripts/sanitizer_credit_audit.py
 python3 scripts/sync_skill.py --check

@@ -1,0 +1,28 @@
+[package]
+name = "bonsai-ninja-rulepack"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+description = "Embedded default security rulepack for bonsai-ninja."
+
+# cargo-machete scans library targets but not package build scripts.
+[package.metadata.cargo-machete]
+ignored = ["sha2", "zstd"]
+
+[lib]
+name = "bonsai_rulepack"
+path = "src/lib.rs"
+
+[build-dependencies]
+sha2 = { workspace = true }
+zstd = { workspace = true }
+
+[lints]
+workspace = true

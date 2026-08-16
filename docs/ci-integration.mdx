@@ -71,7 +71,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
           toolchain: "1.88"
-      - run: cargo build --release --locked -p bonsai_cli
+      - run: cargo build --release --locked -p bonsai-ninja
       - name: Run bonsai-ninja
         run: |
           ./target/release/bonsai-ninja security . taint-analysis \
@@ -99,7 +99,7 @@ bonsai_security:
   image: rust:1.88
   stage: security
   script:
-    - cargo build --release --locked -p bonsai_cli
+    - cargo build --release --locked -p bonsai-ninja
     - |
         ./target/release/bonsai-ninja security . taint-analysis \
           --profile production \
@@ -125,7 +125,7 @@ jobs:
       - image: cimg/rust:1.88
     steps:
       - checkout
-      - run: cargo build --release --locked -p bonsai_cli
+      - run: cargo build --release --locked -p bonsai-ninja
       - run: |
           ./target/release/bonsai-ninja security . taint-analysis \
             --profile production \
@@ -165,6 +165,8 @@ This repository's tag workflow is `.github/workflows/release.yml`. It verifies
 version/tag provenance, runs cross-platform build and test jobs, executes
 documentation and rulepack audits, performs self-analysis, checks packaged
 output formats, and runs the pinned large-workspace gate before publishing.
+Only after those gates pass does it publish the exact workspace version to
+crates.io in production dependency order and create the GitHub release.
 
 The workflow builds archives for:
 
@@ -190,11 +192,11 @@ Changes to compiler objects, adapters, resolver, callgraph, IDG, taint,
 security planning, query execution, caching, or export must run:
 
 ```bash
-cargo build --release --locked -p bonsai_cli
+cargo build --release --locked -p bonsai-ninja
 BONSAI_ELASTICSEARCH_ROOT=../elasticsearch \
 BONSAI_REQUIRE_ELASTICSEARCH_GATE=1 \
 BONSAI_MEMORY_BUDGET_MB=3072 \
-  cargo test --release --locked -p bonsai_cli \
+  cargo test --release --locked -p bonsai-ninja \
   --test elasticsearch_large_repo -- --nocapture
 ```
 

@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_adapters"
+name = "bonsai-ninja-adapters"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "Bundled language adapter registry for bonsai SDK and CLI."
+
+[lib]
+name = "bonsai_adapters"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_lang_api = { workspace = true }

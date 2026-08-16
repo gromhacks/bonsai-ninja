@@ -14,7 +14,7 @@ cd "$ROOT_DIR"
 # Tier definitions follow the production dependency DAG. Lower index = lower
 # in the graph. A crate may depend on its own tier or a lower tier, but never
 # a higher tier. Development-only dependencies are intentionally excluded.
-declare -a TIER_0=(bonsai_factstore bonsai_hash)
+declare -a TIER_0=(bonsai_factstore bonsai_hash bonsai_rulepack)
 declare -a TIER_1=(bonsai_common)
 declare -a TIER_2=(bonsai_diagnostics bonsai_vfs)
 declare -a TIER_3=(bonsai_lang_api)
@@ -35,7 +35,7 @@ declare -a TIER_10=(bonsai_workspace)
 declare -a TIER_11=(bonsai_inspect bonsai_retrieval bonsai_testkit)
 declare -a TIER_12=(bonsai_browse bonsai_conformance bonsai_security)
 declare -a TIER_13=(bonsai_sdk)
-declare -a TIER_14=(bonsai_cli)
+declare -a TIER_14=(bonsai-ninja)
 
 tier_of() {
     local crate="$1"
@@ -53,12 +53,20 @@ tier_of() {
 
 VIOLATIONS=0
 
-for crate_dir in "$ROOT_DIR"/crates/*/; do
+for crate_dir in "$ROOT_DIR"/crates/*/ "$ROOT_DIR"/security-patterns/; do
     crate_toml="${crate_dir}Cargo.toml"
     [[ -f "$crate_toml" ]] || continue
 
-    crate_name="$(awk -F'"' '/^name[[:space:]]*=/ { print $2; exit }' "$crate_toml")"
-    [[ -z "$crate_name" ]] && continue
+    package_name="$(awk -F'"' '/^name[[:space:]]*=/ { print $2; exit }' "$crate_toml")"
+    [[ -z "$package_name" ]] && continue
+    if [[ "$package_name" == "bonsai-ninja" ]]; then
+        crate_name="bonsai-ninja"
+    elif [[ "$package_name" == bonsai-ninja-* ]]; then
+        crate_name="bonsai_${package_name#bonsai-ninja-}"
+        crate_name="${crate_name//-/_}"
+    else
+        crate_name="$package_name"
+    fi
 
     crate_tier="$(tier_of "$crate_name")"
     if [[ "$crate_tier" == "-1" ]]; then

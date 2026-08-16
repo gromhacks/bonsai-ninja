@@ -165,6 +165,8 @@ jobs:
           toolchain: "1.88"
       - name: Verify Cargo and repository metadata
         run: python3 scripts/audit-release-metadata.py
+      - name: Verify crates.io package graph
+        run: python3 scripts/publish-crates.py
 
   capabilities:
     name: Adapter capability matrix drift
@@ -188,7 +190,7 @@ jobs:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Verify per-language LanguageCapabilities snapshot
-        run: cargo test --locked -p bonsai_conformance --test coverage_baseline
+        run: cargo test --locked -p bonsai-ninja-conformance --test coverage_baseline
 
   flow-event-coverage:
     name: Adapter FlowEvent behavior
@@ -216,7 +218,7 @@ jobs:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Verify rendered matrix doc
-        run: cargo test --locked -p bonsai_taint --test matrix_coverage_report
+        run: cargo test --locked -p bonsai-ninja-taint --test matrix_coverage_report
 
   engine-purity:
     name: Engine purity invariant
@@ -230,7 +232,7 @@ jobs:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Pin empty-default InterTaintConfig
-        run: cargo test --locked -p bonsai_taint --test engine_purity
+        run: cargo test --locked -p bonsai-ninja-taint --test engine_purity
 
   public-api:
     name: Public API surface drift
@@ -254,4 +256,4 @@ jobs:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Run golden SARIF tests
-        run: cargo test --locked -p bonsai_security --test golden_sarif
+        run: cargo test --locked -p bonsai-ninja-security --test golden_sarif

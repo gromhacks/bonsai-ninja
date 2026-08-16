@@ -4139,8 +4139,13 @@ fn source_fingerprint_from_pairs<'a>(
 
 fn rulepack_content_fingerprint(root: &Path) -> Result<ExportCacheContentFingerprint> {
     let stable_root = stable_root_path(root);
-    let mut entries = Vec::new();
-    collect_regular_file_fingerprints(&stable_root, &stable_root, &mut entries, rulepack_dir_skipped)?;
+    let entries = bonsai_security::rulepack_semantic_files(&stable_root)?
+        .into_iter()
+        .map(|path| {
+            let relative = stable_relative_path(&stable_root, &stable_root, &path);
+            Ok((relative, file_content_digest(&path)?))
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(content_fingerprint_from_entries(entries))
 }
 
@@ -4152,54 +4157,6 @@ fn dependency_metadata_fingerprint(root: &Path) -> Result<ExportCacheContentFing
             .into_iter()
             .map(|entry| (entry.relative_path, entry.content_hash)),
     ))
-}
-
-fn collect_regular_file_fingerprints(
-    root: &Path,
-    dir: &Path,
-    out: &mut Vec<(String, u64)>,
-    skip_dir: fn(&str) -> bool,
-) -> Result<()> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(err)
-            if matches!(
-                err.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-            ) =>
-        {
-            return Ok(())
-        }
-        Err(err) => return Err(err.into()),
-    };
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(err.into()),
-        };
-        let path = entry.path();
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(err.into()),
-        };
-        if file_type.is_symlink() {
-            continue;
-        }
-        if file_type.is_dir() {
-            if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
-                if skip_dir(name) {
-                    continue;
-                }
-            }
-            collect_regular_file_fingerprints(root, &path, out, skip_dir)?;
-        } else if file_type.is_file() {
-            let digest = file_content_digest(&path)?;
-            out.push((stable_relative_path(root, root, &path), digest));
-        }
-    }
-    Ok(())
 }
 
 fn content_fingerprint_from_entries(
@@ -4259,10 +4216,6 @@ fn stable_relative_path(stable_root: &Path, original_root: &Path, path: &Path) -
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
-}
-
-fn rulepack_dir_skipped(name: &str) -> bool {
-    matches!(name, ".git" | ".bonsai" | "target")
 }
 
 /// Browse facts facade.

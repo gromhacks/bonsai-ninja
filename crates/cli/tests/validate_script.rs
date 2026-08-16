@@ -17,8 +17,8 @@
 //! intended full gate is:
 //!
 //! ```text
-//! cargo build --release -p bonsai_cli
-//! cargo test -p bonsai_cli
+//! cargo build --release -p bonsai-ninja
+//! cargo test -p bonsai-ninja
 //! ```
 
 use std::path::PathBuf;

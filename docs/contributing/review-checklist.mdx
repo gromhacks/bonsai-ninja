@@ -20,7 +20,7 @@ class and verify each box.
 - [ ] **Empty seed invariant holds.** `interproc_false_path_clean_seed_
       does_not_propagate` and `concept_1_source_model_empty_seed_no_
       propagation` both pass.
-- [ ] **Over-taint matrix passes.** `cargo test -p bonsai_taint --test
+- [ ] **Over-taint matrix passes.** `cargo test -p bonsai-ninja-taint --test
       over_taint_matrix` is green for all 20 languages.
 - [ ] **Determinism holds.** `finding_ids_deterministic_across_runs`
       passes.
@@ -51,23 +51,23 @@ class and verify each box.
 
 ## Adapter change (`crates/lang_*/src/lib.rs`)
 
-- [ ] **Conformance test passes.** `cargo test -p bonsai_lang_<name>`.
-- [ ] **Workspace test passes.** `cargo test -p bonsai_workspace --test
+- [ ] **Conformance test passes.** `cargo test -p bonsai-ninja-lang-<name>`.
+- [ ] **Workspace test passes.** `cargo test -p bonsai-ninja-workspace --test
       lang_<name>` and `--test inspect_lang_<name>`.
-- [ ] **Per-language matrix passes.** `cargo test -p bonsai_cli --test
+- [ ] **Per-language matrix passes.** `cargo test -p bonsai-ninja --test
       per_lang_cli_matrix <lang>_matrix`.
 - [ ] **Mega-flow fixture intact.** `scripts/validate-mega-cli.py`
       reports the expected finding count.
 - [ ] **Capabilities declaration matches reality.** `fn capabilities()`
       reflects the actual coverage; `Unsupported` levels are honest.
 - [ ] **Cross-language frontend contracts stay green.** Run
-      `cargo test -p bonsai_conformance --test capability_matrix` and
+      `cargo test -p bonsai-ninja-conformance --test capability_matrix` and
       `--test flow_event_conformance`. Applicable capability cells may not be
       `Missing`; valid fixtures must be diagnostic-free, and malformed input
       must report parser incompleteness instead of silently claiming complete
       analysis.
 - [ ] **Positive and negative taint contracts execute.** Run
-      `cargo test -p bonsai_taint --test matrix`. Every applicable
+      `cargo test -p bonsai-ninja-taint --test matrix`. Every applicable
       scenario/language cell executes the real engine, and every language must
       retain positive propagation, clean-overwrite, and over-taint negatives.
 - [ ] **Syntax ownership stays in the adapter.** New source tokens, grammar
@@ -87,9 +87,9 @@ class and verify each box.
 - [ ] **Validator passes.** `cargo run --bin bonsai-ninja -- security
       . pack --validate --rules-dir ./security-patterns` reports
       `valid: true` with zero error- or warning-level issues.
-- [ ] **Rulepack conformance passes.** `cargo test -p bonsai_security
+- [ ] **Rulepack conformance passes.** `cargo test -p bonsai-ninja-security
       --test rulepack_conformance`.
-- [ ] **No FP audit passes.** `cargo test -p bonsai_security --test
+- [ ] **No FP audit passes.** `cargo test -p bonsai-ninja-security --test
       no_fp_audit`.
 - [ ] **Match examples are realistic.** Imports use real adapter-visible
       forms (e.g. `from Crypto.Cipher import DES`, not `import
@@ -119,13 +119,13 @@ class and verify each box.
       immutable product before the loop or stream independent file objects.
 - [ ] **Text rendering stays out of JSON cost.** JSON pagination does not read
       source-line previews or build flow annotations absent from JSON rows.
-- [ ] **Browse tests pass.** `cargo test -p bonsai_workspace --test
+- [ ] **Browse tests pass.** `cargo test -p bonsai-ninja-workspace --test
       flow_event_audit_fixes` and the per-command tests.
 - [ ] **JSON shape stable.** Field names in `*Out` structs match
       previous releases unless explicitly breaking.
-- [ ] **CLI output unchanged.** `cargo test -p bonsai_cli --test
+- [ ] **CLI output unchanged.** `cargo test -p bonsai-ninja --test
       browse_commands` passes.
-- [ ] **SDK parity intact.** `cargo test -p bonsai_cli --test
+- [ ] **SDK parity intact.** `cargo test -p bonsai-ninja --test
       sdk_cli_parity`.
 - [ ] **Pagination still works** for the affected command.
 - [ ] **Inspect mode contract holds.** Default targeted queries are a light
@@ -142,9 +142,9 @@ class and verify each box.
       passes.
 - [ ] **SARIF parity intact.** `<lang>_matrix::micro_security_sarif_shape`
       tests pass.
-- [ ] **Sanitizer fixtures intact.** `cargo test -p bonsai_cli --test
+- [ ] **Sanitizer fixtures intact.** `cargo test -p bonsai-ninja --test
       sanitizer_fixtures` reports expected raw + sanitized findings.
-- [ ] **Validator matches CLI.** `cargo test -p bonsai_cli --test
+- [ ] **Validator matches CLI.** `cargo test -p bonsai-ninja --test
       validate_script` passes.
 - [ ] **Hardcoded-knowledge boundary passes.** `scripts/audit-hardcoded.sh
       --check` reports zero production violations.
@@ -153,9 +153,9 @@ class and verify each box.
 
 ## CLI change (`crates/cli`)
 
-- [ ] **Command coverage test passes.** `cargo test -p bonsai_cli --test
+- [ ] **Command coverage test passes.** `cargo test -p bonsai-ninja --test
       command_coverage`.
-- [ ] **Per-language command matrix passes.** `cargo test -p bonsai_cli
+- [ ] **Per-language command matrix passes.** `cargo test -p bonsai-ninja
       --test per_lang_cli_matrix` must pass. This is the semantic command
       gate across all 20 supported languages: browse commands, navigation
       commands, debug dumps, export, `comments`, `security sources`,
@@ -173,7 +173,7 @@ class and verify each box.
 
 - [ ] **Public re-exports preserved.** Existing consumers of
       `bonsai_sdk::*` still compile.
-- [ ] **SDK / CLI parity intact.** `cargo test -p bonsai_cli --test
+- [ ] **SDK / CLI parity intact.** `cargo test -p bonsai-ninja --test
       sdk_cli_parity` passes.
 - [ ] **Documentation updated.** `docs/contributing/sdk.mdx` lists the new API.
 
@@ -183,7 +183,7 @@ class and verify each box.
       contract; incompatible changes increment `schema_version` and add a new,
       immutable schema under `schemas/`.
 - [ ] **Schema drift gate passes.** `cargo test --release --locked -p
-      bonsai_cli --test export_schema_drift` validates every supported-language
+      bonsai-ninja --test export_schema_drift` validates every supported-language
       fixture and `--full-propagations` output against the committed schema.
 - [ ] **Schema is packaged and documented.** Release archives retain
       `schemas/`, and the CLI, SDK, output-format, skill, and release-readiness
@@ -262,7 +262,7 @@ class and verify each box.
       use one sparse backward demand proof plus exact forward closures; they
       do not run an unrestricted whole-IDG closure once per lexical hit.
 - [ ] **Architecture invariant passes.** Run
-      `cargo test --release -p bonsai_conformance --test
+      `cargo test --release -p bonsai-ninja-conformance --test
       architecture_invariants`.
 - [ ] **Hardcoded-knowledge boundary passes.** Run
       `scripts/audit-hardcoded.sh --check`. Review production code, excluding
@@ -273,7 +273,7 @@ class and verify each box.
       spelling from shared analysis into an adapter as a cosmetic fix. This is
       a zero-violation gate, not a ratcheted snapshot.
 - [ ] **Elasticsearch exact SLO gate passes.** Build the release binary, then
-      run `BONSAI_REQUIRE_ELASTICSEARCH_GATE=1 cargo test --release --locked -p bonsai_cli --test
+      run `BONSAI_REQUIRE_ELASTICSEARCH_GATE=1 cargo test --release --locked -p bonsai-ninja --test
       elasticsearch_large_repo -- --nocapture` with
       `../elasticsearch` or `BONSAI_ELASTICSEARCH_ROOT`. The gate waits for
       completed exact work and checks warm index, navigation, inspect,

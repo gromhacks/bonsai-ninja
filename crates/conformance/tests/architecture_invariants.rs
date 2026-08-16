@@ -1045,7 +1045,7 @@ fn cli_manifest_uses_sdk_facade_not_lower_analysis_crates() {
         let dep = dep.trim();
         if forbidden.contains(&dep) {
             violations.push(format!(
-                "crate `bonsai_cli` depends on `{dep}` ({})",
+                "crate `bonsai-ninja` depends on `{dep}` ({})",
                 manifest.display()
             ));
         }

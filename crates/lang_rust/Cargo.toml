@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_lang_rust"
+name = "bonsai-ninja-lang-rust"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "Rust language adapter (reference implementation)."
+
+[lib]
+name = "bonsai_lang_rust"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_common = { workspace = true }
@@ -13,8 +22,8 @@ bonsai_lang_api = { workspace = true }
 tree-sitter = { workspace = true }
 
 [dev-dependencies]
-bonsai_conformance = { workspace = true }
-bonsai_testkit = { workspace = true }
+bonsai_conformance = { package = "bonsai-ninja-conformance", path = "../conformance" }
+bonsai_testkit = { package = "bonsai-ninja-testkit", path = "../testkit" }
 
 [lints]
 workspace = true

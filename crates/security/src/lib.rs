@@ -11,8 +11,8 @@
 //! * Dependency inventory from rule metadata + workspace imports.
 //! * Render adapters for grouped / compact / graph / train JSON.
 //!
-//! The CLI (`bonsai_cli::commands::security`) is a thin front for
-//! the types and functions re-exported here.
+//! The `bonsai-ninja` CLI security commands are a thin front for the types and
+//! functions re-exported here.
 
 // External API is the re-exports below. Tests under `tests/`
 // legitimately use `bonsai_security::loader::LanguagePack` and
@@ -57,8 +57,9 @@ pub use finding::{
 };
 pub use flow_evidence::{build_flow_bodies, FlowFunctionBody, FlowRole, FlowSourceLine};
 pub use loader::{
-    load_rulepack, load_workspace_local_rules, parse_severity, LanguageRuleMetadata, LoadError,
-    PackageMatchSemantics, PackageTailBindingSemantics, Rulepack, RulepackMetadata, SecurityProfileMetadata,
+    load_rulepack, load_workspace_local_rules, parse_severity, rulepack_semantic_files, LanguageRuleMetadata,
+    LoadError, PackageMatchSemantics, PackageTailBindingSemantics, Rulepack, RulepackMetadata,
+    SecurityProfileMetadata,
 };
 pub use matcher::{
     drain_runtime_disabled_rules, infer_entry_point_sources, match_rule_against_facts,

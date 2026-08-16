@@ -26,6 +26,6 @@ esac
 # fields on `FlowEvent::Loop` / `FlowEvent::Try`, not separate events:
 # Call Branch Loop Assign Return Throw Try Break Continue Yield Await Defer Using Lifecycle
 cd "$REPO"
-cargo test --locked -p bonsai_conformance \
+cargo test --locked -p bonsai-ninja-conformance \
     --test flow_event_conformance \
     --test async_yield_coverage

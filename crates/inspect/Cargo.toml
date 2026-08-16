@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_inspect"
+name = "bonsai-ninja-inspect"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "Chain enumeration + filter engine — the SDK powering `bonsai-ninja inspect`."
+
+[lib]
+name = "bonsai_inspect"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_common = { workspace = true }
@@ -22,7 +31,7 @@ parking_lot = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
-bonsai_lang_python = { workspace = true }
+bonsai_lang_python = { package = "bonsai-ninja-lang-python", path = "../lang_python" }
 
 [lints]
 workspace = true

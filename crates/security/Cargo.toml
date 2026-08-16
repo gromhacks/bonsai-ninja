@@ -1,15 +1,20 @@
 [package]
-name = "bonsai_security"
+name = "bonsai-ninja-security"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "Security rulepack loader, matcher, and source/sink/sanitizer wrapper for bonsai-ninja."
 
-# cargo-machete scans library targets but not this crate's build script.
-[package.metadata.cargo-machete]
-ignored = ["sha2"]
+[lib]
+name = "bonsai_security"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_common = { workspace = true }
@@ -23,6 +28,7 @@ bonsai_taint = { workspace = true }
 bonsai_idg = { workspace = true }
 bonsai_index = { workspace = true }
 bonsai_resolve = { workspace = true }
+bonsai_rulepack = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
@@ -39,34 +45,30 @@ dirs = { workspace = true }
 fs2 = { workspace = true }
 zstd = { workspace = true }
 
-[build-dependencies]
-sha2 = { workspace = true }
-zstd = { workspace = true }
-
 [dev-dependencies]
 tempfile = { workspace = true }
-bonsai_testkit = { workspace = true }
-bonsai_lang_python = { workspace = true }
-bonsai_lang_c = { workspace = true }
-bonsai_lang_cpp = { workspace = true }
-bonsai_lang_rust = { workspace = true }
-bonsai_lang_java = { workspace = true }
-bonsai_lang_go = { workspace = true }
-bonsai_lang_csharp = { workspace = true }
-bonsai_lang_kotlin = { workspace = true }
-bonsai_lang_scala = { workspace = true }
-bonsai_lang_swift = { workspace = true }
-bonsai_lang_objc = { workspace = true }
-bonsai_lang_dart = { workspace = true }
-bonsai_lang_javascript = { workspace = true }
-bonsai_lang_typescript = { workspace = true }
-bonsai_lang_ruby = { workspace = true }
-bonsai_lang_php = { workspace = true }
-bonsai_lang_perl = { workspace = true }
-bonsai_lang_lua = { workspace = true }
-bonsai_lang_elixir = { workspace = true }
-bonsai_lang_erlang = { workspace = true }
-bonsai_adapters = { workspace = true }
+bonsai_testkit = { package = "bonsai-ninja-testkit", path = "../testkit" }
+bonsai_lang_python = { package = "bonsai-ninja-lang-python", path = "../lang_python" }
+bonsai_lang_c = { package = "bonsai-ninja-lang-c", path = "../lang_c" }
+bonsai_lang_cpp = { package = "bonsai-ninja-lang-cpp", path = "../lang_cpp" }
+bonsai_lang_rust = { package = "bonsai-ninja-lang-rust", path = "../lang_rust" }
+bonsai_lang_java = { package = "bonsai-ninja-lang-java", path = "../lang_java" }
+bonsai_lang_go = { package = "bonsai-ninja-lang-go", path = "../lang_go" }
+bonsai_lang_csharp = { package = "bonsai-ninja-lang-csharp", path = "../lang_csharp" }
+bonsai_lang_kotlin = { package = "bonsai-ninja-lang-kotlin", path = "../lang_kotlin" }
+bonsai_lang_scala = { package = "bonsai-ninja-lang-scala", path = "../lang_scala" }
+bonsai_lang_swift = { package = "bonsai-ninja-lang-swift", path = "../lang_swift" }
+bonsai_lang_objc = { package = "bonsai-ninja-lang-objc", path = "../lang_objc" }
+bonsai_lang_dart = { package = "bonsai-ninja-lang-dart", path = "../lang_dart" }
+bonsai_lang_javascript = { package = "bonsai-ninja-lang-javascript", path = "../lang_javascript" }
+bonsai_lang_typescript = { package = "bonsai-ninja-lang-typescript", path = "../lang_typescript" }
+bonsai_lang_ruby = { package = "bonsai-ninja-lang-ruby", path = "../lang_ruby" }
+bonsai_lang_php = { package = "bonsai-ninja-lang-php", path = "../lang_php" }
+bonsai_lang_perl = { package = "bonsai-ninja-lang-perl", path = "../lang_perl" }
+bonsai_lang_lua = { package = "bonsai-ninja-lang-lua", path = "../lang_lua" }
+bonsai_lang_elixir = { package = "bonsai-ninja-lang-elixir", path = "../lang_elixir" }
+bonsai_lang_erlang = { package = "bonsai-ninja-lang-erlang", path = "../lang_erlang" }
+bonsai_adapters = { package = "bonsai-ninja-adapters", path = "../adapters" }
 
 [lints]
 workspace = true

@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_diagnostics"
+name = "bonsai-ninja-diagnostics"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "Diagnostic model for bonsai-ninja."
+
+[lib]
+name = "bonsai_diagnostics"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_common = { workspace = true }

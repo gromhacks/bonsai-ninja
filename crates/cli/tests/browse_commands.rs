@@ -59,7 +59,7 @@ fn assert_release_binary_is_fresh(bin: &Path) {
                 bin_mtime >= newest,
                 "STALE release binary: target/release/bonsai-ninja is older than the engine \
                  sources / rulepack. These tests would silently exercise an old build. \
-                 Rebuild first:  cargo build --release -p bonsai_cli"
+                 Rebuild first:  cargo build --release -p bonsai-ninja"
             );
         }
     });

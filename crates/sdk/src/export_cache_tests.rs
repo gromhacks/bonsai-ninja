@@ -235,15 +235,23 @@ fn export_cache_rejects_deep_dependency_metadata_mismatch() {
 fn export_cache_rejects_rulepack_content_mismatch() {
     let root = tempdir("export-rulepack-content");
     let rulepack = tempdir("export-rulepack");
+    let sinks = rulepack.join("sinks");
+    std::fs::create_dir_all(&sinks).expect("create flat rule bucket");
     std::fs::write(root.join("app.py"), "print('root')\n").expect("write source");
-    std::fs::write(rulepack.join("rule.yml"), "id: before\n").expect("write rule");
+    std::fs::write(sinks.join("rule.yml"), "id: before\n").expect("write rule");
     write_cache(&root, Some(&rulepack));
     assert!(cache_is_fresh(&root, Some(&rulepack)));
 
-    std::fs::write(rulepack.join("rule.yml"), "id: after\n").expect("rewrite rule");
+    std::fs::write(rulepack.join("README.md"), "packaging note\n").expect("write nonsemantic file");
+    assert!(
+        cache_is_fresh(&root, Some(&rulepack)),
+        "nonsemantic rulepack files must not invalidate the export cache"
+    );
+
+    std::fs::write(sinks.join("rule.yml"), "id: after\n").expect("rewrite rule");
     assert!(
         !cache_is_fresh(&root, Some(&rulepack)),
-        "rulepack content changes must invalidate the export cache"
+        "loaded rule YAML changes must invalidate the export cache"
     );
 
     std::fs::remove_dir_all(&root).ok();

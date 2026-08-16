@@ -4,7 +4,7 @@
 //! × 20 languages = up to 1520 cells; cells flagged `NotApplicable`
 //! or `AdapterDeferred` in `applicability.rs` are skipped at runtime.
 //! Coverage progress is visible via
-//! `cargo test -p bonsai_taint --test matrix_coverage_report`.
+//! `cargo test -p bonsai-ninja-taint --test matrix_coverage_report`.
 
 #[path = "matrix/scenarios.rs"]
 pub mod scenarios;

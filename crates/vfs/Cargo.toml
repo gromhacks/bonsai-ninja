@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_vfs"
+name = "bonsai-ninja-vfs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "Virtual filesystem, overlays, and incremental edits."
+
+[lib]
+name = "bonsai_vfs"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_common = { workspace = true }

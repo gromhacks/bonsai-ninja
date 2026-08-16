@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_db"
+name = "bonsai-ninja-db"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "Incremental analyzer database."
+
+[lib]
+name = "bonsai_db"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_common = { workspace = true }
@@ -31,7 +40,7 @@ tempfile = { workspace = true }
 fs2 = { workspace = true }
 
 [dev-dependencies]
-bonsai_lang_python = { workspace = true }
+bonsai_lang_python = { package = "bonsai-ninja-lang-python", path = "../lang_python" }
 tree-sitter = { workspace = true }
 
 [lints]

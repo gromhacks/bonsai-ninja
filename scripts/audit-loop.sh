@@ -86,11 +86,11 @@ section_cli_docs() {
 }
 
 section_matrix_tests() {
-    (cd "$REPO" && cargo test --release -q -p bonsai_taint --test language_matrix)
+    (cd "$REPO" && cargo test --release -q -p bonsai-ninja-taint --test language_matrix)
 }
 
 section_cli_e2e() {
-    (cd "$REPO" && cargo test --release -q -p bonsai_cli --test taint_engine_e2e)
+    (cd "$REPO" && cargo test --release -q -p bonsai-ninja --test taint_engine_e2e)
 }
 
 run_section "pack-validate"     section_pack_validate

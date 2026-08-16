@@ -36,7 +36,7 @@ fn render() -> String {
     out.push_str("# Taint coverage matrix\n\n");
     out.push_str("Auto-generated from `crates/taint/tests/matrix/`. Edit the\n");
     out.push_str("scenario / applicability tables there, then rebless via:\n\n");
-    out.push_str("```sh\nBLESS_TAINT_MATRIX=1 cargo test -p bonsai_taint --test matrix_coverage_report -- --nocapture\n```\n\n");
+    out.push_str("```sh\nBLESS_TAINT_MATRIX=1 cargo test -p bonsai-ninja-taint --test matrix_coverage_report -- --nocapture\n```\n\n");
 
     out.push_str(&format!(
         "**Scenarios:** {}  |  **Languages:** {}  |  **Applicable cells:** {}\n\n",
@@ -159,7 +159,7 @@ fn taint_coverage_matrix_is_up_to_date() {
     let on_disk = std::fs::read_to_string(&path).unwrap_or_else(|err| {
         panic!(
             "{} missing: {err}\n\
-             regenerate with: BLESS_TAINT_MATRIX=1 cargo test -p bonsai_taint \
+             regenerate with: BLESS_TAINT_MATRIX=1 cargo test -p bonsai-ninja-taint \
              --test matrix_coverage_report -- --nocapture",
             path.display()
         )
@@ -168,7 +168,7 @@ fn taint_coverage_matrix_is_up_to_date() {
     assert!(
         on_disk.trim() == live.trim(),
         "TAINT_COVERAGE_MATRIX.md drift - regenerate with: \
-         BLESS_TAINT_MATRIX=1 cargo test -p bonsai_taint \
+         BLESS_TAINT_MATRIX=1 cargo test -p bonsai-ninja-taint \
          --test matrix_coverage_report -- --nocapture\n\n\
          on-disk lines: {} | live lines: {}",
         on_disk.lines().count(),

@@ -87,7 +87,7 @@ Generated with the release CLI:
 | swift      |        1 | handle_request -> orchestrate -> persist -> run@Storage.swift:30 -> run@Storage.swift:23 -> execute |
 | typescript |        1 | handle_request -> orchestrate -> persist -> run -> execute                                          |
 
-> Refresh procedure: rebuild release (`cargo build --release -p bonsai_cli --bin bonsai-ninja`), clear each fixture's external analysis sidecars with `./target/release/bonsai-ninja cache clear examples/<lang>/mega_flow`, then re-run the command in this section's heading per language. Do not delete repository-local `.bonsai/rules` overlays. The full `--inferred-sources` baselines (used by the CI gate `mega_flow_security_pipeline_covers_every_language_and_flow_event_kind`) live in `crates/security/tests/security_pipeline_regressions.rs::expected_mega_flow_findings_with_inferred_sources`.
+> Refresh procedure: rebuild release (`cargo build --release -p bonsai-ninja --bin bonsai-ninja`), clear each fixture's external analysis sidecars with `./target/release/bonsai-ninja cache clear examples/<lang>/mega_flow`, then re-run the command in this section's heading per language. Do not delete repository-local `.bonsai/rules` overlays. The full `--inferred-sources` baselines (used by the CI gate `mega_flow_security_pipeline_covers_every_language_and_flow_event_kind`) live in `crates/security/tests/security_pipeline_regressions.rs::expected_mega_flow_findings_with_inferred_sources`.
 
 ## What each fixture exercises
 

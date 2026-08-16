@@ -14,17 +14,21 @@ fn main() {
 }
 
 fn build_bundled_rulepack() -> Result<(), Box<dyn std::error::Error>> {
-    let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").ok_or("CARGO_MANIFEST_DIR is unset")?);
-    let rulepack_root = manifest_dir.join("../../security-patterns");
-    println!("cargo:rerun-if-changed={}", rulepack_root.display());
+    let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").ok_or("CARGO_MANIFEST_DIR is unset")?);
+    println!("cargo:rerun-if-changed={}", root.join("VERSION").display());
+    println!("cargo:rerun-if-changed={}", root.join("metadata.yml").display());
+    println!("cargo:rerun-if-changed={}", root.join("langs").display());
 
-    let mut files = Vec::new();
-    collect_regular_files(&rulepack_root, &rulepack_root, &mut files)?;
+    let mut files = vec![
+        (PathBuf::from("VERSION"), root.join("VERSION")),
+        (PathBuf::from("metadata.yml"), root.join("metadata.yml")),
+    ];
+    collect_regular_files(&root, &root.join("langs"), &mut files)?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
-    if files.is_empty() {
-        return Err(format!("{} contains no files", rulepack_root.display()).into());
-    }
-    for (relative, _) in &files {
+    for (relative, absolute) in &files {
+        if !absolute.is_file() {
+            return Err(format!("bundled rulepack is missing `{}`", relative.display()).into());
+        }
         let supported = relative == Path::new("VERSION")
             || matches!(
                 relative.extension().and_then(|value| value.to_str()),
@@ -36,11 +40,6 @@ fn build_bundled_rulepack() -> Result<(), Box<dyn std::error::Error>> {
                 relative.display()
             )
             .into());
-        }
-    }
-    for required in ["VERSION", "metadata.yml"] {
-        if !files.iter().any(|(relative, _)| relative == Path::new(required)) {
-            return Err(format!("bundled rulepack is missing `{required}`").into());
         }
     }
 
@@ -81,7 +80,6 @@ fn build_bundled_rulepack() -> Result<(), Box<dyn std::error::Error>> {
     encoder.include_checksum(true)?;
     encoder.write_all(&archive)?;
     encoder.finish()?.sync_all()?;
-
     fs::write(out_dir.join("bundled-rulepack-id.rs"), format!("{identity:?}\n"))?;
     Ok(())
 }

@@ -34,7 +34,7 @@ fn release_bin() -> Option<PathBuf> {
     if !path.exists() {
         assert!(
             !large_repo_gate_required(),
-            "required Elasticsearch gate has no release binary ({}); run `cargo build --release --locked -p bonsai_cli`",
+            "required Elasticsearch gate has no release binary ({}); run `cargo build --release --locked -p bonsai-ninja`",
             path.display()
         );
         eprintln!(
@@ -48,11 +48,11 @@ fn release_bin() -> Option<PathBuf> {
         Ok(false) => {
             assert!(
                 !large_repo_gate_required(),
-                "required Elasticsearch gate release binary is stale; run `cargo build --release --locked -p bonsai_cli`"
+                "required Elasticsearch gate release binary is stale; run `cargo build --release --locked -p bonsai-ninja`"
             );
             eprintln!(
                 "skipping elasticsearch large-repo test: release binary is stale; \
-                 run `cargo build --release --locked -p bonsai_cli`"
+                 run `cargo build --release --locked -p bonsai-ninja`"
             );
             None
         }

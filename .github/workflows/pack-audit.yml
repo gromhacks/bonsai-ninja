@@ -59,7 +59,7 @@ jobs:
         run: python3 -m pip install --require-hashes -r .github/requirements/pack-audit.txt
 
       - name: build bonsai-ninja release binary
-        run: cargo build --release --locked -p bonsai_cli
+        run: cargo build --release --locked -p bonsai-ninja
 
       - name: pack_audit (rulepack health)
         run: |

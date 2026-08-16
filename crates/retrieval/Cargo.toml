@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_retrieval"
+name = "bonsai-ninja-retrieval"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "Fact-backed candidate retrieval sidecar for bonsai-ninja."
+
+[lib]
+name = "bonsai_retrieval"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_callgraph = { workspace = true }
@@ -22,7 +31,7 @@ serde = { workspace = true }
 zstd = { workspace = true }
 
 [dev-dependencies]
-bonsai_adapters = { workspace = true }
+bonsai_adapters = { package = "bonsai-ninja-adapters", path = "../adapters" }
 tempfile = { workspace = true }
 
 [lints]

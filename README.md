@@ -157,17 +157,31 @@ analysis mode.
 
 ## Install
 
-Build the release binary from source:
+Install the published Rust package from crates.io:
+
+```bash
+# Requires Rust 1.88 or newer.
+cargo install bonsai-ninja --locked
+bonsai-ninja --version
+```
+
+To replace an older Cargo-installed release with the current one:
+
+```bash
+cargo install bonsai-ninja --locked --force
+```
+
+Or build the release binary from a checkout:
 
 ```bash
 git clone https://github.com/gromhacks/bonsai-ninja.git
 cd bonsai-ninja
-cargo build --release --locked -p bonsai_cli
+cargo build --release --locked -p bonsai-ninja
 ./target/release/bonsai-ninja --version
 ```
 
-The tag workflow is configured to build release archives for Linux, macOS, and
-Windows on x64 and arm64. See
+The tag workflow publishes the same version to crates.io and builds release
+archives for Linux, macOS, and Windows on x64 and arm64. See
 [Platform And Architecture Support](docs/platform-support.mdx) for source-build
 requirements and parser delivery constraints on other targets. When a tagged
 archive is published, verify its SHA-256 checksum and GitHub/Sigstore

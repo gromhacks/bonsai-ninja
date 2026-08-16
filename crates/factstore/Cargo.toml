@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_factstore"
+name = "bonsai-ninja-factstore"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "Memory-mapped, content-addressed fact store with workspace-wide string interning"
+
+[lib]
+name = "bonsai_factstore"
+path = "src/lib.rs"
 
 [dependencies]
 ahash.workspace = true

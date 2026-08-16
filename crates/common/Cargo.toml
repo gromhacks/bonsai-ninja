@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_common"
+name = "bonsai-ninja-common"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "Shared IDs, spans, and precision model for bonsai-ninja."
+
+[lib]
+name = "bonsai_common"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_hash = { workspace = true }

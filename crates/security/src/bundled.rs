@@ -12,12 +12,9 @@ use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 
-const ARCHIVE_MAGIC: &[u8; 8] = b"BNSRP001";
-const ARCHIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bundled-rulepack.bin.zst"));
-
 /// SHA-256 identity of every path and byte in the source-controlled bundled
 /// rulepack. The materialized directory is immutable and keyed by this value.
-pub(crate) const BUNDLED_RULEPACK_ID: &str = include!(concat!(env!("OUT_DIR"), "/bundled-rulepack-id.rs"));
+pub(crate) const BUNDLED_RULEPACK_ID: &str = bonsai_rulepack::IDENTITY;
 
 /// Return a filesystem root containing the exact rulepack compiled into this
 /// build. The first call publishes it atomically in the OS cache; later calls
@@ -91,11 +88,12 @@ fn materialize_bundled_rulepack_locked(cache_root: &Path) -> Result<PathBuf> {
     let publish_result = (|| -> Result<()> {
         let staging_root = staging.join("security-patterns");
         fs::create_dir(&staging_root)?;
-        let decoded = zstd::stream::decode_all(ARCHIVE).context("decoding bundled rulepack archive")?;
+        let decoded = zstd::stream::decode_all(bonsai_rulepack::ARCHIVE)
+            .context("decoding bundled rulepack archive")?;
         let mut cursor = Cursor::new(decoded.as_slice());
         let mut magic = [0_u8; 8];
         cursor.read_exact(&mut magic)?;
-        if &magic != ARCHIVE_MAGIC {
+        if &magic != bonsai_rulepack::ARCHIVE_MAGIC {
             return Err(anyhow!("bundled rulepack archive has an invalid header"));
         }
         let file_count = read_u32(&mut cursor)?;

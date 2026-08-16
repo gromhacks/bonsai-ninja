@@ -9,6 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  RUSTUP_TOOLCHAIN: "1.88"
   RUSTFLAGS: "-D warnings"
 
 permissions:
@@ -98,6 +99,7 @@ jobs:
           cargo audit --deny warnings
           python3 scripts/audit-dependency-licenses.py
           python3 scripts/audit-release-metadata.py
+          python3 scripts/publish-crates.py --check-registry
           python3 scripts/realworld-lang-benchmark.py --check
           bash scripts/audit-github-actions.sh
           bash scripts/audit-workflows.sh
@@ -116,7 +118,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release --locked -p bonsai_cli
+          cargo build --release --locked -p bonsai-ninja
           ./target/release/bonsai-ninja security . pack --validate --taint-replay \
             --rules-dir security-patterns --format json --no-color --no-progress \
             > /tmp/bonsai-pack-validation.json
@@ -211,7 +213,7 @@ jobs:
 
       - name: Build the production binary
         working-directory: bonsai-ninja
-        run: cargo build --release --locked -p bonsai_cli
+        run: cargo build --release --locked -p bonsai-ninja
 
       - name: Run exact large-repository correctness and performance gates
         working-directory: bonsai-ninja
@@ -221,7 +223,7 @@ jobs:
           BONSAI_MEMORY_BUDGET_MB: "3072"
           MIMALLOC_PURGE_DELAY: "0"
         run: |
-          cargo test --release --locked -p bonsai_cli \
+          cargo test --release --locked -p bonsai-ninja \
             --test elasticsearch_large_repo -- --nocapture
 
   build:
@@ -280,7 +282,7 @@ jobs:
         run: cargo test --workspace --locked --no-fail-fast
 
       - name: Build release binary
-        run: cargo build --release --locked -p bonsai_cli --target ${{ matrix.target }}
+        run: cargo build --release --locked -p bonsai-ninja --target ${{ matrix.target }}
 
       - name: Enforce build-artifact budget
         run: scripts/audit-build-artifacts.sh
@@ -487,9 +489,32 @@ jobs:
             bonsai-ninja-${{ matrix.target }}.zip
             bonsai-ninja-${{ matrix.target }}.zip.sha256
 
+  publish-crates:
+    name: publish crates.io workspace
+    needs: [build, large-repository]
+    runs-on: ubuntu-22.04
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.88"
+
+      - name: Publish verified crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: >-
+          python3 scripts/publish-crates.py --publish --resume
+          --confirm-version "${GITHUB_REF_NAME#v}"
+
   publish:
     name: publish GitHub release
-    needs: [build, large-repository]
+    needs: [build, large-repository, publish-crates]
     runs-on: ubuntu-22.04
     if: startsWith(github.ref, 'refs/tags/')
     permissions:

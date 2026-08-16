@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_cfg"
+name = "bonsai-ninja-cfg"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "Control-flow graphs."
+
+[lib]
+name = "bonsai_cfg"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_common = { workspace = true }

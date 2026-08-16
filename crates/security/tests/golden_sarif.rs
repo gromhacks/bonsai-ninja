@@ -7,7 +7,7 @@
 //! To regenerate the snapshot after an intentional change:
 //!
 //! ```sh
-//! BONSAI_UPDATE_GOLDEN=1 cargo test -p bonsai_security --test golden_sarif
+//! BONSAI_UPDATE_GOLDEN=1 cargo test -p bonsai-ninja-security --test golden_sarif
 //! ```
 
 use std::fs;
@@ -73,7 +73,7 @@ def handler(request):
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             panic!(
-                "Golden snapshot missing at {}. Generate with:\n  BONSAI_UPDATE_GOLDEN=1 cargo test -p bonsai_security --test golden_sarif",
+                "Golden snapshot missing at {}. Generate with:\n  BONSAI_UPDATE_GOLDEN=1 cargo test -p bonsai-ninja-security --test golden_sarif",
                 golden_path.display()
             );
         }
@@ -85,6 +85,6 @@ def handler(request):
         "Golden SARIF drift for python_command_injection.\n\
          Live (snapshot ↓ live ↑):\n{live}\n\
          Recorded:\n{recorded}\n\
-         If intentional: BONSAI_UPDATE_GOLDEN=1 cargo test -p bonsai_security --test golden_sarif"
+         If intentional: BONSAI_UPDATE_GOLDEN=1 cargo test -p bonsai-ninja-security --test golden_sarif"
     );
 }

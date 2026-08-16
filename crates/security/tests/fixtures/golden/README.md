@@ -9,7 +9,7 @@ each fixture and compare against the snapshot here.
 Run with the env var set:
 
 ```sh
-BONSAI_UPDATE_GOLDEN=1 cargo test -p bonsai_security --test golden_sarif
+BONSAI_UPDATE_GOLDEN=1 cargo test -p bonsai-ninja-security --test golden_sarif
 ```
 
 Without the env var, drift fails the test. With it, the test

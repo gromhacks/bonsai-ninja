@@ -331,7 +331,7 @@ Validate changes with:
   --rules-dir security-patterns --format json --no-color --no-progress
 ./target/release/bonsai-ninja security . pack --audit \
   --rules-dir security-patterns --context 16k --no-color --no-progress
-cargo test -q -p bonsai_security --test rulepack_conformance
+cargo test -q -p bonsai-ninja-security --test rulepack_conformance
 ```
 
 When modifying bonsai-ninja itself, keep syntax in language adapters,

@@ -4,7 +4,7 @@ Auto-generated from `crates/taint/tests/matrix/`. Edit the
 scenario / applicability tables there, then rebless via:
 
 ```sh
-BLESS_TAINT_MATRIX=1 cargo test -p bonsai_taint --test matrix_coverage_report -- --nocapture
+BLESS_TAINT_MATRIX=1 cargo test -p bonsai-ninja-taint --test matrix_coverage_report -- --nocapture
 ```
 
 **Scenarios:** 76  |  **Languages:** 20  |  **Applicable cells:** 1233

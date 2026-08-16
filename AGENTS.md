@@ -189,7 +189,7 @@ buffer to make internal payload bytes appear canonically ordered.
 
 Performance gates measure completed exact work; they never terminate, skip, or
 cap analysis. When query/cache/engine code changes, build release and run
-`cargo test --release -p bonsai_cli --test elasticsearch_large_repo
+`cargo test --release -p bonsai-ninja --test elasticsearch_large_repo
 -- --nocapture` with the sibling checkout (or
 `BONSAI_ELASTICSEARCH_ROOT`). The gate enforces warm semantic reuse and
 navigation/inspect/security SLOs under a 3 GiB scheduling budget. Update the
@@ -393,5 +393,5 @@ Validate before reporting:
 ```shell
 ./target/release/bonsai-ninja security . pack --validate --format json --no-color --no-progress
 ./target/release/bonsai-ninja security . pack --audit --context 16k --no-color --no-progress
-cargo test -q -p bonsai_security --test rulepack_conformance
+cargo test -q -p bonsai-ninja-security --test rulepack_conformance
 ```

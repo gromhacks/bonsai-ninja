@@ -1,11 +1,20 @@
 [package]
-name = "bonsai_trace"
+name = "bonsai-ninja-trace"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 description = "Trace result + renderers."
+
+[lib]
+name = "bonsai_trace"
+path = "src/lib.rs"
 
 [dependencies]
 bonsai_common = { workspace = true }

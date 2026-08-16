@@ -199,7 +199,7 @@ Command:
 BONSAI_ELASTICSEARCH_ROOT=../elasticsearch \
 BONSAI_REQUIRE_ELASTICSEARCH_GATE=1 \
 BONSAI_MEMORY_BUDGET_MB=3072 \
-  cargo test --release --locked -p bonsai_cli \
+  cargo test --release --locked -p bonsai-ninja \
   --test elasticsearch_large_repo -- --nocapture
 ```
 
@@ -292,6 +292,8 @@ The release workflow verifies:
   user/parser cache, and an empty workspace cache;
 - readable `security-patterns/` source in the archive for inspection and
   customization, independently of the embedded runtime default;
+- a 45-package, production-only crates.io graph under the `bonsai-ninja`
+  namespace; the conformance and testkit crates remain repository-only;
 - the versioned native export JSON Schema under `schemas/`;
 - checksums and immutable workflow action pins;
 - signed GitHub/Sigstore provenance for every tagged archive and checksum;
@@ -314,13 +316,18 @@ The tag workflow is authoritative. A release tag must:
 6. pass the pinned large-workspace scale job;
 7. produce archives and checksum files that execute from a relocated
    directory;
-8. sign archive provenance through GitHub artifact attestations before
+8. verify and publish every crates.io package in production dependency order,
+   with an exact workspace-version requirement on each internal edge;
+9. sign archive provenance through GitHub artifact attestations before
    publication;
-9. verify every downloaded archive and checksum attestation again in the
-   isolated publish job before creating the release.
+10. verify every downloaded archive and checksum attestation again in the
+    isolated publish job before creating the GitHub release.
 
 The implementation is locally ready for that workflow. GitHub's tag-triggered
-OIDC identity signs provenance without a long-lived signing key. Remote CI
+OIDC identity signs provenance without a long-lived signing key. crates.io uses
+the repository's `CARGO_REGISTRY_TOKEN` secret; `scripts/publish-crates.py`
+makes a partial upload resumable only after verifying the `gromhacks` registry
+owner and byte-for-byte identity of every already-published archive. Remote CI
 state and publication permissions remain external deployment conditions and
 are not asserted by a local test run.
 
@@ -336,6 +343,7 @@ RUSTDOCFLAGS="-D warnings" \
 python3 scripts/audit-docs.py
 python3 scripts/audit-cli-docs.py --binary ./target/release/bonsai-ninja
 python3 scripts/audit-release-metadata.py
+python3 scripts/publish-crates.py --check-registry
 python3 scripts/realworld-lang-benchmark.py --check
 python3 scripts/sync_skill.py --check
 bash scripts/audit-workflows.sh
