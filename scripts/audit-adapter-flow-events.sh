@@ -28,4 +28,5 @@ esac
 cd "$REPO"
 cargo test --locked -p bonsai-ninja-conformance \
     --test flow_event_conformance \
-    --test async_yield_coverage
+    --test async_yield_coverage \
+    -- --test-threads=1

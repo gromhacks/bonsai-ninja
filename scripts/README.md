@@ -5,6 +5,10 @@ explicit developer harnesses. Generated reports belong in the ignored
 `build/` or `target/` directories; scripts must not leave analysis caches or
 temporary workspaces in the source tree.
 
+Local shell gates require Bash, Python 3, and ripgrep (`rg`). The release
+workflow provisions ripgrep explicitly, and audits that depend on it fail
+closed when it is unavailable.
+
 Every direct child tool or companion data file is listed below. The
 documentation audit rejects missing and stale entries so an unexplained script
 cannot silently accumulate here.
