@@ -98,7 +98,7 @@ tempfile = "3"
 dirs = "6"
 mimalloc = { version = "0.1.52", features = ["v2"] }
 owo-colors = "4"
-comfy-table = { version = "7", features = ["custom_styling"] }
+comfy-table = { version = "8", features = ["custom_styling"] }
 
 # CLI / frontends
 clap = { version = "4", features = ["derive", "env"] }
