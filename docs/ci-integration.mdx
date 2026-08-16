@@ -162,8 +162,13 @@ high findings while allowing unchanged baseline findings.
 ## Repository release checks
 
 Ordinary `main` and pull-request CI runs the complete workspace test suite on
-Linux, macOS, and Windows x64. This catches platform-gated code and test
-warnings before a release tag is created.
+Linux and macOS. Windows x64 runs every library and binary unit test plus the
+CLI contract, command-coverage, determinism, and pack-validation integration
+tests. That split keeps all compiler/security semantics exhaustive while
+testing the Windows-specific filesystem, process, cache, and command surfaces
+without repeating thousands of OS-independent CLI subprocesses. A release tag
+then rebuilds and smoke-runs the packaged binary on every supported artifact
+target.
 
 This repository's tag workflow is `.github/workflows/release.yml`. It verifies
 version/tag provenance, runs cross-platform build and test jobs, executes
@@ -246,9 +251,10 @@ hash.
 links many integration executables that include all language adapters, and
 those tests invoke the compiler-backed CLI thousands of times. Full DWARF
 substantially increases link time and artifact size, while completely
-unoptimized analysis makes the exhaustive Windows gate disproportionately
-slow. Light optimization keeps this correctness profile compact without
-paying release ThinLTO costs. For a local debugger session, opt in explicitly:
+unoptimized analysis makes even the focused Windows portability gate
+disproportionately slow. Light optimization keeps this correctness profile
+compact without paying release ThinLTO costs. For a local debugger session,
+opt in explicitly:
 
 ```bash
 CARGO_PROFILE_TEST_DEBUG=2 CARGO_PROFILE_TEST_OPT_LEVEL=0 \
@@ -258,6 +264,13 @@ CARGO_PROFILE_TEST_DEBUG=2 CARGO_PROFILE_TEST_OPT_LEVEL=0 \
 The complete pattern-pack and mega-CLI validators run once against the release
 binary in their dedicated workflows. They are not duplicated inside each
 platform's debug-oriented workspace test process.
+
+The tag workflow runs the exhaustive workspace suite once in its Linux
+preflight. Its six packaging jobs compile and smoke the native release binary;
+they do not repeat language semantics per CPU architecture. This is a test
+ownership boundary, not a coverage cap: CPU/OS portability is proved by native
+builds and command smokes, while compiler and taint behavior is proved by the
+complete suite.
 
 Production runtime measurements always use release binaries.
 

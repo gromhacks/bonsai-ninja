@@ -51,7 +51,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-2022]
+        include:
+          - os: ubuntu-latest
+            suite: exhaustive
+          - os: macos-latest
+            suite: exhaustive
+          - os: windows-2022
+            suite: portability
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -61,12 +67,28 @@ jobs:
         with:
           toolchain: "1.88"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: matrix.suite == 'exhaustive'
         with:
           python-version: "3.12"
       - name: Install validator dependencies
+        if: matrix.suite == 'exhaustive'
         run: python -m pip install --require-hashes -r .github/requirements/pack-audit.txt
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo test --workspace --locked --no-fail-fast
+      - name: Run exhaustive workspace tests
+        if: matrix.suite == 'exhaustive'
+        run: cargo test --workspace --locked --no-fail-fast
+      - name: Run Windows library and binary tests
+        if: matrix.suite == 'portability'
+        run: cargo test --workspace --lib --bins --locked --no-fail-fast
+      - name: Run Windows CLI portability contracts
+        if: matrix.suite == 'portability'
+        run: >-
+          cargo test --locked -p bonsai-ninja
+          --test cli_contract
+          --test command_coverage
+          --test determinism
+          --test pack_validate_integration
+          --no-fail-fast
 
   docs:
     name: cargo doc

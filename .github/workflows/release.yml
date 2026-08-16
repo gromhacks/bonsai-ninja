@@ -99,6 +99,9 @@ jobs:
           RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
             --document-private-items --release --locked
 
+      - name: Verify exhaustive workspace correctness
+        run: cargo test --workspace --locked --no-fail-fast
+
       - name: Verify dependencies and architecture boundaries
         shell: bash
         run: |
@@ -285,9 +288,6 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: release-${{ matrix.target }}
-
-      - name: Test the native target
-        run: cargo test --workspace --locked --no-fail-fast
 
       - name: Build release binary
         run: cargo build --release --locked -p bonsai-ninja --target ${{ matrix.target }}
