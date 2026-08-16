@@ -36,7 +36,10 @@ def run(*args: str, capture: bool = False) -> subprocess.CompletedProcess[str]:
         check=True,
         text=True,
         stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.STDOUT if capture else None,
+        # Keep diagnostics separate from machine-readable stdout. In a fresh
+        # CI runner rustup may emit toolchain synchronization messages on
+        # stderr before `cargo metadata` writes its JSON document.
+        stderr=None,
     )
 
 
