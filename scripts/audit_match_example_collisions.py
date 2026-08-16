@@ -467,7 +467,11 @@ def collect_inventory_rows(
         file_raw = row.get("file")
         if not isinstance(file_raw, str):
             continue
-        case = file_to_case.get(Path(file_raw).resolve())
+        reported_path = Path(file_raw)
+        if not reported_path.is_absolute():
+            reported_path = workspace / reported_path
+        resolved_path = reported_path.resolve()
+        case = file_to_case.get(resolved_path)
         if case is None or case.expect_no_match:
             continue
         finding = Finding(
@@ -478,7 +482,7 @@ def collect_inventory_rows(
             command_kind=command_kind,
             text=str(row.get("text") or ""),
             line=row.get("line") if isinstance(row.get("line"), int) else None,
-            file=str(Path(file_raw).resolve().relative_to(workspace)),
+            file=str(resolved_path.relative_to(workspace)),
         )
         run.findings.append(finding)
         rows_by_case[case.key].append(finding)
