@@ -9,7 +9,7 @@ not duplicate dated performance history.
 The full local release pass completed on 2026-08-17. Documentation claims,
 links, command examples, current repository counts, and the rulepack validator
 were rechecked on that date. The release candidate also passed 227
-release security unit tests, 34 release rulepack conformance tests, 80
+release security unit tests, 34 release rulepack conformance tests, 81
 architecture invariants, 1,320 command/switch checks, standalone execution,
 and the complete Elasticsearch gate on that date. Local `main` has no known
 failing release gate.

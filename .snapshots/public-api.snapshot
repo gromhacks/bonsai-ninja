@@ -29,18 +29,19 @@ pub use defs::{defs, DefOut, DefsFilters};
 pub use dumps::{
 pub use edges::{compute_edge_id, dump_edges, EdgeRecord, EdgesFilters, PrecisionClass};
 pub use entrypoints::{entrypoints, EntryPointOut, EntryPointsFilters};
-pub use flows::FlowAnnotator;
 pub use graph_export::{
 pub use imports::{imports, ImportOut, ImportsFilters};
 pub use native_export::{
 pub use operations::{operations, OperationOperandOut, OperationOut, OperationsFilters};
-pub use paths::{paths, PathFilters, PathFunctionRow, PathOutcome, PathRow};
+pub use paths::{paths, PathFilters, PathFunctionRow, PathOutcome, PathTerminalCallRow};
 pub use refs::{refs, RefOut, RefsFilters};
 pub use resolution::{
 pub use resolve::{
 pub use search::{search, SearchFilters, SearchHit};
 pub use slice::{slices, SliceFilters, SliceOutcome, SliceRow, SliceStep};
 pub use strings::{strings, StringOut, StringsFilters};
+pub use summary_labels::SummaryAnnotator;
+pub use symbol_summary::{
 pub use taint::{
 pub use vars::{vars, VarOut, VarsFilters};
 
@@ -69,7 +70,7 @@ pub struct EdgeProvenance {
 pub struct ResolvedCallGraph {
 pub struct ResolvedCallGraphBuildContext {
 pub struct UnresolvedWorkspaceCallSite {
-pub use chains::{
+pub use chains::PathTruncation;
 
 === cfg ===
 pub enum SyntheticBlockKind {
@@ -198,9 +199,8 @@ pub fn chain_to_names(
 pub fn func_display_name(workspace: &bonsai_workspace::Workspace, func_id: bonsai_common::FuncId) -> String {
 pub mod cache;
 pub use cache::BoundedCache;
-pub use call_edges::{
+pub use call_edges::{find_call_span_by_name, find_call_span_to_func_uncached, CallEdgeResolver};
 pub use chain_cache::{find_enclosing_func, ChainCache};
-pub use chains::{downstream_funcs_set, enumerate_chains_resolved, ChainTruncation, ResolvedChain};
 pub use filter::{
 pub use flow_id::{
 pub use query::{matching_decls, matching_func_ids, matching_func_ids_in_headers, Matcher};
@@ -430,8 +430,6 @@ pub struct InspectFlowDrilldown {
 pub struct InspectFlowGroupDrilldown {
 pub struct InspectFlowGroupShow {
 pub struct InspectFlowShow {
-pub struct InspectQuery<'a> {
-pub struct InspectTargetChains {
 pub struct NativeExportOptions {
 pub struct Project {
 pub struct Security<'a> {
