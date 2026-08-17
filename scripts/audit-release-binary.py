@@ -16,6 +16,14 @@ def path_spellings(value: str) -> set[bytes]:
     return {spelling.encode() for spelling in spellings if len(spelling) >= 6}
 
 
+def printable_context(payload: bytes, offset: int, width: int = 96) -> str:
+    """Return bounded printable evidence without dumping arbitrary binary data."""
+    start = max(0, offset - width)
+    end = min(len(payload), offset + width)
+    context = payload[start:end]
+    return "".join(chr(byte) if 32 <= byte < 127 else "." for byte in context)
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: audit-release-binary.py <binary>", file=sys.stderr)
@@ -30,9 +38,16 @@ def main() -> int:
         os.environ.get("GITHUB_WORKSPACE", ""),
     }
     for candidate in candidates:
-        if any(spelling in payload for spelling in path_spellings(candidate)):
+        for spelling in sorted(path_spellings(candidate)):
+            offset = payload.find(spelling)
+            if offset < 0:
+                continue
             print(
                 f"release binary contains an unremapped build path ({candidate!r})",
+                file=sys.stderr,
+            )
+            print(
+                f"matched at byte {offset}: {printable_context(payload, offset)}",
                 file=sys.stderr,
             )
             return 1

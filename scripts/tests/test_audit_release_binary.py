@@ -35,6 +35,8 @@ class AuditReleaseBinaryTests(unittest.TestCase):
         result = self.run_audit(b"prefix\0" + str(ROOT).encode() + b"\0suffix")
         self.assertEqual(result.returncode, 1)
         self.assertIn("unremapped build path", result.stderr)
+        self.assertIn("matched at byte", result.stderr)
+        self.assertIn("prefix", result.stderr)
 
 
 if __name__ == "__main__":

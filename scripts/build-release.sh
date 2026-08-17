@@ -58,6 +58,37 @@ fi
 unset RUSTFLAGS
 export CARGO_ENCODED_RUSTFLAGS="$encoded"
 
+# Native dependencies can embed __FILE__ strings that never pass through
+# rustc. Apply the equivalent compiler remapping on Unix C/C++ builds. MSVC
+# does not accept these switches, while Rust path remapping above covers its
+# Rust objects and generated sources.
+if ! command -v cygpath >/dev/null 2>&1; then
+  c_prefix_flags=()
+  add_c_remap() {
+    local source="$1"
+    local destination="$2"
+    [[ -n "$source" ]] || return 0
+    c_prefix_flags+=(
+      "-ffile-prefix-map=${source}=${destination}"
+      "-fdebug-prefix-map=${source}=${destination}"
+      "-fmacro-prefix-map=${source}=${destination}"
+    )
+  }
+
+  add_c_remap "$ROOT" /workspace
+  add_c_remap "$BUILD_HOME" /builder-home
+  add_c_remap "$BUILD_USERPROFILE" /builder-profile
+  add_c_remap "$BUILD_CARGO_HOME" /cargo-home
+  add_c_remap "$BUILD_RUSTUP_HOME" /rustup-home
+
+  rendered_c_flags=""
+  if ((${#c_prefix_flags[@]})); then
+    printf -v rendered_c_flags ' %q' "${c_prefix_flags[@]}"
+  fi
+  export CFLAGS="${CFLAGS:-}${rendered_c_flags}"
+  export CXXFLAGS="${CXXFLAGS:-}${rendered_c_flags}"
+fi
+
 # Some dependencies inspect HOME/USERPROFILE in build scripts and then emit
 # the result as ordinary string data. rustc's path-prefix remapping cannot
 # rewrite such generated literals, so expose a stable synthetic build home
