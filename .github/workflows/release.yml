@@ -500,7 +500,13 @@ jobs:
           }
           Compress-Archive -Path "dist/$artifact" -DestinationPath "$artifact.zip" -Force
           $hash = (Get-FileHash "$artifact.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $artifact.zip" | Out-File -Encoding ascii "$artifact.zip.sha256"
+          # Write the checksum with a Unix newline and no BOM so the published
+          # file works with `sha256sum -c` on every release platform.
+          [System.IO.File]::WriteAllText(
+            "$artifact.zip.sha256",
+            "$hash  $artifact.zip`n",
+            [System.Text.UTF8Encoding]::new($false)
+          )
 
       - name: Attest zip provenance
         if: matrix.package == 'zip' && startsWith(github.ref, 'refs/tags/')
