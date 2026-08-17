@@ -1,6 +1,7 @@
-//! `bonsai-ninja inspect` — render every call chain that reaches a
-//! target symbol, each with source-inlined function bodies and step
-//! annotations. JSON output is structurally the same, keyed by
+//! `bonsai-ninja inspect` — find compiler syntax facts and optionally hydrate
+//! bounded, source-inlined evidence for each selected symbol. Transitive call
+//! structure remains an exact compressed graph rather than an enumeration of
+//! concrete call paths. JSON output is structurally the same, keyed by
 //! `InspectReport`.
 
 use anyhow::{Context, Result};
@@ -8,9 +9,9 @@ use bonsai_lang_api::{DeclKind, FlowEvent, RefKind};
 use bonsai_sdk::Workspace;
 use bonsai_sdk::{
     compute_flow_labels_from, compute_structural_flow_id, compute_structural_group_id, compute_taint_flow_id,
-    file_path_matches_filter, find_call_span_to_func_uncached, func_display_name, CallEdgeResolver,
-    ChainCache, EntryTaintGraph, ResolvedChain, SyntaxFlowPlan, SyntaxFlowQuery, TaintFlowIdentityStep,
-    TaintedCall, TaintedCallEdge, TaintedCallKind,
+    file_path_matches_filter, find_call_span_to_func_uncached, func_display_name, ChainCache,
+    EntryTaintGraph, SyntaxFlowPlan, SyntaxFlowQuery, TaintFlowIdentityStep, TaintedCall, TaintedCallEdge,
+    TaintedCallKind,
 };
 use comfy_table::Cell;
 use serde::{Deserialize, Serialize};
@@ -53,11 +54,11 @@ struct InspectOut {
     params: Vec<String>,
     direct_callers: Vec<RefOut>,
     callees: Vec<String>,
-    /// Whether static entry-point chains were actually evaluated for this
+    /// Whether bounded structural evidence was requested for this
     /// declaration. Plain large-workspace inspect is intentionally a syntax
-    /// query; an empty `flows` list in that mode must not be presented as
-    /// proof that no caller reaches the symbol.
-    graph_flows_evaluated: bool,
+    /// query; an empty `flows` list in that mode does not describe graph
+    /// reachability.
+    graph_evidence_evaluated: bool,
     flows: Vec<InspectFlowRendered>,
     /// Longest-shared-suffix grouping of `flows`. Always populated
     /// alongside `flows` so JSON consumers can pick either view.
@@ -69,35 +70,28 @@ struct InspectOut {
 
 #[derive(Serialize, Clone)]
 struct InspectSummary {
-    total_flows: u32,
-    max_chain_depth: u32,
-    unique_entry_points: u32,
+    evidence_units: u32,
+    max_functions_per_unit: u32,
+    unique_symbol_roots: u32,
 }
 
-/// One start→sink execution flow, with the full call chain and, for each
-/// function in the chain, its source code with numbered annotations on the
-/// chain-advancing lines.
+/// One bounded structural evidence unit. Normal graph-flow queries contain
+/// the matched callable only; an explicitly selected endpoint corridor may
+/// contain additional compiler-proven functions.
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct InspectFlowRendered {
     /// Numeric flow index (for sorting / programmatic access).
     pub(crate) flow_number: u32,
-    /// Display label. Chains that share a prefix and only diverge in their
-    /// last step are grouped: the first gets `"2"`, siblings get `"2a"`,
-    /// `"2b"` etc. so the inspect view can show a branch split.
+    /// Display label for paging and grouped presentation.
     pub(crate) flow_label: String,
-    /// Stable content-hash id of this flow's structural shape
-    /// (`F:` + 16 hex). Hash inputs are the chain's display names
-    /// joined with a separator — precision, annotations, cache
-    /// state, and render mode are intentionally excluded so the
-    /// id is identical across `--compact`, `--view`, `--no-cache`,
-    /// and theme choices. Lets users / tools cite a specific flow
-    /// across runs with `inspect --flow <flow_id>`.
+    /// Stable content-hash id of this evidence unit's compiler identities
+    /// (`F:` + 16 hex). Precision, annotations, cache state, and render mode
+    /// are intentionally excluded so the id is stable across presentations.
     pub(crate) flow_id: String,
     pub(crate) chain: Vec<String>,
     pub(crate) chain_display: String,
-    /// Worst-case precision of any semantic edge along the chain.
-    /// Public inspect output is filtered to `Exact` / `Narrowed`
-    /// chains before rendering.
+    /// Worst-case precision of any semantic edge in an explicit endpoint
+    /// corridor. A one-symbol unit crosses no edge and is exact.
     pub(crate) precision: bonsai_common::Precision,
     pub(crate) functions: Vec<InspectFunctionRendered>,
 }
@@ -550,44 +544,6 @@ struct DeclHitPass<'a> {
     taint_flow: bool,
     graph_flows_enabled: bool,
     full_source_for_large_bodies: bool,
-    endpoint_corridor: Option<&'a ExactEndpointCorridor>,
-}
-
-struct ExactEndpointCorridor {
-    sources: ahash::AHashSet<bonsai_common::FuncId>,
-    targets: ahash::AHashSet<bonsai_common::FuncId>,
-}
-
-impl ExactEndpointCorridor {
-    fn new(sources: &[bonsai_common::FuncId], targets: &[bonsai_common::FuncId]) -> Option<Self> {
-        (!sources.is_empty() && !targets.is_empty()).then(|| Self {
-            sources: sources.iter().copied().collect(),
-            targets: targets.iter().copied().collect(),
-        })
-    }
-
-    fn project_path(
-        &self,
-        path: &[bonsai_common::FuncId],
-        required: Option<bonsai_common::FuncId>,
-    ) -> Option<Vec<bonsai_common::FuncId>> {
-        for (source_idx, func) in path.iter().enumerate() {
-            if !self.sources.contains(func) {
-                continue;
-            }
-            let Some(target_offset) = path[source_idx..]
-                .iter()
-                .position(|candidate| self.targets.contains(candidate))
-            else {
-                continue;
-            };
-            let corridor = &path[source_idx..=source_idx + target_offset];
-            if required.is_none_or(|func| corridor.contains(&func)) {
-                return Some(corridor.to_vec());
-            }
-        }
-        None
-    }
 }
 
 struct InspectKindSelection {
@@ -615,7 +571,6 @@ impl InspectKindSelection {
 fn collect_decl_hits(
     ws: &Workspace,
     chain_cache: &ChainCache<'_>,
-    edge_resolver: &mut CallEdgeResolver<'_>,
     options: DeclHitPass<'_>,
     taint_candidates: &mut TaintCandidates,
 ) -> Vec<InspectOut> {
@@ -695,135 +650,83 @@ fn collect_decl_hits(
                 params: decl.params.clone(),
                 direct_callers: Vec::new(),
                 callees: Vec::new(),
-                graph_flows_evaluated: false,
+                graph_evidence_evaluated: false,
                 flows: Vec::new(),
                 groups: Vec::new(),
                 summary: InspectSummary {
-                    total_flows: 0,
-                    max_chain_depth: 0,
-                    unique_entry_points: 0,
+                    evidence_units: 0,
+                    max_functions_per_unit: 0,
+                    unique_symbol_roots: 0,
                 },
             });
             continue;
         }
 
-        let (chains, _) = chain_cache.chains_resolved(target_func, usize::MAX, usize::MAX);
-        let _downstream = chain_cache.downstream_resolved(target_func, usize::MAX, usize::MAX);
-        let chains: Vec<ResolvedChain> = chains
-            .into_iter()
-            .filter(|chain| {
-                matches!(
-                    chain.precision,
-                    bonsai_common::Precision::Exact | bonsai_common::Precision::Narrowed,
-                ) && edge_resolver.chain_edges_resolvable(&chain.funcs)
-            })
-            .collect();
-        if chains.is_empty() {
-            continue;
-        }
-
-        let mut extended_chains = Vec::new();
-        for chain in &chains {
-            let (paths, _) = edge_resolver.enumerate_call_paths_from_with_truncation(
-                chain_cache,
-                &chain.funcs,
-                usize::MAX,
-                usize::MAX,
-            );
-            extended_chains.extend(paths.into_iter().map(|path| (path, chain.precision)));
-        }
-        if let Some(corridor) = options.endpoint_corridor {
-            extended_chains = extended_chains
-                .into_iter()
-                .filter_map(|(path, precision)| {
-                    corridor
-                        .project_path(&path, Some(target_func))
-                        .map(|path| (path, precision))
-                })
-                .collect();
-        }
+        // Graph flow is a bounded symbol evidence packet, not the Cartesian
+        // language of every upstream × downstream execution path. The exact
+        // direct caller/callee relation is rendered below, while one self
+        // unit owns the selected source body. Transitive structure remains
+        // losslessly represented by the compiler graph (and by `path`'s
+        // compressed corridor) without materializing path combinations.
         if options.filters.from.is_some() || options.filters.to.is_some() {
-            extended_chains.retain(|(path, _)| {
-                let mut chain_names: Vec<String> =
-                    path.iter().map(|&func| func_display_name(ws, func)).collect();
-                if let Some(&tail) = path.last() {
-                    for callee in chain_cache.callees_of_resolved(tail) {
-                        let name = func_display_name(ws, callee);
-                        if !name.is_empty() && !chain_names.contains(&name) {
-                            chain_names.push(name);
-                        }
-                    }
-                }
-                let taint_facts = || chain_cache.chain_structural_tokens(path);
-                bonsai_sdk::chain_matches_filters_for_hit(
-                    Some(bonsai_sdk::FilterHit::new(
-                        &decl.name,
-                        bonsai_sdk::FactKindFilter::Decl,
-                    )),
-                    &chain_names,
-                    &taint_facts,
-                    options.filters.to_sdk(),
-                )
-            });
-            if extended_chains.is_empty() {
+            let reachable = chain_cache.reachable_resolved(&[target_func]);
+            let names: Vec<String> = reachable
+                .iter()
+                .map(|&func| func_display_name(ws, func))
+                .collect();
+            let facts = || chain_cache.chain_structural_tokens(&reachable);
+            if !bonsai_sdk::chain_matches_filters_for_hit(
+                Some(bonsai_sdk::FilterHit::new(
+                    &decl.name,
+                    bonsai_sdk::FactKindFilter::Decl,
+                )),
+                &names,
+                &facts,
+                options.filters.to_sdk(),
+            ) {
                 continue;
             }
         }
         if options.taint_flow {
-            for (path, _) in &extended_chains {
-                if let Some(&entry) = path.first() {
-                    taint_candidates.insert(entry);
-                }
-            }
+            taint_candidates.insert(target_func);
         }
 
-        let call_spans: Vec<Vec<Option<bonsai_common::Span>>> = extended_chains
-            .iter()
-            .map(|(chain, _)| edge_resolver.call_spans_for_chain(chain))
-            .collect();
-        use rayon::prelude::*;
-        let mut flows: Vec<InspectFlowRendered> = extended_chains
-            .par_iter()
-            .zip(call_spans.par_iter())
-            .filter_map(|((extended, precision), spans)| {
-                let match_idx = extended
-                    .iter()
-                    .position(|&func| func == target_func)
-                    .unwrap_or(extended.len().saturating_sub(1));
-                render_flow_with_cached_call_spans(
-                    ws,
-                    extended,
-                    spans,
-                    0,
-                    FLOW_LABEL_PLACEHOLDER,
-                    *precision,
-                    Some((
-                        match_idx,
-                        MatchOverride {
-                            span: decl.name_span,
-                            label: format!("MATCH: enter {}", decl.name),
-                            marker_subjects: vec![decl.name.clone()],
-                        },
-                    )),
-                    options.filters,
-                    true,
-                    options.full_source_for_large_bodies,
-                )
-            })
-            .collect();
+        let funcs = [target_func];
+        let spans = [None];
+        let mut flows: Vec<InspectFlowRendered> = render_flow_with_cached_call_spans(
+            ws,
+            &funcs,
+            &spans,
+            0,
+            FLOW_LABEL_PLACEHOLDER,
+            bonsai_common::Precision::Exact,
+            Some((
+                0,
+                MatchOverride {
+                    span: decl.name_span,
+                    label: format!("MATCH: enter {}", decl.name),
+                    marker_subjects: vec![decl.name.clone()],
+                },
+            )),
+            options.filters,
+            true,
+            options.full_source_for_large_bodies,
+        )
+        .into_iter()
+        .collect();
         dedup_structural_flows(&mut flows);
         let direct_callers = semantic_direct_callers(ws, chain_cache.resolved_graph(), target_func);
         let callees = semantic_callees(ws, chain_cache.resolved_graph(), target_func);
         let unique_entries: ahash::AHashSet<&String> =
             flows.iter().filter_map(|flow| flow.chain.first()).collect();
         let summary = InspectSummary {
-            total_flows: flows.len() as u32,
-            max_chain_depth: flows
+            evidence_units: flows.len() as u32,
+            max_functions_per_unit: flows
                 .iter()
                 .map(|flow| flow.chain.len() as u32)
                 .max()
                 .unwrap_or(0),
-            unique_entry_points: unique_entries.len() as u32,
+            unique_symbol_roots: unique_entries.len() as u32,
         };
         let groups = group_flows_by_suffix(&flows);
         hits.push(InspectOut {
@@ -835,7 +738,7 @@ fn collect_decl_hits(
             params: decl.params.clone(),
             direct_callers,
             callees,
-            graph_flows_evaluated: true,
+            graph_evidence_evaluated: true,
             flows,
             groups,
             summary,
@@ -858,12 +761,10 @@ struct OccurrenceHitPass<'a> {
     occurrence_scan_skipped_for_id_lookup: bool,
     partial_workspace: bool,
     large_syntax_scan: bool,
-    endpoint_corridor: Option<&'a ExactEndpointCorridor>,
 }
 
-struct OccurrenceChainResolution {
-    chains: Vec<ResolvedChain>,
-    call_targets: Vec<(bonsai_common::FuncId, bonsai_common::Precision)>,
+struct OccurrenceGraphFilterResult {
+    accepted: bool,
     from_match: Option<FilterMatch>,
     to_match: Option<FilterMatch>,
 }
@@ -871,173 +772,95 @@ struct OccurrenceChainResolution {
 struct OccurrenceChainContext<'query, 'workspace> {
     ws: &'workspace Workspace,
     chain_cache: &'query ChainCache<'workspace>,
-    edge_resolver: &'query mut CallEdgeResolver<'workspace>,
     filters: InspectFilters<'query>,
 }
 
-fn resolve_occurrence_chains(
+fn evaluate_occurrence_graph_filters(
     context: &mut OccurrenceChainContext<'_, '_>,
     kind: &str,
     text: &str,
-    span: bonsai_common::Span,
     containing_id: Option<bonsai_common::FuncId>,
-) -> OccurrenceChainResolution {
-    let mut resolution = OccurrenceChainResolution {
-        chains: Vec::new(),
-        call_targets: Vec::new(),
+) -> OccurrenceGraphFilterResult {
+    let mut result = OccurrenceGraphFilterResult {
+        accepted: false,
         from_match: None,
         to_match: None,
     };
     let Some(containing_id) = containing_id else {
-        return resolution;
+        return result;
     };
 
-    let containing_downstream =
-        context
-            .chain_cache
-            .downstream_resolved(containing_id, usize::MAX, usize::MAX);
-    let mut seed = Vec::new();
-    let mut seed_from_call_target = false;
-    if kind == "call" {
-        resolution.call_targets = resolve_call_hit_targets(context.chain_cache, containing_id, span);
-        for (target, direct_precision) in resolution.call_targets.iter().copied() {
-            let (raw, _) = context
-                .chain_cache
-                .chains_resolved(target, usize::MAX, usize::MAX);
-            let target_seed = if raw.is_empty() {
-                vec![ResolvedChain {
-                    funcs: vec![target],
-                    precision: bonsai_common::Precision::Exact,
-                }]
-            } else {
-                raw
-            };
-            let mut target_seed: Vec<ResolvedChain> = target_seed
-                .into_iter()
-                .filter(|chain| chain.funcs.contains(&containing_id))
-                .collect();
-            if target_seed.is_empty() && target != containing_id {
-                target_seed.push(ResolvedChain {
-                    funcs: vec![containing_id, target],
-                    precision: direct_precision,
-                });
-            }
-            seed.extend(target_seed);
-        }
-        seed = dedupe_chains_keep_best_precision(seed);
-        seed_from_call_target = !seed.is_empty();
-    }
-    if seed.is_empty() {
-        let (raw, _) = context
-            .chain_cache
-            .chains_resolved(containing_id, usize::MAX, usize::MAX);
-        seed = if raw.is_empty() {
-            vec![ResolvedChain {
-                funcs: vec![containing_id],
-                precision: bonsai_common::Precision::Exact,
-            }]
-        } else {
-            raw
-        };
-    }
-    let seed: Vec<ResolvedChain> = seed
-        .into_iter()
-        .filter(|chain| {
-            let precise = matches!(
-                chain.precision,
-                bonsai_common::Precision::Exact | bonsai_common::Precision::Narrowed,
-            );
-            precise && (seed_from_call_target || context.edge_resolver.chain_edges_resolvable(&chain.funcs))
-        })
-        .collect();
-
-    if (context.filters.from.is_some() || context.filters.to.is_some()) && kind != "call" {
+    if context.filters.from.is_some() || context.filters.to.is_some() {
         let mut seen_from = None;
         let mut seen_to = None;
-        context
-            .chain_cache
-            .prewarm_taint_facts(seed.iter().filter_map(|chain| chain.funcs.first().copied()));
-        resolution.chains = seed
-            .into_iter()
-            .filter(|chain| {
-                let mut extended = chain.funcs.clone();
-                for downstream in &containing_downstream {
-                    if !extended.contains(downstream) {
-                        extended.push(*downstream);
-                    }
-                }
-                let chain_names: Vec<String> = extended
-                    .iter()
-                    .map(|&func| func_display_name(context.ws, func))
-                    .collect();
-                let taint_facts = || context.chain_cache.chain_taint_facts(&extended);
-                if !bonsai_sdk::chain_matches_filters_for_hit(
-                    inspect_filter_hit(text, kind),
-                    &chain_names,
-                    &taint_facts,
-                    context.filters.to_sdk(),
-                ) {
-                    return false;
-                }
-
-                let reachable = context.chain_cache.reachable_resolved(&extended);
-                let func_names: Vec<String> = reachable
-                    .iter()
-                    .map(|&func| func_display_name(context.ws, func))
-                    .collect();
-                if seen_from.is_none() {
-                    if let Some(needle) = context.filters.from {
-                        seen_from = reachable
-                            .iter()
-                            .zip(func_names.iter())
-                            .find(|(_, name)| name_token_match(name, needle))
-                            .map(|(&func, name)| build_filter_match(context.ws, Some(func), name.clone()))
-                            .or_else(|| {
-                                let facts = taint_facts();
-                                let mut tokens: Vec<&String> =
-                                    facts.by_kind.values().flat_map(|tokens| tokens.iter()).collect();
-                                tokens.sort();
-                                tokens
-                                    .into_iter()
-                                    .find(|token| name_token_match(token, needle))
-                                    .map(|token| build_filter_match(context.ws, None, token.clone()))
-                            });
-                    }
-                }
-                if seen_to.is_none() {
-                    if let Some(needle) = context.filters.to {
-                        seen_to = name_token_match(text, needle)
-                            .then(|| build_filter_match(context.ws, None, needle.to_string()))
-                            .or_else(|| {
-                                let facts = taint_facts();
-                                let mut tokens: Vec<&String> =
-                                    facts.by_kind.values().flat_map(|tokens| tokens.iter()).collect();
-                                tokens.sort();
-                                tokens
-                                    .into_iter()
-                                    .find(|token| name_token_match(token, needle))
-                                    .map(|token| build_filter_match(context.ws, None, token.clone()))
-                            })
-                            .or_else(|| {
-                                reachable
-                                    .iter()
-                                    .zip(func_names.iter())
-                                    .find(|(_, name)| name_token_match(name, needle))
-                                    .map(|(&func, name)| {
-                                        build_filter_match(context.ws, Some(func), name.clone())
-                                    })
-                            });
-                    }
-                }
-                true
-            })
+        context.chain_cache.prewarm_taint_facts([containing_id]);
+        let reachable = context.chain_cache.reachable_resolved(&[containing_id]);
+        let chain_names: Vec<String> = reachable
+            .iter()
+            .map(|&func| func_display_name(context.ws, func))
             .collect();
-        resolution.from_match = seen_from;
-        resolution.to_match = seen_to;
+        let taint_facts = || context.chain_cache.chain_taint_facts(&reachable);
+        let accepted = bonsai_sdk::chain_matches_filters_for_hit(
+            inspect_filter_hit(text, kind),
+            &chain_names,
+            &taint_facts,
+            context.filters.to_sdk(),
+        );
+        if accepted {
+            let func_names: Vec<String> = reachable
+                .iter()
+                .map(|&func| func_display_name(context.ws, func))
+                .collect();
+            if seen_from.is_none() {
+                if let Some(needle) = context.filters.from {
+                    seen_from = reachable
+                        .iter()
+                        .zip(func_names.iter())
+                        .find(|(_, name)| name_token_match(name, needle))
+                        .map(|(&func, name)| build_filter_match(context.ws, Some(func), name.clone()))
+                        .or_else(|| {
+                            let facts = taint_facts();
+                            let mut tokens: Vec<&String> =
+                                facts.by_kind.values().flat_map(|tokens| tokens.iter()).collect();
+                            tokens.sort();
+                            tokens
+                                .into_iter()
+                                .find(|token| name_token_match(token, needle))
+                                .map(|token| build_filter_match(context.ws, None, token.clone()))
+                        });
+                }
+            }
+            if seen_to.is_none() {
+                if let Some(needle) = context.filters.to {
+                    seen_to = name_token_match(text, needle)
+                        .then(|| build_filter_match(context.ws, None, needle.to_string()))
+                        .or_else(|| {
+                            let facts = taint_facts();
+                            let mut tokens: Vec<&String> =
+                                facts.by_kind.values().flat_map(|tokens| tokens.iter()).collect();
+                            tokens.sort();
+                            tokens
+                                .into_iter()
+                                .find(|token| name_token_match(token, needle))
+                                .map(|token| build_filter_match(context.ws, None, token.clone()))
+                        })
+                        .or_else(|| {
+                            reachable
+                                .iter()
+                                .zip(func_names.iter())
+                                .find(|(_, name)| name_token_match(name, needle))
+                                .map(|(&func, name)| build_filter_match(context.ws, Some(func), name.clone()))
+                        });
+                }
+            }
+        }
+        result.accepted = accepted;
+        result.from_match = seen_from;
+        result.to_match = seen_to;
     } else {
-        resolution.chains = seed;
+        result.accepted = true;
     }
-    resolution
+    result
 }
 
 struct OccurrenceHitResult {
@@ -1295,7 +1118,6 @@ fn scan_occurrence_facts(
 fn collect_occurrence_hits<'workspace>(
     ws: &'workspace Workspace,
     chain_cache: &ChainCache<'workspace>,
-    edge_resolver: &mut CallEdgeResolver<'workspace>,
     options: OccurrenceHitPass<'_>,
     taint_candidates: &mut TaintCandidates,
 ) -> OccurrenceHitResult {
@@ -1312,7 +1134,6 @@ fn collect_occurrence_hits<'workspace>(
         occurrence_scan_skipped_for_id_lookup,
         partial_workspace,
         large_syntax_scan,
-        endpoint_corridor,
     } = options;
     // ----- 2. Non-decl hits: calls, assignments, strings, imports, args, decorators, refs.
     let mut hits: Vec<HitOut> = Vec::new();
@@ -1340,7 +1161,7 @@ fn collect_occurrence_hits<'workspace>(
                         text: String,
                         span: bonsai_common::Span,
                         containing: Option<(bonsai_common::FuncId, String)>,
-                        assignment_source_call: bool,
+                        _assignment_source_call: bool,
                         out: &mut Vec<HitOut>| {
         let (path, line, col) = format_span(&span, ws);
         // `--file` filter (substring) on the hit's source path.
@@ -1421,37 +1242,32 @@ fn collect_occurrence_hits<'workspace>(
             return;
         }
 
-        let resolution = resolve_occurrence_chains(
+        let resolution = evaluate_occurrence_graph_filters(
             &mut OccurrenceChainContext {
                 ws,
                 chain_cache,
-                edge_resolver: &mut *edge_resolver,
                 filters,
             },
             kind,
             &text,
-            span,
             containing_id,
         );
-        let OccurrenceChainResolution {
-            chains: chains_r,
-            call_targets: call_hit_targets,
+        let OccurrenceGraphFilterResult {
+            accepted,
             from_match: hit_from_match,
             to_match: hit_to_match,
         } = resolution;
-        // If chain filters rejected every chain AND the user explicitly
-        // asked for --from / --to, drop this hit entirely (they didn't
-        // want to see it).
-        if chains_r.is_empty() && (filters.from.is_some() || filters.to.is_some()) {
+        // Endpoint filters are semantic predicates over this symbol's exact
+        // graph neighborhood. A rejection suppresses the hit; no fallback
+        // path is guessed or enumerated.
+        if !accepted && (filters.from.is_some() || filters.to.is_some()) {
             return;
         }
-        let chains_preview: Vec<String> = chains_r
-            .iter()
-            .take(6)
-            .map(|c| disambiguated_func_names_for_output(ws, &c.funcs).join(" -> "))
-            .collect();
-        // Build full source-inlined flows for this hit, overriding the
-        // target function's MATCH annotation to point at the hit span.
+        let chains_preview = containing_id
+            .map(|func| disambiguated_func_names_for_output(ws, &[func]))
+            .unwrap_or_default();
+        // Build the bounded source evidence unit for this hit, overriding the
+        // containing function's MATCH annotation to point at the hit span.
         let sink_label = match kind {
             "call" => format!("MATCH: call {}", truncate(&text, 40)),
             "string" => format!("MATCH: string {}", truncate(&text, 40)),
@@ -1465,124 +1281,28 @@ fn collect_occurrence_hits<'workspace>(
             label: sink_label,
             marker_subjects: vec![text.clone()],
         };
-        // If there are no upstream chains (the containing function is a
-        // root, or there's no enclosing function) still emit one flow
-        // starting at the containing function itself. The synthetic
-        // chain's precision is `Exact` because it crosses no edges.
-        let working_chains_r: Vec<ResolvedChain> = if chains_r.is_empty() {
-            if let Some(c_id) = containing_id {
-                vec![ResolvedChain {
-                    funcs: vec![c_id],
-                    precision: bonsai_common::Precision::Exact,
-                }]
-            } else {
-                Vec::new()
-            }
-        } else {
-            chains_r.clone()
-        };
-        // Extend each chain along the syntactic call path from its
-        // tail — same contract as the decl-hit branch. Unresolvable
-        // downstream hops terminate the extension rather than getting
-        // appended as bogus `(over-approx)` edges.
-        let mut extended_chains_r: Vec<(Vec<bonsai_common::FuncId>, bonsai_common::Precision)> = Vec::new();
-        let extend_downstream = kind != "call" || !call_hit_targets.is_empty() || assignment_source_call;
-        if extend_downstream {
-            for chain in &working_chains_r {
-                let (paths, _) = edge_resolver.enumerate_call_paths_from_with_truncation(
-                    chain_cache,
-                    &chain.funcs,
-                    usize::MAX,
-                    usize::MAX,
-                );
-                extended_chains_r.extend(paths.into_iter().map(|path| (path, chain.precision)));
-            }
-        } else {
-            extended_chains_r.extend(
-                working_chains_r
-                    .iter()
-                    .map(|chain| (chain.funcs.clone(), chain.precision)),
-            );
-        }
-        if let Some(corridor) = endpoint_corridor {
-            extended_chains_r = extended_chains_r
-                .into_iter()
-                .filter_map(|(path, precision)| {
-                    corridor
-                        .project_path(&path, containing_id)
-                        .map(|path| (path, precision))
-                })
-                .collect();
-        }
-        if filters.from.is_some() || filters.to.is_some() {
-            // Filter enumerated paths, not the raw upstream chains:
-            // only paths that reach the `--to` sink (or contain the
-            // `--from` source) survive. The earlier raw-chain filter
-            // already passed each upstream stem; this second pass
-            // drops DFS branches that go somewhere the filter doesn't
-            // care about.
-            extended_chains_r.retain(|(path, _)| {
-                let mut chain_names: Vec<String> = path.iter().map(|&f| func_display_name(ws, f)).collect();
-                if extend_downstream {
-                    if let Some(&tail) = path.last() {
-                        for c in chain_cache.callees_of_resolved(tail) {
-                            let name = func_display_name(ws, c);
-                            if !name.is_empty() && !chain_names.contains(&name) {
-                                chain_names.push(name);
-                            }
-                        }
-                    }
+        // A matched callable owns one exact self unit. It crosses no call
+        // edge, so rendering it through a parallel chain pipeline would add
+        // scheduling and allocations without adding evidence.
+        let mut flows: Vec<InspectFlowRendered> = containing_id
+            .and_then(|func| {
+                if taint_flow {
+                    taint_candidates.insert(func);
                 }
-                // Path-only structural facts avoid sibling-branch
-                // leakage while preserving kind-filter matches on
-                // intermediate arguments/calls.
-                let taint_facts_fn = || chain_cache.chain_structural_tokens(path);
-                bonsai_sdk::chain_matches_filters_for_hit(
-                    inspect_filter_hit(&text, kind),
-                    &chain_names,
-                    &taint_facts_fn,
-                    filters.to_sdk(),
-                )
-            });
-            if extended_chains_r.is_empty() {
-                return;
-            }
-        }
-        if taint_flow {
-            for (path, _) in &extended_chains_r {
-                if let Some(&entry) = path.first() {
-                    taint_candidates.insert(entry);
-                }
-            }
-        }
-        let call_spans: Vec<Vec<Option<bonsai_common::Span>>> = extended_chains_r
-            .iter()
-            .map(|(chain, _)| edge_resolver.call_spans_for_chain(chain))
-            .collect();
-        // Parallel render — see the decl-hit path above for the
-        // determinism argument. Same shape, same guarantee.
-        use rayon::prelude::*;
-        let mut flows: Vec<InspectFlowRendered> = extended_chains_r
-            .par_iter()
-            .zip(call_spans.par_iter())
-            .enumerate()
-            .filter_map(|(_i, ((extended_r, prec), spans))| {
-                let match_idx = containing_id
-                    .and_then(|f| extended_r.iter().position(|&g| g == f))
-                    .unwrap_or(extended_r.len().saturating_sub(1));
                 render_flow_with_cached_call_spans(
                     ws,
-                    extended_r,
-                    spans,
+                    &[func],
+                    &[None],
                     0,
                     FLOW_LABEL_PLACEHOLDER,
-                    *prec,
-                    Some((match_idx, match_override.clone())),
+                    bonsai_common::Precision::Exact,
+                    Some((0, match_override)),
                     filters,
                     true,
                     full_source_for_large_bodies,
                 )
             })
+            .into_iter()
             .collect();
         dedup_structural_flows(&mut flows);
         if flows.is_empty() && (filters.from.is_some() || filters.to.is_some()) {
@@ -2449,9 +2169,6 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     let query_graph = endpoint_fallback_graph
         .clone()
         .or_else(|| target_fallback_graph.clone());
-    let endpoint_corridor = endpoint_funcs
-        .as_ref()
-        .and_then(|(from, to)| ExactEndpointCorridor::new(from, to));
     if endpoint_workspace.is_some() || endpoint_fallback_graph.is_some() {
         // The compiler corridor already resolved both qualified endpoints to
         // exact FuncIds. Inspect's presentation matcher operates on short
@@ -2471,16 +2188,6 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     // `--no-cache` / `BONSAI_NO_CACHE` swaps this for a pass-through
     // variant that always takes the cold path.
     let chain_cache = build_chain_cache(ws, query_graph.clone());
-    // Edge resolvability is queried heavily when `inspect` extends raw
-    // upstream chains into concrete downstream call paths. Cache the
-    // per-file alias maps and per-edge span lookups for this invocation;
-    // otherwise hub queries such as Redis's `--query system` repeatedly
-    // rescan the same parse trees while checking the same edges.
-    let mut edge_resolver = query_graph.map_or_else(
-        || CallEdgeResolver::new(ws),
-        |graph| CallEdgeResolver::with_resolved_graph(ws, graph),
-    );
-
     // When no query is supplied, `inspect` becomes a filter-driven
     // enumeration. Declaration hits stay opt-in in this mode, but
     // occurrence hits should still be seeded by the concrete endpoint
@@ -2642,7 +2349,6 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     let decl_hits = collect_decl_hits(
         ws,
         &chain_cache,
-        &mut edge_resolver,
         DeclHitPass {
             enabled: emit_decls,
             files_in_path_order: &files_in_path_order,
@@ -2651,14 +2357,12 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             taint_flow,
             graph_flows_enabled,
             full_source_for_large_bodies,
-            endpoint_corridor: endpoint_corridor.as_ref(),
         },
         &mut taint_candidates,
     );
     let occurrence_hits = collect_occurrence_hits(
         ws,
         &chain_cache,
-        &mut edge_resolver,
         OccurrenceHitPass {
             files_in_path_order: &files_in_path_order,
             occurrence_matcher: &occurrence_matcher,
@@ -2672,7 +2376,6 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             occurrence_scan_skipped_for_id_lookup,
             partial_workspace,
             large_syntax_scan,
-            endpoint_corridor: endpoint_corridor.as_ref(),
         },
         &mut taint_candidates,
     );
@@ -2686,7 +2389,6 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         taint_candidates.target_spans.len(),
         syntax_inspect_started.elapsed().as_secs_f64()
     );
-    drop(edge_resolver);
     drop(chain_cache);
     drop(global);
     if taint_flow {
@@ -3743,11 +3445,9 @@ fn dedup_taint_flows(flows: &mut Vec<InspectTaintFlow>) {
     flows.retain(|flow| seen.insert(flow.taint_id.clone()));
 }
 
-/// Callgraph resolution can discover the same exact FuncId path through
-/// several equivalent evidence edges (for example, an override edge plus an
-/// inherited receiver edge). The compiler-identity `F:` id proves those
-/// rendered paths are the same; retain the first deterministic occurrence so
-/// paging, summaries, and output size represent unique execution paths.
+/// Equivalent compiler evidence can be discovered through several indexed
+/// facts. The compiler-identity `F:` id proves those units are the same;
+/// retain the first deterministic occurrence before paging.
 fn dedup_structural_flows(flows: &mut Vec<InspectFlowRendered>) {
     let mut seen = ahash::AHashSet::with_capacity(flows.len());
     flows.retain(|flow| seen.insert(flow.flow_id.clone()));
@@ -3926,7 +3626,7 @@ fn paged_decl_hit(hit: &InspectOut, flow: Option<&InspectFlowRendered>) -> Inspe
         params: hit.params.clone(),
         direct_callers: hit.direct_callers.clone(),
         callees: hit.callees.clone(),
-        graph_flows_evaluated: hit.graph_flows_evaluated,
+        graph_evidence_evaluated: hit.graph_evidence_evaluated,
         flows: flow.into_iter().cloned().collect(),
         groups: Vec::new(),
         summary: hit.summary.clone(),
@@ -6306,25 +6006,30 @@ fn render_inspect_text(out: &InspectOut, render: &InspectRenderOptions, view: Re
     if !out.callees.is_empty() {
         cli_println!("   {} {}", u.dim("outgoing calls:"), out.callees.join(", "));
     }
-    if !out.graph_flows_evaluated {
+    if !out.graph_evidence_evaluated {
         cli_println!(
             "\n   {}",
-            u.dim("(static entry-point chains not requested; pass --graph-flow to evaluate them)")
+            u.dim(
+                "(structural evidence not requested; pass --graph-flow to include the bounded callable unit)"
+            )
         );
         return;
     }
     if out.flows.is_empty() {
         cli_println!(
             "\n   {}",
-            u.dim("(no entry-point call chain reaches this symbol statically)")
+            u.dim("(no callable-scoped structural evidence is available for this match)")
         );
         return;
     }
     cli_println!(
         "\n   {}",
         u.dim(&format!(
-            "{} flow(s) reaching {} — {} unique entry points, max depth {}",
-            out.summary.total_flows, out.symbol, out.summary.unique_entry_points, out.summary.max_chain_depth
+            "{} structural evidence unit(s) for {} — {} symbol root(s), at most {} function(s) per unit",
+            out.summary.evidence_units,
+            out.symbol,
+            out.summary.unique_symbol_roots,
+            out.summary.max_functions_per_unit
         ))
     );
     match view {
@@ -6359,47 +6064,6 @@ fn render_inspect_text(out: &InspectOut, render: &InspectRenderOptions, view: Re
             }
         }
     }
-}
-
-/// Resolve a call occurrence to the workspace callee(s) it invokes.
-///
-/// Occurrence hits must use the already-built semantic graph, keyed by
-/// the exact call-site span. Re-resolving by name here can bind a hit
-/// like `external.helper()` to an unrelated sibling call `helper()` in
-/// the same function.
-fn resolve_call_hit_targets(
-    chain_cache: &ChainCache<'_>,
-    caller_func: bonsai_common::FuncId,
-    call_span: bonsai_common::Span,
-) -> Vec<(bonsai_common::FuncId, bonsai_common::Precision)> {
-    let mut targets: Vec<(bonsai_common::FuncId, bonsai_common::Precision)> = chain_cache
-        .resolved_graph()
-        .callees_of(caller_func)
-        .filter(|edge| edge.precision.is_semantic() && spans_overlap(edge.span, call_span))
-        .map(|edge| (edge.to, edge.precision))
-        .collect();
-    targets.sort_by(|a, b| a.0.raw().cmp(&b.0.raw()).then_with(|| a.1.cmp(&b.1)));
-    targets.dedup_by_key(|target| target.0);
-    targets
-}
-
-fn spans_overlap(left: bonsai_common::Span, right: bonsai_common::Span) -> bool {
-    left.file == right.file && left.start < right.end && right.start < left.end
-}
-
-fn dedupe_chains_keep_best_precision(mut chains: Vec<ResolvedChain>) -> Vec<ResolvedChain> {
-    chains.sort_by(|a, b| a.funcs.cmp(&b.funcs).then_with(|| a.precision.cmp(&b.precision)));
-    let mut deduped: Vec<ResolvedChain> = Vec::with_capacity(chains.len());
-    for chain in chains {
-        if deduped
-            .last()
-            .is_some_and(|previous| previous.funcs == chain.funcs)
-        {
-            continue;
-        }
-        deduped.push(chain);
-    }
-    deduped
 }
 
 fn format_filter_match_cell(ui: &Ui, matched: Option<&FilterMatch>) -> String {

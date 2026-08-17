@@ -1,30 +1,25 @@
-//! Map a browse-row location to the flow IDs whose upstream chains
-//! end in the row's enclosing function.
+//! Map a browse-row location to stable ids for its enclosing symbol summary.
 //!
 //! Every browse command (`defs`, `calls`, `imports`, `vars`,
 //! `strings`, `args`, `classes`, `refs`, `search`) surfaces a row
-//! at `(file, line)`. [`FlowAnnotator::labels_for`] returns the
-//! pre-computed `F:<16-hex>` ids for that row's enclosing function
-//! — the same IDs `inspect` emits, so a user can paste one into
-//! `inspect --flow F:<16-hex>` to expand the chain.
+//! at `(file, line)`. [`SummaryAnnotator::labels_for`] returns the
+//! pre-computed `F:<16-hex>` id for that row's enclosing function — the same
+//! identity `inspect` emits for its bounded compiler evidence packet.
 //!
 //! The per-function id set is built lazily by
-//! [`bonsai_workspace::flow_ids::FlowIdCache::labels_for_func`],
-//! so this struct answers "which function is this location inside?"
-//! and then reads the shared cache. Hub functions may return a
-//! bounded prefix with a trailing ellipsis. Renderers must surface
-//! that as incomplete flow-label evidence; `inspect --query ... --all`
-//! is the full expansion surface.
+//! [`bonsai_workspace::flow_ids::FlowIdCache::id_for_func`], so this
+//! struct answers "which function is this location inside?" and then reads
+//! the shared cache. It never walks or enumerates graph paths.
 
 use bonsai_common::{FileId, FuncId};
 use bonsai_workspace::Workspace;
 use parking_lot::Mutex;
 use std::sync::OnceLock;
 
-/// Line-accurate resolver from `(file_path, line)` to flow-id
-/// labels. One instance per CLI invocation; per-row calls are O(1)
-/// in the workspace flow-id cache.
-pub struct FlowAnnotator<'ws> {
+/// Line-accurate resolver from `(file_path, line)` to symbol-summary
+/// ids. One instance per CLI invocation; per-row calls are O(1) in the
+/// workspace stable-id cache.
+pub struct SummaryAnnotator<'ws> {
     ws: &'ws Workspace,
     /// Lazy `path-string → FileId` index, populated on first use.
     file_by_path: OnceLock<ahash::AHashMap<String, FileId>>,
@@ -44,7 +39,7 @@ struct FuncLineRange {
     func: FuncId,
 }
 
-impl<'ws> FlowAnnotator<'ws> {
+impl<'ws> SummaryAnnotator<'ws> {
     /// Build a new annotator. Indexes are lazy — first call
     /// pays the indexing cost.
     #[must_use]
@@ -57,50 +52,28 @@ impl<'ws> FlowAnnotator<'ws> {
     }
 
     /// Compact display string for a row at `(file_path, line)`.
-    /// Space-joined `F:<16-hex>` ids with a trailing `…` when the
-    /// enclosing function's chain enumeration hit its budget;
-    /// empty when the row isn't inside any indexed function or no
-    /// upstream caller exists.
+    /// Space-joined `F:<16-hex>` ids, or empty when the row is not inside an
+    /// indexed callable.
     pub fn labels_for(&self, file_path: &str, line: u32) -> String {
         let Some(func) = self.enclosing_func(file_path, line) else {
             return String::new();
         };
-        let ids = self
-            .ws
-            .flow_ids()
-            .labels_for_func(func, self.ws.db(), self.ws.vfs());
-        if ids.is_empty() {
-            return String::new();
-        }
-        let mut s = ids.join(" ");
-        if self.ws.flow_ids().was_truncated(func) {
-            s.push('…');
-        }
-        s
+        let id = self.ws.flow_ids().id_for_func(func, self.ws.db(), self.ws.vfs());
+        id.to_string()
     }
 
-    /// Look up flow labels by SYMBOL NAME. Used by browse rows
+    /// Look up summary ids by symbol name. Used by browse rows
     /// whose "enclosing function" is actually the symbol itself
     /// — e.g. an import statement (`from .x import foo`) which
-    /// lives at module scope but logically belongs to every flow
-    /// that terminates in `foo`. Returns the same space-joined
+    /// lives at module scope but logically belongs to the callable `foo`.
+    /// Returns the same space-joined
     /// `F:<16-hex>` format as `labels_for`.
     pub fn labels_for_symbol(&self, symbol_name: &str) -> String {
         let Some(func) = self.ws.lookup_function(symbol_name) else {
             return String::new();
         };
-        let ids = self
-            .ws
-            .flow_ids()
-            .labels_for_func(func, self.ws.db(), self.ws.vfs());
-        if ids.is_empty() {
-            return String::new();
-        }
-        let mut s = ids.join(" ");
-        if self.ws.flow_ids().was_truncated(func) {
-            s.push('…');
-        }
-        s
+        let id = self.ws.flow_ids().id_for_func(func, self.ws.db(), self.ws.vfs());
+        id.to_string()
     }
 
     /// Linear scan through the file's function ranges. Ranges are

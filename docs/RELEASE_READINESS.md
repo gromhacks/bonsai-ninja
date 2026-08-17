@@ -6,11 +6,11 @@ not duplicate dated performance history.
 
 ## Status
 
-The full local release pass completed on 2026-08-16. Documentation claims,
+The full local release pass completed on 2026-08-17. Documentation claims,
 links, command examples, current repository counts, and the rulepack validator
 were rechecked on that date. The release candidate also passed 227
 release security unit tests, 34 release rulepack conformance tests, 80
-architecture invariants, 1,280 command/switch checks, standalone execution,
+architecture invariants, 1,320 command/switch checks, standalone execution,
 and the complete Elasticsearch gate on that date. Local `main` has no known
 failing release gate.
 Publishing still requires the tag workflow because signing, packaging, and
@@ -40,7 +40,7 @@ The final local pass completed these checks with zero failures:
 | IDG, taint, resolver, callgraph, workspace, and conformance suites | Passed |
 | Full optimized security package | Passed |
 | Rulepack taint replay | 0 errors, 0 warnings, 0 misses |
-| Release CLI command/language matrix | 1,280 combinations passed |
+| Release CLI command/language matrix | 1,320 combinations passed |
 | CLI end-to-end suite | 117 tests passed |
 | Layering and public API snapshots | Passed |
 | Hardcoded-knowledge boundary | 0 production violations |
@@ -50,14 +50,14 @@ The final local pass completed these checks with zero failures:
 | Full reachable-history secret scan | Passed |
 | GitHub Actions syntax and immutable action pins | Passed |
 | Cargo and public repository metadata | Passed |
+| Release binary build-path privacy | Passed |
 | Documentation structure, links, navigation, binary help claims, and skill copies | Passed |
 | Native archive checksum and fresh-profile relocation smoke | Passed on macOS arm64 |
-| Build-artifact size gate | 31.63 GiB / 32 GiB limit |
+| Build-artifact size gate | 13.01 GiB / 32 GiB combined limit (workspace and privacy-safe release targets) |
 
-The build-artifact measurement is the transient peak after the full debug test
-matrix and optimized CLI build. Final cleanup removes Cargo intermediates and
-retains only the release binary; generated analysis caches and test outputs are
-not release inputs.
+The build-artifact measurement was taken after the full debug test matrix,
+release rustdoc, and optimized CLI build. Generated analysis caches and test
+outputs are not release inputs.
 
 The rulepack replay command was:
 
@@ -166,32 +166,33 @@ and their generated workspace caches are not retained after the gate.
 ## Large-workspace scale gate
 
 The required release test uses the sibling 30,055-source Elasticsearch
-checkout pinned by the release workflow at `e9741368da0`. The measured
-empty-cache run rebuilt the semantic generation in 600.59
-seconds. The remaining four scenarios completed in 228.93 seconds
-under the 3 GiB scheduler.
+checkout pinned by the release workflow at `e9741368da0`. The controlled
+empty-cache semantic prewarm remains 600.59 seconds. On August 17, the
+complete five-scenario gate finished in 203.75 seconds under the 3 GiB
+scheduler; the isolated warm production-taint command also recorded
+682,688,512 bytes maximum RSS with zero swaps.
 
 | Operation | Time | Enforced SLO |
 |---|---:|---:|
 | Cold semantic generation | 600.59 s | completion required |
-| Fresh-process semantic reuse | 2.49 s | 15 s |
-| Default inspect | 7.29 s | 30 s |
-| Exact raw-taint inspect | 26.66 s | 30 s |
-| Fresh-cache production taint | 30.95 s | 45 s |
-| Warm production taint | 28.60 s | 30 s |
-| `tree --max-depth 1` | 0.02 s | 30 s |
-| Search | 4.05 s | 30 s |
-| Definitions | 14.06 s | 30 s |
-| Imports | 7.81 s | 30 s |
-| Classes | 8.23 s | 30 s |
-| Entry points | 28.23 s | 30 s |
-| Calls | 3.70 s | 30 s |
-| Arguments | 3.72 s | 30 s |
-| Scoped `read-file` | 1.51 s | 30 s |
-| Source inventory | 3.62 s | 30 s |
-| High-severity sink inventory | 25.66 s | 30 s |
-| Sanitizer inventory | 21.60 s | 30 s |
-| Dependency inventory | 10.69 s | 30 s |
+| Fresh-process semantic reuse | 2.33 s | 15 s |
+| Default inspect | 7.82 s | 30 s |
+| Exact raw-taint inspect | 26.33 s | 30 s |
+| Fresh-cache production taint | 29.95 s | 45 s |
+| Warm production taint | 10.57 s | 30 s |
+| `tree --max-depth 1` | 0.04 s | 30 s |
+| Search | 3.92 s | 30 s |
+| Definitions | 13.56 s | 30 s |
+| Imports | 7.83 s | 30 s |
+| Classes | 8.60 s | 30 s |
+| Entry points | 28.02 s | 30 s |
+| Calls | 3.62 s | 30 s |
+| Arguments | 3.67 s | 30 s |
+| Scoped `read-file` | 1.58 s | 30 s |
+| Source inventory | 3.31 s | 30 s |
+| High-severity sink inventory | 19.74 s | 30 s |
+| Sanitizer inventory | 15.52 s | 30 s |
+| Dependency inventory | 11.07 s | 30 s |
 
 Command:
 
@@ -226,7 +227,17 @@ callgraph, 1,505,969,092 bytes of linkage, 224,728,416 bytes of retrieval, and
 4,160,252,580 bytes of IDG. Ordinary commands compute exact requested facts
 on demand; users only pay this full prewarm when they explicitly run
 `index --semantic`. A fresh process reused the completed semantic generation
-in 2.49 seconds.
+in 2.33 seconds.
+
+The August 17 security-planning correction restored immutable compiler-object
+attachment for path-filtered workspaces that retain deterministic
+full-workspace `FileId`s. Before the fix, a warm production profile silently
+fell back to Tree-sitter declaration/flow lowering for 13,270 raw-anchor
+candidates. The corrected planner validates each selected id, path, adapter,
+content hash, and SHA-256 digest, decodes compact syntax headers, and opens
+only the five surviving bodies. On the same cache and host, warm production
+taint fell from 29.44 to 11.87 seconds in isolated runs; maximum RSS fell from
+2,067,922,944 to 682,688,512 bytes. The enforced gate measured 10.57 seconds.
 
 Commit `dd37c87afca7c4d5f606906410d3a02777b7675a` replaced compiler-object
 batch barriers with a continuous, source-weighted worklist. Completed payloads

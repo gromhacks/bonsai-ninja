@@ -285,6 +285,15 @@ ordinal with sparse VFS slots. A one-file or candidate-only workspace can
 therefore decode the exact same compiler object as a complete workspace
 without reparsing or changing symbol identity.
 
+Scoped broad analysis attaches an existing immutable compiler-object
+generation only after every selected raw-anchor candidate matches its stable
+file id, workspace-relative path, adapter, fast content hash, and SHA-256
+digest. Attachment is read-only: a missing or stale generation falls back to
+the owning Tree-sitter adapter and is never repaired by eagerly lowering all
+candidate bodies before syntax-header filtering. This keeps import and compact
+syntax-target planning exact while avoiding a full compiler pass in a warm
+path-filtered workspace.
+
 ```mermaid
 flowchart LR
   S[Immutable source snapshot] --> T[Language Tree-sitter adapter]
@@ -693,18 +702,18 @@ callable aliases, receiver-projected callable storage (`obj.cb`,
 indirect callback calls stay resolver-backed instead of becoming
 name-only fan-out.
 
-`path` builds a shared semantic path graph from the cached resolved
-callgraph plus warmed IDG cross-call edges when an IDG sidecar has been
-hydrated. It then uses `enumerate_paths_resolved`: a cycle-safe, ranked
-source-to-target walk over exact/narrowed edges only. The default walk is
-uncapped; explicit diagnostic cutoffs report incompleteness. It carries edge
-precision through each path and reports truncation, missing IDG facts, or
-resolution gaps as incompleteness rather than widening missing calls into
-guessed evidence. When the target pattern matches an indexed call site but
-no callable declaration (for example an external API), `path` resolves the
-semantic path only to the enclosing callable and attaches `terminal_call`
-evidence for the call site. It never fabricates a callee node for the
-external API.
+`path` builds an exact compressed corridor from the cached resolved callgraph
+plus warmed IDG cross-call edges when an IDG sidecar has been hydrated.
+Forward/reverse fixed points retain every exact/narrowed node and edge that is
+both reachable from a selected source and able to reach a selected target.
+The command never enumerates concrete path combinations, so diamonds and
+cycles remain linear in graph size. Edge precision and resolver provenance
+stay attached to the compressed relation. Missing IDG facts or resolution
+gaps mark the result incomplete rather than widening missing calls into
+guessed evidence. When the target pattern matches an indexed call site but no
+callable declaration (for example an external API), `path` retains the
+corridor only to the enclosing callable and attaches `terminal_call` evidence
+for the call site. It never fabricates a callee node for the external API.
 
 Targeted `trace --from/--to` runs over the selected semantic corridor. Calls
 outside that corridor are intentionally omitted evidence, not unresolved
@@ -970,10 +979,12 @@ the same rules appear different.
 
 ## Query / browse / trace
 
-**`crates/inspect`** powers `inspect`: every call chain reaching a target,
-source-inlined with numbered annotations. Backed by a chain cache so
-repeated invocations stay fast. Structural `F:`/`G:` ids hash the exact
-compiler chain. The CLI records the full originating query provenance,
+**`crates/inspect`** supplies matching, filtering, stable-id, and bounded memo
+primitives for `inspect`. Structural graph-flow output owns one source-backed
+evidence unit per matching callable; it does not enumerate recursive caller
+paths. `symbol-summary` exposes the corresponding declaration packet with
+direct resolved neighbors and explicit unresolved calls. Structural `F:`/`G:`
+ids hash exact compiler identities. The CLI records the full originating query provenance,
 including qualified from/to identities and kind/file/function filters, so a
 later `show` reopens the same scoped corridor. Lexical-tail matching used
 inside an already-proven corridor is presentation state and must never replace
@@ -981,7 +992,7 @@ that provenance.
 
 **`crates/browse`** powers the browse commands (`defs`, `calls`,
 `imports`, `refs`, `vars`, `strings`, `args`, `operations`, `classes`,
-`comments`, `search`, `path`, `slice`, `read-file`, `tree`). Most commands
+`comments`, `search`, `symbol-summary`, `path`, `slice`, `read-file`, `tree`). Most commands
 share the same plumbing: read facts from the db, rank query-shaped rows
 before pagination, paginate, format. The shared textual relevance helper
 ranks plain filters as exact > prefix > substring while regex filters

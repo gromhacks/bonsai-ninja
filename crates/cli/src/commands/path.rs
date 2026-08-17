@@ -1,8 +1,9 @@
-//! `bonsai-ninja path` — ranked structural call paths between two functions.
+//! `bonsai-ninja path` — exact compressed callgraph corridor between endpoints.
 
 use anyhow::Result;
-use bonsai_sdk::{PathFilters, PathOutcome, PathRow};
+use bonsai_sdk::{EdgeRecord, PathFilters, PathFunctionRow, PathOutcome, PathTerminalCallRow};
 use comfy_table::Cell;
+use serde::Serialize;
 
 use crate::args::BrowseFormat;
 use crate::footer::render_paging_footer;
@@ -32,11 +33,8 @@ pub(crate) fn cmd_path(root: &std::path::Path, options: PathCommandOptions<'_>) 
         from: options.from,
         to: options.to,
         regex: options.regex,
-        max_paths: 0,
-        max_depth: 0,
-        max_probes: 0,
     };
-    let stage = progress::ScopedSpinner::new("enumerating semantic paths");
+    let stage = progress::ScopedSpinner::new("projecting semantic corridor");
     let endpoint_prefilter = !options.regex
         && options.from.trim().len() >= 3
         && options.to.trim().len() >= 3
@@ -56,7 +54,7 @@ pub(crate) fn cmd_path(root: &std::path::Path, options: PathCommandOptions<'_>) 
             open_project_index_matching_any_literal(root, &literals)?
         };
         let scoped = project.browse().paths(filters)?;
-        if scoped.paths.is_empty() {
+        if scoped.edges.is_empty() {
             let (project, _footer) = open_project_path_query(root)?;
             project.browse().paths(filters)?
         } else if scoped
@@ -85,17 +83,18 @@ pub(crate) fn cmd_path(root: &std::path::Path, options: PathCommandOptions<'_>) 
         ("to", options.to),
         ("regex", if options.regex { "1" } else { "0" }),
     ]);
+    let items = path_graph_items(&outcome);
     match options.format {
         BrowseFormat::Json => emit_path_json(root, &outcome, &options.paging_cfg, filters_hash),
         BrowseFormat::Text => page_cache::emit_paged_text(
             root,
-            &outcome.paths,
+            &items,
             &options.paging_cfg,
             "path",
             filters_hash,
-            path_cost,
-            |paths, info, _cfg| {
-                render_path_text(&outcome, paths);
+            path_item_cost,
+            |items, info, _cfg| {
+                render_path_text(&outcome, items);
                 render_paging_footer(info, "bonsai-ninja path <workspace> --from <A> --to <B>");
                 Ok(())
             },
@@ -137,12 +136,12 @@ fn emit_path_json(
         || crate::filter::active().is_active();
     page_cache::emit_paged_text(
         root,
-        &outcome.paths,
+        &path_graph_items(outcome),
         paging_cfg,
         "path",
         filters_hash,
-        path_cost,
-        |paths, info, _cfg| {
+        path_item_cost,
+        |items, info, _cfg| {
             if !force_wrapper && info.page_number == 1 && info.is_last {
                 cli_println!("{}", serde_json::to_string_pretty(outcome)?);
                 return Ok(());
@@ -159,13 +158,12 @@ fn emit_path_json(
                 "idg_semantic_edges": outcome.idg_semantic_edges,
                 "from_matches": outcome.from_matches,
                 "to_matches": outcome.to_matches,
-                "max_paths": outcome.max_paths,
-                "max_depth": outcome.max_depth,
-                "max_probes": outcome.max_probes,
-                "path_count": outcome.path_count,
+                "representation": outcome.representation,
+                "node_count": outcome.node_count,
+                "edge_count": outcome.edge_count,
                 "analysis_complete": reasons.is_empty(),
                 "analysis_incomplete_reasons": reasons,
-                "paths": paths,
+                "items": items,
                 "page": page_info_to_json(info),
             });
             cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
@@ -174,7 +172,38 @@ fn emit_path_json(
     )
 }
 
-fn render_path_text(outcome: &PathOutcome, paths: &[PathRow]) {
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", content = "evidence", rename_all = "snake_case")]
+enum PathGraphItem {
+    Node(PathFunctionRow),
+    Edge(Box<EdgeRecord>),
+    TerminalCall(PathTerminalCallRow),
+}
+
+fn path_graph_items(outcome: &PathOutcome) -> Vec<PathGraphItem> {
+    outcome
+        .nodes
+        .iter()
+        .cloned()
+        .map(PathGraphItem::Node)
+        .chain(
+            outcome
+                .edges
+                .iter()
+                .cloned()
+                .map(|edge| PathGraphItem::Edge(Box::new(edge))),
+        )
+        .chain(
+            outcome
+                .terminal_calls
+                .iter()
+                .cloned()
+                .map(PathGraphItem::TerminalCall),
+        )
+        .collect()
+}
+
+fn render_path_text(outcome: &PathOutcome, items: &[PathGraphItem]) {
     let u = ui();
     cli_println!();
     cli_println!(
@@ -182,15 +211,22 @@ fn render_path_text(outcome: &PathOutcome, paths: &[PathRow]) {
         u.heading(&format!("▸ path {} → {}", outcome.from, outcome.to))
     );
     cli_println!(
-        "  {} {}    {} {}    {} {}    {} {}",
+        "  {} {}    {} {}    {} {}    {} {}    {} {}",
         u.label("sources"),
         u.name(&outcome.from_matches.to_string()),
         u.label("targets"),
         u.name(&outcome.to_matches.to_string()),
-        u.label("paths"),
-        u.name(&outcome.path_count.to_string()),
+        u.label("nodes"),
+        u.name(&outcome.node_count.to_string()),
+        u.label("edges"),
+        u.name(&outcome.edge_count.to_string()),
         u.label("status"),
         analysis_status(outcome.analysis_complete)
+    );
+    cli_println!(
+        "  {} {}",
+        u.label("representation"),
+        u.name(outcome.representation)
     );
     if !outcome.backends.is_empty() {
         cli_println!(
@@ -202,7 +238,7 @@ fn render_path_text(outcome: &PathOutcome, paths: &[PathRow]) {
     let idg_status = if outcome.idg_available {
         u.name("available")
     } else {
-        u.warn("unavailable")
+        u.dim("not loaded (optional)")
     };
     cli_println!(
         "  {} {} · {}",
@@ -217,67 +253,52 @@ fn render_path_text(outcome: &PathOutcome, paths: &[PathRow]) {
             cli_println!("{line}");
         }
     }
-    if paths.is_empty() {
+    if items.is_empty() {
         cli_println!();
-        cli_println!("{}", u.dim("(no semantic path matched)"));
+        cli_println!("{}", u.dim("(no semantic corridor matched)"));
         return;
     }
 
-    for path in paths {
-        cli_println!();
-        cli_println!(
-            "{} {}  {}",
-            u.label("PATH"),
-            u.name(&path.path_id),
-            u.dim(&format!("[{} hop(s), precision {}]", path.hops, path.precision))
-        );
-        let mut table = u.table(&["#", "function", "location", "via call"]);
-        for (idx, func) in path.functions.iter().enumerate() {
-            let via = path.edges.get(idx).map_or_else(
-                || String::from("-"),
-                |edge| {
-                    format!(
-                        "{} at {}:{}",
-                        edge.call_text,
-                        short_file(&edge.call_file),
-                        edge.call_line
-                    )
-                },
-            );
-            table.add_row(vec![
-                Cell::new(u.dim(&(idx + 1).to_string())),
-                Cell::new(u.name(&func.name)),
-                Cell::new(u.path(&format!("{}:{}", short_file(&func.file), func.line))),
-                Cell::new(u.dim(&via)),
-            ]);
-        }
-        cli_println!("{table}");
-        if let Some(call) = &path.terminal_call {
-            cli_println!(
-                "  {} {} at {}:{}:{} inside {}",
-                u.label("terminal call"),
-                u.name(&call.name),
-                u.path(&short_file(&call.file)),
-                call.line,
-                call.column,
-                u.name(&call.enclosing_function)
-            );
-        }
+    let mut table = u.table(&["kind", "from / symbol", "to / evidence", "location"]);
+    for item in items {
+        match item {
+            PathGraphItem::Node(node) => table.add_row(vec![
+                Cell::new(u.kind("node")),
+                Cell::new(u.name(&node.name)),
+                Cell::new(u.dim("compiler declaration")),
+                Cell::new(u.path(&format!("{}:{}", short_file(&node.file), node.line))),
+            ]),
+            PathGraphItem::Edge(edge) => table.add_row(vec![
+                Cell::new(u.kind("edge")),
+                Cell::new(u.name(&edge.caller_name)),
+                Cell::new(format!("{} · {}", edge.callee_name, edge.resolver_stage)),
+                Cell::new(u.path(&format!(
+                    "{}:{}:{}",
+                    short_file(&edge.call_file),
+                    edge.call_line,
+                    edge.call_column
+                ))),
+            ]),
+            PathGraphItem::TerminalCall(call) => table.add_row(vec![
+                Cell::new(u.kind("terminal-call")),
+                Cell::new(u.name(&call.enclosing_function)),
+                Cell::new(call.name.clone()),
+                Cell::new(u.path(&format!(
+                    "{}:{}:{}",
+                    short_file(&call.file),
+                    call.line,
+                    call.column
+                ))),
+            ]),
+        };
     }
+    cli_println!("{table}");
 }
 
-fn path_cost(path: &PathRow) -> u64 {
-    let funcs = path
-        .functions
-        .iter()
-        .map(|func| func.name.len() + func.file.len() + 24)
-        .sum::<usize>();
-    let edges = path
-        .edges
-        .iter()
-        .map(|edge| edge.call_text.len() + edge.call_file.len() + 32)
-        .sum::<usize>();
-    (funcs + edges + 128) as u64 + paging::TABLE_ROW_CHROME_BYTES
+fn path_item_cost(item: &PathGraphItem) -> u64 {
+    serde_json::to_string(item).map_or(256, |encoded| {
+        encoded.len() as u64 + paging::TABLE_ROW_CHROME_BYTES
+    })
 }
 
 fn analysis_status(complete: bool) -> String {

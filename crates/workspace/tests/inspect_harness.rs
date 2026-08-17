@@ -178,12 +178,12 @@ fn short_tail(name: &str) -> &str {
 }
 
 // ---------------------------------------------------------------------------
-// Chain enumeration (mirrors CLI `enumerate_chains`)
+// Test-only concrete path oracle
 // ---------------------------------------------------------------------------
 
-/// Walk every incoming-edge from `target` back to unreached roots and
-/// return one chain per (entry, path) pair. The chains read top-down:
-/// `[entry, …, target]`.
+/// Walk incoming edges from `target` back to roots for small adapter fixtures.
+/// Production commands preserve this relation as a compressed graph; this
+/// bounded concrete walker exists only as an independent test oracle.
 pub fn enumerate_chains(ws: &Workspace, target: &str, max_chains: usize) -> Vec<Vec<String>> {
     let callers = build_callers_map(ws);
     let mut results: Vec<Vec<String>> = Vec::new();

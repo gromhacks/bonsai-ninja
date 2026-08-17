@@ -107,21 +107,22 @@ fn inspect_fuzzy_substring_matches_decl() {
 }
 
 #[test]
-fn inspect_request_shows_downstream_chain() {
+fn inspect_request_keeps_graph_evidence_bounded_to_the_matching_callable() {
     if require_binary_built().is_none() {
         return;
     }
     let ws = ws_path();
     let out = run(&["inspect", ws.to_str().unwrap(), "request", "--graph-flow"]);
-    // The request match lives in handle_request, which is the root. Its
-    // downstream should reach run_admin_command and os.system transitively.
+    // The request match lives in handle_request. Graph-flow owns one bounded
+    // callable unit and exposes direct calls without recursively expanding
+    // their descendants.
     assert!(
-        out.contains("run_admin_command"),
-        "expected downstream to include run_admin_command: {out}"
+        out.contains("outgoing calls: get_user, update_user"),
+        "expected direct compiler-resolved callees: {out}"
     );
     assert!(
-        out.contains("os.system"),
-        "expected downstream to include os.system: {out}"
+        !out.contains("handle_request →") && !out.contains("handle_request ->"),
+        "graph-flow must not materialize a transitive path: {out}"
     );
 }
 
@@ -210,13 +211,16 @@ fn exact_file_graph_flow_builds_complete_cold_workspace_linkage() {
     let report: serde_json::Value = serde_json::from_str(&out).expect("cold graph inspect JSON");
     assert_eq!(report["summary"]["total_decl_hits"], 1);
     assert_eq!(report["analysis_complete"], true);
+    assert_eq!(
+        report["decl_hits"][0]["flows"][0]["chain"],
+        serde_json::json!(["target"])
+    );
+    assert_eq!(report["decl_hits"][0]["summary"]["evidence_units"], 1);
     assert!(
-        report["decl_hits"][0]["flows"]
+        report["decl_hits"][0]["direct_callers"]
             .as_array()
-            .is_some_and(|flows| flows.iter().any(|flow| flow["chain"]
-                .as_array()
-                .is_some_and(|chain| chain.iter().any(|name| name == "entry")))),
-        "file-scoped graph query must retain sibling callers through the exact compiler linkage: {out}"
+            .is_some_and(|callers| callers.iter().any(|caller| caller["symbol"] == "entry")),
+        "file-scoped graph query must retain sibling callers as direct linkage evidence: {out}"
     );
 }
 
@@ -469,7 +473,7 @@ def load(data):
 }
 
 #[test]
-fn inspect_text_disambiguates_duplicate_chain_hop_names() {
+fn inspect_to_filter_returns_only_bounded_matching_callable_units() {
     if require_binary_built().is_none() {
         return;
     }
@@ -486,21 +490,13 @@ fn inspect_text_disambiguates_duplicate_chain_hop_names() {
         "--all",
         "--no-progress",
     ]);
-    let bad_chain_lines: Vec<&str> = out
-        .lines()
-        .map(str::trim)
-        .filter(|line| {
-            *line == "predict → predict → load_model" || *line == "predict -> predict -> load_model"
-        })
-        .collect();
     assert!(
-        bad_chain_lines.is_empty(),
-        "duplicate same-name chain lines should be display-disambiguated:\n{bad_chain_lines:#?}\n{out}"
+        out.contains("load_from_pickle") && out.contains("load_model"),
+        "expected compiler-owned pickle matches:\n{out}"
     );
     assert!(
-        out.contains("complex.app.predict → InferenceEngine.predict → load_model")
-            || out.contains("complex.app.predict -> InferenceEngine.predict -> load_model"),
-        "expected owner/module-qualified display for duplicate predict hops:\n{out}"
+        !out.contains("predict →") && !out.contains("predict ->"),
+        "a filtered inspect row must not recursively expand upstream paths:\n{out}"
     );
 }
 
@@ -825,13 +821,7 @@ fn inspect_kind_filter_restricts_output() {
 }
 
 #[test]
-fn inspect_call_hit_surfaces_full_upstream_chain() {
-    // Regression: on a qualified call hit (`authService.runAdminCommand`
-    // inside UserService.updateUser), the flow for the SINK call
-    // `Runtime.getRuntime().exec` should trace all the way up to the
-    // entry point `handleRequest`, not collapse to just the containing
-    // function. This reproduces the Kotlin-micro regression where cross-
-    // class method calls short-circuited the caller-map lookup.
+fn inspect_call_hit_owns_one_bounded_containing_callable_unit() {
     if require_binary_built().is_none() {
         return;
     }
@@ -843,16 +833,12 @@ fn inspect_call_hit_surfaces_full_upstream_chain() {
     let ws = repo_root.join("examples/kotlin/micro");
     let out = run(&["inspect", ws.to_str().unwrap(), "--query", "exec", "--graph-flow"]);
     assert!(
-        out.contains("handleRequest → updateUser → runAdminCommand"),
-        "expected full cross-class chain for exec hit, got:\n{out}"
+        out.contains("FLOW 2") && out.contains("runAdminCommand"),
+        "expected source-backed containing callable evidence for exec hit:\n{out}"
     );
-    // The exec flow is not necessarily FLOW 1 (the `executeQuery` SQLi
-    // flows substring-match `exec` and group ahead of it); assert the
-    // source annotation traces to the entry point regardless of the
-    // flow's group label.
     assert!(
-        out.contains("SOURCE: entry handleRequest"),
-        "expected SOURCE annotation at handleRequest, got:\n{out}"
+        !out.contains("handleRequest →") && !out.contains("handleRequest ->"),
+        "inspect must not enumerate the full upstream chain:\n{out}"
     );
 }
 
@@ -949,7 +935,7 @@ fn inspect_flow_bodies_show_class_owner_context() {
 }
 
 #[test]
-fn inspect_flow_labels_use_letter_suffix_on_branch_split() {
+fn inspect_flow_labels_are_one_per_bounded_symbol_unit() {
     // A sink reached via two sibling paths should render as FLOW Na / Nb,
     // not two separate numeric flows.
     if require_binary_built().is_none() {
@@ -976,13 +962,16 @@ def handle_request(cmd, path):\n    if path == '/l':\n        left(cmd)\n    els
         .output()
         .expect("run bonsai-ninja");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // At least one label should include a letter suffix (e.g. 1a / 1b).
-    let has_letter_label = stdout
-        .lines()
-        .any(|l| l.contains("FLOW 1a") || l.contains("FLOW 2a"));
     assert!(
-        has_letter_label,
-        "expected letter-suffix flow label for sibling chain, got:\n{stdout}"
+        stdout.contains("1 structural evidence unit(s) for sink")
+            && stdout.contains("FLOW 1")
+            && stdout.contains("FLOW 2")
+            && stdout.contains("FLOW 3"),
+        "expected one bounded unit for the declaration and each owning occurrence:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("FLOW 1a") && !stdout.contains("FLOW 2a"),
+        "bounded symbol evidence does not use path-branch suffixes:\n{stdout}"
     );
     let _ = std::fs::remove_dir_all(&td);
 }

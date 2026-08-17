@@ -1,14 +1,8 @@
-//! In-process memo cache for hot per-target lookups in inspect /
-//! export. Each field is a [`crate::BoundedCache`] (FIFO eviction);
-//! evicted entries recompute identically. Keys include budget
-//! parameters so a caller can ask for a wider chain set later in
-//! the same run without getting a stale truncated answer.
+//! In-process memo cache for hot per-symbol lookups in inspect.
+//! Each field is a [`crate::BoundedCache`] (FIFO eviction); evicted
+//! entries recompute identically.
 
-use crate::cache::{
-    BoundedCache, CALLEES_CACHE_CAP, CHAINS_CACHE_CAP, DOWNSTREAM_CACHE_CAP, ENCLOSING_CACHE_CAP,
-    REACHABLE_CACHE_CAP,
-};
-use crate::chains::{downstream_funcs_set, enumerate_chains_resolved, ChainTruncation, ResolvedChain};
+use crate::cache::{BoundedCache, CALLEES_CACHE_CAP, ENCLOSING_CACHE_CAP, REACHABLE_CACHE_CAP};
 use bonsai_callgraph::ResolvedCallGraph;
 use bonsai_common::{FileId, FuncId, Span};
 use bonsai_workspace::Workspace;
@@ -23,24 +17,17 @@ use std::sync::{Arc, OnceLock};
 // workloads.
 //
 // Determinism: `BoundedCache` still has FIFO eviction and stable
-// insertion order, so replaying the exact same inputs through the
-// cache produces the exact same contents regardless of which thread
-// inserted. Chain enumeration and filter output are pure functions
-// of the workspace, so shared access can't produce different
-// results.
-type ChainsCache = Mutex<BoundedCache<(FuncId, usize, usize), (Vec<ResolvedChain>, ChainTruncation)>>;
-type DownstreamCache = Mutex<BoundedCache<(FuncId, usize, usize), Vec<FuncId>>>;
+// insertion order, so replaying the exact same inputs through the cache
+// produces the exact same contents regardless of which thread inserted.
+// Evidence construction and filtering are pure functions of the workspace,
+// so shared access cannot produce different results.
 type ReachableCache = Mutex<BoundedCache<Vec<FuncId>, Vec<FuncId>>>;
 type PerFuncTokensCache = Mutex<BoundedCache<FuncId, Arc<bonsai_taint::KindedTokens>>>;
 type TaintFactsCache = Mutex<BoundedCache<FuncId, Arc<bonsai_taint::KindedTokens>>>;
 type CalleesCache = Mutex<BoundedCache<FuncId, Vec<FuncId>>>;
 type EnclosingCache = Mutex<BoundedCache<(FileId, u64, u64), Option<(FuncId, String)>>>;
 
-/// Per-invocation memo cache for the hot per-target lookups
-/// inspect's chain enumeration repeats over and over (one walk
-/// per hit on the same enclosing function — Redis's
-/// `--query system` resolves 50+ hits to a handful of decls, so
-/// memoization is the difference between 30 s and 3 s).
+/// Per-invocation memo cache for facts shared by hits in the same callable.
 ///
 /// Borrowed from a `&Workspace`; lifetime `'a` is the workspace's.
 /// `Sync` so a single cache can be shared across rayon workers
@@ -60,18 +47,16 @@ pub struct ChainCache<'a> {
     /// canonical singleton instead of deep-cloning a 100k-edge
     /// `CallGraph` per inspect invocation.
     pub(crate) resolved: OnceLock<Arc<ResolvedCallGraph>>,
-    pub(crate) chains_r: ChainsCache,
-    pub(crate) downstream_r: DownstreamCache,
     pub(crate) reachable_r: ReachableCache,
-    /// Per-FuncId reachability hop tokens. Chains share many hops,
+    /// Per-FuncId reachability hop tokens. Evidence units share many hops,
     /// so caching at this granularity means each hop's tokens
     /// compute exactly once per invocation instead of once per
-    /// chain-that-visits-it.
+    /// unit that visits it.
     pub(crate) per_func_tokens_r: PerFuncTokensCache,
     /// Interprocedural taint augmentation facts per entry function.
-    /// One entry typically fans out to many chains; running the
+    /// One entry can contribute to many evidence units; running the
     /// interprocedural pass once per entry and re-using the facts
-    /// across chains cuts inspect's `--from` / `--to` wall-time
+    /// across units cuts inspect's `--from` / `--to` wall-time
     /// roughly in half on hub-sink queries.
     pub(crate) taint_facts_r: TaintFactsCache,
     pub(crate) callees_r: CalleesCache,
@@ -86,7 +71,7 @@ pub struct ChainCache<'a> {
 
 impl<'a> ChainCache<'a> {
     /// Construct a normal in-process memo cache. Use this for any
-    /// command that performs more than a single chain lookup —
+    /// command that performs more than a single evidence lookup —
     /// `inspect`, `export`, and the per-hit filter passes all
     /// share one cache per CLI invocation. Cache holds bounded
     /// memos; output is identical to [`Self::without_cache`].
@@ -113,7 +98,7 @@ impl<'a> ChainCache<'a> {
     /// partitioned callgraph exists yet. The compiler worklist still reaches
     /// a fixed point, but only from the requested source; presentation must
     /// not replace that graph with the workspace-wide fallback merely to
-    /// enumerate chains.
+    /// render evidence.
     #[must_use]
     pub fn with_resolved_graph(ws: &'a Workspace, resolved: Arc<ResolvedCallGraph>) -> Self {
         Self::with_disabled_and_resolved(ws, false, resolved)
@@ -142,8 +127,6 @@ impl<'a> ChainCache<'a> {
         Self {
             ws,
             resolved: OnceLock::new(),
-            chains_r: Mutex::new(BoundedCache::with_capacity(CHAINS_CACHE_CAP)),
-            downstream_r: Mutex::new(BoundedCache::with_capacity(DOWNSTREAM_CACHE_CAP)),
             reachable_r: Mutex::new(BoundedCache::with_capacity(REACHABLE_CACHE_CAP)),
             per_func_tokens_r: Mutex::new(BoundedCache::with_capacity(REACHABLE_CACHE_CAP)),
             taint_facts_r: Mutex::new(BoundedCache::with_capacity(REACHABLE_CACHE_CAP)),
@@ -159,8 +142,6 @@ impl<'a> ChainCache<'a> {
     /// the maps, so no live reference is invalidated.
     pub fn reset(&mut self) {
         self.resolved = OnceLock::new();
-        self.chains_r.lock().clear();
-        self.downstream_r.lock().clear();
         self.reachable_r.lock().clear();
         self.per_func_tokens_r.lock().clear();
         self.taint_facts_r.lock().clear();
@@ -177,41 +158,6 @@ impl<'a> ChainCache<'a> {
         self.resolved
             .get_or_init(|| self.ws.cached_resolved_call_graph())
             .as_ref()
-    }
-
-    /// Resolved-graph chain enumeration. Eliminates the
-    /// `__construct`-class collision bug structurally — chains are
-    /// `Vec<FuncId>`, not `Vec<String>`.
-    pub fn chains_resolved(
-        &self,
-        target: FuncId,
-        max_chains: usize,
-        max_probes: usize,
-    ) -> (Vec<ResolvedChain>, ChainTruncation) {
-        if self.disabled {
-            return enumerate_chains_resolved(self.resolved_graph(), target, max_chains, max_probes);
-        }
-        let key = (target, max_chains, max_probes);
-        if let Some(hit) = self.chains_r.lock().get(&key) {
-            return hit.clone();
-        }
-        let computed = enumerate_chains_resolved(self.resolved_graph(), target, max_chains, max_probes);
-        self.chains_r.lock().insert(key, computed.clone());
-        computed
-    }
-
-    /// Resolved-graph downstream callee closure.
-    pub fn downstream_resolved(&self, target: FuncId, max_depth: usize, max_funcs: usize) -> Vec<FuncId> {
-        if self.disabled {
-            return downstream_funcs_set(self.resolved_graph(), target, max_depth, max_funcs);
-        }
-        let key = (target, max_depth, max_funcs);
-        if let Some(hit) = self.downstream_r.lock().get(&key) {
-            return hit.clone();
-        }
-        let computed = downstream_funcs_set(self.resolved_graph(), target, max_depth, max_funcs);
-        self.downstream_r.lock().insert(key, computed.clone());
-        computed
     }
 
     /// Resolved-graph "names visible in the rendered flow." Each

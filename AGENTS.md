@@ -153,7 +153,10 @@ explicitly requests that semantic product. Apply file/name/kind predicates
 while walking compiler IR, before allocating result rows. Never initialize a
 lazy workspace-wide cache from inside a Rayon file loop. Scoped query
 workspaces preserve the full workspace's deterministic `FileId` ordinal so
-they can reuse content-addressed compiler objects without reparsing.
+they can reuse content-addressed compiler objects without reparsing. Before
+broad header planning, attach an existing generation only after the complete
+selected worklist matches exact id/path/adapter/content identities; attachment
+is read-only and a miss must not lower every raw-anchor candidate body.
 
 Security endpoint planning is also staged. Apply raw/import/syntax-target
 filters before global receiver ancestry. Open ancestry only when a typed
@@ -244,7 +247,9 @@ Understand behavior:
 ```shell
 ./target/release/bonsai-ninja inspect <workspace> --query <target> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja inspect <workspace> --query <target> --taint-flow --context 16k --no-color --no-progress
+./target/release/bonsai-ninja symbol-summary <workspace> --symbol <target> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja inspect <workspace> --from <entry> --to <target> --context 16k --no-color --no-progress
+./target/release/bonsai-ninja path <workspace> --from <entry> --to <target> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja show <workspace> --id F:<id> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja trace <workspace> --symbol <entry-function> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja slice <workspace> --symbol <symbol> --context 16k --no-color --no-progress
@@ -275,10 +280,12 @@ Broad raw-flow reports compute every exact path before pagination, reuse
 worker-precomputed row costs, and format/cache only the requested page. Follow
 the printed page or cursor for more; page 1 never eagerly renders later pages.
 Use plain `inspect`, `refs`, or `calls` for symbol lookup. `--graph-flow`
-deliberately computes the complete structural path language attached to every
-match before paging, so shared helpers can expand a narrow spelling query into
-a large exact artifact. When both endpoints are known, prefer `--from` and
-`--to` so the compiler projects the exact graph corridor first.
+adds one bounded source/evidence unit per matching callable; it never
+recursively materializes caller/callee path combinations. Use
+`symbol-summary` for the callable's declaration, source, imports, direct
+resolved neighbors, and unresolved-call evidence. When both endpoints are
+known, use `path --from ... --to ...` for the exact compressed graph corridor,
+or `trace --from ... --to ...` to interpret that corridor.
 
 Record understanding as:
 

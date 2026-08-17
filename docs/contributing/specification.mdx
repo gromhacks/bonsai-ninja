@@ -129,9 +129,10 @@ scanning. See [`../security-spec.mdx`](../security-spec.mdx#output-formats).
 
 ## 3. Stability
 
-Public type field names in the SDK and CLI output are stable across
-minor versions. Adding a field is a minor change; renaming or removing
-one is a breaking change requiring a major version bump.
+Public type field names in the SDK and CLI output remain compatible within a
+published release line. Adding an optional field is a compatible change;
+renaming or removing one is breaking. Before 1.0, breaking changes require a
+minor-version bump; after 1.0 they require a major-version bump.
 
 The `MATCHER_POLICY_FINGERPRINT` and explicit sidecar schema/semantic ABI
 versions identify matcher and engine semantics. Source, dependency,

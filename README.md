@@ -68,7 +68,8 @@ academic and independent labs, or local-model hobbyists.
 |---|---|
 | Tree-sitter compiler frontends | Parse 20 languages into typed declarations, calls, imports, values, control flow, and dataflow facts |
 | Focused `search`, `refs`, `calls`, and `read-file` | Retrieve a small, source-backed context slice before asking for heavier semantics |
-| Compiler-resolved `inspect`, `trace`, `path`, and `slice` | Follow compiler-evidenced behavior across files and report unresolved dynamic edges instead of inventing them |
+| Bounded `symbol-summary` and `inspect --graph-flow` packets | Retrieve source, signature, imports, direct resolved neighbors, and unresolved-call evidence without recursively expanding a call tree |
+| Compiler-resolved `trace`, compressed `path`, and `slice` | Follow compiler-evidenced behavior across files and report unresolved dynamic edges instead of inventing them |
 | AST, HIR, CFG, resolver, edge, and taint diagnostics | Inspect both the target program and the analyzer's reasoning instead of guessing from text |
 | Sparse IDG taint fixed point | Complete source-to-sink reachability over the admitted static graph without a hidden depth, file, iteration, or result cap |
 | Stable IDs, explicit page cursors, JSON, and the Rust SDK | Let agents cite evidence, detect when coverage continues, and automate repeatable review workflows |
@@ -85,11 +86,12 @@ separate the first explicit semantic index from commands run after it exists:
 | Cache state and operation | Measured time | Result |
 |---|---:|---|
 | Empty cache: `index --semantic` | 10m 00.6s | 7.11 GB validated reusable cache under the 3 GiB scheduling profile |
-| After index: semantic generation reopen | 2.5s | Existing compiler objects, linkage, callgraph, retrieval, and IDG validated and reused |
-| After index: search | 4.1s | Exact requested matches |
-| After index: call lookup | 3.7s | Compiler-resolved call rows |
-| After index: default inspect | 7.3s | Structural evidence for the requested target |
-| After index: complete production taint analysis | 28.6s | Requested fixed point completed without a semantic cap |
+| Empty analysis cache: complete production taint analysis | 30.0s | Requested analysis completed without requiring the whole semantic prewarm |
+| After index: semantic generation reopen | 2.3s | Existing compiler objects, linkage, callgraph, retrieval, and IDG validated and reused |
+| After index: search | 3.9s | Exact requested matches |
+| After index: call lookup | 3.6s | Compiler-resolved call rows |
+| After index: default inspect | 7.8s | Structural evidence for the requested target |
+| After index: complete production taint analysis | 10.6s | Requested fixed point completed without a semantic cap |
 | After index: default native export | 4m 05s | 4.54 GB compiler, callgraph, flow, and compiled-IDG facts |
 | After index: `--full-propagations` export | 7m 36s | 6.42 GB with the same exact propagation relation materialized as individual rows |
 
@@ -176,7 +178,7 @@ Or build the release binary from a checkout:
 ```bash
 git clone https://github.com/gromhacks/bonsai-ninja.git
 cd bonsai-ninja
-cargo build --release --locked -p bonsai-ninja
+bash scripts/build-release.sh
 ./target/release/bonsai-ninja --version
 ```
 
@@ -210,6 +212,10 @@ workflows.
 ./target/release/bonsai-ninja inspect ./my-app --query verify_token \
   --taint-flow --context 16k --no-color --no-progress
 
+# Get one bounded compiler packet without expanding transitive paths.
+./target/release/bonsai-ninja symbol-summary ./my-app --symbol verify_token \
+  --context 16k --no-color --no-progress
+
 # Run production-oriented security analysis.
 ./target/release/bonsai-ninja security ./my-app taint-analysis \
   --profile production --context 16k --no-color --no-progress
@@ -234,7 +240,8 @@ For any unfamiliar option, use the binary's `--help` and the
 | Declarations, classes, imports, entry points | `defs`, `classes`, `imports`, `entrypoints` |
 | Calls, arguments, references | `calls`, `args`, `refs` |
 | Local facts around one target | `inspect` |
-| Source-to-target call path | `path` |
+| Bounded compiler packet for one callable | `symbol-summary` |
+| Exact compressed source-to-target corridor | `path` |
 | Execution trace from an entry | `trace` |
 | Backward influence around a symbol | `slice` |
 | One source file and connected context | `read-file` |

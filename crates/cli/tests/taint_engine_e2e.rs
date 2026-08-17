@@ -273,14 +273,10 @@ fn mega_flow_dump_taint_uses_rulepack_transfer_semantics() {
     }
 }
 
-/// `inspect --query execute` on mega_flow must emit a FLOW block
-/// with at least one chain hop — backward enumeration from the sink.
-///
-/// This assertion stays deliberately about inspect's backward
-/// enumeration. `dump-taint` above is the stricter source-seeded
-/// per-argument check for the same fixture.
+/// Discovery stays bounded to one evidence unit per matching callable, while
+/// `symbol-summary` exposes its exact direct compiler-resolved neighbors.
 #[test]
-fn mega_flow_inspect_execute_produces_backward_chain() {
+fn mega_flow_inspect_and_symbol_summary_stay_bounded() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "mega_flow");
     let Some((out, _, code)) = run(&[
@@ -310,14 +306,15 @@ fn mega_flow_inspect_execute_produces_backward_chain() {
             .unwrap_or(false)
         {
             any_flow = true;
-            // Every flow must have a non-empty chain and a valid F: id.
+            // Every discovery unit is exactly the selected callable; recursive
+            // reachability belongs to the compressed `path` graph.
             for flow in hit["flows"].as_array().unwrap() {
                 let chain = flow
                     .get("chain")
                     .and_then(|c| c.as_array())
                     .cloned()
                     .unwrap_or_default();
-                assert!(!chain.is_empty(), "flow has empty chain");
+                assert_eq!(chain.len(), 1, "inspect recursively materialized a call path");
                 let id = flow.get("flow_id").and_then(|v| v.as_str()).unwrap_or("");
                 assert!(id.starts_with("F:") && id.len() == 18, "flow_id malformed: {id}");
             }
@@ -325,56 +322,23 @@ fn mega_flow_inspect_execute_produces_backward_chain() {
     }
     assert!(
         any_flow,
-        "inspect --query execute produced no flows — backward enumeration broke"
+        "inspect --query execute produced no bounded structural evidence"
     );
-    // Secondary check: inspect --query `persist` (which has real
-    // callers in mega_flow — `orchestrate` calls it) produces a
-    // multi-hop backward chain.
-    let Some((out2, _, _)) = run(&[
-        "inspect",
-        &w,
-        "--query",
-        "persist",
-        "--graph-flow",
-        "--format",
-        "json",
-    ]) else {
+    let Some((out2, _, code2)) = run(&["symbol-summary", &w, "--symbol", "persist", "--format", "json"])
+    else {
         return;
     };
-    let p2: serde_json::Value = serde_json::from_str(&out2).unwrap();
-    // Check both decl_hits and hits — `persist` can land in either.
-    let all_flows: Vec<serde_json::Value> = p2
-        .get("decl_hits")
-        .and_then(|h| h.as_array())
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .chain(
-            p2.get("hits")
-                .and_then(|h| h.as_array())
-                .cloned()
-                .unwrap_or_default(),
-        )
-        .flat_map(|h| {
-            h.get("flows")
-                .and_then(|f| f.as_array())
-                .cloned()
-                .unwrap_or_default()
-        })
-        .collect();
-    let best = all_flows
-        .iter()
-        .map(|f| {
-            f.get("chain")
-                .and_then(|c| c.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0)
-        })
-        .max()
-        .unwrap_or(0);
+    assert_eq!(code2, 0, "symbol-summary persist ec={code2}");
+    let summaries: serde_json::Value = serde_json::from_str(&out2).unwrap();
+    let rows = rows_of(&summaries);
+    assert_eq!(rows.len(), 1, "expected one persist summary: {out2}");
+    let summary = &rows[0];
+    assert_eq!(summary["graph_scope"], "direct_resolved_neighbors");
     assert!(
-        best >= 2,
-        "inspect --query persist best chain length = {best}, want >= 2 — backward enumeration regressed"
+        summary["direct_callers"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty()),
+        "persist summary lost direct compiler-resolved caller evidence: {summary}"
     );
 }
 
@@ -796,12 +760,10 @@ complex_e2e_tests!(
 // Layer 4 — cross-command consistency
 // =============================================================================
 
-/// For every language with complex findings, the chain a finding
-/// reports in `chain_display` must be reconstructible via an
-/// inspect query on the sink — both surfaces walk the same
-/// `ResolvedCallGraph`, so the chain sets must intersect.
+/// A security finding's exact chain must fit inside the compiler-projected
+/// compressed path corridor between the same endpoints.
 #[test]
-fn flows_chain_matches_inspect_chain_on_complex() {
+fn finding_chain_fits_compressed_path_corridor() {
     let Some(_) = bin_path() else { return };
     // Use python/complex (known-large workspace with many findings).
     let w = ws("python", "complex");
@@ -847,71 +809,41 @@ fn flows_chain_matches_inspect_chain_on_complex() {
         .collect();
     let sink_name = chain.last().unwrap();
 
-    // Inspect the sink name; at least one resulting flow must
-    // share at least one non-sink hop with the finding's chain.
-    let Some((inspect_out, _, _)) = run(&[
-        "inspect",
+    let source_name = chain.first().expect("finding chain source");
+    let Some((path_out, _, path_code)) = run(&[
+        "path",
         &w,
-        "--query",
+        "--from",
+        source_name,
+        "--to",
         sink_name,
-        "--graph-flow",
         "--format",
         "json",
+        "--all",
     ]) else {
         return;
     };
-    let inspect_parsed: serde_json::Value = serde_json::from_str(&inspect_out).unwrap();
-    let mut shared_any = false;
-    for hit in inspect_parsed
-        .get("decl_hits")
-        .and_then(|h| h.as_array())
-        .cloned()
-        .unwrap_or_default()
-    {
-        for flow in hit
-            .get("flows")
-            .and_then(|f| f.as_array())
-            .cloned()
-            .unwrap_or_default()
-        {
-            let inspect_chain: Vec<String> = flow
-                .get("chain")
-                .and_then(|c| c.as_array())
-                .cloned()
-                .unwrap_or_default()
-                .iter()
-                .filter_map(|n| n.as_str().map(String::from))
-                .collect();
-            let overlap = chain
-                .iter()
-                .filter(|h| **h != *sink_name)
-                .any(|h| inspect_chain.iter().any(|n| n == h));
-            if overlap {
-                shared_any = true;
-                break;
-            }
-        }
-        if shared_any {
-            break;
-        }
+    assert_eq!(path_code, 0, "path ec={path_code}: {path_out}");
+    let path: serde_json::Value = serde_json::from_str(&path_out).unwrap();
+    assert_eq!(path["representation"], "compressed_callgraph");
+    let corridor_names = path["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|node| node["name"].as_str())
+        .collect::<std::collections::HashSet<_>>();
+    for hop in &chain {
+        assert!(
+            corridor_names.contains(hop.as_str()),
+            "finding hop `{hop}` missing from exact {source_name}->{sink_name} corridor: {path_out}"
+        );
     }
-    // Finding chains are built by `build_findings_chain_aware`
-    // which uses the same ChainCache. A non-overlap would mean
-    // one surface walked a different edge set — the regression
-    // we want to catch.
-    assert!(
-        shared_any,
-        "finding chain {chain:?} at sink `{sink_name}` doesn't overlap any inspect flow — chain enumeration diverged"
-    );
 }
 
-/// Export's compressed callgraph must contain every edge in the exact chain
-/// that `inspect` walks internally. Native export deliberately does not
-/// enumerate concrete path rows: the complete path language is represented by
-/// function and edge facts, which downstream consumers can traverse without
-/// an engine-side path cap.
+/// Export's compressed callgraph must contain every edge in `path`'s exact
+/// compressed corridor. Neither surface materializes concrete route rows.
 #[test]
-fn export_chains_resolve_to_inspect_chain_names() {
+fn export_contains_exact_path_corridor_edges() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "mega_flow");
     let Some((out, _, _)) = run(&["export", &w]) else {
@@ -931,34 +863,23 @@ fn export_chains_resolve_to_inspect_chain_names() {
     assert_eq!(tg["chains_mode"], "compressed_callgraph");
     assert!(tg["chains"].as_array().is_some_and(Vec::is_empty));
 
-    let Some((inspect_out, _, inspect_code)) = run(&[
-        "inspect",
+    let Some((path_out, _, path_code)) = run(&[
+        "path",
         &w,
-        "--query",
+        "--from",
+        "handle_request",
+        "--to",
         "execute",
-        "--graph-flow",
         "--format",
         "json",
         "--all",
     ]) else {
         return;
     };
-    assert_eq!(inspect_code, 0);
-    let inspected: serde_json::Value = serde_json::from_str(&inspect_out).unwrap();
-    let chain_names: Vec<String> = inspected["decl_hits"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|hit| hit["flows"].as_array().into_iter().flatten())
-        .find_map(|flow| {
-            flow["chain"].as_array().map(|chain| {
-                chain
-                    .iter()
-                    .filter_map(|name| name.as_str().map(String::from))
-                    .collect()
-            })
-        })
-        .expect("inspect produced no chain to execute");
+    assert_eq!(path_code, 0, "path ec={path_code}: {path_out}");
+    let path: serde_json::Value = serde_json::from_str(&path_out).unwrap();
+    assert_eq!(path["representation"], "compressed_callgraph");
+    assert!(path["edge_count"].as_u64().unwrap_or(0) > 0);
 
     let exported_edges: std::collections::HashSet<(u64, u64)> = tg["call_edges"]
         .as_array()
@@ -966,30 +887,23 @@ fn export_chains_resolve_to_inspect_chain_names() {
         .iter()
         .filter_map(|edge| Some((edge["from"].as_u64()?, edge["to"].as_u64()?)))
         .collect();
-    for pair in chain_names.windows(2) {
+    for edge in path["edges"].as_array().into_iter().flatten() {
+        let caller = edge["caller_name"].as_str().expect("path edge caller");
+        let callee = edge["callee_name"].as_str().expect("path edge callee");
         let from_ids = id_to_name
             .iter()
-            .filter_map(|(&id, name)| (name == &pair[0]).then_some(id));
+            .filter_map(|(&id, name)| (name == caller).then_some(id));
         let to_ids = id_to_name
             .iter()
-            .filter_map(|(&id, name)| (name == &pair[1]).then_some(id))
+            .filter_map(|(&id, name)| (name == callee).then_some(id))
             .collect::<Vec<_>>();
         assert!(
             from_ids
                 .into_iter()
                 .any(|from| { to_ids.iter().any(|to| exported_edges.contains(&(from, *to))) }),
-            "exported compressed callgraph is missing inspect edge {} -> {}",
-            pair[0],
-            pair[1]
+            "exported compressed callgraph is missing path edge {caller} -> {callee}"
         );
     }
-    assert!(chain_names.contains(&"execute".to_string()));
-    assert!(
-        chain_names
-            .iter()
-            .any(|n| n == "handle_request" || n == "persist" || n == "perform"),
-        "export chain to execute doesn't include an upstream hop: {chain_names:?}"
-    );
 }
 
 /// `security taint-analysis` must produce identical stable finding_ids on

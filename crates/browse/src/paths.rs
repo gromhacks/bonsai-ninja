@@ -5,13 +5,10 @@
 //! text or invents missing call edges.
 
 use crate::common::format_span;
-use crate::edges::{compute_edge_id, edge_record_from_graph_nodes, EdgeRecord};
+use crate::edges::{edge_record_from_graph_nodes, EdgeRecord};
 use crate::resolution::resolution_incomplete_reasons_for_funcs;
-use bonsai_callgraph::{
-    enumerate_paths_resolved, CallEdge, EdgeProvenance, PathTruncation, ResolvedCallGraph, ResolvedPath,
-};
+use bonsai_callgraph::{CallEdge, EdgeProvenance, ResolvedCallGraph};
 use bonsai_common::{FuncId, Span};
-use bonsai_hash::fnv1a_names_low32;
 use bonsai_idg::{CrossCallEdge, IdgQueryService};
 use bonsai_inspect::{matching_func_ids_in_headers, Matcher};
 use bonsai_lang_api::{DeclKind, FlowEvent};
@@ -24,9 +21,6 @@ pub struct PathFilters<'a> {
     pub from: &'a str,
     pub to: &'a str,
     pub regex: bool,
-    pub max_paths: usize,
-    pub max_depth: usize,
-    pub max_probes: usize,
 }
 
 impl Default for PathFilters<'_> {
@@ -35,14 +29,11 @@ impl Default for PathFilters<'_> {
             from: "",
             to: "",
             regex: false,
-            max_paths: 0,
-            max_depth: 0,
-            max_probes: 0,
         }
     }
 }
 
-/// Full path query result.
+/// Exact compressed source-to-target graph result.
 #[derive(Serialize, Clone, Debug, Default)]
 pub struct PathOutcome {
     pub from: String,
@@ -53,32 +44,19 @@ pub struct PathOutcome {
     pub idg_semantic_edges: usize,
     pub from_matches: usize,
     pub to_matches: usize,
-    pub max_paths: usize,
-    pub max_depth: usize,
-    pub max_probes: usize,
-    pub path_count: usize,
+    pub representation: &'static str,
+    pub node_count: usize,
+    pub edge_count: usize,
     pub analysis_complete: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub analysis_incomplete_reasons: Vec<String>,
-    pub paths: Vec<PathRow>,
-}
-
-/// One ranked path row.
-#[derive(Serialize, Clone, Debug)]
-pub struct PathRow {
-    pub path_id: String,
-    pub hops: usize,
-    pub precision: String,
-    pub functions: Vec<PathFunctionRow>,
+    pub nodes: Vec<PathFunctionRow>,
     pub edges: Vec<EdgeRecord>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub terminal_call: Option<PathTerminalCallRow>,
-    pub analysis_complete: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub analysis_incomplete_reasons: Vec<String>,
+    pub terminal_calls: Vec<PathTerminalCallRow>,
 }
 
-/// Function hop in a path row.
+/// Function node in the selected graph corridor.
 #[derive(Serialize, Clone, Debug)]
 pub struct PathFunctionRow {
     pub name: String,
@@ -105,12 +83,12 @@ struct TerminalCallTarget {
     row: PathTerminalCallRow,
 }
 
-/// Query source-to-target paths over resolved semantic callgraph edges.
+/// Project a source-to-target corridor over resolved semantic callgraph edges.
 pub fn paths(ws: &Workspace, filters: &PathFilters<'_>) -> Result<PathOutcome, regex::Error> {
     // Retain one immutable graph generation for the complete query. Other
     // compiler phases may release the DB's resident service slot to reduce
     // peak memory, but that storage transition must not make endpoint lookup
-    // and path enumeration observe different semantic backends.
+    // and corridor projection observe different semantic backends.
     let warmed_idg = ws.db().idg_service();
     let from_matcher = Matcher::build(Some(filters.from), filters.regex)?;
     let to_matcher = Matcher::build(Some(filters.to), filters.regex)?;
@@ -158,9 +136,7 @@ pub fn paths(ws: &Workspace, filters: &PathFilters<'_>) -> Result<PathOutcome, r
         } else {
             to_funcs.len()
         },
-        max_paths: filters.max_paths,
-        max_depth: filters.max_depth,
-        max_probes: filters.max_probes,
+        representation: "compressed_callgraph",
         ..PathOutcome::default()
     };
     if from_funcs.is_empty() {
@@ -183,7 +159,7 @@ pub fn paths(ws: &Workspace, filters: &PathFilters<'_>) -> Result<PathOutcome, r
     }
     if from_funcs.is_empty() || (to_funcs.is_empty() && terminal_targets.is_empty()) {
         resolution_scope.extend(terminal_targets.iter().map(|target| target.func));
-        finalize_outcome(ws, &mut outcome, PathTruncation::None, resolution_scope);
+        finalize_outcome(ws, &mut outcome, resolution_scope);
         return Ok(outcome);
     }
 
@@ -199,68 +175,59 @@ pub fn paths(ws: &Workspace, filters: &PathFilters<'_>) -> Result<PathOutcome, r
     outcome.backends.clone_from(&path_graph.backends);
     outcome.idg_available = path_graph.idg_available;
     outcome.idg_semantic_edges = path_graph.idg_semantic_edges;
-    let mut rows = Vec::new();
-    let effective_max_paths = if filters.max_paths == 0 {
-        usize::MAX
-    } else {
-        filters.max_paths
-    };
     let mut hydration_reasons = Vec::new();
-    let mut truncation = PathTruncation::None;
-    let callable_targets: Vec<(FuncId, Option<PathTerminalCallRow>)> = if to_funcs.is_empty() {
-        terminal_targets
-            .iter()
-            .map(|target| (target.func, Some(target.row.clone())))
-            .collect()
-    } else {
-        to_funcs.iter().copied().map(|func| (func, None)).collect()
-    };
-    'outer: for from in &from_funcs {
-        for (to, terminal_call) in &callable_targets {
-            let remaining = effective_max_paths.saturating_sub(rows.len());
-            if remaining == 0 {
-                truncation = PathTruncation::MaxPaths;
-                break 'outer;
+    outcome.nodes = path_graph
+        .graph
+        .nodes()
+        .iter()
+        .filter_map(|node| {
+            resolution_scope.insert(node.func);
+            let row = function_row(ws, &path_graph.graph, node.func);
+            if row.is_none() {
+                hydration_reasons.push(format!(
+                    "corridor node F:{} was not present in the current compiler index",
+                    node.func.raw()
+                ));
             }
-            let (paths, pair_truncation) = enumerate_paths_resolved(
-                &path_graph.graph,
-                *from,
-                *to,
-                remaining,
-                filters.max_depth,
-                filters.max_probes,
-            );
-            truncation = merge_truncation(truncation, pair_truncation);
-            for path in paths {
-                resolution_scope.extend(path.funcs.iter().copied());
-                match hydrate_path_row(ws, &path_graph.graph, &path) {
-                    Ok(mut row) => {
-                        row.terminal_call.clone_from(terminal_call);
-                        row.path_id = compute_path_id(&row.functions, &row.edges, row.terminal_call.as_ref());
-                        rows.push(row);
-                    }
-                    Err(reason) => hydration_reasons.push(reason),
-                }
-                if rows.len() >= effective_max_paths {
-                    truncation = PathTruncation::MaxPaths;
-                    break 'outer;
-                }
-            }
-        }
-    }
-    rows.sort_by(|a, b| {
-        a.hops
-            .cmp(&b.hops)
-            .then_with(|| precision_rank(&a.precision).cmp(&precision_rank(&b.precision)))
-            .then_with(|| a.path_id.cmp(&b.path_id))
+            row
+        })
+        .collect();
+    outcome.nodes.sort_by(|left, right| {
+        left.file
+            .cmp(&right.file)
+            .then_with(|| left.line.cmp(&right.line))
+            .then_with(|| left.name.cmp(&right.name))
     });
-    if filters.max_paths != 0 {
-        rows.truncate(filters.max_paths);
-    }
-    outcome.paths = rows;
-    outcome.path_count = outcome.paths.len();
+    outcome.edges = path_graph
+        .graph
+        .inner()
+        .edges
+        .iter()
+        .filter(|edge| edge.precision.is_semantic())
+        .filter_map(|edge| {
+            let row = edge_record_from_graph_nodes(ws, &path_graph.graph, edge);
+            if row.is_none() {
+                hydration_reasons.push(format!(
+                    "corridor edge F:{} -> F:{} could not be hydrated",
+                    edge.from.raw(),
+                    edge.to.raw()
+                ));
+            }
+            row
+        })
+        .collect();
+    outcome.edges.sort_by(|left, right| {
+        left.caller_name
+            .cmp(&right.caller_name)
+            .then_with(|| left.callee_name.cmp(&right.callee_name))
+            .then_with(|| left.call_file.cmp(&right.call_file))
+            .then_with(|| left.call_line.cmp(&right.call_line))
+    });
+    outcome.terminal_calls = terminal_targets.into_iter().map(|target| target.row).collect();
+    outcome.node_count = outcome.nodes.len();
+    outcome.edge_count = outcome.edges.len();
     outcome.analysis_incomplete_reasons.extend(hydration_reasons);
-    finalize_outcome(ws, &mut outcome, truncation, resolution_scope);
+    finalize_outcome(ws, &mut outcome, resolution_scope);
     Ok(outcome)
 }
 
@@ -447,16 +414,6 @@ fn semantic_path_graph(
     warmed_idg: Option<&IdgQueryService>,
 ) -> SemanticPathGraph {
     if warmed_idg.is_none() {
-        if let Some(Ok(graph)) = ws.persisted_direct_call_graph_between(starts, targets) {
-            if !graph.inner().edges.is_empty() {
-                return SemanticPathGraph {
-                    graph,
-                    backends: vec!["partitioned-resolved-callgraph-direct-shortest".to_string()],
-                    idg_available: false,
-                    idg_semantic_edges: 0,
-                };
-            }
-        }
         if let Some(Ok(graph)) = ws.persisted_resolved_call_graph_between(starts, targets) {
             return SemanticPathGraph {
                 graph,
@@ -483,13 +440,15 @@ fn semantic_path_graph(
         }
         backends.push("warmed-idg-cross-call".to_string());
     }
+    let graph = ResolvedCallGraph::from_persisted_parts(
+        base.nodes().to_vec(),
+        graph.edges,
+        base.local_binding_records().to_vec(),
+        base.unresolved_workspace_site_records().to_vec(),
+    )
+    .between(starts, targets, Some(bonsai_common::Precision::Narrowed));
     SemanticPathGraph {
-        graph: ResolvedCallGraph::from_persisted_parts(
-            base.nodes().to_vec(),
-            graph.edges,
-            base.local_binding_records().to_vec(),
-            base.unresolved_workspace_site_records().to_vec(),
-        ),
+        graph,
         backends,
         idg_available,
         idg_semantic_edges,
@@ -540,143 +499,17 @@ fn function_row(ws: &Workspace, graph: &ResolvedCallGraph, func: FuncId) -> Opti
     })
 }
 
-fn hydrate_path_row(
-    ws: &Workspace,
-    graph: &ResolvedCallGraph,
-    path: &ResolvedPath,
-) -> Result<PathRow, String> {
-    if path.funcs.len() != path.edges.len().saturating_add(1) {
-        return Err(format!(
-            "path candidate skipped because it had {} function node(s) and {} edge(s)",
-            path.funcs.len(),
-            path.edges.len()
-        ));
-    }
-
-    let mut functions = Vec::with_capacity(path.funcs.len());
-    for func in &path.funcs {
-        let Some(row) = function_row(ws, graph, *func) else {
-            return Err(format!(
-                "path candidate skipped because function F:{} was not present in the current index",
-                func.raw()
-            ));
-        };
-        functions.push(row);
-    }
-
-    let mut edges = Vec::with_capacity(path.edges.len());
-    for edge in &path.edges {
-        let Some(row) = edge_record_from_graph_nodes(ws, graph, edge) else {
-            return Err(format!(
-                "path candidate skipped because edge F:{} -> F:{} at file {}:{}-{} was not present in the current index",
-                edge.from.raw(),
-                edge.to.raw(),
-                edge.span.file.raw(),
-                edge.span.start,
-                edge.span.end
-            ));
-        };
-        edges.push(row);
-    }
-
-    let precision = precision_display(path.precision).to_string();
-    let path_id = compute_path_id(&functions, &edges, None);
-    Ok(PathRow {
-        path_id,
-        hops: path.edges.len(),
-        precision,
-        functions,
-        edges,
-        terminal_call: None,
-        analysis_complete: false,
-        analysis_incomplete_reasons: Vec::new(),
-    })
-}
-
 fn finalize_outcome(
     ws: &Workspace,
     outcome: &mut PathOutcome,
-    truncation: PathTruncation,
     resolution_scope: impl IntoIterator<Item = FuncId>,
 ) {
-    if let Some(label) = truncation.label() {
-        outcome
-            .analysis_incomplete_reasons
-            .push(format!("path enumeration truncated by {label}"));
-    }
     outcome
         .analysis_incomplete_reasons
         .extend(resolution_incomplete_reasons_for_funcs(ws, resolution_scope));
     outcome.analysis_incomplete_reasons.sort();
     outcome.analysis_incomplete_reasons.dedup();
     outcome.analysis_complete = outcome.analysis_incomplete_reasons.is_empty();
-    for path in &mut outcome.paths {
-        path.analysis_complete = outcome.analysis_complete;
-        path.analysis_incomplete_reasons
-            .clone_from(&outcome.analysis_incomplete_reasons);
-    }
-}
-
-fn merge_truncation(left: PathTruncation, right: PathTruncation) -> PathTruncation {
-    if truncation_rank(right) > truncation_rank(left) {
-        right
-    } else {
-        left
-    }
-}
-
-fn truncation_rank(value: PathTruncation) -> u8 {
-    match value {
-        PathTruncation::None => 0,
-        PathTruncation::MaxDepth => 1,
-        PathTruncation::MaxPaths => 2,
-        PathTruncation::ProbeBudget => 3,
-    }
-}
-
-fn compute_path_id(
-    functions: &[PathFunctionRow],
-    edges: &[EdgeRecord],
-    terminal_call: Option<&PathTerminalCallRow>,
-) -> String {
-    let mut tokens = Vec::with_capacity(functions.len() + edges.len());
-    tokens.extend(functions.iter().map(|func| func.name.clone()));
-    tokens.extend(edges.iter().map(|edge| {
-        if edge.edge_id.is_empty() {
-            compute_edge_id(
-                &edge.caller_name,
-                &edge.callee_name,
-                &edge.call_file,
-                edge.call_line,
-                edge.call_column,
-            )
-        } else {
-            edge.edge_id.clone()
-        }
-    }));
-    if let Some(call) = terminal_call {
-        tokens.push(call.name.clone());
-        tokens.push(format!("{}:{}:{}", call.file, call.line, call.column));
-    }
-    format!("PTH:{:08x}", fnv1a_names_low32(&tokens))
-}
-
-fn precision_display(precision: bonsai_common::Precision) -> &'static str {
-    match precision {
-        bonsai_common::Precision::Exact => "exact",
-        bonsai_common::Precision::Narrowed => "narrowed",
-        bonsai_common::Precision::OverApproximate => "over-approximate",
-        bonsai_common::Precision::Unknown => "unknown",
-    }
-}
-
-fn precision_rank(precision: &str) -> u8 {
-    match precision {
-        "exact" => 0,
-        "narrowed" => 1,
-        "over-approximate" => 2,
-        _ => 3,
-    }
 }
 
 #[cfg(test)]
@@ -699,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn path_rows_hydrate_complete_function_and_edge_facts() {
+    fn compressed_corridor_hydrates_complete_function_and_edge_facts() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("app.py"),
@@ -718,19 +551,53 @@ mod tests {
             },
         )
         .expect("path query");
-        let row = outcome.paths.first().unwrap_or_else(|| {
-            panic!("expected entry -> sink path, got outcome: {outcome:#?}");
-        });
+        assert_eq!(outcome.representation, "compressed_callgraph");
+        assert!(outcome.nodes.iter().any(|func| func.name == "entry"));
+        assert!(outcome.nodes.iter().any(|func| func.name == "sink"));
+        assert_eq!(outcome.node_count, 2);
+        assert_eq!(outcome.edge_count, 1);
+        assert!(outcome.terminal_calls.is_empty());
+    }
 
-        assert_eq!(
-            row.functions.len(),
-            row.edges.len() + 1,
-            "path rows must render only fully hydrated function/edge chains"
-        );
-        assert_eq!(row.hops, row.edges.len());
-        assert!(row.functions.iter().any(|func| func.name == "entry"));
-        assert!(row.functions.iter().any(|func| func.name == "sink"));
-        assert!(row.terminal_call.is_none());
+    #[test]
+    fn twenty_layer_diamond_stays_linear_in_compiler_graph_size() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut source = String::from("def sink(x):\n    return x\n\n");
+        for layer in (0..20).rev() {
+            if layer == 19 {
+                source.push_str(&format!("def join{layer}(x):\n    return sink(x)\n\n"));
+            } else {
+                source.push_str(&format!(
+                    "def join{layer}(x):\n    return left{}(x) + right{}(x)\n\n",
+                    layer + 1,
+                    layer + 1
+                ));
+            }
+            source.push_str(&format!(
+                "def left{layer}(x):\n    return join{layer}(x)\n\ndef right{layer}(x):\n    return join{layer}(x)\n\n"
+            ));
+        }
+        source.push_str("def root(x):\n    return left0(x) + right0(x)\n");
+        std::fs::write(dir.path().join("diamond.py"), source).expect("write diamond fixture");
+        let ws =
+            Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+
+        let outcome = paths(
+            &ws,
+            &PathFilters {
+                from: "root",
+                to: "sink",
+                ..PathFilters::default()
+            },
+        )
+        .expect("diamond corridor");
+
+        // The route language contains 2^20 concrete combinations. The public
+        // result must remain the exact O(V+E) compiler relation.
+        assert_eq!(outcome.representation, "compressed_callgraph");
+        assert_eq!(outcome.node_count, 62);
+        assert_eq!(outcome.edge_count, 81);
+        assert!(outcome.analysis_complete);
     }
 
     #[test]
@@ -842,71 +709,16 @@ mod tests {
             },
         )
         .expect("terminal path query");
-        let path = outcome
-            .paths
-            .first()
-            .unwrap_or_else(|| panic!("expected entry -> helper -> external_sink path, got {outcome:#?}"));
-
         assert_eq!(outcome.to_matches, 1);
+        let names = outcome
+            .nodes
+            .iter()
+            .map(|function| function.name.as_str())
+            .collect::<ahash::AHashSet<_>>();
+        assert_eq!(names, ahash::AHashSet::from_iter(["entry", "helper"]));
         assert_eq!(
-            path.functions
-                .iter()
-                .map(|function| function.name.as_str())
-                .collect::<Vec<_>>(),
-            ["entry", "helper"]
-        );
-        assert_eq!(
-            path.terminal_call.as_ref().map(|call| call.name.as_str()),
+            outcome.terminal_calls.first().map(|call| call.name.as_str()),
             Some("external_sink")
-        );
-    }
-
-    #[test]
-    fn path_id_includes_terminal_call_site_evidence() {
-        let functions = vec![PathFunctionRow {
-            name: "run_admin_command".to_string(),
-            file: "app.py".to_string(),
-            line: 3,
-        }];
-        let first = PathTerminalCallRow {
-            name: "external_sink".to_string(),
-            file: "app.py".to_string(),
-            line: 4,
-            column: 5,
-            enclosing_function: "run_admin_command".to_string(),
-        };
-        let second = PathTerminalCallRow {
-            column: 12,
-            ..first.clone()
-        };
-
-        let without_terminal = compute_path_id(&functions, &[], None);
-        let with_first = compute_path_id(&functions, &[], Some(&first));
-        let with_second = compute_path_id(&functions, &[], Some(&second));
-
-        assert_ne!(without_terminal, with_first);
-        assert_ne!(with_first, with_second);
-    }
-
-    #[test]
-    fn path_row_hydration_rejects_missing_function_fact() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("app.py"), "def entry():\n    return 1\n").expect("write fixture");
-        let ws =
-            Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
-        let graph = ws.cached_resolved_call_graph();
-        let stale_path = ResolvedPath {
-            funcs: vec![FuncId::new(u32::MAX)],
-            edges: Vec::new(),
-            precision: Precision::Exact,
-        };
-
-        let err = hydrate_path_row(&ws, graph.as_ref(), &stale_path)
-            .expect_err("stale function ids must not render as partial paths");
-
-        assert!(
-            err.contains("was not present in the current index"),
-            "unexpected hydration error: {err}"
         );
     }
 

@@ -463,15 +463,15 @@ fn imports_finds_flask_and_local_modules() {
 }
 
 #[test]
-fn imports_flows_column_is_populated() {
-    // Regression from the symbol-level flow lookup — imports with a
+fn imports_summaries_column_is_populated() {
+    // Regression from the symbol-level summary lookup — imports with a
     // resolvable target must show at least one F:id.
-    let Some(out) = run(&["imports", ws().to_str().unwrap(), "--flows"]) else {
+    let Some(out) = run(&["imports", ws().to_str().unwrap(), "--summaries"]) else {
         return;
     };
     assert!(
         out.contains("F:"),
-        "imports: expected at least one F:<16-hex> flow id in output:\n{out}"
+        "imports: expected at least one F:<16-hex> summary id in output:\n{out}"
     );
 }
 
@@ -618,7 +618,7 @@ fn trace_handle_request_shows_sink_path() {
 // -------- path --------
 
 #[test]
-fn path_handle_request_to_admin_command_reports_ranked_semantic_path() {
+fn path_handle_request_to_admin_command_reports_compressed_semantic_corridor() {
     let Some(out) = run(&[
         "path",
         ws().to_str().unwrap(),
@@ -637,20 +637,24 @@ fn path_handle_request_to_admin_command_reports_ranked_semantic_path() {
     for field in ["backends", "idg_available", "idg_semantic_edges"] {
         assert!(value.get(field).is_some(), "path JSON missing `{field}`: {out}");
     }
+    assert_eq!(value["representation"], "compressed_callgraph");
     assert!(
-        value["path_count"].as_u64().unwrap_or(0) >= 1,
-        "path command should find handle_request -> run_admin_command:\n{out}"
+        value["node_count"].as_u64().unwrap_or(0) >= 3,
+        "path command should find the semantic corridor:\n{out}"
     );
-    let first = value["paths"]
-        .as_array()
-        .and_then(|paths| paths.first())
-        .unwrap_or_else(|| panic!("path JSON missing first path:\n{out}"));
-    for field in ["path_id", "hops", "precision", "functions", "edges"] {
-        assert!(first.get(field).is_some(), "path row missing `{field}`: {first}");
+    assert!(
+        value["edge_count"].as_u64().unwrap_or(0) >= 2,
+        "path command should retain resolved corridor edges:\n{out}"
+    );
+    for field in ["nodes", "edges", "analysis_complete"] {
+        assert!(
+            value.get(field).is_some(),
+            "path result missing `{field}`: {value}"
+        );
     }
-    let names: Vec<&str> = first["functions"]
+    let names: Vec<&str> = value["nodes"]
         .as_array()
-        .expect("path functions")
+        .expect("corridor nodes")
         .iter()
         .filter_map(|func| func["name"].as_str())
         .collect();
@@ -658,7 +662,7 @@ fn path_handle_request_to_admin_command_reports_ranked_semantic_path() {
         names.contains(&"handle_request")
             && names.contains(&"update_user")
             && names.contains(&"run_admin_command"),
-        "path should include the semantic chain through update_user: {names:?}\n{out}"
+        "corridor should include the semantic nodes through update_user: {names:?}\n{out}"
     );
 }
 
@@ -740,7 +744,7 @@ fn slice_resolves_an_unambiguous_symbol_without_line() {
 // -------- inspect --------
 
 #[test]
-fn inspect_verify_token_finds_decl_and_chains() {
+fn inspect_verify_token_finds_decl_and_direct_evidence() {
     let Some(out) = run(&[
         "inspect",
         ws().to_str().unwrap(),
@@ -752,7 +756,9 @@ fn inspect_verify_token_finds_decl_and_chains() {
     };
     assert_contains(&out, "decl hit(s)", "inspect verify_token");
     assert_contains(&out, "F:", "inspect verify_token");
-    assert_contains(&out, "handle_request", "inspect verify_token");
+    assert_contains(&out, "direct callers", "inspect verify_token");
+    assert_contains(&out, "get_user", "inspect verify_token");
+    assert_contains(&out, "update_user", "inspect verify_token");
 }
 
 #[test]

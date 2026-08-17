@@ -3,9 +3,9 @@
 //! Every supported language is exercised against every search kind the
 //! inspect command dispatches on: decl-name, direct call, qualified /
 //! dotted call, string literal, decorator / annotation, variable
-//! (assignment target), cross-module chain through the match. Uses the
-//! same primitives the CLI's `cmd_inspect` is built on (enumerate chains +
-//! flow-event walk) so a failure here means the CLI will mis-render too.
+//! (assignment target), and cross-module reachability through the match.
+//! The test-only concrete path oracle plus the compiler flow-event walk prove
+//! the same underlying callgraph and syntax facts consumed by CLI views.
 
 #[path = "lang_common.rs"]
 mod common;

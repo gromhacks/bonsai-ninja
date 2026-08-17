@@ -1,16 +1,15 @@
 //! Query matching — the name-resolution layer the CLI's `inspect`
-//! command uses to turn a user-typed query string into the decls
-//! and non-decl hits it should enumerate chains for.
+//! command uses to turn a user-typed query string into declarations
+//! and non-declaration evidence hits.
 //!
 //! A programmatic consumer that wants inspect's data without the
 //! CLI renderer composes this module with [`crate::ChainCache`]:
 //!
 //! 1. [`matching_decls`] / [`Matcher`] resolves the query to the
 //!    set of decls + non-decl hits it applies to.
-//! 2. [`crate::ChainCache::chains_resolved`] enumerates upstream
-//!    chains for each target.
-//! 3. [`crate::chain_matches_filters`] filters chains against the
-//!    active `--from` / `--to` needles.
+//! 2. [`crate::ChainCache`] hydrates direct resolver and syntax facts.
+//! 3. [`crate::chain_matches_filters`] applies the active `--from` /
+//!    `--to` predicates to the bounded evidence unit.
 //!
 //! The CLI does steps 1–3 plus rendering; library consumers stop at
 //! step 3 and produce their own output.
@@ -139,11 +138,8 @@ pub fn matching_decls(ws: &Workspace, matcher: &Matcher) -> Vec<Decl> {
     hits
 }
 
-/// Project the matching decls down to FuncIds that can be fed
-/// straight into [`crate::ChainCache::chains_resolved`]. Only
-/// callable decls (functions, methods, constructors) survive —
-/// classes / structs are dropped because chain enumeration is
-/// function-level.
+/// Project matching declarations to callable FuncIds. Classes and structs
+/// are omitted because symbol evidence is callable-scoped.
 pub fn matching_func_ids(ws: &Workspace, matcher: &Matcher) -> Vec<FuncId> {
     matching_decls(ws, matcher)
         .into_iter()

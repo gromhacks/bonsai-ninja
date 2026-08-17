@@ -1,4 +1,5 @@
 use super::*;
+use crate::chains::{enumerate_paths_resolved, PathTruncation};
 use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{CallKind, DeclIndex, ModulePath, Visibility, NO_CONSTRUCTOR_METHOD_NAMES};
 

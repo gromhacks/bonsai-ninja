@@ -169,7 +169,7 @@ def check_navigation() -> list[str]:
 def check_retired_surface() -> list[str]:
     failures: list[str] = []
     retired_tokens = {
-        "--no-flows": "flow columns are opt-in with `--flows`",
+        "--no-flows": "summary ids are opt-in with `--summaries`",
         "--findings": "security analysis is an explicit `security` command",
         "goal-benchmark-2026-05-15.md": "historical engineering logs are not product documentation",
         "docs/goal.md": "historical engineering logs are not product documentation",

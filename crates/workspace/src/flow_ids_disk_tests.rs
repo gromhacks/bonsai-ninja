@@ -5,20 +5,17 @@ fn empty_entry_roundtrips() {
     let entry = FlowIdEntry::default();
     let bytes = encode(&entry);
     let decoded = decode(&bytes).expect("decode");
-    assert!(decoded.labels.is_empty());
-    assert!(!decoded.truncated);
+    assert!(decoded.id.is_empty());
 }
 
 #[test]
-fn entry_with_labels_roundtrips() {
+fn entry_with_id_roundtrips() {
     let entry = FlowIdEntry {
-        labels: vec!["F:abc123".to_string(), "F:def456".to_string()],
-        truncated: true,
+        id: "F:abc123".to_string(),
     };
     let bytes = encode(&entry);
     let decoded = decode(&bytes).expect("decode");
-    assert_eq!(decoded.labels, entry.labels);
-    assert!(decoded.truncated);
+    assert_eq!(decoded.id, entry.id);
 }
 
 #[test]

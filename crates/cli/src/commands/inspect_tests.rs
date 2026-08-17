@@ -560,13 +560,13 @@ fn inspect_json_page_unit_serializes_one_flow_not_the_whole_declaration() {
         params: Vec::new(),
         direct_callers: Vec::new(),
         callees: Vec::new(),
-        graph_flows_evaluated: true,
+        graph_evidence_evaluated: true,
         flows: vec![sample_structural_flow(1), sample_structural_flow(2)],
         groups: Vec::new(),
         summary: InspectSummary {
-            total_flows: 2,
-            max_chain_depth: 2,
-            unique_entry_points: 1,
+            evidence_units: 2,
+            max_functions_per_unit: 2,
+            unique_symbol_roots: 1,
         },
     };
     let unit = InspectJsonPageUnit::Decl {

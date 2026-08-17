@@ -3175,11 +3175,23 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
             && main_body.contains("cmd_export(&workspace, full_propagations, format)"),
         "CLI and default SDK export must always use the exact compressed chain relation without a cap-oriented mode switch"
     );
-    let chain_enumerator_body = read(&root.join("crates/callgraph/src/chains.rs"));
+    let inspect_command = live_code(&read(&root.join("crates/cli/src/commands/inspect.rs")));
+    let browse_paths = live_code(&read(&root.join("crates/browse/src/paths.rs")));
+    let flow_ids = live_code(&read(&root.join("crates/workspace/src/flow_ids.rs")));
+    let cli_args = live_code(&read(&root.join("crates/cli/src/args.rs")));
     assert!(
-        chain_enumerator_body.contains("visited_budget = visited_budget.saturating_add(1)")
-            && chain_enumerator_body.contains("max_probes.saturating_mul(16)"),
-        "chain enumeration must safely support usize::MAX as the uncapped probe budget"
+        !inspect_command.contains("enumerate_chains_resolved(")
+            && !inspect_command.contains("enumerate_paths_resolved(")
+            && !browse_paths.contains("enumerate_paths_resolved(")
+            && !flow_ids.contains("enumerate_chains_resolved(")
+            && !flow_ids.contains("enumerate_paths_resolved("),
+        "production inspect, path, and browse-summary surfaces must preserve graph relations without concrete path enumeration"
+    );
+    assert!(
+        cli_args.matches("long = \"summaries\"").count() == 10
+            && !cli_args.contains("alias = \"flows\"")
+            && !cli_args.contains("long = \"flows\""),
+        "browse summary ids must use one intentional --summaries switch without a hidden legacy --flows path"
     );
     assert!(
         export_body.contains("compressed_callgraph")
@@ -3324,16 +3336,17 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
     let render_function = function_body(&inspect, "render_function_source");
     let render_report = function_body(&inspect, "render_inspect_report_text");
     assert!(
-        command.contains("drop(edge_resolver)")
-            && command.contains("drop(chain_cache)")
+        command.contains("drop(chain_cache)")
             && command.contains("ws.db().release_global_index()")
             && command.contains("ws.release_resolved_call_graph_cache()")
             && command.contains("ws.release_compiler_linkage_cache()")
             && command.contains("ws.release_exact_body_cache()")
             && command.contains("ws.release_decl_name_index_cache()")
+            && !inspect.contains("CallEdgeResolver")
+            && !inspect.contains("resolve_call_hit_targets")
             && function_body(&inspect_engine, "func_display_name")
                 .contains("compiler_header_index()"),
-        "inspect must end its whole-body navigation phase before opening a scoped IDG and render semantic names from shared compiler headers"
+        "inspect must end its whole-body navigation phase before opening a scoped IDG, avoid a redundant call-edge presentation resolver for bounded self units, and render semantic names from shared compiler headers"
     );
     assert!(
         command.contains("let global = ws.compiler_header_index()")
@@ -3447,6 +3460,21 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
                 .zip(body.find("let analyze_entry"))
                 .is_some_and(|((session, targets), analyze)| session < targets && targets < analyze),
         "inspect must share one paged exact corridor, resolve exact target nodes, and reject compiler-proven irrelevant sources before per-entry closure"
+    );
+}
+
+#[test]
+fn browse_summaries_remain_lightweight_and_machine_readable() {
+    let root = repo_root();
+    let browse = read(&root.join("crates/cli/src/commands/browse.rs"));
+    let json_emitter = function_body(&browse, "emit_summary_json_paged_cached");
+    assert!(
+        browse.contains("summary_ids: Vec<String>")
+            && json_emitter.contains("SummaryAnnotator::new(ws)")
+            && json_emitter.contains("emit_json_paged_cached")
+            && !browse.contains("flows && !partial_workspace")
+            && !browse.contains("CallEdgeResolver"),
+        "browse --summaries must expose compiler summary identities in JSON and scoped workspaces without reviving graph traversal or silently disabling the flag"
     );
 }
 
@@ -3739,6 +3767,10 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
     let compiler_session_prewarm =
         function_body(&security_matcher, "prepare_compiler_object_session_for_body_scan");
     let compiler_session = function_body(&compiler_object, "ensure_compiler_object_session");
+    let compiler_attachment = function_body(
+        &compiler_object,
+        "attach_reusable_compiler_object_store_for_files",
+    );
     let compiler_import_header = function_body(&compiler_object, "compiler_import_index_uncached");
     let compiler_syntax_header = function_body(&compiler_object, "compiler_syntax_header_uncached");
     let broad_matcher = function_body(
@@ -3757,6 +3789,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && package_context_prewarm.contains("include_workspace_package_context")
             && !package_context_prewarm.contains("has_package_text_anchors")
             && broad_matcher.contains("prewarm_language_import_package_contexts")
+            && broad_matcher.contains("attach_reusable_compiler_object_store_for_files")
             && broad_matcher.contains("prepare_compiler_object_session_for_body_scan")
             && broad_matcher.contains("prewarmed_import_contexts.get(language.as_str())")
             && compiler_session_prewarm.contains("FactRetention::Transient")
@@ -3766,6 +3799,10 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && compiler_session.contains("workspace_root()")
             && compiler_session.contains("tempfile::Builder::new()")
             && compiler_session.contains("write_compiler_object_generation")
+            && compiler_attachment.contains("store.covers(&descriptors)")
+            && compiler_attachment.contains("CompilerObjectStore::open_reusable(&root)")
+            && !compiler_attachment.contains("write_compiler_object_generation")
+            && !compiler_attachment.contains("compile_fresh_file_object")
             && compiler_import_header.contains("store.load_imports(&descriptor)")
             && compiler_syntax_header.contains("store.load_syntax(&descriptor)")
             && compiler_object.contains("imports_digest")
@@ -4054,8 +4091,9 @@ fn first_class_path_and_slice_use_syntax_derived_indexes_only() {
     let path_finalize_body = live_code(function_body(&paths_rs, "finalize_outcome"));
     assert!(
         path_body.contains("semantic_path_graph(ws, &from_funcs, &graph_targets, warmed_idg.as_deref())")
-            && path_body.contains("enumerate_paths_resolved("),
-        "path queries must enumerate the shared semantic path graph and report resolution coverage"
+            && path_body.contains("representation: \"compressed_callgraph\"")
+            && !path_body.contains("enumerate_paths_resolved("),
+        "path queries must return the exact compressed semantic corridor without concrete path enumeration"
     );
     assert!(
         path_graph_body.contains("ws.cached_resolved_call_graph()")
@@ -4589,28 +4627,25 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
             && !cached_imports.contains("extract_imports")
             && !streaming_imports.contains("build_import_index_uncached(file)")
             && seed_callgraph.contains("dataflow.seed_call_graph(graph.clone())")
-            && seed_callgraph.contains("flow_ids.seed_call_graph(graph.clone())")
             && cached_callgraph.contains("seed_resolved_call_graph(graph.clone())")
             && cached_callgraph.contains("dataflow.seed_call_graph(arc.clone())")
-            && cached_callgraph.contains("flow_ids.seed_call_graph(arc.clone())")
             && release_callgraph.contains("dataflow.release_call_graph()")
-            && release_callgraph.contains("flow_ids.release_call_graph()")
             && function_body(&dataflow, "release_call_graph").contains("cached_call_graph.write()")
-            && function_body(&flow_ids, "release_call_graph").contains("inner.write().cg = None"),
-        "streaming compiler phases must reuse exact import headers and one canonical resolved callgraph across dataflow/flow-id consumers, then release every shared owner together"
+            && !flow_ids.contains("ResolvedCallGraph")
+            && !flow_ids.contains("build_resolved_call_graph_snapshot"),
+        "streaming compiler phases must reuse exact import headers and one canonical resolved callgraph for graph consumers; symbol-summary ids must remain header-only"
     );
     let export_flow_labels = function_body(&native_export, "export_taint_chains_and_flow_labels");
-    let indexed_flow_labels = function_body(&flow_ids, "labels_for_chain_sets_with_index_and_options");
+    let symbol_evidence_id = function_body(&flow_ids, "symbol_evidence_id");
     assert!(
         export_flow_labels.contains("compressed_callgraph")
             && !export_flow_labels.contains("labels_for_chain_sets")
             && !export_flow_labels.contains("chains_resolved")
-            && indexed_flow_labels.contains("collect_flow_ids_for_chains(&cg, headers")
-            && !indexed_flow_labels.contains("global_index()")
+            && symbol_evidence_id.contains("compute_structural_flow_id(headers, db, vfs, &[symbol])")
             && !flow_ids.contains("SharedCallPathResolver")
-            && !function_body(&flow_ids, "collect_flow_ids_for_chains").contains("global_index()")
-            && !function_body(&flow_ids, "enumerate_from").contains("global_index()"),
-        "native export must not enumerate path labels, while query-time flow IDs reuse live compiler headers/callgraph without cloning whole-workspace adjacency/name tables, reopening body indexes, or reparsing sources"
+            && !flow_ids.contains("enumerate_from")
+            && !flow_ids.contains("call_graph("),
+        "native export must not enumerate path labels, while query-time summary IDs hash exact compiler headers without opening graph or body indexes"
     );
     let taint_graph_start = native_export
         .find("struct ExportTaintGraphStreaming")
@@ -4632,7 +4667,7 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
     assert!(
         taint_graph.contains("RefCell<Option<ExportTaintChainsAndFlowLabels>>")
             && taint_graph.contains("self.chain_rows.borrow_mut().take()")
-            && taint_graph.contains("flow_ids().release_resident_labels()")
+            && taint_graph.contains("flow_ids().release_resident_ids()")
             && taint_graph.contains("release_compiler_header_cache()")
             && taint_graph.contains("drop(return_taint_by_func)")
             && chains < release_bodies

@@ -131,7 +131,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release --locked -p bonsai-ninja
+          bash scripts/build-release.sh
           ./target/release/bonsai-ninja security . pack --validate --taint-replay \
             --rules-dir security-patterns --format json --no-color --no-progress \
             > /tmp/bonsai-pack-validation.json
@@ -226,7 +226,7 @@ jobs:
 
       - name: Build the production binary
         working-directory: bonsai-ninja
-        run: cargo build --release --locked -p bonsai-ninja
+        run: bash scripts/build-release.sh
 
       - name: Run exact large-repository correctness and performance gates
         working-directory: bonsai-ninja
@@ -296,14 +296,26 @@ jobs:
           toolchain: "1.88"
           targets: ${{ matrix.target }}
 
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: release-${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --locked -p bonsai-ninja --target ${{ matrix.target }}
+        shell: bash
+        run: bash scripts/build-release.sh --target ${{ matrix.target }}
+
+      - name: Reject build-machine paths in release binary
+        shell: bash
+        run: |
+          python scripts/audit-release-binary.py \
+            target/${{ matrix.target }}/release/${{ matrix.bin }}
 
       - name: Enforce build-artifact budget
+        shell: bash
         run: scripts/audit-build-artifacts.sh
 
       - name: Verify CLI smoke tests (Unix)

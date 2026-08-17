@@ -1,11 +1,6 @@
 //! On-disk encoding for [`super::flow_ids::FlowIdCache`] entries.
 //!
-//! Each per-function entry is the MessagePack-encoded `(labels,
-//! truncated)` pair: the cached `Arc<[String]>` of hashed flow-id
-//! labels and the flag indicating whether the chain enumeration hit
-//! its cap. Strings are kept inline (not interned across entries)
-//! because flow-id labels are short hex hashes (8-16 chars) and the
-//! per-entry list is bounded at `MAX_LABELS_PER_FUNC`.
+//! Each per-function entry is one MessagePack-encoded symbol-evidence id.
 
 use bonsai_common::wire;
 use serde::{Deserialize, Serialize};
@@ -14,12 +9,8 @@ use thiserror::Error;
 /// One per-function record persisted to a fact store.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct FlowIdEntry {
-    /// Hashed flow-id labels for this function — same shape as the
-    /// in-memory `Arc<[String]>`.
-    pub labels: Vec<String>,
-    /// `true` when chain enumeration truncated for this function (the
-    /// label set is a strict prefix of reality).
-    pub truncated: bool,
+    /// Hashed symbol-evidence id for this function.
+    pub id: String,
 }
 
 /// Errors returned by [`decode`].

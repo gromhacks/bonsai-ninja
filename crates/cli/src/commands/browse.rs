@@ -213,9 +213,8 @@ pub(crate) fn cmd_defs(
     } else {
         f.kind
     };
-    let (project, _footer, partial_workspace) =
+    let (project, _footer, _partial_workspace) =
         open_browse_project_with_retrieval(root, prefilter_literal, retrieval_kind, f.file, f.regex)?;
-    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let out = with_browse_progress("collecting definitions", || {
         project
@@ -238,7 +237,20 @@ pub(crate) fn cmd_defs(
     };
     match format {
         BrowseFormat::Json => {
-            emit_json_paged_cached(root, &out, &paging_cfg, "defs", filters_hash, cost)?;
+            if flows {
+                emit_summary_json_paged_cached(
+                    root,
+                    ws,
+                    &out,
+                    &paging_cfg,
+                    "defs",
+                    filters_hash,
+                    cost,
+                    |ann, row| ann.labels_for(&row.file, row.line),
+                )?;
+            } else {
+                emit_json_paged_cached(root, &out, &paging_cfg, "defs", filters_hash, cost)?;
+            }
         }
         BrowseFormat::Text => {
             page_cache::emit_paged_text(
@@ -251,10 +263,10 @@ pub(crate) fn cmd_defs(
                 |paged, info, cfg| {
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
-                    let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
-                    let mut flow_status = FlowColumnStatus::default();
+                    let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = SummaryColumnStatus::default();
                     let headers =
-                        with_flows_header(&["name", "kind", "location", "signature", "callees"], flows);
+                        with_summaries_header(&["name", "kind", "location", "signature", "callees"], flows);
                     let mut t = u.table(&headers);
                     let callees_by_name = callee_summaries(ws, 3);
                     for d in &rows {
@@ -283,7 +295,7 @@ pub(crate) fn cmd_defs(
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
                             let labels = ann.labels_for(&d.file, d.line);
-                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
+                            cells.push(summary_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -295,7 +307,7 @@ pub(crate) fn cmd_defs(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} definitions)", info.total_rows)));
-                    render_flow_column_notice(u, &flow_status);
+                    render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja defs <workspace>");
                     Ok(())
@@ -570,46 +582,47 @@ pub(crate) fn paging_from_cli_output(
     ))
 }
 
-/// Header helper: extend `base` with a trailing `"flows"` column
-/// when the `flows` column is enabled. Keeps the column list in
+/// Header helper: extend `base` with a trailing `"summaries"` column
+/// when compiler summary ids are enabled. Keeps the column list in
 /// one place per renderer so ordering stays consistent.
-pub(crate) fn with_flows_header<'a>(base: &'a [&'a str], flows: bool) -> Vec<&'a str> {
+pub(crate) fn with_summaries_header<'a>(base: &'a [&'a str], flows: bool) -> Vec<&'a str> {
     let mut out: Vec<&str> = base.to_vec();
     if flows {
-        out.push("flows");
+        out.push("summaries");
     }
     out
 }
 
 /// Paired `(annotator, progress_bar)` for a browse-command row
-/// loop. When `flows` is set, returns an annotator + a
+/// loop. When summaries are requested, returns an annotator + a
 /// row-count-sized progress bar so the user sees ticks during
 /// what would otherwise be a multi-second silent pause on big
-/// workspaces (Redis-scale chain enumeration for the first hit
-/// against each enclosing function). Both are `None` when the
-/// flows column is disabled.
-pub(crate) fn build_flow_annotator<'a>(
+/// workspaces. Both are `None` when the summary column is disabled.
+pub(crate) fn build_summary_annotator<'a>(
     ws: &'a Workspace,
     flows: bool,
     row_count: u64,
 ) -> (
-    Option<bonsai_sdk::FlowAnnotator<'a>>,
+    Option<bonsai_sdk::SummaryAnnotator<'a>>,
     Option<indicatif::ProgressBar>,
 ) {
     if !flows {
         return (None, None);
     }
-    let bar = progress::progress_bar("annotating flows", row_count);
-    (Some(bonsai_sdk::FlowAnnotator::new(ws)), Some(bar))
+    let bar = progress::progress_bar("annotating symbol summaries", row_count);
+    (Some(bonsai_sdk::SummaryAnnotator::new(ws)), Some(bar))
 }
 
-/// Cell helper: render compact flow references for the `flows`
+/// Cell helper: render compact references for the `summaries`
 /// column. Full `F:<16-hex>` ids are intentionally not placed
 /// inside dense browse tables because comfy-table may split long
 /// tokens under width pressure. The cell gets short per-render
-/// references (`F1`, `F2`, ...), and `render_flow_column_notice`
+/// references (`F1`, `F2`, ...), and `render_summary_column_notice`
 /// prints the complete copyable ids below the table.
-pub(crate) fn format_flow_labels_for_cell(labels: &str, status: &mut FlowColumnStatus) -> Option<String> {
+pub(crate) fn format_summary_labels_for_cell(
+    labels: &str,
+    status: &mut SummaryColumnStatus,
+) -> Option<String> {
     if labels.trim().is_empty() {
         return None;
     }
@@ -626,7 +639,7 @@ pub(crate) fn format_flow_labels_for_cell(labels: &str, status: &mut FlowColumnS
     }
     let mut refs = Vec::new();
     for id in ids.iter().take(MAX_INLINE_FLOWS) {
-        refs.push(status.flow_ref(id));
+        refs.push(status.summary_ref(id));
     }
     if refs.is_empty() {
         return None;
@@ -636,20 +649,16 @@ pub(crate) fn format_flow_labels_for_cell(labels: &str, status: &mut FlowColumnS
     if extra > 0 {
         shown.push_str(&format!("\n(+{extra} more)"));
     }
-    if flow_labels_truncated(labels) {
-        shown.push('…');
-    }
     Some(shown)
 }
 
 #[derive(Default)]
-pub(crate) struct FlowColumnStatus {
-    truncated_rows: usize,
+pub(crate) struct SummaryColumnStatus {
     pub(crate) flow_ids: Vec<String>,
 }
 
-impl FlowColumnStatus {
-    fn flow_ref(&mut self, id: &str) -> String {
+impl SummaryColumnStatus {
+    fn summary_ref(&mut self, id: &str) -> String {
         let idx = self
             .flow_ids
             .iter()
@@ -662,41 +671,20 @@ impl FlowColumnStatus {
     }
 }
 
-fn flow_cell_with_status(u: &Ui, labels: &str, status: &mut FlowColumnStatus) -> Cell {
-    if flow_labels_truncated(labels) {
-        status.truncated_rows += 1;
-    }
-    let Some(shown) = format_flow_labels_for_cell(labels, status) else {
+fn summary_cell_with_status(u: &Ui, labels: &str, status: &mut SummaryColumnStatus) -> Cell {
+    let Some(shown) = format_summary_labels_for_cell(labels, status) else {
         return Cell::new(u.dim("-"));
     };
     Cell::new(u.loc(&shown))
 }
 
-fn flow_labels_truncated(labels: &str) -> bool {
-    labels.split_whitespace().any(|part| part.ends_with('…'))
-}
-
-fn render_flow_column_notice(u: &Ui, status: &FlowColumnStatus) {
+fn render_summary_column_notice(u: &Ui, status: &SummaryColumnStatus) {
     if !status.flow_ids.is_empty() {
-        cli_println!("{}", u.label("flow ids:"));
+        cli_println!("{}", u.label("symbol summary ids:"));
         for (idx, id) in status.flow_ids.iter().enumerate() {
             cli_println!("  {} {}", u.dim(&format!("F{}", idx + 1)), u.loc(id));
         }
     }
-    if status.truncated_rows == 0 {
-        return;
-    }
-    cli_println!(
-        "{}",
-        u.warn(&format!(
-            "semantic-only flows column incomplete: {} rendered row(s) have capped flow-id labels",
-            status.truncated_rows
-        ))
-    );
-    cli_println!(
-        "{}",
-        u.dim("flow ids ending in … are prefixes, not complete label sets; use inspect --query ... --all for full evidence")
-    );
 }
 
 /// Conservative visible-byte estimate for one comfy-table cell.
@@ -773,7 +761,7 @@ fn flow_labels_estimated_cell_cost(flows: bool) -> u64 {
 }
 
 fn location_flow_labels_cell_cost(
-    exact_ann: Option<&bonsai_sdk::FlowAnnotator<'_>>,
+    exact_ann: Option<&bonsai_sdk::SummaryAnnotator<'_>>,
     flows: bool,
     file: &str,
     line: u32,
@@ -785,7 +773,7 @@ fn location_flow_labels_cell_cost(
     }
 }
 
-fn import_flow_labels(ann: &bonsai_sdk::FlowAnnotator<'_>, import: &bonsai_sdk::ImportOut) -> String {
+fn import_flow_labels(ann: &bonsai_sdk::SummaryAnnotator<'_>, import: &bonsai_sdk::ImportOut) -> String {
     // Imports live at module scope — `labels_for(file, line)` would
     // always be empty. The useful labels are those terminating in
     // the imported symbols/local bindings. Keep this in one helper
@@ -817,6 +805,73 @@ fn import_flow_labels(ann: &bonsai_sdk::FlowAnnotator<'_>, import: &bonsai_sdk::
     union.into_iter().collect::<Vec<_>>().join(" ")
 }
 
+fn class_summary_labels(ann: &bonsai_sdk::SummaryAnnotator<'_>, class: &bonsai_sdk::ClassOut) -> String {
+    let mut union = std::collections::BTreeSet::new();
+    for method in &class.methods {
+        union.extend(
+            ann.labels_for_symbol(method)
+                .split_whitespace()
+                .map(str::to_string),
+        );
+    }
+    if union.is_empty() {
+        union.extend(
+            ann.labels_for_symbol(&class.name)
+                .split_whitespace()
+                .map(str::to_string),
+        );
+    }
+    union.into_iter().collect::<Vec<_>>().join(" ")
+}
+
+#[derive(serde::Serialize)]
+struct SummaryJsonRow<'row, T> {
+    #[serde(flatten)]
+    row: &'row T,
+    summary_ids: Vec<String>,
+}
+
+impl<T> Clone for SummaryJsonRow<'_, T> {
+    fn clone(&self) -> Self {
+        Self {
+            row: self.row,
+            summary_ids: self.summary_ids.clone(),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // mirrors the existing paged JSON emitter contract
+fn emit_summary_json_paged_cached<T, F, L>(
+    workspace: &std::path::Path,
+    ws: &Workspace,
+    rows: &[T],
+    cfg: &paging::PagingConfig,
+    command: &str,
+    filters_hash: u64,
+    row_cost_bytes: F,
+    labels_for: L,
+) -> Result<()>
+where
+    T: serde::Serialize,
+    F: Fn(&T) -> u64,
+    L: Fn(&bonsai_sdk::SummaryAnnotator<'_>, &T) -> String,
+{
+    let annotator = bonsai_sdk::SummaryAnnotator::new(ws);
+    let annotated: Vec<SummaryJsonRow<'_, T>> = rows
+        .iter()
+        .map(|row| SummaryJsonRow {
+            row,
+            summary_ids: labels_for(&annotator, row)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+        })
+        .collect();
+    emit_json_paged_cached(workspace, &annotated, cfg, command, filters_hash, |row| {
+        row_cost_bytes(row.row) + row.summary_ids.iter().map(|id| id.len() as u64 + 4).sum::<u64>() + 20
+    })
+}
+
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
 pub(crate) fn cmd_calls(
     root: &std::path::Path,
@@ -828,9 +883,8 @@ pub(crate) fn cmd_calls(
 ) -> Result<()> {
     let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.callee.or(f.caller);
-    let (project, _footer, partial_workspace) =
+    let (project, _footer, _partial_workspace) =
         open_browse_project_with_retrieval(root, prefilter_literal, Some("call"), f.file, f.regex)?;
-    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let out = with_browse_progress("collecting call sites", || {
         project
@@ -850,7 +904,7 @@ pub(crate) fn cmd_calls(
     ]);
     let text_cost = matches!(format, BrowseFormat::Text);
     let exact_flow_cost_ann =
-        (flows && text_cost && out.len() <= 512).then(|| bonsai_sdk::FlowAnnotator::new(ws));
+        (flows && text_cost && out.len() <= 512).then(|| bonsai_sdk::SummaryAnnotator::new(ws));
     let cost_bytes = |c: &bonsai_sdk::CallOut| {
         if !text_cost {
             return (c.callee.len() + c.caller.as_deref().map_or(1, str::len) + c.file.len() + 16) as u64
@@ -869,10 +923,19 @@ pub(crate) fn cmd_calls(
     };
     match format {
         BrowseFormat::Json => {
-            if paging_cfg.json_wrapped() {
-                emit_json_paged_cached(root, &out, &paging_cfg, "calls", filters_hash, cost_bytes)?;
+            if flows {
+                emit_summary_json_paged_cached(
+                    root,
+                    ws,
+                    &out,
+                    &paging_cfg,
+                    "calls",
+                    filters_hash,
+                    cost_bytes,
+                    |ann, row| ann.labels_for(&row.file, row.line),
+                )?;
             } else {
-                cli_println!("{}", serde_json::to_string_pretty(&out)?);
+                emit_json_paged_cached(root, &out, &paging_cfg, "calls", filters_hash, cost_bytes)?;
             }
         }
         BrowseFormat::Text => {
@@ -891,9 +954,10 @@ pub(crate) fn cmd_calls(
                 |paged, info, cfg| {
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
-                    let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
-                    let mut flow_status = FlowColumnStatus::default();
-                    let headers = with_flows_header(&["callee text", "caller", "location", "code"], flows);
+                    let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = SummaryColumnStatus::default();
+                    let headers =
+                        with_summaries_header(&["callee text", "caller", "location", "code"], flows);
                     let mut t = u.table(&headers);
                     for c in &rows {
                         let caller = c.caller.as_deref().unwrap_or("-");
@@ -909,7 +973,7 @@ pub(crate) fn cmd_calls(
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
                             let labels = ann.labels_for(&c.file, c.line);
-                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
+                            cells.push(summary_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -921,7 +985,7 @@ pub(crate) fn cmd_calls(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} call sites)", info.total_rows)));
-                    render_flow_column_notice(u, &flow_status);
+                    render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja calls <workspace>");
                     Ok(())
@@ -1152,11 +1216,10 @@ pub(crate) fn cmd_imports(
 ) -> Result<()> {
     let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.module.or(f.alias);
-    let (project, _footer, partial_workspace) =
+    let (project, _footer, _partial_workspace) =
         open_browse_project_with_retrieval(root, prefilter_literal, Some("import"), f.file, f.regex)?;
-    let flows = flows && !partial_workspace;
     let ws = project.workspace();
-    f.resolve_workspace_bindings = flows && matches!(format, BrowseFormat::Text);
+    f.resolve_workspace_bindings = flows;
     let out = with_browse_progress("collecting imports", || {
         project
             .browse()
@@ -1171,7 +1234,7 @@ pub(crate) fn cmd_imports(
         ("regex", if f.regex { "1" } else { "0" }),
     ]);
     let text_cost = matches!(format, BrowseFormat::Text);
-    let flow_cost_ann = (flows && text_cost).then(|| bonsai_sdk::FlowAnnotator::new(ws));
+    let flow_cost_ann = (flows && text_cost).then(|| bonsai_sdk::SummaryAnnotator::new(ws));
     let cost = |import: &bonsai_sdk::ImportOut| {
         if !text_cost {
             return (import.module.len()
@@ -1201,7 +1264,20 @@ pub(crate) fn cmd_imports(
     };
     match format {
         BrowseFormat::Json => {
-            emit_json_paged_cached(root, &out, &paging_cfg, "imports", filters_hash, cost)?;
+            if flows {
+                emit_summary_json_paged_cached(
+                    root,
+                    ws,
+                    &out,
+                    &paging_cfg,
+                    "imports",
+                    filters_hash,
+                    cost,
+                    import_flow_labels,
+                )?;
+            } else {
+                emit_json_paged_cached(root, &out, &paging_cfg, "imports", filters_hash, cost)?;
+            }
         }
         BrowseFormat::Text => {
             page_cache::emit_paged_text(
@@ -1214,10 +1290,12 @@ pub(crate) fn cmd_imports(
                 |paged, info, cfg| {
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
-                    let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
-                    let mut flow_status = FlowColumnStatus::default();
-                    let headers =
-                        with_flows_header(&["module", "symbol", "alias", "kind", "location", "code"], flows);
+                    let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = SummaryColumnStatus::default();
+                    let headers = with_summaries_header(
+                        &["module", "symbol", "alias", "kind", "location", "code"],
+                        flows,
+                    );
                     let mut t = u.table(&headers);
                     for import in &rows {
                         let alias = import.alias.clone().unwrap_or_else(|| "-".to_string());
@@ -1242,7 +1320,7 @@ pub(crate) fn cmd_imports(
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
                             let labels = import_flow_labels(ann, import);
-                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
+                            cells.push(summary_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -1254,7 +1332,7 @@ pub(crate) fn cmd_imports(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} imports)", info.total_rows)));
-                    render_flow_column_notice(u, &flow_status);
+                    render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja imports <workspace>");
                     Ok(())
@@ -1289,9 +1367,8 @@ pub(crate) fn cmd_vars(
 ) -> Result<()> {
     let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.name.or(f.source).or(f.in_fn);
-    let (project, _footer, partial_workspace) =
+    let (project, _footer, _partial_workspace) =
         open_browse_project_with_retrieval(root, prefilter_literal, Some("var"), f.file, f.regex)?;
-    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let out = with_browse_progress("collecting variables", || {
         project
@@ -1308,7 +1385,7 @@ pub(crate) fn cmd_vars(
     ]);
     let text_cost = matches!(format, BrowseFormat::Text);
     let exact_flow_cost_ann =
-        (flows && text_cost && out.len() <= 512).then(|| bonsai_sdk::FlowAnnotator::new(ws));
+        (flows && text_cost && out.len() <= 512).then(|| bonsai_sdk::SummaryAnnotator::new(ws));
     let cost = |v: &bonsai_sdk::VarOut| {
         if !text_cost {
             return (v.name.len()
@@ -1331,7 +1408,20 @@ pub(crate) fn cmd_vars(
     };
     match format {
         BrowseFormat::Json => {
-            emit_json_paged_cached(root, &out, &paging_cfg, "vars", filters_hash, cost)?;
+            if flows {
+                emit_summary_json_paged_cached(
+                    root,
+                    ws,
+                    &out,
+                    &paging_cfg,
+                    "vars",
+                    filters_hash,
+                    cost,
+                    |ann, row| ann.labels_for(&row.file, row.line),
+                )?;
+            } else {
+                emit_json_paged_cached(root, &out, &paging_cfg, "vars", filters_hash, cost)?;
+            }
         }
         BrowseFormat::Text => {
             page_cache::emit_paged_text(
@@ -1344,9 +1434,9 @@ pub(crate) fn cmd_vars(
                 |paged, info, cfg| {
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
-                    let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
-                    let mut flow_status = FlowColumnStatus::default();
-                    let headers = with_flows_header(&["var", "in", "source", "location", "code"], flows);
+                    let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = SummaryColumnStatus::default();
+                    let headers = with_summaries_header(&["var", "in", "source", "location", "code"], flows);
                     let mut t = u.table(&headers);
                     for v in &rows {
                         let loc = format!("{}:{}:{}", short_file(&v.file), v.line, v.column);
@@ -1363,7 +1453,7 @@ pub(crate) fn cmd_vars(
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
                             let labels = ann.labels_for(&v.file, v.line);
-                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
+                            cells.push(summary_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -1375,7 +1465,7 @@ pub(crate) fn cmd_vars(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} writes)", info.total_rows)));
-                    render_flow_column_notice(u, &flow_status);
+                    render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja vars <workspace>");
                     Ok(())
@@ -1397,9 +1487,8 @@ pub(crate) fn cmd_strings(
 ) -> Result<()> {
     let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.contains.or(f.in_fn);
-    let (project, _footer, partial_workspace) =
+    let (project, _footer, _partial_workspace) =
         open_browse_project_with_retrieval(root, prefilter_literal, Some("string"), f.file, f.regex)?;
-    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let out = with_browse_progress("collecting strings", || {
         project
@@ -1422,7 +1511,7 @@ pub(crate) fn cmd_strings(
     // text preview + file path.
     let text_cost = matches!(format, BrowseFormat::Text);
     let exact_flow_cost_ann =
-        (flows && text_cost && out.len() <= 512).then(|| bonsai_sdk::FlowAnnotator::new(ws));
+        (flows && text_cost && out.len() <= 512).then(|| bonsai_sdk::SummaryAnnotator::new(ws));
     let cost = |s: &bonsai_sdk::StringOut| {
         if !text_cost {
             return (s.category.len() + s.text.len().min(120) + s.file.len() + 16 + 180) as u64
@@ -1446,7 +1535,20 @@ pub(crate) fn cmd_strings(
     };
     match format {
         BrowseFormat::Json => {
-            emit_json_paged_cached(root, &out, &paging_cfg, "strings", filters_hash, cost)?;
+            if flows {
+                emit_summary_json_paged_cached(
+                    root,
+                    ws,
+                    &out,
+                    &paging_cfg,
+                    "strings",
+                    filters_hash,
+                    cost,
+                    |ann, row| ann.labels_for(&row.file, row.line),
+                )?;
+            } else {
+                emit_json_paged_cached(root, &out, &paging_cfg, "strings", filters_hash, cost)?;
+            }
         }
         BrowseFormat::Text => {
             page_cache::emit_paged_text(
@@ -1459,9 +1561,10 @@ pub(crate) fn cmd_strings(
                 |paged, info, cfg| {
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
-                    let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
-                    let mut flow_status = FlowColumnStatus::default();
-                    let headers = with_flows_header(&["category", "text", "in", "location", "code"], flows);
+                    let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = SummaryColumnStatus::default();
+                    let headers =
+                        with_summaries_header(&["category", "text", "in", "location", "code"], flows);
                     let mut t = u.table(&headers);
                     for s in &rows {
                         let preview = truncate(&s.text, 60);
@@ -1480,7 +1583,7 @@ pub(crate) fn cmd_strings(
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
                             let labels = ann.labels_for(&s.file, s.line);
-                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
+                            cells.push(summary_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -1492,7 +1595,7 @@ pub(crate) fn cmd_strings(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} strings)", info.total_rows)));
-                    render_flow_column_notice(u, &flow_status);
+                    render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja strings <workspace>");
                     Ok(())
@@ -1596,9 +1699,8 @@ pub(crate) fn cmd_args(
     } else {
         Some("arg")
     };
-    let (project, _footer, partial_workspace) =
+    let (project, _footer, _partial_workspace) =
         open_browse_project_with_retrieval(root, prefilter_literal, retrieval_kind, f.file, f.regex)?;
-    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let out = with_browse_progress("collecting arguments", || {
         project
@@ -1617,7 +1719,7 @@ pub(crate) fn cmd_args(
     ]);
     let text_cost = matches!(format, BrowseFormat::Text);
     let exact_flow_cost_ann =
-        (flows && text_cost && out.len() <= 512).then(|| bonsai_sdk::FlowAnnotator::new(ws));
+        (flows && text_cost && out.len() <= 512).then(|| bonsai_sdk::SummaryAnnotator::new(ws));
     let cost = |a: &bonsai_sdk::ArgOut| {
         if !text_cost {
             return (a.callee.len()
@@ -1650,7 +1752,20 @@ pub(crate) fn cmd_args(
     };
     match format {
         BrowseFormat::Json => {
-            emit_json_paged_cached(root, &out, &paging_cfg, "args", filters_hash, cost)?;
+            if flows {
+                emit_summary_json_paged_cached(
+                    root,
+                    ws,
+                    &out,
+                    &paging_cfg,
+                    "args",
+                    filters_hash,
+                    cost,
+                    |ann, row| ann.labels_for(&row.file, row.line),
+                )?;
+            } else {
+                emit_json_paged_cached(root, &out, &paging_cfg, "args", filters_hash, cost)?;
+            }
         }
         BrowseFormat::Text => {
             page_cache::emit_paged_text(
@@ -1663,9 +1778,9 @@ pub(crate) fn cmd_args(
                 |paged, info, cfg| {
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
-                    let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
-                    let mut flow_status = FlowColumnStatus::default();
-                    let headers = with_flows_header(
+                    let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = SummaryColumnStatus::default();
+                    let headers = with_summaries_header(
                         &["callee text", "pos", "arg", "caller", "location", "code"],
                         flows,
                     );
@@ -1693,7 +1808,7 @@ pub(crate) fn cmd_args(
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
                             let labels = ann.labels_for(&a.file, a.line);
-                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
+                            cells.push(summary_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -1705,7 +1820,7 @@ pub(crate) fn cmd_args(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} arguments)", info.total_rows)));
-                    render_flow_column_notice(u, &flow_status);
+                    render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja args <workspace>");
                     Ok(())
@@ -1727,9 +1842,8 @@ pub(crate) fn cmd_operations(
 ) -> Result<()> {
     let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.name.or(f.in_fn);
-    let (project, _footer, partial_workspace) =
+    let (project, _footer, _partial_workspace) =
         open_browse_project_with_retrieval(root, prefilter_literal, Some("operation"), f.file, f.regex)?;
-    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let out = with_browse_progress("collecting operations", || {
         project
@@ -1746,7 +1860,7 @@ pub(crate) fn cmd_operations(
     ]);
     let text_cost = matches!(format, BrowseFormat::Text);
     let exact_flow_cost_ann =
-        (flows && text_cost && out.len() <= 512).then(|| bonsai_sdk::FlowAnnotator::new(ws));
+        (flows && text_cost && out.len() <= 512).then(|| bonsai_sdk::SummaryAnnotator::new(ws));
     let cost = |op: &bonsai_sdk::OperationOut| {
         let operands_len = op
             .operands
@@ -1782,7 +1896,20 @@ pub(crate) fn cmd_operations(
     };
     match format {
         BrowseFormat::Json => {
-            emit_json_paged_cached(root, &out, &paging_cfg, "operations", filters_hash, cost)?;
+            if flows {
+                emit_summary_json_paged_cached(
+                    root,
+                    ws,
+                    &out,
+                    &paging_cfg,
+                    "operations",
+                    filters_hash,
+                    cost,
+                    |ann, row| ann.labels_for(&row.file, row.line),
+                )?;
+            } else {
+                emit_json_paged_cached(root, &out, &paging_cfg, "operations", filters_hash, cost)?;
+            }
         }
         BrowseFormat::Text => {
             page_cache::emit_paged_text(
@@ -1795,9 +1922,9 @@ pub(crate) fn cmd_operations(
                 |paged, info, cfg| {
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
-                    let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
-                    let mut flow_status = FlowColumnStatus::default();
-                    let headers = with_flows_header(
+                    let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = SummaryColumnStatus::default();
+                    let headers = with_summaries_header(
                         &["kind", "name", "in", "detail", "operands", "location", "code"],
                         flows,
                     );
@@ -1829,7 +1956,7 @@ pub(crate) fn cmd_operations(
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
                             let labels = ann.labels_for(&op.file, op.line);
-                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
+                            cells.push(summary_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -1841,7 +1968,7 @@ pub(crate) fn cmd_operations(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} operations)", info.total_rows)));
-                    render_flow_column_notice(u, &flow_status);
+                    render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja operations <workspace>");
                     Ok(())
@@ -1869,9 +1996,8 @@ pub(crate) fn cmd_classes(
     } else {
         f.kind
     };
-    let (project, _footer, partial_workspace) =
+    let (project, _footer, _partial_workspace) =
         open_browse_project_with_retrieval(root, prefilter_literal, retrieval_kind, f.file, prefilter_regex)?;
-    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let out = with_browse_progress("collecting classes", || {
         project
@@ -1900,7 +2026,20 @@ pub(crate) fn cmd_classes(
     };
     match format {
         BrowseFormat::Json => {
-            emit_json_paged_cached(root, &out, &paging_cfg, "classes", filters_hash, cost)?;
+            if flows {
+                emit_summary_json_paged_cached(
+                    root,
+                    ws,
+                    &out,
+                    &paging_cfg,
+                    "classes",
+                    filters_hash,
+                    cost,
+                    class_summary_labels,
+                )?;
+            } else {
+                emit_json_paged_cached(root, &out, &paging_cfg, "classes", filters_hash, cost)?;
+            }
         }
         BrowseFormat::Text => {
             page_cache::emit_paged_text(
@@ -1913,9 +2052,9 @@ pub(crate) fn cmd_classes(
                 |paged, info, cfg| {
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
-                    let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
-                    let mut flow_status = FlowColumnStatus::default();
-                    let headers = with_flows_header(&["name", "kind", "location", "#", "methods"], flows);
+                    let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = SummaryColumnStatus::default();
+                    let headers = with_summaries_header(&["name", "kind", "location", "#", "methods"], flows);
                     let mut t = u.table(&headers);
                     for c in &rows {
                         let loc = format!("{}:{}", short_file(&c.file), c.line);
@@ -1938,31 +2077,8 @@ pub(crate) fn cmd_classes(
                             Cell::new(methods_cell),
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
-                            // Classes don't sit inside a function body, so
-                            // `labels_for(file, line)` is always empty here.
-                            // The flows a reader expects are the ones
-                            // terminating in the class's methods — union
-                            // labels across every method name declared on
-                            // the class. Matches the "imports" logic where
-                            // we aggregate Local-scope siblings.
-                            let mut union: std::collections::BTreeSet<String> =
-                                std::collections::BTreeSet::new();
-                            for method in &c.methods {
-                                let labels = ann.labels_for_symbol(method);
-                                for id in labels.split_whitespace() {
-                                    union.insert(id.to_string());
-                                }
-                            }
-                            // Fall back to the class name itself (constructors,
-                            // call-site references with that exact name).
-                            if union.is_empty() {
-                                let labels = ann.labels_for_symbol(&c.name);
-                                for id in labels.split_whitespace() {
-                                    union.insert(id.to_string());
-                                }
-                            }
-                            let flows_text = union.into_iter().collect::<Vec<_>>().join(" ");
-                            cells.push(flow_cell_with_status(u, &flows_text, &mut flow_status));
+                            let flows_text = class_summary_labels(ann, c);
+                            cells.push(summary_cell_with_status(u, &flows_text, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -1974,7 +2090,7 @@ pub(crate) fn cmd_classes(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} types)", info.total_rows)));
-                    render_flow_column_notice(u, &flow_status);
+                    render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja classes <workspace>");
                     Ok(())
@@ -1996,9 +2112,8 @@ pub(crate) fn cmd_refs(
     format: BrowseFormat,
 ) -> Result<()> {
     let paging_cfg = paging_with_row_limit(paging_cfg, limit);
-    let (project, _footer, partial_workspace) =
+    let (project, _footer, _partial_workspace) =
         open_browse_project_with_retrieval(root, Some(symbol), Some("ref"), f.file, f.regex)?;
-    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let out = with_browse_progress("collecting references", || {
         project
@@ -2019,7 +2134,20 @@ pub(crate) fn cmd_refs(
     };
     match format {
         BrowseFormat::Json => {
-            emit_json_paged_cached(root, &out, &paging_cfg, "refs", filters_hash, cost)?;
+            if flows {
+                emit_summary_json_paged_cached(
+                    root,
+                    ws,
+                    &out,
+                    &paging_cfg,
+                    "refs",
+                    filters_hash,
+                    cost,
+                    |ann, row| ann.labels_for(&row.file, row.line),
+                )?;
+            } else {
+                emit_json_paged_cached(root, &out, &paging_cfg, "refs", filters_hash, cost)?;
+            }
         }
         BrowseFormat::Text => {
             page_cache::emit_paged_text(
@@ -2032,9 +2160,9 @@ pub(crate) fn cmd_refs(
                 |paged, info, cfg| {
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
-                    let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
-                    let mut flow_status = FlowColumnStatus::default();
-                    let headers = with_flows_header(&["symbol", "kind", "in", "location", "code"], flows);
+                    let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = SummaryColumnStatus::default();
+                    let headers = with_summaries_header(&["symbol", "kind", "in", "location", "code"], flows);
                     let mut t = u.table(&headers);
                     for r in &rows {
                         let loc = format!("{}:{}:{}", short_file(&r.file), r.line, r.column);
@@ -2052,7 +2180,7 @@ pub(crate) fn cmd_refs(
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
                             let labels = ann.labels_for(&r.file, r.line);
-                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
+                            cells.push(summary_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -2064,7 +2192,7 @@ pub(crate) fn cmd_refs(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} references)", info.total_rows)));
-                    render_flow_column_notice(u, &flow_status);
+                    render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja refs <workspace> <symbol>");
                     Ok(())
@@ -2094,12 +2222,11 @@ pub(crate) fn cmd_search(
     } else {
         None
     };
-    let (project, _footer, partial_workspace) = if let Some((project, footer)) = retrieval_project {
+    let (project, _footer, _partial_workspace) = if let Some((project, footer)) = retrieval_project {
         (project, footer, true)
     } else {
         open_browse_project(root, Some(query), f.regex)?
     };
-    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let hits = with_browse_progress("hydrating verified facts", || {
         project
@@ -2125,7 +2252,20 @@ pub(crate) fn cmd_search(
     };
     match format {
         BrowseFormat::Json => {
-            emit_json_paged_cached(root, &hits, &paging_cfg, "search", filters_hash, cost)?;
+            if flows {
+                emit_summary_json_paged_cached(
+                    root,
+                    ws,
+                    &hits,
+                    &paging_cfg,
+                    "search",
+                    filters_hash,
+                    cost,
+                    |ann, row| ann.labels_for(&row.file, row.line),
+                )?;
+            } else {
+                emit_json_paged_cached(root, &hits, &paging_cfg, "search", filters_hash, cost)?;
+            }
         }
         BrowseFormat::Text => {
             page_cache::emit_paged_text(
@@ -2138,13 +2278,13 @@ pub(crate) fn cmd_search(
                 |paged, info, cfg| {
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
-                    let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
-                    let mut flow_status = FlowColumnStatus::default();
+                    let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = SummaryColumnStatus::default();
                     // The "qualified" column is only meaningful for decl-kind
                     // hits; non-decl hits use the context column (signature /
                     // alias / "in <fn>") for the analogous info. The "code"
                     // column shows the actual source line, syntax-highlighted.
-                    let headers = with_flows_header(
+                    let headers = with_summaries_header(
                         &["name", "kind", "qualified", "context", "code", "location"],
                         flows,
                     );
@@ -2166,7 +2306,7 @@ pub(crate) fn cmd_search(
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
                             let labels = ann.labels_for(&h.file, h.line);
-                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
+                            cells.push(summary_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -2178,7 +2318,7 @@ pub(crate) fn cmd_search(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} matches)", info.total_rows)));
-                    render_flow_column_notice(u, &flow_status);
+                    render_summary_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja search <workspace> <query>");
                     Ok(())
@@ -2187,6 +2327,132 @@ pub(crate) fn cmd_search(
         }
     }
     Ok(())
+}
+
+pub(crate) fn cmd_symbol_summary(
+    root: &std::path::Path,
+    symbol: &str,
+    regex: bool,
+    paging_cfg: paging::PagingConfig,
+    format: BrowseFormat,
+) -> Result<()> {
+    // Summary edges are semantic resolver products. Candidate retrieval is
+    // intentionally not used here because a partial workspace cannot prove
+    // the complete direct caller/callee set.
+    let (project, _footer) = open_project(root)?;
+    let rows = with_browse_progress("building compiler symbol summary", || {
+        project
+            .browse()
+            .symbol_summaries(Some(symbol), regex)
+            .map_err(|error| anyhow::anyhow!("invalid symbol regex `{symbol}`: {error}"))
+    })?;
+    let filters_hash = paging::hash_filters(&[("symbol", symbol), ("regex", if regex { "1" } else { "0" })]);
+    let cost = |row: &bonsai_sdk::SymbolSummary| {
+        serde_json::to_string(row).map_or(512, |encoded| {
+            encoded.len() as u64 + paging::TABLE_ROW_CHROME_BYTES
+        })
+    };
+    match format {
+        BrowseFormat::Json => {
+            emit_json_paged_cached(root, &rows, &paging_cfg, "symbol-summary", filters_hash, cost)?;
+        }
+        BrowseFormat::Text => {
+            page_cache::emit_paged_text(
+                root,
+                &rows,
+                &paging_cfg,
+                "symbol-summary",
+                filters_hash,
+                cost,
+                |page, info, _cfg| {
+                    let u = ui();
+                    for row in page {
+                        let qualified = row.qualified_name.as_deref().unwrap_or(&row.name);
+                        cli_println!();
+                        cli_println!("{}", u.heading(&format!("{}  {}", qualified, row.summary_id)));
+                        cli_println!(
+                            "{}",
+                            u.dim(&format!(
+                                "{}:{}-{} · {} · {} · {}",
+                                short_file(&row.file),
+                                row.start_line,
+                                row.end_line,
+                                row.language,
+                                row.kind,
+                                row.graph_scope
+                            ))
+                        );
+                        cli_println!("{}", u.snippet(&row.signature, extension_for(&row.file)));
+                        if !row.source.trim().is_empty() {
+                            cli_println!();
+                            cli_println!("{}", u.label("SOURCE EVIDENCE"));
+                            cli_println!("{}", u.snippet(&row.source, extension_for(&row.file)));
+                        }
+                        render_summary_edges(u, "DIRECT CALLERS", &row.direct_callers);
+                        render_summary_edges(u, "DIRECT CALLEES", &row.direct_callees);
+                        if !row.unresolved_calls.is_empty() {
+                            cli_println!();
+                            cli_println!("{}", u.label("UNRESOLVED WORKSPACE CALLS"));
+                            for call in &row.unresolved_calls {
+                                cli_println!(
+                                    "  {}:{}:{}  {}",
+                                    short_file(&call.file),
+                                    call.line,
+                                    call.column,
+                                    call.call_text.trim()
+                                );
+                            }
+                        }
+                        if !row.imports.is_empty() {
+                            cli_println!();
+                            cli_println!("{}", u.label("IMPORTS"));
+                            for import in &row.imports {
+                                cli_println!(
+                                    "  {}:{}  {}",
+                                    short_file(&row.file),
+                                    import.line,
+                                    import.module
+                                );
+                            }
+                        }
+                    }
+                    render_paging_footer(info, "bonsai-ninja symbol-summary <workspace> --symbol <name>");
+                    Ok(())
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn render_summary_edges(u: &Ui, title: &str, edges: &[bonsai_sdk::SymbolCallEdge]) {
+    if edges.is_empty() {
+        return;
+    }
+    cli_println!();
+    cli_println!("{}", u.label(title));
+    for edge in edges {
+        cli_println!(
+            "  {} {} → {}  {}:{}:{}  {} / {}",
+            edge.edge_id,
+            edge.caller,
+            edge.callee,
+            short_file(&edge.file),
+            edge.line,
+            edge.column,
+            edge.precision,
+            edge.resolver_stage
+        );
+        if !edge.call_text.trim().is_empty() {
+            cli_println!(
+                "    {}",
+                u.snippet(edge.call_text.trim(), extension_for(&edge.file))
+            );
+        }
+        if !edge.resolver_evidence.trim().is_empty() {
+            cli_println!("    {}", u.dim(&edge.resolver_evidence));
+        }
+    }
 }
 
 #[cfg(test)]

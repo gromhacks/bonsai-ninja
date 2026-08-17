@@ -1000,21 +1000,18 @@ fn check_path(ws: &str, lang: &str, handler: &str, verifier: &str) {
     };
     assert_eq!(code, 0, "[{lang}] path ec={code}: {out}");
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert!(
-        parsed
-            .get("paths")
-            .and_then(|v| v.as_array())
-            .is_some_and(|paths| !paths.is_empty()),
-        "[{lang}] path returned no paths: {out}"
+    assert_eq!(
+        parsed["representation"], "compressed_callgraph",
+        "[{lang}] path did not use compressed graph representation: {out}"
     );
-    let first = parsed["paths"]
-        .as_array()
-        .and_then(|paths| paths.first())
-        .unwrap();
-    for field in ["path_id", "hops", "precision", "functions", "edges"] {
+    assert!(
+        parsed["node_count"].as_u64().unwrap_or(0) >= 2 && parsed["edge_count"].as_u64().unwrap_or(0) >= 1,
+        "[{lang}] path returned an empty semantic corridor: {out}"
+    );
+    for field in ["nodes", "edges", "analysis_complete"] {
         assert!(
-            first.get(field).is_some(),
-            "[{lang}] path row missing `{field}`: {first}"
+            parsed.get(field).is_some(),
+            "[{lang}] path result missing `{field}`: {parsed}"
         );
     }
 }
@@ -3326,7 +3323,7 @@ fn imports_whole_module_resolve_to_flows() {
         "php",
     ] {
         let w = ws(lang, "micro");
-        let Some((out, _, _)) = run(&["imports", &w, "--flows"]) else {
+        let Some((out, _, _)) = run(&["imports", &w, "--summaries"]) else {
             return;
         };
         assert!(

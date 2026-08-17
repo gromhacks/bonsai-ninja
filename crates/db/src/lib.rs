@@ -200,9 +200,18 @@ impl AnalyzerDb {
     /// workspace-relative module paths. Called by `Workspace` at
     /// open/index time. No-op when called twice with the same value.
     pub fn set_workspace_root(&self, root: std::path::PathBuf) {
-        let store = compiler_object::CompilerObjectStore::open_reusable(&root)
-            .ok()
-            .map(Arc::new);
+        let store = match compiler_object::CompilerObjectStore::open_reusable(&root) {
+            Ok(store) => Some(Arc::new(store)),
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-object",
+                    "compiler object generation unavailable at {}: {}",
+                    root.display(),
+                    error
+                );
+                None
+            }
+        };
         *self.inner.workspace_root.write() = Some(root);
         *self.inner.compiler_object_store.write() = store;
         self.inner

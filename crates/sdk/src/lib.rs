@@ -70,20 +70,20 @@ pub use bonsai_browse::{
     file_path_matches_filter, format_span, workspace_file_id, ArgOut, ArgsFilters, AstFileDump, AstFilters,
     AstFunctionCandidate, AstNode, AstOutcome, CallOut, CallgraphRow, CallsFilters, ClassOut, ClassesFilters,
     CommentOut, CommentsFilters, DefOut, DefsFilters, EdgeRecord, EdgesFilters, EntryPointOut,
-    EntryPointsFilters, FlowAnnotator, GraphExportFormat, GraphProjection, HirDump, ImportOut,
-    ImportsFilters, Locator, OperationOperandOut, OperationOut, OperationsFilters, PathFilters,
-    PathFunctionRow, PathOutcome, PathRow, PrecisionClass, RefOut, RefsFilters, ResolutionCoverageDeclRow,
+    EntryPointsFilters, GraphExportFormat, GraphProjection, HirDump, ImportOut, ImportsFilters, Locator,
+    OperationOperandOut, OperationOut, OperationsFilters, PathFilters, PathFunctionRow, PathOutcome,
+    PathTerminalCallRow, PrecisionClass, RefOut, RefsFilters, ResolutionCoverageDeclRow,
     ResolutionCoverageFileRow, ResolutionCoverageFilters, ResolveFilters, ResolveOutcome, ResolveTrace,
     SearchFilters, SearchHit, SliceFilters, SliceOutcome, SliceRow, SliceStep, StringOut, StringsFilters,
-    TaintFilters, TaintOutcome, TaintReport, VarOut, VarsFilters,
+    SummaryAnnotator, SymbolCallEdge, SymbolEvidenceKind, SymbolImport, SymbolSummary, TaintFilters,
+    TaintOutcome, TaintReport, UnresolvedCallEvidence, VarOut, VarsFilters,
 };
 pub use bonsai_inspect::{
     chain_matches_filters, chain_matches_filters_for_hit, chain_to_names, compute_flow_id,
     compute_flow_labels_from, compute_group_id, compute_structural_group_id, compute_taint_flow_id,
     find_call_span_by_name, find_call_span_to_func_uncached, find_enclosing_func, func_display_name,
-    matching_decls, matching_func_ids, name_token_match, CallEdgeResolver, CallPathTruncation, ChainCache,
-    FactKindFilter, FilterHit, InspectFilters, Matcher, PrecisionFilter, ResolvedChain,
-    TaintFlowIdentityStep,
+    matching_decls, matching_func_ids, name_token_match, CallEdgeResolver, ChainCache, FactKindFilter,
+    FilterHit, InspectFilters, Matcher, PrecisionFilter, TaintFlowIdentityStep,
 };
 pub use bonsai_security::{
     build_flow_bodies, drain_runtime_disabled_rules, filter_rules_to_workspace_languages, load_rulepack,
@@ -119,9 +119,7 @@ pub use bonsai_workspace::{
 };
 
 pub mod cache {
-    pub use bonsai_inspect::cache::{
-        CALLEES_CACHE_CAP, CHAINS_CACHE_CAP, DOWNSTREAM_CACHE_CAP, ENCLOSING_CACHE_CAP, REACHABLE_CACHE_CAP,
-    };
+    pub use bonsai_inspect::cache::{CALLEES_CACHE_CAP, ENCLOSING_CACHE_CAP, REACHABLE_CACHE_CAP};
 }
 
 pub mod refs {
@@ -4312,6 +4310,19 @@ impl Browse<'_> {
         bonsai_browse::search(&self.project.workspace, query, &filters, limit)
     }
 
+    /// Return one non-recursive compiler evidence packet per matching
+    /// callable. Direct resolved neighbors and unresolved call sites are
+    /// included; transitive paths are represented by the call graph rather
+    /// than enumerated here.
+    pub fn symbol_summaries(
+        &self,
+        pattern: Option<&str>,
+        regex: bool,
+    ) -> Result<Vec<bonsai_browse::SymbolSummary>, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
+        bonsai_browse::symbol_summaries(&self.project.workspace, pattern, regex)
+    }
+
     pub fn paths(&self, filters: PathFilters<'_>) -> Result<bonsai_browse::PathOutcome, regex::Error> {
         self.project.refresh_from_disk_best_effort();
         bonsai_browse::paths(&self.project.workspace, &filters)
@@ -4574,7 +4585,7 @@ impl Show<'_> {
 
     pub fn structural_flow(&self, flow_id: &str) -> Result<ShowOutcome> {
         let mut matches = Vec::new();
-        for target in self.inspect_chains_for_show()? {
+        for target in self.inspect_evidence_for_show()? {
             for chain in target.chains {
                 if chain.flow_id == flow_id {
                     matches.push(InspectFlowDrilldown {
@@ -4608,7 +4619,7 @@ impl Show<'_> {
 
     pub fn flow_group(&self, group_id: &str) -> Result<ShowOutcome> {
         let mut matches = Vec::new();
-        for target in self.inspect_chains_for_show()? {
+        for target in self.inspect_evidence_for_show()? {
             for group in target.groups.iter().filter(|group| group.group_id == group_id) {
                 let member_ids: AHashSet<&str> = group.member_flow_ids.iter().map(String::as_str).collect();
                 let chains = target
@@ -4746,13 +4757,8 @@ impl Show<'_> {
         }
     }
 
-    fn inspect_chains_for_show(&self) -> Result<Vec<InspectTargetChains>> {
-        Ok(self.project.inspect().chains(InspectQuery {
-            pattern: None,
-            regex: false,
-            max_chains: usize::MAX,
-            max_probes: usize::MAX,
-        })?)
+    fn inspect_evidence_for_show(&self) -> Result<Vec<InspectTargetEvidence>> {
+        Ok(structural_inspect_evidence(self.project, None, false)?)
     }
 }
 
@@ -5395,32 +5401,11 @@ pub struct Inspect<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub struct InspectQuery<'a> {
-    pub pattern: Option<&'a str>,
-    pub regex: bool,
-    pub max_chains: usize,
-    pub max_probes: usize,
-}
-
-impl Default for InspectQuery<'_> {
-    fn default() -> Self {
-        Self {
-            pattern: None,
-            regex: false,
-            max_chains: 64,
-            max_probes: 10_000,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct InspectTargetChains {
+struct InspectTargetEvidence {
     pub target_func_id: u32,
     pub target: String,
     pub chains: Vec<InspectChain>,
     pub groups: Vec<InspectChainGroup>,
-    pub truncated: bool,
-    pub truncation: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -5465,45 +5450,43 @@ impl Inspect<'_> {
             &matcher,
         ))
     }
+}
 
-    pub fn chains(&self, query: InspectQuery<'_>) -> Result<Vec<InspectTargetChains>, regex::Error> {
-        self.project.refresh_from_disk_best_effort();
-        let matcher = bonsai_inspect::Matcher::build(query.pattern, query.regex)?;
-        let targets = bonsai_inspect::matching_func_ids(&self.project.workspace, &matcher);
-        let cache = bonsai_inspect::ChainCache::new(&self.project.workspace);
-        let headers = self.project.workspace.compiler_header_index();
-        let mut out = Vec::new();
-        for target in targets {
-            let (chains, truncation) = cache.chains_resolved(target, query.max_chains, query.max_probes);
-            let chains = chains
-                .into_iter()
-                .map(|chain| {
-                    let names = bonsai_inspect::chain_to_names(&self.project.workspace, &chain.funcs);
-                    InspectChain {
-                        flow_id: bonsai_workspace::flow_ids::compute_structural_flow_id(
-                            headers.as_ref(),
-                            self.project.workspace.db(),
-                            self.project.workspace.vfs(),
-                            &chain.funcs,
-                        ),
-                        funcs: chain.funcs.iter().map(|func| func.raw()).collect(),
-                        names,
-                        precision: format!("{:?}", chain.precision),
-                    }
-                })
-                .collect::<Vec<_>>();
-            let groups = group_inspect_chains_by_suffix(&chains);
-            out.push(InspectTargetChains {
-                target_func_id: target.raw(),
-                target: bonsai_inspect::func_display_name(&self.project.workspace, target),
-                chains,
-                groups,
-                truncated: truncation.is_truncated(),
-                truncation: truncation.label().map(str::to_string),
-            });
-        }
-        Ok(out)
+fn structural_inspect_evidence(
+    project: &Project,
+    pattern: Option<&str>,
+    regex: bool,
+) -> Result<Vec<InspectTargetEvidence>, regex::Error> {
+    project.refresh_from_disk_best_effort();
+    let matcher = bonsai_inspect::Matcher::build(pattern, regex)?;
+    let targets = bonsai_inspect::matching_func_ids(&project.workspace, &matcher);
+    let headers = project.workspace.compiler_header_index();
+    let mut out = Vec::new();
+    for target in targets {
+        // Structural inspect is a symbol-scoped evidence packet. Keep one
+        // internal self unit for stable F:/G: drill-down compatibility; the
+        // public packet is `Browse::symbol_summaries`.
+        let funcs = vec![target];
+        let chains = vec![InspectChain {
+            flow_id: bonsai_workspace::flow_ids::compute_structural_flow_id(
+                headers.as_ref(),
+                project.workspace.db(),
+                project.workspace.vfs(),
+                &funcs,
+            ),
+            funcs: vec![target.raw()],
+            names: bonsai_inspect::chain_to_names(&project.workspace, &funcs),
+            precision: "Exact".to_string(),
+        }];
+        let groups = group_inspect_chains_by_suffix(&chains);
+        out.push(InspectTargetEvidence {
+            target_func_id: target.raw(),
+            target: bonsai_inspect::func_display_name(&project.workspace, target),
+            chains,
+            groups,
+        });
     }
+    Ok(out)
 }
 
 fn group_inspect_chains_by_suffix(chains: &[InspectChain]) -> Vec<InspectChainGroup> {

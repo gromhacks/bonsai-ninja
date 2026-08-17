@@ -8,6 +8,7 @@
 //! frontend semantic ABI all match.
 
 use crate::AnalyzerDb;
+use ahash::AHashSet;
 use bonsai_common::{wire, workspace_bonsai_dir, FileId, Span, MATCHER_POLICY_FINGERPRINT};
 use bonsai_diagnostics::{Diagnostic, DiagnosticSink, Severity};
 use bonsai_factstore::{
@@ -803,11 +804,13 @@ impl CompilerObjectStore {
         let compressed = self.compressed_header_payload(metadata)?;
         let decoded = zstd::stream::decode_all(Cursor::new(compressed))?;
         let header: CompilerObjectHeader = wire::decode(&decoded).map_err(invalid_wire)?;
-        if import_index_digest(header.imports.as_ref()) != header.imports_digest
-            || compiler_syntax_header_digest(header.syntax.as_ref()) != header.syntax_digest
-        {
-            return Err(invalid_data("compiler-object independent-header digest mismatch"));
-        }
+        // `compressed_header_payload` has already bound this exact payload to
+        // the source/front-end body hash and verified its stored length and
+        // SHA-256 digest. The typed MessagePack decode above is the remaining
+        // structural check. Re-encoding both decoded projections merely to
+        // reproduce their construction-time digests doubled broad-header
+        // work (and allocations) without adding an independent integrity
+        // boundary: both digests lived inside the already-verified payload.
         Ok(Some(header))
     }
 
@@ -1458,6 +1461,55 @@ impl AnalyzerDb {
             }
         }
         debug_assert_eq!(visited, files.len());
+    }
+
+    /// Attach the existing immutable compiler-object generation when it
+    /// exactly covers a scoped compiler worklist.
+    ///
+    /// This is a read-only planning operation: it never creates a scoped
+    /// generation and never lowers a declaration/flow body. Every selected
+    /// file is bound by stable [`FileId`], workspace-relative path, adapter,
+    /// fast content hash, and SHA-256 source digest before the store becomes
+    /// visible. A retrieval-scoped workspace with renumbered or stale inputs
+    /// therefore fails closed and continues through its canonical
+    /// Tree-sitter fallback.
+    pub fn attach_reusable_compiler_object_store_for_files(&self, files: &[FileId]) -> std::io::Result<bool> {
+        if files.is_empty() {
+            return Ok(true);
+        }
+        use rayon::prelude::*;
+        let mut descriptors = files
+            .par_iter()
+            .filter_map(|file| source_descriptor(self, *file))
+            .collect::<Vec<_>>();
+        descriptors.sort_unstable_by_key(|descriptor| descriptor.file.raw());
+        descriptors.dedup_by_key(|descriptor| descriptor.file.raw());
+        if descriptors.len() != files.iter().copied().collect::<AHashSet<_>>().len() {
+            return Ok(false);
+        }
+        if self
+            .inner
+            .compiler_object_store
+            .read()
+            .as_ref()
+            .is_some_and(|store| store.covers(&descriptors))
+        {
+            return Ok(true);
+        }
+        let Some(root) = self.workspace_root() else {
+            return Ok(false);
+        };
+        let store = CompilerObjectStore::open_reusable(&root)?;
+        if store.reader.len() != compiler_object_entry_count(store.metadata.files.len())
+            || !store.covers(&descriptors)
+        {
+            return Ok(false);
+        }
+        *self.inner.compiler_object_store.write() = Some(Arc::new(store));
+        self.inner
+            .compiler_object_store_requires_repair
+            .store(false, std::sync::atomic::Ordering::Release);
+        Ok(true)
     }
 
     /// Persist a complete immutable compiler-object generation. Existing

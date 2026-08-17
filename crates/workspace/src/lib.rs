@@ -1171,7 +1171,6 @@ impl Workspace {
     /// at workspace open time to skip the initial build entirely.
     pub fn seed_resolved_call_graph(&self, graph: Arc<bonsai_callgraph::ResolvedCallGraph>) {
         self.inner.dataflow.seed_call_graph(graph.clone());
-        self.inner.flow_ids.seed_call_graph(graph.clone());
         *self.inner.resolved_call_graph.write() = Some(graph);
     }
 
@@ -1556,7 +1555,6 @@ impl Workspace {
         *self.inner.resolved_call_graph.write() = None;
         *self.inner.callgraph_query.lock() = None;
         self.inner.dataflow.release_call_graph();
-        self.inner.flow_ids.release_call_graph();
     }
 
     /// Release the standalone compiler linkage table at a compiler phase
@@ -1788,7 +1786,6 @@ impl Workspace {
             // so downstream pointer-equality checks remain stable.
             drop(slot);
             self.inner.dataflow.seed_call_graph(existing.clone());
-            self.inner.flow_ids.seed_call_graph(existing.clone());
             return existing;
         }
         // Publish the shared consumers before exposing the workspace slot.
@@ -1796,7 +1793,6 @@ impl Workspace {
         // race into rebuilding the same complete graph in DataFlowCache or
         // FlowIdCache.
         self.inner.dataflow.seed_call_graph(arc.clone());
-        self.inner.flow_ids.seed_call_graph(arc.clone());
         *slot = Some(arc.clone());
         drop(slot);
         if let Some(root) = complete_root.as_deref() {
@@ -4023,7 +4019,6 @@ impl Workspace {
             // each rebuild identical content.
             let cg = ws.cached_resolved_call_graph();
             ws.inner.dataflow.seed_call_graph(cg.clone());
-            ws.inner.flow_ids.seed_call_graph(cg);
             // Build the complete workspace IDG once the call graph and global
             // index are available. Complete workspaces always persist the
             // exact sidecar regardless of file count; scoped query workspaces

@@ -232,9 +232,9 @@ struct ExportTaintedArg {
     param_name: String,
 }
 
-/// One entry per target function: every enumerated upstream chain that
-/// reaches it. Matches the `chain` structure rendered inline by
-/// `inspect`.
+/// Retained wire shape for the v7 schema's optional concrete flow rows.
+/// Production export leaves this empty and publishes the exact relationship
+/// through `compressed_callgraph` instead.
 #[derive(Serialize)]
 struct ExportFlowChain {
     target: String,
@@ -1525,7 +1525,7 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
             }
         }
         self.chain_rows.borrow_mut().take();
-        self.ws.flow_ids().release_resident_labels();
+        self.ws.flow_ids().release_resident_ids();
 
         // These compiler projections consume file-local typed bodies but not
         // the IDG. Finish them while the IDG is closed, then release exact-body

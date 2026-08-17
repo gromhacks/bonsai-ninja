@@ -63,14 +63,6 @@ fn cache_stats(workspace: Option<std::path::PathBuf>, format: BrowseFormat) -> R
         &bonsai_sdk::cache::REACHABLE_CACHE_CAP.to_string(),
     );
     print_kv(
-        "chains memo entries",
-        &bonsai_sdk::cache::CHAINS_CACHE_CAP.to_string(),
-    );
-    print_kv(
-        "downstream memo entries",
-        &bonsai_sdk::cache::DOWNSTREAM_CACHE_CAP.to_string(),
-    );
-    print_kv(
         "callees memo entries",
         &bonsai_sdk::cache::CALLEES_CACHE_CAP.to_string(),
     );

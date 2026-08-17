@@ -104,7 +104,5 @@ impl<K: std::hash::Hash + Eq + Clone, V> BoundedCache<K, V> {
 // caches and benefits from keeping hot FuncId/FileId facts resident.
 // ---------------------------------------------------------------------------
 pub const REACHABLE_CACHE_CAP: usize = 65536;
-pub const CHAINS_CACHE_CAP: usize = 16384;
-pub const DOWNSTREAM_CACHE_CAP: usize = 16384;
 pub const CALLEES_CACHE_CAP: usize = 32768;
 pub const ENCLOSING_CACHE_CAP: usize = 65536;

@@ -135,6 +135,39 @@ fn run_inspect_graph(ws: &Path, args_after_ws: &[&str]) -> Option<String> {
     run(&args)
 }
 
+fn semantic_corridor(ws: &Path, from: &str, to: &str) -> Option<serde_json::Value> {
+    let out = run(&[
+        "path",
+        ws.to_str().unwrap(),
+        "--from",
+        from,
+        "--to",
+        to,
+        "--format",
+        "json",
+        "--all",
+    ])?;
+    Some(serde_json::from_str(&out).expect("path JSON"))
+}
+
+fn assert_semantic_corridor(lang: &str, ws: &Path, from: &str, to: &str) {
+    let graph = semantic_corridor(ws, from, to).expect("path command available");
+    assert_eq!(
+        graph["representation"], "compressed_callgraph",
+        "[{lang}] {graph}"
+    );
+    let declared_corridor =
+        graph["node_count"].as_u64().unwrap_or(0) >= 2 && graph["edge_count"].as_u64().unwrap_or(0) >= 1;
+    let external_terminal = graph["node_count"].as_u64().unwrap_or(0) >= 1
+        && graph["terminal_calls"]
+            .as_array()
+            .is_some_and(|calls| !calls.is_empty());
+    assert!(
+        declared_corridor || external_terminal,
+        "[{lang}] missing compiler-resolved corridor or exact terminal-call evidence {from} -> {to}: {graph}"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // defs
 // -----------------------------------------------------------------------------
@@ -1993,124 +2026,63 @@ fn search_regex_and_kind_filter() {
 }
 
 #[test]
-fn inspect_from_to_filter_is_fuzzy_over_full_flow() {
+fn inspect_graph_flow_is_symbol_bounded_and_path_is_transitive() {
     let ws = ws_path();
-
-    // `--from request --to os.system` — the user's canonical case. The
-    // chain is `handle_request → update_user → run_admin_command` and
-    // the hit text is `os.system`. `request` matches the first hop,
-    // `os.system` matches the hit text. Both should keep the flow.
-    let Some(out) = run_inspect_graph(
-        &ws,
-        &["--query", "os.system", "--from", "request", "--to", "os.system"],
-    ) else {
-        return;
-    };
-    assert!(out.contains("FLOW"), "from/to filter dropped the flow: {out}");
-    assert!(
-        out.contains("handle_request → update_user → run_admin_command"),
-        "chain not rendered: {out}"
-    );
-
-    // `--from update_user` — needle matches an INTERMEDIATE hop, not
-    // the entry. Fuzzy-over-full-flow must still keep it.
-    let Some(out) = run_inspect_graph(&ws, &["--query", "os.system", "--from", "update_user"]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--query", "run_admin_command"]) else {
         return;
     };
     assert!(
-        out.contains("FLOW"),
-        "intermediate-hop --from rejected the flow: {out}"
+        out.contains("run_admin_command") && !out.contains("handle_request → update_user"),
+        "inspect must render one bounded symbol unit instead of recursive paths: {out}"
     );
-
-    // `--to <nonexistent>` drops every flow → hit is dropped entirely.
-    let Some(out) = run_inspect_graph(&ws, &["--query", "os.system", "--to", "totally_fake_fn"]) else {
-        return;
-    };
-    assert!(
-        out.contains("no matches") || out.contains("0 other hit(s)"),
-        "expected all hits dropped, got: {out}"
-    );
+    assert_semantic_corridor("python", &ws, "handle_request", "run_admin_command");
 }
 
 #[test]
-fn inspect_from_to_markers_land_on_matched_lines() {
-    // With `--from update --to system`, the FROM marker must consistently
-    // land on the line that advances to `update_user` (the hop whose name
-    // contains "update"), and the TO marker must land on the line where
-    // `os.system` is called. The filter widening now considers the
-    // downstream closure, so MANY hits in `handle_request` pass — each
-    // renders its own flow. The invariant we care about: markers never
-    // scatter across unrelated body lines, regardless of how many hits
-    // surface.
+fn symbol_summary_reports_direct_edges_without_transitive_markers() {
     let ws = ws_path();
-    let Some(out) = run_inspect_graph(&ws, &["--from", "update", "--to", "system"]) else {
+    let Some(out) = run(&[
+        "symbol-summary",
+        ws.to_str().unwrap(),
+        "--symbol",
+        "update_user",
+        "--format",
+        "json",
+        "--all",
+    ]) else {
         return;
     };
-
-    // FROM: update always lands on the `update_user(...)` line.
-    let from_lines: Vec<&str> = out
-        .lines()
-        .filter(|l| l.contains("[FLOW 1 FROM: update]"))
-        .collect();
-    assert!(
-        !from_lines.is_empty(),
-        "no FROM marker lines found; output:\n{out}"
-    );
-    for line in &from_lines {
-        assert!(
-            line.contains("update_user"),
-            "FROM marker on unrelated line: {line}"
-        );
-    }
-
-    // TO: system always lands on the `os.system(...)` MATCH line.
-    let to_lines: Vec<&str> = out
-        .lines()
-        .filter(|l| l.contains("[FLOW 1 TO: system]"))
-        .collect();
-    assert!(!to_lines.is_empty(), "no TO marker lines found; output:\n{out}");
-    for line in &to_lines {
-        assert!(line.contains("os.system"), "TO marker on unrelated line: {line}");
-        assert!(
-            line.contains("MATCH"),
-            "TO marker should land alongside MATCH: {line}"
-        );
-    }
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("summary JSON");
+    let row = rows.first().expect("update_user summary");
+    assert!(row["direct_callers"]
+        .as_array()
+        .is_some_and(|rows| !rows.is_empty()));
+    assert!(row["direct_callees"]
+        .as_array()
+        .is_some_and(|rows| !rows.is_empty()));
+    assert_eq!(row["graph_scope"], "direct_resolved_neighbors");
 }
 
 #[test]
-fn inspect_from_marker_on_source_line_when_from_matches_entry() {
-    // `--from request` matches the entry `handle_request`. The FROM
-    // marker must pin to the SOURCE line (the filter's motivation),
-    // AND may also appear on other lines where the raw code naturally
-    // contains "request" (e.g. `request.args.get(...)` calls). The
-    // important invariant is: at least one FROM marker lands on the
-    // SOURCE line, and every FROM marker line legitimately mentions
-    // `request` in either an annotation subject or the code itself.
+fn symbol_summary_includes_source_and_parameters() {
     let ws = ws_path();
-    let Some(out) = run_inspect_graph(&ws, &["--query", "os.system", "--from", "request"]) else {
+    let Some(out) = run(&[
+        "symbol-summary",
+        ws.to_str().unwrap(),
+        "--symbol",
+        "update_user",
+        "--format",
+        "json",
+        "--all",
+    ]) else {
         return;
     };
-    let from_lines: Vec<&str> = out.lines().filter(|l| l.contains("FROM: request")).collect();
-    assert!(
-        !from_lines.is_empty(),
-        "no FROM: request marker fired; output:\n{out}"
-    );
-    assert!(
-        from_lines
-            .iter()
-            .any(|l| l.contains("SOURCE: entry handle_request")),
-        "expected at least one FROM marker on the SOURCE line; got: {from_lines:#?}"
-    );
-    // Every FROM marker must sit on a line that legitimately mentions
-    // `request` (either in the annotation/SOURCE subject or in the
-    // source code itself) — never floating on an unrelated body line.
-    for line in &from_lines {
-        assert!(
-            line.contains("request"),
-            "FROM marker on a line that doesn't mention `request`: {line}"
-        );
-    }
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("summary JSON");
+    let row = rows.first().expect("update_user summary");
+    assert!(row["source"]
+        .as_str()
+        .is_some_and(|source| source.contains("token") && source.contains("action")));
+    assert!(row["params"].as_array().is_some_and(|params| !params.is_empty()));
 }
 
 #[test]
@@ -2124,20 +2096,7 @@ fn inspect_from_to_markers_work_on_kotlin() {
         p.canonicalize().expect("repo root")
     };
     let ws = repo_root.join("examples/kotlin/micro");
-    let Some(out) = run_inspect_graph(&ws, &["--query", "exec", "--from", "updateUser", "--to", "exec"])
-    else {
-        return;
-    };
-    let from_lines: Vec<&str> = out.lines().filter(|l| l.contains("FROM: updateUser")).collect();
-    assert!(
-        from_lines.iter().any(|l| l.contains("updateUser")),
-        "FROM marker not on updateUser advance: {from_lines:#?}"
-    );
-    let to_lines: Vec<&str> = out.lines().filter(|l| l.contains("TO: exec")).collect();
-    assert!(
-        to_lines.iter().any(|l| l.contains("exec") && l.contains("MATCH")),
-        "TO marker not on exec MATCH line: {to_lines:#?}"
-    );
+    assert_semantic_corridor("kotlin", &ws, "updateUser", "runAdminCommand");
 }
 
 #[test]
@@ -2150,21 +2109,7 @@ fn inspect_from_to_markers_work_on_javascript() {
     let ws = repo_root.join("examples/javascript/micro");
     // JS fixture: gateway.js calls updateUser which calls runAdminCommand
     // which calls execSync.
-    let Some(out) = run_inspect_graph(
-        &ws,
-        &["--query", "execSync", "--from", "updateUser", "--to", "execSync"],
-    ) else {
-        return;
-    };
-    assert!(
-        out.lines().any(|l| l.contains("FROM: updateUser")),
-        "FROM marker missing in JS output: {out}"
-    );
-    assert!(
-        out.lines()
-            .any(|l| l.contains("TO: execSync") && l.contains("MATCH")),
-        "TO marker not on MATCH line: {out}"
-    );
+    assert_semantic_corridor("javascript", &ws, "updateUser", "runAdminCommand");
 }
 
 #[test]
@@ -2175,24 +2120,12 @@ fn inspect_from_to_markers_work_on_java() {
         p.canonicalize().expect("repo root")
     };
     let ws = repo_root.join("examples/java/micro");
-    let Some(out) = run_inspect_graph(&ws, &["--from", "updateUser", "--to", "exec"]) else {
-        return;
-    };
-    assert!(
-        out.lines().any(|l| l.contains("FROM: updateUser")),
-        "FROM marker missing in Java output: {out}"
-    );
-    assert!(
-        out.lines().any(|l| l.contains("TO: exec")),
-        "TO marker missing in Java output: {out}"
-    );
+    assert_semantic_corridor("java", &ws, "updateUser", "runAdminCommand");
 }
 
-/// Shared helper for per-language marker assertions. Asserts that
-/// `inspect <ws> --from <from> --to <to>` on the given micro fixture
-/// produces at least one `FROM:` marker and one `TO:` marker in the
-/// rendered output — pinning the end-to-end contract for every
-/// supported language.
+/// Shared helper for per-language endpoint assertions. The `path` command
+/// exposes one exact compressed relation rather than recursively rendering
+/// every concrete route through the graph.
 fn assert_from_to_markers(lang: &str, from: &str, to: &str) {
     let repo_root: std::path::PathBuf = {
         let mut p = std::env::current_dir().expect("cwd");
@@ -2203,19 +2136,7 @@ fn assert_from_to_markers(lang: &str, from: &str, to: &str) {
     if !ws.exists() {
         return; // some langs (perl) don't ship a micro fixture
     }
-    let Some(out) = run_inspect_graph(&ws, &["--from", from, "--to", to]) else {
-        return;
-    };
-    let from_hits = out.lines().filter(|l| l.contains("FROM: ")).count();
-    let to_hits = out.lines().filter(|l| l.contains("TO: ")).count();
-    assert!(
-        from_hits > 0,
-        "[{lang}] no FROM marker with --from {from} --to {to}: {out}"
-    );
-    assert!(
-        to_hits > 0,
-        "[{lang}] no TO marker with --from {from} --to {to}: {out}"
-    );
+    assert_semantic_corridor(lang, &ws, from, to);
 }
 
 #[test]
@@ -2286,60 +2207,18 @@ fn inspect_from_to_filters_are_case_insensitive() {
     };
     let ws = repo_root.join("examples/java/micro");
 
-    let Some(lower) = run_inspect_graph(&ws, &["--from", "user", "--to", "exec"]) else {
-        return;
-    };
-    assert!(
-        lower.contains("FROM: user") && lower.contains("TO: exec"),
-        "case-insensitive --from/--to failed on Java: {lower}"
-    );
-
-    let Some(upper) = run_inspect_graph(&ws, &["--from", "USER", "--to", "EXEC"]) else {
-        return;
-    };
-    assert!(
-        upper.contains("FROM: USER") && upper.contains("TO: EXEC"),
-        "uppercase filters didn't match lowercase source: {upper}"
-    );
+    assert_semantic_corridor("java", &ws, "UPDATEUSER", "RUNADMINCOMMAND");
 
     // Same check on Python with mixed case.
     let py_ws = repo_root.join("examples/python/micro");
-    let Some(py_out) = run_inspect_graph(&py_ws, &["--from", "USER", "--to", "SYSTEM"]) else {
-        return;
-    };
-    assert!(
-        py_out.contains("FROM: USER") && py_out.contains("TO: SYSTEM"),
-        "case-insensitive filters failed on Python: {py_out}"
-    );
+    assert_semantic_corridor("python", &py_ws, "UPDATE_USER", "RUN_ADMIN_COMMAND");
 }
 
 #[test]
 fn inspect_from_to_work_standalone_without_query() {
     let ws = ws_path();
 
-    // `--from request --to os.system` without a `--query` should still
-    // surface the os.system hit — the filters alone pick it out.
-    let Some(out) = run_inspect_graph(&ws, &["--from", "request", "--to", "os.system"]) else {
-        return;
-    };
-    assert!(
-        out.contains("(filters only)"),
-        "header should show filters-only label: {out}"
-    );
-    assert!(
-        out.contains("os.system"),
-        "os.system hit dropped by standalone filter mode: {out}"
-    );
-    assert!(
-        out.contains("handle_request → update_user → run_admin_command"),
-        "chain not rendered in filter-only mode: {out}"
-    );
-
-    // `--to os.system` alone should work too.
-    let Some(out) = run_inspect_graph(&ws, &["--to", "os.system"]) else {
-        return;
-    };
-    assert!(out.contains("os.system"));
+    assert_semantic_corridor("python", &ws, "handle_request", "os.system");
 
     // `inspect <workspace>` with no query AND no filters must error.
     let Some(bin) = bin_path() else {
@@ -2370,17 +2249,7 @@ fn inspect_from_to_resolves_qualified_same_named_methods() {
     )
     .expect("write app.py");
 
-    let Some(out) = run_inspect_graph(&root, &["--from", "Source.run", "--to", "Target.run"]) else {
-        return;
-    };
-    assert!(
-        out.contains("Source.run") && out.contains("Target.run"),
-        "qualified same-named endpoints must resolve through compiler declaration identities:\n{out}"
-    );
-    assert!(
-        out.contains("FLOW 1"),
-        "the exact qualified endpoint corridor must render its connected flow:\n{out}"
-    );
+    assert_semantic_corridor("python", &root, "Source.run", "Target.run");
 }
 
 #[test]
@@ -2392,55 +2261,14 @@ fn inspect_from_to_excludes_sibling_branches_outside_exact_corridor() {
     )
     .expect("write app.py");
 
-    let Some(out) = run_inspect_graph(
-        &root,
-        &[
-            "--from",
-            "Source.run",
-            "--to",
-            "Target.run",
-            "--format",
-            "json",
-            "--all",
-        ],
-    ) else {
-        return;
-    };
-    let report: serde_json::Value = serde_json::from_str(&out).expect("inspect JSON");
-    let flows = ["decl_hits", "hits"]
-        .into_iter()
-        .flat_map(|section| {
-            report[section]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .flat_map(|hit| hit["flows"].as_array().into_iter().flatten())
-        })
-        .collect::<Vec<_>>();
-    assert!(!flows.is_empty(), "exact corridor emitted no flows: {out}");
-    for flow in flows {
-        let functions = flow["functions"].as_array().expect("flow functions");
-        let has_owner = |function: &serde_json::Value, wanted: &str| {
-            function["owners"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|owner| owner["name"].as_str() == Some(wanted))
-        };
-        assert!(
-            functions
-                .first()
-                .is_some_and(|function| has_owner(function, "Source"))
-                && functions
-                    .last()
-                    .is_some_and(|function| has_owner(function, "Target")),
-            "flow escaped the exact Source.run -> Target.run corridor: {flow}"
-        );
-        assert!(
-            functions.iter().all(|function| !has_owner(function, "Decoy")),
-            "sibling Decoy.run branch leaked into exact corridor: {flow}"
-        );
-    }
+    let report = semantic_corridor(&root, "Source.run", "Target.run").expect("path report");
+    assert!(!report["edges"].as_array().expect("corridor edges").is_empty());
+    let encoded = report.to_string();
+    assert!(encoded.contains("Source.run") && encoded.contains("Target.run"));
+    assert!(
+        !encoded.contains("Decoy.run"),
+        "corridor leaked sibling branch: {report}"
+    );
 }
 
 #[test]
@@ -3974,75 +3802,10 @@ fn options_heading_still_present_after_template_override() {
 /// `callees` column of `bonsai-ninja defs`), so each language has a
 /// language-appropriate pair.
 #[test]
-fn inspect_from_to_every_flow_shows_both_markers_across_langs() {
-    let cases = [
-        ("c/micro", "req", "system"),
-        ("cpp/micro", "params", "system"),
-        ("csharp/micro", "req", "RunAdmin"),
-        ("go/micro", "UpdateUser", "Command"),
-        ("java/micro", "req", "exec"),
-        ("javascript/micro", "token", "execSync"),
-        ("kotlin/micro", "req", "exec"),
-        ("php/micro", "token", "exec"),
-        ("python/micro", "req", "os"),
-        ("ruby/micro", "token", "system"),
-        ("rust/micro", "token", "Command"),
-        ("scala/micro", "req", "exec"),
-        ("swift/micro", "query", "Process"),
-        ("typescript/micro", "token", "execSync"),
-    ];
-    let repo = repo_root();
-    for (sub, from, to) in &cases {
-        let ws = repo.join("examples").join(sub);
-        let Some(out) = run_inspect_graph(&ws, &["--from", from, "--to", to]) else {
-            return;
-        };
-        // Skip langs whose micro fixture doesn't happen to have this
-        // exact flow — we care about correctness, not coverage breadth
-        // here.
-        if out.contains("no matches for") {
-            continue;
-        }
-        // For each `FLOW N …` block, assert both markers are present.
-        let mut current: Option<String> = None;
-        let mut has_from = false;
-        let mut has_to = false;
-        let from_tag = format!("FROM: {from}");
-        let to_tag = format!("TO: {to}");
-        let mut flow_count = 0usize;
-        let check = |label: &Option<String>, has_from: bool, has_to: bool, lang: &str| {
-            if let Some(l) = label {
-                assert!(
-                    has_from,
-                    "{lang}: flow `{l}` missing `{from_tag}` marker in full render"
-                );
-                assert!(
-                    has_to,
-                    "{lang}: flow `{l}` missing `{to_tag}` marker in full render"
-                );
-            }
-        };
-        for line in out.lines() {
-            if line.starts_with("FLOW ") {
-                check(&current, has_from, has_to, sub);
-                flow_count += 1;
-                current = Some(line.to_string());
-                has_from = false;
-                has_to = false;
-                continue;
-            }
-            if line.contains(&from_tag) {
-                has_from = true;
-            }
-            if line.contains(&to_tag) {
-                has_to = true;
-            }
-        }
-        check(&current, has_from, has_to, sub);
-        assert!(
-            flow_count > 0,
-            "{sub}: expected at least one FLOW block for --from {from} --to {to}; output:\n{out}"
-        );
+fn compressed_corridors_resolve_across_languages() {
+    for case in canonical_chains() {
+        let ws = lang_ws(case.lang);
+        assert_semantic_corridor(case.lang, &ws, case.entry, case.sink);
     }
 }
 
@@ -4052,33 +3815,14 @@ fn inspect_from_to_every_flow_shows_both_markers_across_langs() {
 /// contain `req` or `os` at a token boundary (substring matches like
 /// `os` ⊂ `close` are rejected by `name_token_match`).
 #[test]
-fn inspect_from_to_narrow_no_unrelated_hits_python() {
+fn compressed_corridor_excludes_unrelated_python_calls() {
     let ws = ws_path();
-    let Some(out) = run_inspect_graph(&ws, &["--from", "req", "--to", "os"]) else {
-        return;
-    };
-    // Only the OCCURRENCE HITS table matters for this assertion — the
-    // flow bodies below will naturally inline other lines (like the
-    // `conn.close` line inside verify_token) because they're rendered
-    // as context for flows that DO legitimately pass the filter.
-    let table_start = out.find("══ OCCURRENCE HITS").expect("hits table missing");
-    let after_start = &out[table_start..];
-    // Table ends at the first flow-block ruler (folded view) OR the
-    // legacy per-hit `▸` header if some older render path is still
-    // in play. Either marker signals the table is over.
-    let table_end_rel = after_start
-        .find("\n\n══════")
-        .or_else(|| after_start.find("\n▸ "))
-        .unwrap_or(after_start.len());
-    let table = &after_start[..table_end_rel];
-    // The hits table columns are fixed-width; we spot-check that the
-    // unrelated call sites DON'T appear as hit rows. These would have
-    // surfaced under the old loose-substring filter because
-    // `close`/`cursor`/`fetchone` contain `os` as a substring.
+    let report = semantic_corridor(&ws, "handle_request", "run_admin_command").expect("path report");
+    let encoded = report.to_string();
     for blocked in ["conn.close", "cursor.execute", "cursor.fetchone", "conn.cursor"] {
         assert!(
-            !table.contains(blocked),
-            "unrelated hit `{blocked}` surfaced in hits table:\n{table}"
+            !encoded.contains(blocked),
+            "unrelated call `{blocked}` surfaced in endpoint corridor: {report}"
         );
     }
 }
@@ -5065,8 +4809,6 @@ fn cache_stats_explains_memo_eviction_and_external_path() {
     for label in &[
         "scope",
         "reachable memo entries",
-        "chains memo entries",
-        "downstream memo entries",
         "callees memo entries",
         "enclosing memo entries",
         "memo semantics",
@@ -5633,32 +5375,20 @@ fn every_lang_micro_has_canonical_sink_decl() {
     }
 }
 
-/// The headline integrity check: `inspect --query <sink-fn>` on
-/// every micro fixture must produce a FLOW chain of at least 3 hops
-/// starting at the entry function. If the entry is missing (e.g.
-/// Ruby's Sinatra block bug) the chain stops at `update_user` and
-/// this assertion fires loudly. We query on the sink's FUNCTION
-/// name (`run_admin_command` / `RunAdminCommand` / `runAdminCommand`
-/// per language convention) so the test works regardless of which
-/// shell builtin each language shells out to.
+/// The headline integrity check: every adapter must resolve the canonical
+/// entry-to-sink corridor through its compiler-lowered call graph.
 #[test]
 fn every_lang_micro_chain_reaches_entry_to_sink() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(out) = run_inspect_graph(&ws, &["--query", c.sink]) else {
-            return;
-        };
-        // Chain line shape: `entry → mid → sink` (arrow-connected,
-        // one line). Our non-ANSI test runs use the → character.
-        let chain_line = out
-            .lines()
-            .find(|l| l.contains(c.entry) && l.contains(c.mid) && l.contains(c.sink))
-            .unwrap_or("");
+        let graph = semantic_corridor(&ws, c.entry, c.sink).expect("path report");
+        let names = graph["nodes"].as_array().expect("corridor nodes");
         assert!(
-            !chain_line.is_empty(),
-            "{}: inspect --query {} must produce a chain `{} → {} → {}`; got:\n{out}",
+            [c.entry, c.mid, c.sink]
+                .iter()
+                .all(|wanted| names.iter().any(|node| node["name"].as_str() == Some(wanted))),
+            "{}: corridor must contain {} -> {} -> {}: {graph}",
             c.lang,
-            c.sink,
             c.entry,
             c.mid,
             c.sink,
@@ -5701,14 +5431,7 @@ fn py_ws() -> std::path::PathBuf {
 #[test]
 fn from_needle_matches_def_name() {
     let ws = py_ws();
-    let Some(out) = run_inspect_graph(&ws, &["--from", "handle_request", "--to", "os.system"]) else {
-        return;
-    };
-    assert!(
-        !out.contains("no matches"),
-        "--from def-name should match:\n{out}"
-    );
-    assert!(out.contains("handle_request"), "from column missing:\n{out}");
+    assert_semantic_corridor("python", &ws, "handle_request", "run_admin_command");
 }
 
 /// --from on a call-site name (e.g. `sqlite3.connect`) matches.
@@ -5762,27 +5485,38 @@ fn from_needle_matches_var_target() {
 #[test]
 fn from_needle_matches_parameter_name() {
     let ws = py_ws();
-    let Some(out) = run_inspect_graph(&ws, &["--from", "token", "--to", "os.system"]) else {
+    let Some(out) = run(&[
+        "symbol-summary",
+        ws.to_str().unwrap(),
+        "--symbol",
+        "handle_request",
+        "--format",
+        "json",
+        "--all",
+    ]) else {
         return;
     };
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("summary JSON");
     assert!(
-        !out.contains("no matches"),
-        "--from parameter-name should match:\n{out}"
+        rows[0]["source"]
+            .as_str()
+            .is_some_and(|source| source.contains("token")),
+        "symbol source must preserve parameter-derived syntax: {out}"
     );
 }
 
-/// --to on a string literal (strings) matches.
+/// A string-literal query owns the bounded callable that contains it.
 #[test]
-fn to_needle_matches_string_literal() {
+fn graph_flow_string_literal_query_owns_local_callable() {
     let ws = py_ws();
     // Python's auth_service.py has `"notify-admin "` as a string
     // concatenated into the shell command.
-    let Some(out) = run_inspect_graph(&ws, &["--from", "handle_request", "--to", "notify-admin"]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--query", "notify-admin"]) else {
         return;
     };
     assert!(
-        !out.contains("no matches"),
-        "--to string-literal should match:\n{out}"
+        out.contains("run_admin_command") && out.contains("notify-admin"),
+        "string literal should retain its source-backed owning callable:\n{out}"
     );
 }
 
@@ -5821,13 +5555,23 @@ fn from_needle_rejects_bare_class_name() {
 #[test]
 fn from_needle_matches_ref_name() {
     let ws = py_ws();
-    // `get_user` is referenced as a call inside handle_request.
-    let Some(out) = run_inspect_graph(&ws, &["--from", "get_user", "--to", "os.system"]) else {
+    let Some(out) = run(&[
+        "symbol-summary",
+        ws.to_str().unwrap(),
+        "--symbol",
+        "handle_request",
+        "--format",
+        "json",
+        "--all",
+    ]) else {
         return;
     };
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("summary JSON");
     assert!(
-        !out.contains("no matches"),
-        "--from ref-name should match:\n{out}"
+        rows[0]["direct_callees"]
+            .as_array()
+            .is_some_and(|edges| edges.iter().any(|edge| edge["callee"] == "get_user")),
+        "direct compiler evidence should include get_user: {out}"
     );
 }
 
@@ -5869,26 +5613,7 @@ fn query_needle_matches_every_browse_fact_kind() {
 fn every_lang_micro_from_entry_to_sink_filter_matches() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(out) = run_inspect_graph(&ws, &["--from", c.entry, "--to", c.sink]) else {
-            return;
-        };
-        // `no matches` is a regression — the canonical flow must exist.
-        assert!(
-            !out.contains("no matches"),
-            "{}: --from {} --to {} returned no matches; chain should exist:\n{out}",
-            c.lang,
-            c.entry,
-            c.sink,
-        );
-        // And the FROM column must contain the entry with its
-        // resolved file:line (added in the hits-table refactor).
-        assert!(
-            out.contains(c.entry),
-            "{}: --from {} --to {} table missing entry in `from` column:\n{out}",
-            c.lang,
-            c.entry,
-            c.sink,
-        );
+        assert_semantic_corridor(c.lang, &ws, c.entry, c.sink);
     }
 }
 
@@ -6812,36 +6537,18 @@ fn grouped_json_has_both_flow_ids_and_group_ids() {
 /// chain. Raw taint rows use `T:` ids, while structural graph rows use
 /// `F:` ids; either is citeable in the inspect UI.
 #[test]
-fn every_lang_micro_chain_line_has_stable_id_nearby() {
+fn every_lang_micro_symbol_evidence_has_stable_id() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
         let Some(out) = run_inspect_graph(&ws, &["--query", c.sink]) else {
             return;
         };
-        // Find the chain line, then look for a flow_id within 4
-        // lines before or after (the FLOW header + separator
-        // ruler is 2 lines above; within 4 lines covers both
-        // trace and grouped shapes).
-        let output_lines: Vec<&str> = out.lines().collect();
-        let chain_line_idx = output_lines
-            .iter()
-            .position(|line| line.contains(c.entry) && line.contains(c.mid) && line.contains(c.sink));
-        let Some(chain_line_idx) = chain_line_idx else {
-            panic!(
-                "{}: chain line missing; can't check flow_id adjacency. Output:\n{out}",
-                c.lang
-            );
-        };
-        let window_start = chain_line_idx.saturating_sub(4);
-        let window_end = (chain_line_idx + 5).min(output_lines.len());
-        let adjacent_window = output_lines[window_start..window_end].join("\n");
-        let flow_ids_in_window = extract_flow_ids(&adjacent_window);
-        let taint_ids_in_window = extract_taint_ids(&adjacent_window);
+        let flow_ids = extract_flow_ids(&out);
         assert!(
-            !flow_ids_in_window.is_empty() || !taint_ids_in_window.is_empty(),
-            "{}: chain line at `{}` has no stable flow/taint id within ±4 lines; window:\n{adjacent_window}",
+            !flow_ids.is_empty(),
+            "{}: bounded symbol evidence for {} has no stable id: {out}",
             c.lang,
-            output_lines[chain_line_idx],
+            c.sink,
         );
     }
 }
@@ -6866,26 +6573,18 @@ fn auto_view_flips_to_grouped_above_threshold() {
     );
 }
 
-/// `--compact` must still emit the canonical chain line
-/// `entry → mid → sink` — we only strip source bodies, not the
-/// chain header.
+/// `--compact` retains the selected symbol identity while omitting its body.
 #[test]
-fn every_lang_micro_compact_preserves_chain_line() {
+fn every_lang_micro_compact_preserves_symbol_identity() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
         let Some(out) = run_inspect_graph(&ws, &["--query", c.sink, "--compact"]) else {
             return;
         };
-        let chain_line = out
-            .lines()
-            .find(|l| l.contains(c.entry) && l.contains(c.mid) && l.contains(c.sink))
-            .unwrap_or("");
         assert!(
-            !chain_line.is_empty(),
-            "{}: --compact must still emit the `{} → {} → {}` chain line; got:\n{out}",
+            out.contains(c.sink) && !extract_flow_ids(&out).is_empty(),
+            "{}: --compact must retain selected symbol {} and its evidence id: {out}",
             c.lang,
-            c.entry,
-            c.mid,
             c.sink,
         );
     }

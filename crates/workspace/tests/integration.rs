@@ -96,26 +96,26 @@ fn edit_invalidates_flow_id_cache() {
     ws.vfs()
         .write(path, Arc::<str>::from("fn entry() { sink(); }\nfn sink() {}\n"));
     let sink_before = ws.lookup_function("sink").expect("sink before edit");
-    let labels_before = ws
+    let id_before = ws
         .flow_ids()
-        .labels_for_func(sink_before, ws.db(), ws.vfs())
-        .to_vec();
-    assert!(!labels_before.is_empty(), "expected initial flow id labels");
+        .id_for_func(sink_before, ws.db(), ws.vfs())
+        .to_string();
+    assert!(!id_before.is_empty(), "expected initial symbol-summary id");
 
     ws.apply_edit(path, "fn entry() {}\nfn sink() {}\n".into());
     let sink_after = ws.lookup_function("sink").expect("sink after edit");
-    let labels_after = ws
+    let id_after = ws
         .flow_ids()
-        .labels_for_func(sink_after, ws.db(), ws.vfs())
-        .to_vec();
+        .id_for_func(sink_after, ws.db(), ws.vfs())
+        .to_string();
 
     assert!(
-        !labels_after.is_empty(),
-        "expected recomputed flow id labels after edit"
+        !id_after.is_empty(),
+        "expected recomputed symbol-summary id after edit"
     );
     assert_ne!(
-        labels_before, labels_after,
-        "flow id labels should be recomputed after an edit changes the caller chain"
+        id_before, id_after,
+        "an edit that moves the declaration span must invalidate its compiler identity"
     );
     let headers = ws.db().build_global_header_index();
     let expected_singleton = bonsai_workspace::flow_ids::compute_structural_flow_id(
@@ -125,9 +125,8 @@ fn edit_invalidates_flow_id_cache() {
         &[sink_after],
     );
     assert_eq!(
-        labels_after,
-        vec![expected_singleton],
-        "the stale entry -> sink call edge must not survive edit invalidation"
+        id_after, expected_singleton,
+        "the cache must return the id for the current compiler declaration"
     );
 }
 

@@ -35,7 +35,7 @@ pub(crate) use bonsai_sdk::{
 };
 pub(crate) use browse::{
     apply_text_limit, cmd_args, cmd_calls, cmd_classes, cmd_comments, cmd_defs, cmd_entrypoints, cmd_imports,
-    cmd_operations, cmd_refs, cmd_search, cmd_strings, cmd_vars, emit_json_paged_cached,
+    cmd_operations, cmd_refs, cmd_search, cmd_strings, cmd_symbol_summary, cmd_vars, emit_json_paged_cached,
     emit_json_value_paged_cached, page_info_to_json, paged_json_incomplete_reasons, paging_from_cli,
     paging_from_cli_output, paging_with_row_limit, short_file, truncate,
 };

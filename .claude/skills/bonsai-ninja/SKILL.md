@@ -95,7 +95,8 @@ report; it wraps the selected text view and never enables more analysis.
 | Calls, arguments, references | `calls`, `args`, `refs` |
 | Variables, strings, comments, operations | `vars`, `strings`, `comments`, `operations` |
 | One target and nearby behavior | `inspect` |
-| Call path between two targets | `path` |
+| Bounded compiler packet for one callable | `symbol-summary` |
+| Exact compressed corridor between two targets | `path` |
 | Execution trace from an entry | `trace` |
 | Backward influence around a symbol | `slice` |
 | One file with optional connected context | `read-file` |
@@ -133,6 +134,8 @@ Find one concrete anchor, then inspect its relationships:
   --context 8k --no-color --no-progress
 ./target/release/bonsai-ninja args <workspace> --callee <callee> \
   --context 8k --no-color --no-progress
+./target/release/bonsai-ninja symbol-summary <workspace> --symbol <symbol> \
+  --context 16k --no-color --no-progress
 ```
 
 Summarize behavior as:
@@ -143,20 +146,25 @@ entry point -> validation -> business logic -> storage/external call -> response
 
 ## Trace behavior and dataflow
 
-`inspect` is rulepack-free by default. Add `--graph-flow` for structural
-source-backed paths or `--taint-flow` for raw taint paths.
+`inspect` is rulepack-free by default. Add `--graph-flow` for one bounded
+source/evidence unit per matching callable or `--taint-flow` for raw taint
+paths.
 
-For lookup, start with plain `inspect`, `refs`, or `calls`. Add `--graph-flow`
-only when the complete structural paths attached to every match are the
-requested result; shared helpers can expand a narrow spelling query into a
-large exact artifact before paging. When both endpoints are known, prefer
-`--from` and `--to` so the compiler projects the exact corridor first.
+For lookup, start with plain `inspect`, `refs`, or `calls`. Use
+`symbol-summary` when one callable needs a self-contained packet with source,
+signature, imports, direct resolved callers/callees, and explicit unresolved
+calls. `--graph-flow` adds the same bounded callable evidence to matching
+inspect rows; it never enumerates transitive caller/callee paths. When both
+endpoints are known, use `path --from ... --to ...` for the exact compressed
+compiler corridor or `trace --from ... --to ...` to interpret it.
 
 ```shell
 ./target/release/bonsai-ninja inspect <workspace> --query <target> \
   --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja inspect <workspace> --query <target> \
   --taint-flow --context 16k --no-color --no-progress
+./target/release/bonsai-ninja symbol-summary <workspace> --symbol <target> \
+  --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja inspect <workspace> \
   --from <entry> --to <target> \
   --context 16k --no-color --no-progress

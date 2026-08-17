@@ -1,7 +1,7 @@
 use super::{
-    exact_identifier_regex_literal, format_flow_labels_for_cell, rendered_table_row_cost,
+    exact_identifier_regex_literal, format_summary_labels_for_cell, rendered_table_row_cost,
     retrieval_prefilter_for_browse_literal_with_limit, retrieval_prefilter_for_search_with_limit, truncate,
-    FlowColumnStatus, SearchFilters,
+    SearchFilters, SummaryColumnStatus,
 };
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{CallKind, FlowEvent};
@@ -69,9 +69,9 @@ fn collect_callees_includes_assignment_source_calls() {
 
 #[test]
 fn flow_labels_render_with_safe_breaks_between_ids() {
-    let mut status = FlowColumnStatus::default();
+    let mut status = SummaryColumnStatus::default();
     assert_eq!(
-        format_flow_labels_for_cell("F:1111111111111111 F:2222222222222222", &mut status),
+        format_summary_labels_for_cell("F:1111111111111111 F:2222222222222222", &mut status),
         Some("F1\nF2".to_string())
     );
     assert_eq!(status.flow_ids, vec!["F:1111111111111111", "F:2222222222222222"]);
@@ -83,8 +83,8 @@ fn flow_labels_cap_preserves_complete_ids() {
         .map(|idx| format!("F:{idx:016x}"))
         .collect::<Vec<_>>()
         .join(" ");
-    let mut status = FlowColumnStatus::default();
-    let formatted = format_flow_labels_for_cell(&labels, &mut status).expect("formatted labels");
+    let mut status = SummaryColumnStatus::default();
+    let formatted = format_summary_labels_for_cell(&labels, &mut status).expect("formatted labels");
 
     assert!(formatted.contains("F8"));
     assert!(!formatted.contains("F9"));

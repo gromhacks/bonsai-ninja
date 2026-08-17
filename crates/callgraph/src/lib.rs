@@ -7,10 +7,7 @@
 
 pub mod chains;
 
-pub use chains::{
-    downstream_funcs_set, enumerate_chains_resolved, enumerate_paths_resolved, is_precise_chain,
-    ChainTruncation, PathTruncation, ResolvedChain, ResolvedPath,
-};
+pub use chains::PathTruncation;
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{qualified_names_match, short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId};

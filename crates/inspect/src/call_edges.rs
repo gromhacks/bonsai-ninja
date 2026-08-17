@@ -3,37 +3,6 @@ use bonsai_lang_api::{Decl, FlowEvent};
 use bonsai_workspace::Workspace;
 use std::sync::Arc;
 
-/// Why downstream call-path expansion returned fewer paths than the
-/// resolved call graph may contain.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum CallPathTruncation {
-    /// Every resolvable downstream path in the requested scope was
-    /// emitted.
-    None,
-    /// Expansion stopped at the requested downstream depth while at
-    /// least one resolvable callee still existed.
-    MaxExtraDepth,
-    /// Expansion stopped because the path-count cap was reached while
-    /// there was still work left on the DFS stack.
-    MaxPaths,
-}
-
-impl CallPathTruncation {
-    #[must_use]
-    pub fn is_truncated(self) -> bool {
-        !matches!(self, Self::None)
-    }
-
-    #[must_use]
-    pub fn label(self) -> Option<&'static str> {
-        match self {
-            Self::None => None,
-            Self::MaxExtraDepth => Some("downstream-depth cap"),
-            Self::MaxPaths => Some("downstream-path cap"),
-        }
-    }
-}
-
 /// Cached call-edge source-span resolver used by inspect renderers.
 ///
 /// This lives in `bonsai_inspect` rather than the CLI so every flow
@@ -105,77 +74,6 @@ impl<'a> CallEdgeResolver<'a> {
         }
         spans.push(None);
         spans
-    }
-
-    /// DFS-enumerate every resolvable call path starting from `base`'s
-    /// tail, appending each to the return vector.
-    #[must_use]
-    pub fn enumerate_call_paths_from(
-        &mut self,
-        chain_cache: &crate::ChainCache<'_>,
-        base: &[FuncId],
-        max_extra: usize,
-        max_paths: usize,
-    ) -> Vec<Vec<FuncId>> {
-        self.enumerate_call_paths_from_with_truncation(chain_cache, base, max_extra, max_paths)
-            .0
-    }
-
-    /// DFS-enumerate every resolvable call path starting from `base`'s
-    /// tail, appending each to the return vector and reporting whether
-    /// a depth/path cap made the returned paths only a prefix.
-    #[must_use]
-    pub fn enumerate_call_paths_from_with_truncation(
-        &mut self,
-        chain_cache: &crate::ChainCache<'_>,
-        base: &[FuncId],
-        max_extra: usize,
-        max_paths: usize,
-    ) -> (Vec<Vec<FuncId>>, CallPathTruncation) {
-        if base.is_empty() {
-            return (Vec::new(), CallPathTruncation::None);
-        }
-        let mut out: Vec<Vec<FuncId>> = Vec::new();
-        let mut stack: Vec<(Vec<FuncId>, usize)> = vec![(base.to_vec(), 0)];
-        let mut truncation = CallPathTruncation::None;
-        while let Some((path, extra)) = stack.pop() {
-            if out.len() >= max_paths {
-                truncation = CallPathTruncation::MaxPaths;
-                break;
-            }
-            let tail = *path.last().expect("non-empty path");
-            let callees = chain_cache.callees_of_resolved(tail);
-            let mut resolvable: Vec<FuncId> = callees
-                .into_iter()
-                .filter(|callee| {
-                    if path.contains(callee) {
-                        return false;
-                    }
-                    self.find_call_span_to_func(tail, *callee).is_some()
-                })
-                .collect();
-            if extra >= max_extra {
-                if !resolvable.is_empty() {
-                    truncation = CallPathTruncation::MaxExtraDepth;
-                }
-                out.push(path);
-                continue;
-            }
-            if resolvable.is_empty() {
-                out.push(path);
-                continue;
-            }
-            resolvable.sort_by_key(|func| func.raw());
-            for callee in resolvable.into_iter().rev() {
-                let mut next = path.clone();
-                next.push(callee);
-                stack.push((next, extra + 1));
-            }
-        }
-        if out.is_empty() {
-            out.push(base.to_vec());
-        }
-        (out, truncation)
     }
 
     /// True when every consecutive pair in the chain represents a call

@@ -21,7 +21,7 @@ no need to depend on lower crates directly.
 ## Quickstart
 
 ```rust
-use bonsai_sdk::{Bonsai, InspectQuery, NativeExportOptions, TaintAnalysisOptions};
+use bonsai_sdk::{Bonsai, NativeExportOptions, TaintAnalysisOptions};
 
 fn main() -> anyhow::Result<()> {
     let project = Bonsai::new()
@@ -37,10 +37,7 @@ fn main() -> anyhow::Result<()> {
                  finding.precision);
     }
 
-    let chains = project.inspect().chains(InspectQuery {
-        pattern: Some("os.system"),
-        ..Default::default()
-    })?;
+    let summary = project.browse().symbol_summaries(Some("os.system"), false)?;
 
     let exported = project.export().native_json(NativeExportOptions::default())?;
 
@@ -102,7 +99,7 @@ let project = bonsai.index("./my-app")?;
 
 let refresh = project.refresh_from_disk()?;
 let security_report = project.security().taint_analysis(Default::default())?;
-let chains = project.inspect().chains(Default::default())?;
+let summaries = project.browse().symbol_summaries(Some("handle_request"), false)?;
 let trace = project.trace().from("main")?;
 let source_flows = project.security().source_analysis(Default::default())?;
 let exported = project.export().native_json(Default::default())?;
@@ -185,16 +182,16 @@ let audit = pack.audit(None)?;
 let validation = pack.validate(Default::default())?;
 ```
 
-### Inspect
+### Inspect and symbol evidence
 
 ```rust
-let chains = project.inspect().chains(bonsai_sdk::InspectQuery {
-    pattern: Some("os.system"),
-    regex: false,
-    max_chains: 100,
-    max_probes: 10_000,
-})?;
+let decls = project.inspect().matching_decls(Some("os.system"), false)?;
+let summaries = project.browse().symbol_summaries(Some("os.system"), false)?;
 ```
+
+`symbol_summaries` returns one bounded compiler packet per matching callable:
+declaration/source, signature, imports, direct resolved callers and callees,
+and unresolved workspace calls. It never recursively enumerates call paths.
 
 ### Trace
 
@@ -219,6 +216,7 @@ let operations = project.browse().operations(bonsai_sdk::OperationsFilters {
     ..Default::default()
 })?;
 let classes = project.browse().classes(Default::default())?;
+let summaries = project.browse().symbol_summaries(Some("handle_request"), false)?;
 let paths = project.browse().paths(bonsai_sdk::PathFilters {
     from: "handle_request",
     to: "run_admin_command",
@@ -257,9 +255,11 @@ carry `analysis_complete` plus `analysis_incomplete_reasons`. `paths` starts
 from resolver-backed exact/narrowed callgraph edges and augments them with
 warmed IDG cross-call edges when the query open hydrated an IDG sidecar;
 `PathOutcome.backends`, `idg_available`, and `idg_semantic_edges` expose that
-planner decision. When a target pattern matches an indexed call site but no
-callable declaration, `PathRow.terminal_call` identifies the exact terminal
-call and location while the function path stops at the enclosing callable.
+planner decision. `PathOutcome` contains `representation:
+"compressed_callgraph"`, exact `nodes` and `edges`, and their counts; it does
+not enumerate route combinations. When a target pattern matches an indexed
+call site but no callable declaration, `terminal_calls` identifies the exact
+call and location while the graph corridor stops at the enclosing callable.
 `slices` projects the selected callable's workspace value-flow/IDG graph on
 demand, reuses a compatible cached entry when present, merges adapter-emitted syntax-flow detail, and reports `backends` so
 SDK callers can distinguish `value-flow` evidence from `flow-events`.
@@ -311,7 +311,7 @@ taint-path flow ids, `G:` inspect graph-flow group ids or security
 taint-path group ids, `N:` AST-node
 ids, `R:` resolver-candidate ids, structured `T:` dump-taint propagation
 ids, and `S:` security finding ids. Structural `F:` and `G:` are
-reopened from the same syntax/resolver-derived inspect chains used by
+reopened from the same bounded syntax/resolver-derived inspect evidence used by
 CLI `show F:` and `show G:`; when an `F:` id is not an inspect flow,
 `show()` falls back to security taint-analysis flow lookup, and when a
 `G:` id is not an inspect group it falls back to security taint-analysis
@@ -506,7 +506,8 @@ multiple bonsai crates as dependencies:
 - From `bonsai_security`: `Rule`, `RuleKind`, `Rulepack`, `Finding`,
   `FindingMatch`, `Severity`, `Precision`, `TaintAnalysisReport`,
   `SourceAnalysisReport`
-- From `bonsai_inspect`: `ResolvedChain`, `InspectFilters`
+- From `bonsai_inspect`: `InspectFilters`, `FactKindFilter`, `FilterHit`,
+  `Matcher`
 - From `bonsai_trace`: `TraceResult`, `TraceQuery`, `TraceStep`,
   `TraceStepKind`
 - From `bonsai_browse`: every `*Out` type and the dump helpers
@@ -516,7 +517,25 @@ multiple bonsai crates as dependencies:
 ## Stability
 
 The SDK API is the public contract. Field names in `Finding`, `RuleMatch`,
-`TraceResult`, `DefOut`, `CallOut`, etc. are stable across minor versions.
-Breaking changes require a major-version bump and a migration note.
+`TraceResult`, `DefOut`, `CallOut`, etc. remain compatible within a published
+release line. Before 1.0, breaking changes require a minor-version bump and a
+migration note; after 1.0 they require a major-version bump.
 
 The CLI is a thin renderer over this SDK; both surfaces evolve together.
+
+### 0.2 migration
+
+Version 0.2 removes recursive materialization of concrete call-path
+combinations from navigation and export:
+
+- `path` now returns the exact compiler-resolved source-to-target corridor as
+  `nodes` plus `edges`, including branches and cycles without path explosion.
+- Browse `--flows` is replaced by `--summaries`; reopen an emitted `F:` id with
+  `show` for one callable's declaration, body, direct resolved neighbors,
+  imports, and unresolved call evidence.
+- The SDK no longer exposes recursive inspect-chain helpers or
+  `ResolvedChain`. Use `bonsai_browse::paths` for the compressed corridor and
+  `bonsai_browse::symbol_summaries` for bounded symbol evidence.
+- Native export continues to represent the complete call relation as
+  `compressed_callgraph`; no accuracy-affecting path-materialization switch is
+  required.

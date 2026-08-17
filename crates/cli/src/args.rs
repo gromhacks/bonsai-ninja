@@ -509,17 +509,12 @@ pub(crate) enum Cmd {
         output: OutputPathArg,
     },
 
-    /// Ranked structural call paths between two functions.
+    /// Exact compressed semantic corridor between two callables.
     #[command(
         display_order = 3,
-        long_about = themed_subcommand_long_about("Find ranked shortest call paths from one callable to another \
-                      using only syntax-derived, resolver-backed semantic callgraph \
-                      edges. The command does not search raw text or invent missing \
-                      edges. If unresolved call sites mean absence cannot be proven, \
-                      the output marks analysis incomplete and says \
-                      why."),
+        long_about = themed_subcommand_long_about("Project the exact semantic callgraph corridor from one callable to another. The result is a compressed node/edge relation, so branches, diamonds, and cycles stay linear in graph size instead of multiplying into concrete paths. Every edge is syntax-derived and resolver-backed; unresolved evidence is reported explicitly."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Shortest semantic paths from entry to sink\n  \
+                      # Exact semantic corridor from entry to sink\n  \
                       $ bonsai-ninja path ./src --from handle_request --to os.system\n  \
                       \n  \
                       # Machine-readable output for tooling\n  \
@@ -546,7 +541,7 @@ pub(crate) enum Cmd {
         /// Emit every row, no paging or context cap.
         #[arg(long, default_value_t = false)]
         all: bool,
-        /// Output shape — `text` for rendered paths, `json` for machine-readable output.
+        /// Output shape — `text` for a rendered corridor, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
         #[command(flatten)]
@@ -729,7 +724,7 @@ pub(crate) enum Cmd {
         long_about = themed_subcommand_long_about("Emit the HIR (flow-event tree — Call / Branch / Loop / Return \
                       / Throw / Try / …) for one function as JSON. The \
                       layer directly above the tree-sitter AST; what \
-                      `inspect` and `trace` walk to produce flow chains.\n\
+                      `inspect`, `trace`, and the IDG compiler consume.\n\
                       \n\
                       Use to verify an adapter actually extracts a construct \
                       before chasing a missing chain further down the \
@@ -1265,8 +1260,9 @@ pub(crate) enum Cmd {
         display_order = 20,
         long_about = themed_subcommand_long_about("List every definition found in the workspace. Columns: \
                       name, kind, location, signature, and callees (top 3 \
-                      outgoing). Pass `--flows` to add `F:<16-hex>` structural \
-                      flow ids that can be expanded with `inspect --flow`.\n\
+                      outgoing). Pass `--summaries` to add the stable \
+                      `F:<16-hex>` id for each callable's bounded compiler \
+                      evidence packet.\n\
                       \n\
                       Supports filters by kind (`function`, `class`, \
                       `method`, …), workspace-relative file filter, name substring / \
@@ -1315,10 +1311,10 @@ pub(crate) enum Cmd {
         /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Include structural flow IDs. This explicitly hydrates semantic
-        /// graph facts and is off by default so the command remains a light
-        /// syntax inventory.
-        #[arg(long, default_value_t = false)]
+        /// Include stable symbol-summary IDs derived from compiler identity
+        /// facts. This is off by default so the command remains a light syntax
+        /// inventory.
+        #[arg(long = "summaries", default_value_t = false)]
         flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
@@ -1411,11 +1407,10 @@ pub(crate) enum Cmd {
         display_order = 22,
         long_about = themed_subcommand_long_about("Every call site in the workspace, with the caller function, \
                       location, and a syntax-highlighted source-line \
-                      snippet. Pass `--flows` to add every `F:<16-hex>` \
-                      whose upstream chain \
-                      reaches the call's enclosing function — paste \
-                      any id into `inspect --flow F:<16-hex>` to \
-                      expand. `--callee` accepts a substring or regex \
+                      snippet. Pass `--summaries` to add the stable \
+                      `F:<16-hex>` id for the call's enclosing function; \
+                      `symbol-summary` opens the complete bounded packet. \
+                      `--callee` accepts a substring or regex \
                       (`--regex`) and is the fastest way to find every \
                       invocation of a sensitive function."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
@@ -1465,10 +1460,10 @@ pub(crate) enum Cmd {
         /// `--context 0`.
         #[arg(long, default_value_t = false)]
         all: bool,
-        /// Include structural flow IDs. This explicitly hydrates semantic
-        /// graph facts and is off by default so the command remains a light
-        /// syntax inventory.
-        #[arg(long, default_value_t = false)]
+        /// Include stable symbol-summary IDs derived from compiler identity
+        /// facts. This is off by default so the command remains a light syntax
+        /// inventory.
+        #[arg(long = "summaries", default_value_t = false)]
         flows: bool,
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
@@ -1483,9 +1478,9 @@ pub(crate) enum Cmd {
         long_about = themed_subcommand_long_about("Every import / use / include statement in the workspace. \
                       Columns: module, symbol (`from x import y` → `y`), \
                       alias (`as X`), kind (named / wildcard), location, \
-                      and source-line snippet. Pass `--flows` to add \
-                      `F:<16-hex>` ids for chains reaching functions brought \
-                      into scope by the import.\n\
+                      and source-line snippet. Pass `--summaries` to add \
+                      stable ids for callable symbols brought into scope by \
+                      the import.\n\
                       \n\
                       Supported forms: Python `import x [as y]`, `from x \
                       import y [as z]`, `from . import x`, `from x import \
@@ -1543,10 +1538,10 @@ pub(crate) enum Cmd {
         /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Include structural flow IDs. This explicitly hydrates semantic
-        /// graph facts and is off by default so the command remains a light
-        /// syntax inventory.
-        #[arg(long, default_value_t = false)]
+        /// Include stable symbol-summary IDs derived from compiler identity
+        /// facts. This is off by default so the command remains a light syntax
+        /// inventory.
+        #[arg(long = "summaries", default_value_t = false)]
         flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
@@ -1613,10 +1608,10 @@ pub(crate) enum Cmd {
         /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Include structural flow IDs. This explicitly hydrates semantic
-        /// graph facts and is off by default so the command remains a light
-        /// syntax inventory.
-        #[arg(long, default_value_t = false)]
+        /// Include stable symbol-summary IDs derived from compiler identity
+        /// facts. This is off by default so the command remains a light syntax
+        /// inventory.
+        #[arg(long = "summaries", default_value_t = false)]
         flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
@@ -1676,10 +1671,10 @@ pub(crate) enum Cmd {
         /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Include structural flow IDs. This explicitly hydrates semantic
-        /// graph facts and is off by default so the command remains a light
-        /// syntax inventory.
-        #[arg(long, default_value_t = false)]
+        /// Include stable symbol-summary IDs derived from compiler identity
+        /// facts. This is off by default so the command remains a light syntax
+        /// inventory.
+        #[arg(long = "summaries", default_value_t = false)]
         flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
@@ -1823,10 +1818,10 @@ pub(crate) enum Cmd {
         /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Include structural flow IDs. This explicitly hydrates semantic
-        /// graph facts and is off by default so the command remains a light
-        /// syntax inventory.
-        #[arg(long, default_value_t = false)]
+        /// Include stable symbol-summary IDs derived from compiler identity
+        /// facts. This is off by default so the command remains a light syntax
+        /// inventory.
+        #[arg(long = "summaries", default_value_t = false)]
         flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
@@ -1889,10 +1884,10 @@ pub(crate) enum Cmd {
         /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Include structural flow IDs. This explicitly hydrates semantic
-        /// graph facts and is off by default so the command remains a light
-        /// syntax inventory.
-        #[arg(long, default_value_t = false)]
+        /// Include stable symbol-summary IDs derived from compiler identity
+        /// facts. This is off by default so the command remains a light syntax
+        /// inventory.
+        #[arg(long = "summaries", default_value_t = false)]
         flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
@@ -1918,9 +1913,8 @@ pub(crate) enum Cmd {
         display_order = 27,
         long_about = themed_subcommand_long_about("Every class / struct / trait / interface / enum decl, with \
                       method count and (up to 8) method names per row. With \
-                      `--flows`, the flow column unions ids reaching every \
-                      method the class declares, so a single row captures \
-                      every chain that lands anywhere inside the class."),
+                      `--summaries`, the summary column lists the stable ids \
+                      of methods the class declares."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Every class in the workspace\n  \
                       $ bonsai-ninja classes ./src\n  \
@@ -1957,10 +1951,10 @@ pub(crate) enum Cmd {
         /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Include structural flow IDs. This explicitly hydrates semantic
-        /// graph facts and is off by default so the command remains a light
-        /// syntax inventory.
-        #[arg(long, default_value_t = false)]
+        /// Include stable symbol-summary IDs derived from compiler identity
+        /// facts. This is off by default so the command remains a light syntax
+        /// inventory.
+        #[arg(long = "summaries", default_value_t = false)]
         flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
@@ -1989,10 +1983,9 @@ pub(crate) enum Cmd {
                       Columns: symbol, kind, enclosing fn, location, code.\n\
                       \n\
                       A symbol is required — either as the positional \
-                      argument or via `--symbol`. Pass `--flows` to show \
-                      every `F:<16-hex>` whose upstream chain reaches the \
-                      ref's enclosing function; paste into \
-                      `inspect --flow F:<16-hex>` to expand the chain."),
+                      argument or via `--symbol`. Pass `--summaries` to show \
+                      the stable `F:<16-hex>` id for each ref's enclosing \
+                      callable."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Explicit symbol selector\n  \
                       $ bonsai-ninja refs ./src --symbol handle_request\n  \
@@ -2039,10 +2032,10 @@ pub(crate) enum Cmd {
         /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Include structural flow IDs. This explicitly hydrates semantic
-        /// graph facts and is off by default so the command remains a light
-        /// syntax inventory.
-        #[arg(long, default_value_t = false)]
+        /// Include stable symbol-summary IDs derived from compiler identity
+        /// facts. This is off by default so the command remains a light syntax
+        /// inventory.
+        #[arg(long = "summaries", default_value_t = false)]
         flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
@@ -2077,9 +2070,8 @@ pub(crate) enum Cmd {
                       argument or via `--query`. Use `--regex` to treat the \
                       query as a regex; `--kind` to filter by fact kind; \
                       `--file` to scope to a workspace-relative path. Pass \
-                      `--flows` to list every `F:<16-hex>` that \
-                      reaches each hit — paste into `inspect --flow` to \
-                      expand the chain."),
+                      `--summaries` to add the stable compiler-summary id for \
+                      each hit's enclosing callable."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Explicit query selector\n  \
                       $ bonsai-ninja search ./src --query verify --limit 50\n  \
@@ -2121,9 +2113,9 @@ pub(crate) enum Cmd {
         /// combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = 0)]
         limit: usize,
-        /// Include structural flow IDs. This explicitly hydrates semantic
-        /// graph facts and is off by default.
-        #[arg(long, default_value_t = false)]
+        /// Include stable symbol-summary IDs derived from compiler identity
+        /// facts. This is off by default.
+        #[arg(long = "summaries", default_value_t = false)]
         flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
         #[arg(long)]
@@ -2140,8 +2132,49 @@ pub(crate) enum Cmd {
         #[command(flatten)]
         output: OutputPathArg,
     },
-    /// Inspect a name / pattern across every fact with full cross-module
-    /// flow chains — the tool's headline feature.
+    /// Emit one bounded compiler evidence packet per matching callable.
+    #[command(
+        display_order = 2,
+        override_usage = "bonsai-ninja symbol-summary [OPTIONS] <WORKSPACE> [SYMBOL]",
+        long_about = themed_subcommand_long_about("Summarize one callable from exact compiler evidence: its declaration and source body, signature and parameters, direct resolved callers and callees, file imports, and explicitly unresolved workspace calls. This command never recursively enumerates call paths; use `path` for an exact compressed source-to-target graph."),
+        after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
+                      $ bonsai-ninja symbol-summary . --symbol handle_request\n  \
+                      $ bonsai-ninja symbol-summary . 'Service\\.run' --regex --format json"),
+        group(
+            ArgGroup::new("summary_symbol")
+                .args(["symbol_pos", "symbol"])
+                .required(true)
+                .multiple(false)
+        )
+    )]
+    SymbolSummary {
+        /// Workspace root to analyze.
+        workspace: PathBuf,
+        /// Positional symbol selector (alternative to `--symbol`).
+        #[arg(value_name = "SYMBOL")]
+        symbol_pos: Option<String>,
+        /// Callable name or qualified name.
+        #[arg(short = 's', long)]
+        symbol: Option<String>,
+        /// Interpret the selector as a regular expression.
+        #[arg(long, default_value_t = false)]
+        regex: bool,
+        /// Token-budget ceiling for rendered output.
+        #[arg(long)]
+        context: Option<String>,
+        /// Page to render (1-based number, `P:xxxxxxxx`, or `next`).
+        #[arg(long)]
+        page: Option<String>,
+        /// Emit every matching summary without paging.
+        #[arg(long, default_value_t = false)]
+        all: bool,
+        /// Output shape — `text` or `json`.
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
+    },
+    /// Inspect matching syntax facts with optional bounded compiler evidence.
     #[command(
         display_order = 1,
         long_about = themed_subcommand_long_about("Inspect a name / pattern across every fact: decls \
@@ -2152,22 +2185,16 @@ pub(crate) enum Cmd {
                       occurrences, syntax/index facts, and source excerpts. It \
                       does not load source / sink / sanitizer YAML or hydrate \
                       a whole-workspace semantic graph. Pass `--graph-flow` \
-                      when you intentionally need structural callgraph source \
-                      bodies, or `--taint-flow` for rulepack-free raw taint \
+                      for one bounded source/evidence unit per matching callable, \
+                      or `--taint-flow` for rulepack-free raw taint \
                       paths. These flags change output scope, not analysis \
                       accuracy: emitted graph facts still use the same \
                       exact/narrowed static evidence contract.\n\
                       \n\
-                      Graph-flow chains that share the same entry + sink but take \
-                      different intermediate paths get letter-suffixed labels \
-                      (FLOW 2a / FLOW 2b) so branch splits are visible.\n\
-                      \n\
-                      Every explicit graph flow carries a stable `F:<16-hex>` id printed \
-                      next to its header; use `--flow F:id` to re-render \
-                      just that chain across runs. `--group G:id` pins a \
-                      cluster of chains that share a tail. Architecturally \
-                      `inspect` is the pattern-less query layer over the \
-                      indexed taint graph `export` ships; `security taint-analysis` \
+                      `--graph-flow` never recursively enumerates caller/callee paths. \
+                      Use `symbol-summary` for a standalone declaration packet and \
+                      `path --from A --to B` for an exact compressed corridor. \
+                      `security taint-analysis` \
                       applies rulepack source / sink / sanitizer matches with \
                       exact source seeds. `--taint-flow` requests exact raw \
                       taint paths explicitly."),
@@ -2178,7 +2205,7 @@ pub(crate) enum Cmd {
                       # Add rulepack-free raw taint paths explicitly\n  \
                       $ bonsai-ninja inspect ./src --query os.system --taint-flow\n  \
                       \n  \
-                      # Request structural source-body evidence for a large result set\n  \
+                      # Add bounded structural source-body evidence\n  \
                       $ bonsai-ninja inspect ./src --query os.system --graph-flow\n  \
                       \n  \
                       # Regex query — syntax hits for exec-like calls\n  \
@@ -2190,7 +2217,7 @@ pub(crate) enum Cmd {
                       # Restrict to call-kind hits only\n  \
                       $ bonsai-ninja inspect ./src --query exec --kind call\n  \
                       \n  \
-                      # Pin one explicit graph flow by its stable id across runs\n  \
+                      # Reopen one bounded structural evidence unit\n  \
                       $ bonsai-ninja inspect ./src --query handle_request --flow F:0123456789abcdef\n  \
                       \n  \
                       # --from/--to syntax window\n  \
@@ -2261,7 +2288,7 @@ pub(crate) enum Cmd {
         /// Analysis is already exact and uncapped by default.
         #[arg(long, default_value_t = false)]
         all: bool,
-        /// Render explicit graph flows without inlined source bodies. The chain
+        /// Render structural evidence without inlined source bodies. The
         /// display line, `FLOW N` header (with `flow_id` + precision
         /// tag), and a compact step list stay — the multi-line
         /// function blocks are dropped. Useful for surveying large
@@ -2271,30 +2298,27 @@ pub(crate) enum Cmd {
         /// same steps + location data).
         #[arg(long, default_value_t = false)]
         compact: bool,
-        /// Re-render only the flow whose stable content-hash id
+        /// Re-render only the evidence unit whose stable content-hash id
         /// matches (format `F:` + 16 hex, as shown next to each
         /// `FLOW N` header). Lets tools / scripts cite a single
         /// flow across runs without reproducing the full query
         /// plus `--from` / `--to` shape.
         #[arg(long)]
         flow: Option<String>,
-        /// Output shape: `trace` (one block per flow, the default),
-        /// `grouped` (cluster flows by shared tail into GROUP blocks
-        /// with per-member prefixes), or `auto` (trace when the
-        /// result set is small, grouped once it gets noisy).
+        /// Output shape: `trace` (one block per evidence unit), `grouped`
+        /// (group units by structural identity), or `auto`.
         #[arg(long, value_enum, default_value_t = InspectView::Trace)]
         view: InspectView,
-        /// Re-render only the flow group whose stable content-hash
+        /// Re-render only the evidence group whose stable content-hash
         /// id matches (format `G:` + 16 hex, as shown next to each
         /// `GROUP N` header in grouped view). Complementary to
         /// `--flow <flow_id>` — one pins a single chain, the other
         /// pins a cluster of chains that share a tail.
         #[arg(long)]
         group: Option<String>,
-        /// Request structural call-graph flows with source bodies for
-        /// inspect hits. This flag adds graph-flow evidence to the default
-        /// syntax/index view. It does
-        /// not lower the resolver's exact/narrowed evidence contract.
+        /// Add one bounded compiler evidence unit with a source body for each
+        /// matching callable. This never recursively enumerates call paths;
+        /// use `path` for an exact compressed endpoint corridor.
         #[arg(long = "graph-flow", default_value_t = false)]
         graph_flow: bool,
         /// Add rulepack-free raw taint-engine paths. Off by default so
@@ -2324,9 +2348,9 @@ pub(crate) enum Cmd {
         display_order = 12,
         long_about = themed_subcommand_long_about("Dump a semantic analyzed workspace as a single JSON document: \
                       every file's decls / refs / imports / strings / classes, \
-                      the file-local flat flow-event IR, the resolved semantic \
-                      call-graph edge list, workspace-wide flow chains with \
-                      explicit completeness metadata, and a `taint_graph` \
+                      the file-local flat flow-event IR, the exact compressed \
+                      semantic callgraph with explicit completeness metadata, \
+                      and a `taint_graph` \
                       section that materializes the analyzer's \
                       engine state end-to-end.\n\
                       \n\

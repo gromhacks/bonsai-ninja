@@ -27,7 +27,6 @@ pub(crate) mod defs;
 pub(crate) mod dumps;
 pub(crate) mod edges;
 pub(crate) mod entrypoints;
-pub(crate) mod flows;
 pub(crate) mod graph_export;
 pub(crate) mod imports;
 pub(crate) mod native_export;
@@ -39,6 +38,8 @@ pub(crate) mod resolve;
 pub(crate) mod search;
 pub(crate) mod slice;
 pub mod strings;
+pub(crate) mod summary_labels;
+pub(crate) mod symbol_summary;
 pub(crate) mod taint;
 pub(crate) mod vars;
 
@@ -61,7 +62,6 @@ pub use dumps::{
 };
 pub use edges::{compute_edge_id, dump_edges, EdgeRecord, EdgesFilters, PrecisionClass};
 pub use entrypoints::{entrypoints, EntryPointOut, EntryPointsFilters};
-pub use flows::FlowAnnotator;
 pub use graph_export::{
     graph_projection, render_cypher, render_graph_export, render_graphml, render_networkx_json, GraphEdge,
     GraphExportFormat, GraphNode, GraphProjection,
@@ -72,7 +72,7 @@ pub use native_export::{
     render_native_export_json_with_config, write_native_export_json_with_config, NativeExportConfig,
 };
 pub use operations::{operations, OperationOperandOut, OperationOut, OperationsFilters};
-pub use paths::{paths, PathFilters, PathFunctionRow, PathOutcome, PathRow};
+pub use paths::{paths, PathFilters, PathFunctionRow, PathOutcome, PathTerminalCallRow};
 pub use refs::{refs, RefOut, RefsFilters};
 pub use resolution::{
     resolution_coverage, ResolutionCoverageDeclRow, ResolutionCoverageFileRow, ResolutionCoverageFilters,
@@ -83,6 +83,10 @@ pub use resolve::{
 pub use search::{search, SearchFilters, SearchHit};
 pub use slice::{slices, SliceFilters, SliceOutcome, SliceRow, SliceStep};
 pub use strings::{strings, StringOut, StringsFilters};
+pub use summary_labels::SummaryAnnotator;
+pub use symbol_summary::{
+    symbol_summaries, SymbolCallEdge, SymbolEvidenceKind, SymbolImport, SymbolSummary, UnresolvedCallEvidence,
+};
 pub use taint::{
     compute_taint_id, dump_taint, precision_display, TaintFilters, TaintOutcome, TaintRecord, TaintReport,
     TaintedArgRecord,

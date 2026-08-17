@@ -297,8 +297,8 @@ redo work.
 `inspect` queries indexed syntax facts and source excerpts that contain the
 query or filters. It does not load source, sink, or sanitizer YAML; use
 `security taint-analysis` for rulepack findings. Add `--taint-flow` for
-rulepack-free raw taint paths or `--graph-flow` for structural callgraph
-paths and source bodies. These flags change output scope, not analysis
+rulepack-free raw taint paths or `--graph-flow` for one bounded structural
+source/evidence unit per matching callable. These flags change output scope, not analysis
 accuracy: emitted graph facts still use the exact/narrowed static
 evidence contract. Raw taint rows come through the workspace syntax-flow
 facade. A warm batch uses its existing IDG target cut; a cold batch builds one
@@ -318,12 +318,11 @@ cursor to continue; `--all` changes presentation only.
 
 Keep lookup and relational questions separate. A plain `inspect --query`,
 `refs`, or `calls` query is the lightweight choice for locating a symbol or
-call site. `--graph-flow` deliberately computes the complete structural path
-language attached to every matching occurrence before it pages the result;
-shared helpers can therefore turn a narrow spelling match into a very large
-exact artifact. Use it only when those entry-to-match relationships are the
-requested result. When both ends are known, prefer `--from` and `--to` so the
-compiler can project the exact corridor first.
+call site. `--graph-flow` adds bounded callable evidence without recursively
+enumerating caller/callee path combinations. Use `symbol-summary` for the
+standalone callable packet. When both ends are known, use `path --from ...
+--to ...` for the exact compressed compiler corridor, or `trace --from ...
+--to ...` to interpret it.
 
 ```bash
 bonsai-ninja inspect ./src --query os.system --kind call
@@ -360,6 +359,37 @@ selects the surviving pair.
 | `--taint-flow` | false | Request raw taint-engine paths, including for large result sets. |
 | `--context <BUDGET>` | 32k | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
+| `--format <FORMAT>` | text | `text` or native `json`. |
+| `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
+
+## symbol-summary
+
+`symbol-summary` returns one self-contained, non-recursive compiler packet per
+matching callable. It includes the declaration, exact source span, signature,
+parameters, file imports, direct compiler-resolved callers and callees with
+edge provenance, and workspace calls whose candidates could not be resolved.
+Its work is linear in the selected body and direct graph degree; diamonds and
+cycles cannot multiply into a path set.
+
+```bash
+bonsai-ninja symbol-summary ./src --symbol handle_request
+bonsai-ninja symbol-summary ./src 'Service\.run' --regex --format json
+```
+
+Each result carries a stable `summary_id`, the snapshot-local
+`compiler_symbol_id`, adapter `language`,
+`graph_scope: direct_resolved_neighbors`, and explicit completion metadata.
+Use `path` for transitive reachability between known endpoints.
+
+| Flag | Default | Description |
+|---|---:|---|
+| `<WORKSPACE>` | Required | Workspace root. |
+| `[SYMBOL]` | None | Positional callable selector; mutually exclusive with `--symbol`. |
+| `--symbol <SYMBOL>` | None | Preferred callable or qualified-name selector. |
+| `--regex` | false | Treat the selector as a regex. |
+| `--context <BUDGET>` | 32k | Token budget. |
+| `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
+| `--all` | false | Emit every matching summary without paging. |
 | `--format <FORMAT>` | text | `text` or native `json`. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
@@ -458,11 +488,13 @@ Trace step `file`, `module`, and nested span locations are workspace-relative;
 
 ## path
 
-`path` returns ranked structural call paths between two callables. It starts
-from the shared resolved callgraph, augments it with warmed IDG cross-call
-edges when a semantic sidecar has been hydrated, and marks output incomplete
-when unavailable semantic graph facts or unresolved call
-sites mean missing paths cannot be ruled out.
+`path` returns the exact compressed structural corridor between two callables.
+It starts from the shared resolved callgraph, augments it with warmed IDG
+cross-call edges when a semantic sidecar has been hydrated, and applies
+forward/reverse reachability to retain exactly the nodes and semantic edges on
+some source-to-target route. It does not enumerate route combinations. Output
+is marked incomplete when unavailable semantic graph facts or unresolved call
+sites mean missing routes cannot be ruled out.
 
 ```bash
 bonsai-ninja path ./src --from handle_request --to run_admin_command
@@ -481,17 +513,18 @@ bonsai-ninja path ./src --from handle_request --to verify --format json
 
 If `--to` does not match a callable declaration but does match an indexed
 call site such as `os.system`, `path` does not invent an external function
-edge. It enumerates the semantic path to the call site's enclosing callable
-and adds `terminal_call` evidence with the exact call name and location;
+edge. It retains the compressed semantic corridor to the call site's enclosing
+callable and adds `terminal_call` evidence with the exact call name and location;
 the result is marked incomplete because static control inside that callable
 is reported as call-site evidence, not a resolved callee.
 
 JSON includes `from_matches`, `to_matches`, `backends`, `idg_available`,
-`idg_semantic_edges`, `path_count`, `analysis_complete`,
-`analysis_incomplete_reasons`, and `paths`. Each path contains stable `PTH:`
-ids, function hops, resolved `E:` edge ids, call-site locations, precision,
-rendered call previews, and optional `terminal_call` evidence for external
-or otherwise undeclared target call sites.
+`idg_semantic_edges`, `representation: compressed_callgraph`, `node_count`,
+`edge_count`, `analysis_complete`, `analysis_incomplete_reasons`, `nodes`,
+`edges`, and optional `terminal_calls`. Edges carry stable `E:` ids, call-site
+locations, precision, resolver provenance, and source previews. Terminal-call
+rows cover external or otherwise undeclared target call sites without
+inventing a callee node.
 
 ## slice
 
@@ -686,6 +719,7 @@ bonsai-ninja search ./src --query "request.args"
 | `classes` | Classes, structs, traits, interfaces, and enums. | `--kind`, `--file`, `--name`, `--has-method`, `--min-methods`, `--regex` |
 | `refs` | References to symbols, including read/call/type facts. | positional symbol, `--symbol`, `--file`, `--kind`, `--regex` |
 | `search` | Prefix-first fuzzy search over all browse facts, including source-file rows via `--kind file`. | positional query, `--query`, `--kind`, `--file`, `--regex` |
+| `symbol-summary` | Bounded callable packet with source, imports, direct resolved neighbors, and unresolved calls. | positional symbol, `--symbol`, `--regex` |
 
 Common browse output flags:
 
@@ -695,19 +729,19 @@ Common browse output flags:
 | `--context <BUDGET>` | 32k | Token-budget paging, e.g. `4k`, `16k`, `128k`, `all`. |
 | `--page <PAGE>` | 1 | Page number, `next`, or a printed `P:xxxxxxxx` cursor. |
 | `--all` | false | Emit all rows with no paging/context cap. |
-| `--flows` | false | Opt in to structural flow-id columns on browse commands that support them. This explicitly hydrates semantic graph facts. |
+| `--summaries` | false | Add stable callable-summary IDs to browse commands that support them. Text output uses compact labels plus a legend; JSON rows gain a `summary_ids` array. This derives IDs from compiler headers without recursively expanding graph paths. |
 | `--format <FORMAT>` | text | `text` or native `json`. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
-Flow columns are opt-in semantic navigation labels: exact/narrowed facts
-only, never unresolved fan-out. `defs`, `calls`, `imports`, `vars`, `strings`,
-`args`, `operations`, `classes`, `refs`, and `search` support `--flows`;
-lightweight syntax rows remain the default. Dense text tables render compact local labels
-(`F1`, `F2`, ...) and print a `flow ids:` legend below the table with the
-complete copyable `F:<16-hex>` ids. If a rendered flow cell ends in `…`, the
-command also prints `semantic-only flows column incomplete`; those IDs are a
-compact navigation preview, not the complete label set for that row. Use
-`inspect --query ... --graph-flow` and follow its pages for full flow evidence.
+Summary columns are opt-in semantic navigation labels: exact compiler
+identities only, never unresolved fan-out. `defs`, `calls`, `imports`, `vars`,
+`strings`, `args`, `operations`, `classes`, `refs`, and `search` support
+`--summaries`; lightweight syntax rows remain the default. Native JSON preserves each
+command's ordinary row shape unless the flag is present, then adds a `summary_ids`
+array to every emitted row. Dense text tables render compact local labels
+(`F1`, `F2`, ...) and print a `symbol summary ids:` legend below the table with
+the complete copyable `F:<16-hex>` ids. Open one with `symbol-summary`; use
+`path --from ... --to ...` when the question is transitive reachability.
 
 ## Navigation
 

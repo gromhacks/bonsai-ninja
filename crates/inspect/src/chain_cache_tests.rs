@@ -1,20 +1,16 @@
-//! ChainCache + chain enumeration + flow-id integration tests.
+//! ChainCache + flow-id integration tests.
 //!
 //! Moved verbatim from the CLI's inline test module when these
 //! types graduated from the binary into this SDK crate. Coverage
 //! is otherwise identical: every cache method must return what
-//! the uncached implementation would return, every chain
-//! enumeration must reach its target, every flow-id must hash
+//! the uncached implementation would return and every flow-id must hash
 //! deterministically.
 //!
 //! The fixture is a tiny Python program (the Python adapter is the
 //! one dev-dep) so the resolver / global index / call graph all
 //! get exercised end-to-end.
 
-use crate::{
-    compute_flow_id, enumerate_chains_resolved, find_call_span_to_func_uncached, BoundedCache,
-    CallEdgeResolver, CallPathTruncation, ChainCache, ChainTruncation,
-};
+use crate::{compute_flow_id, find_call_span_to_func_uncached, BoundedCache, CallEdgeResolver, ChainCache};
 use bonsai_callgraph::collect_callable_targets;
 use bonsai_common::{Span, SymbolId};
 use bonsai_lang_api::LanguageRegistry;
@@ -64,104 +60,6 @@ fn func_id(ws: &Workspace, name: &str) -> bonsai_common::FuncId {
         candidates.len()
     );
     candidates[0]
-}
-
-#[test]
-fn resolved_chains_reach_target() {
-    let ws = ws_with_python(FIXTURE);
-    let cache = ChainCache::new(&ws);
-    let sink = func_id(&ws, "sink");
-    let entry = func_id(&ws, "entry");
-    let (chains, _trunc) = cache.chains_resolved(sink, 32, 64);
-    // At least one chain must run from entry to sink in FuncId space.
-    assert!(
-        chains
-            .iter()
-            .any(|c| c.funcs.first() == Some(&entry) && c.funcs.last() == Some(&sink)),
-        "expected entry → ... → sink chain in FuncId space, got {chains:?}"
-    );
-}
-
-#[test]
-fn chains_resolved_repeat_is_a_cache_hit() {
-    let ws = ws_with_python(FIXTURE);
-    let cache = ChainCache::new(&ws);
-    let sink = func_id(&ws, "sink");
-    let (first, _) = cache.chains_resolved(sink, 32, 64);
-    let (second, _) = cache.chains_resolved(sink, 32, 64);
-    assert_eq!(first, second);
-}
-
-#[test]
-fn downstream_resolved_includes_direct_callees() {
-    let ws = ws_with_python(FIXTURE);
-    let cache = ChainCache::new(&ws);
-    let middle = func_id(&ws, "middle");
-    let helper = func_id(&ws, "helper");
-    let sink = func_id(&ws, "sink");
-    let downstream = cache.downstream_resolved(middle, 6, 12);
-    // `middle` calls `helper` and `sink` directly — both must appear.
-    assert!(downstream.contains(&helper));
-    assert!(downstream.contains(&sink));
-}
-
-#[test]
-fn call_path_enumeration_reports_depth_truncation() {
-    let ws = ws_with_python(
-        r"
-def root():
-    a()
-
-def a():
-    b()
-
-def b():
-    return 1
-",
-    );
-    let cache = ChainCache::new(&ws);
-    let root = func_id(&ws, "root");
-    let mut resolver = CallEdgeResolver::new(&ws);
-    let (paths, truncation) = resolver.enumerate_call_paths_from_with_truncation(&cache, &[root], 1, 16);
-
-    assert!(!paths.is_empty());
-    assert_eq!(
-        truncation,
-        CallPathTruncation::MaxExtraDepth,
-        "depth-limited downstream paths must report truncation"
-    );
-    assert!(truncation.is_truncated());
-    assert_eq!(truncation.label(), Some("downstream-depth cap"));
-}
-
-#[test]
-fn call_path_enumeration_reports_path_truncation() {
-    let ws = ws_with_python(
-        r"
-def root():
-    a()
-    b()
-
-def a():
-    return 1
-
-def b():
-    return 2
-",
-    );
-    let cache = ChainCache::new(&ws);
-    let root = func_id(&ws, "root");
-    let mut resolver = CallEdgeResolver::new(&ws);
-    let (paths, truncation) = resolver.enumerate_call_paths_from_with_truncation(&cache, &[root], 6, 1);
-
-    assert_eq!(paths.len(), 1, "path cap should keep one emitted path");
-    assert_eq!(
-        truncation,
-        CallPathTruncation::MaxPaths,
-        "path-limited downstream paths must report truncation"
-    );
-    assert!(truncation.is_truncated());
-    assert_eq!(truncation.label(), Some("downstream-path cap"));
 }
 
 #[test]
@@ -299,9 +197,7 @@ fn resolved_graph_is_built_once() {
 fn filter_skip_leaves_reachable_cache_cold() {
     let ws = ws_with_python(FIXTURE);
     let cache = ChainCache::new(&ws);
-    let sink = func_id(&ws, "sink");
-    let _ = cache.chains_resolved(sink, 32, 64);
-    let _ = cache.downstream_resolved(sink, 6, 12);
+    let _ = cache.resolved_graph();
     assert!(
         cache.reachable_r.lock().is_empty(),
         "reachable cache must stay cold when no --from/--to filter is applied"
@@ -312,17 +208,12 @@ fn filter_skip_leaves_reachable_cache_cold() {
 fn reset_clears_every_map() {
     let ws = ws_with_python(FIXTURE);
     let mut cache = ChainCache::new(&ws);
-    let sink = func_id(&ws, "sink");
     let middle = func_id(&ws, "middle");
     // Populate every cache.
     let _ = cache.resolved_graph();
-    let _ = cache.chains_resolved(sink, 32, 64);
-    let _ = cache.downstream_resolved(middle, 6, 12);
     let _ = cache.callees_of_resolved(middle);
     let _ = cache.reachable_resolved(&[func_id(&ws, "entry"), middle]);
     assert!(cache.resolved.get().is_some());
-    assert!(!cache.chains_r.lock().is_empty());
-    assert!(!cache.downstream_r.lock().is_empty());
     assert!(!cache.callees_r.lock().is_empty());
     assert!(!cache.reachable_r.lock().is_empty());
 
@@ -331,35 +222,22 @@ fn reset_clears_every_map() {
         cache.resolved.get().is_none(),
         "resolved OnceCell must be cleared"
     );
-    assert!(cache.chains_r.lock().is_empty());
-    assert!(cache.downstream_r.lock().is_empty());
     assert!(cache.callees_r.lock().is_empty());
     assert!(cache.reachable_r.lock().is_empty());
     assert!(cache.enclosing.lock().is_empty());
 
-    // Post-reset, the next lookup must still return the correct
-    // value — reset shouldn't corrupt future calls.
-    let (post, _) = cache.chains_resolved(sink, 32, 64);
-    // Compute directly via a fresh resolved graph and compare.
-    let fresh_rcg = ws.resolved_call_graph();
-    let (direct, _) = enumerate_chains_resolved(&fresh_rcg, sink, 32, 64);
-    assert_eq!(post, direct);
+    assert!(cache.resolved_graph().callees_of(middle).next().is_some());
 }
 
 #[test]
 fn disabled_cache_never_populates_maps() {
     let ws = ws_with_python(FIXTURE);
     let cache = ChainCache::without_cache(&ws);
-    let sink = func_id(&ws, "sink");
     let middle = func_id(&ws, "middle");
     // Every method must return a correct value but leave the memo
     // maps empty — `--no-cache` is a true pass-through.
-    let _ = cache.chains_resolved(sink, 32, 64);
-    let _ = cache.downstream_resolved(middle, 6, 12);
     let _ = cache.callees_of_resolved(middle);
     let _ = cache.reachable_resolved(&[func_id(&ws, "entry"), middle]);
-    assert!(cache.chains_r.lock().is_empty());
-    assert!(cache.downstream_r.lock().is_empty());
     assert!(cache.callees_r.lock().is_empty());
     assert!(cache.reachable_r.lock().is_empty());
 }
@@ -434,11 +312,9 @@ class C:
     }
 }
 
-/// Each enumerated chain must carry semantic precision across its
-/// edges. Ambiguous broad matches are not emitted as callgraph
-/// edges, so inspect chains stay exact/narrowed by construction.
+/// Direct symbol evidence retains the resolver's semantic precision.
 #[test]
-fn chain_precision_meets_along_path() {
+fn direct_edge_retains_semantic_precision() {
     // `target` is unique → caller→target edge is Direct/Narrowed.
     let ws = ws_with_python(
         r"
@@ -460,18 +336,17 @@ def caller():
     }
     let cache = ChainCache::new(&ws);
 
-    // Direct/narrowed path.
     let target = func_id(&ws, "target");
-    let (chains, _) = cache.chains_resolved(target, 32, 64);
-    let chain = chains
-        .iter()
-        .find(|c| c.funcs.len() >= 2)
-        .expect("expected caller → target chain");
+    let caller = func_id(&ws, "caller");
+    let edge = cache
+        .resolved_graph()
+        .callees_of(caller)
+        .find(|edge| edge.to == target)
+        .expect("expected compiler-resolved caller → target edge");
     assert_eq!(
-        chain.precision,
+        edge.precision,
         bonsai_common::Precision::Narrowed,
-        "single-candidate chain must propagate Narrowed (got {:?})",
-        chain.precision
+        "single-candidate edge must retain Narrowed precision"
     );
 
     let driver = func_id(&ws, "driver");
@@ -705,129 +580,19 @@ fn eviction_then_recompute_returns_identical_value() {
     );
 }
 
-/// End-to-end: a tiny cap (force lots of eviction) must produce
-/// the same result set as a generous cap (no eviction). The
-/// cache is purely a perf optimization; output is invariant.
 #[test]
-fn enumeration_reports_max_chains_truncation() {
-    // Build a small graph where multiple chains reach `sink`, then
-    // ask for fewer chains than exist. The truncation tag must
-    // surface so the renderer can warn the user.
-    let ws = ws_with_python(
-        r"
-def sink(): pass
-def a(): sink()
-def b(): sink()
-def c(): sink()
-def d(): sink()
-def e(): sink()
-",
-    );
-    let rcg = ws.resolved_call_graph();
-    let sink = func_id(&ws, "sink");
-    // Cap below the true number of chains (5) to force truncation.
-    let (chains, trunc) = enumerate_chains_resolved(&rcg, sink, 2, 64);
-    assert!(chains.len() <= 2, "must respect max_chains cap");
-    assert_eq!(
-        trunc,
-        ChainTruncation::MaxChains,
-        "truncation tag must be MaxChains when cap kicks in (got {trunc:?})"
-    );
-    assert!(trunc.is_truncated());
-    assert_eq!(trunc.label(), Some("max-flows cap"));
-}
-
-#[test]
-fn enumeration_reports_no_truncation_when_under_cap() {
-    // Same graph as above, but ask for more chains than exist —
-    // no truncation should be reported.
-    let ws = ws_with_python(
-        r"
-def sink(): pass
-def a(): sink()
-",
-    );
-    let rcg = ws.resolved_call_graph();
-    let sink = func_id(&ws, "sink");
-    let (chains, trunc) = enumerate_chains_resolved(&rcg, sink, 100, 100);
-    assert!(!chains.is_empty());
-    assert_eq!(trunc, ChainTruncation::None);
-    assert!(!trunc.is_truncated());
-    assert_eq!(trunc.label(), None);
-}
-
-#[test]
-fn precise_suffix_survives_imprecise_incoming_parent() {
-    let ws = ws_with_python(
-        r"
-class Runner:
-    def execute(self, value):
-        sink(value)
-
-class Loader:
-    def load(self, value):
-        runner = Runner()
-        return runner.execute(value)
-
-def load_model(value):
-    loader = Loader()
-    return loader.load(value)
-
-class Other:
-    def load_model(self, value):
-        return value
-
-def predict(obj, value):
-    return obj.load_model(value)
-",
-    );
-    let global = ws.db().global_index();
-    let execute = func_id(&ws, "execute");
-    let entry = collect_callable_targets(&global, "load_model")
-        .into_iter()
-        .find(|func| {
-            global
-                .decl_of(bonsai_common::SymbolId::new(func.raw()))
-                .is_some_and(|decl| decl.parent.is_none())
-        })
-        .expect("top-level load_model");
-    let loader_load = collect_callable_targets(&global, "load")
-        .into_iter()
-        .find(|func| {
-            global
-                .decl_of(bonsai_common::SymbolId::new(func.raw()))
-                .and_then(|decl| decl.parent)
-                .and_then(|parent| global.decl_of(parent))
-                .is_some_and(|parent| parent.name == "Loader")
-        })
-        .expect("Loader.load");
-
-    let (chains, _trunc) = enumerate_chains_resolved(&ws.resolved_call_graph(), execute, 64, 64);
-    assert!(
-        chains.iter().any(|chain| {
-            chain.funcs == vec![entry, loader_load, execute]
-                && matches!(
-                    chain.precision,
-                    bonsai_common::Precision::Exact | bonsai_common::Precision::Narrowed
-                )
-        }),
-        "expected precise suffix load_model -> Loader.load -> Runner.execute despite imprecise predict -> load_model parent; chains={chains:#?}"
-    );
-}
-
-#[test]
-fn small_cap_matches_large_cap_for_chains() {
+fn small_cache_matches_large_cache_for_direct_reachability() {
     let ws = ws_with_python(FIXTURE);
     let mut tight = ChainCache::new(&ws);
-    tight.chains_r = parking_lot::Mutex::new(BoundedCache::with_capacity(1));
+    tight.reachable_r = parking_lot::Mutex::new(BoundedCache::with_capacity(1));
     let mut loose = ChainCache::new(&ws);
-    loose.chains_r = parking_lot::Mutex::new(BoundedCache::with_capacity(1024));
+    loose.reachable_r = parking_lot::Mutex::new(BoundedCache::with_capacity(1024));
 
     for name in &["entry", "middle", "sink", "helper"] {
         let target = func_id(&ws, name);
-        let (t, _) = tight.chains_resolved(target, 32, 64);
-        let (l, _) = loose.chains_resolved(target, 32, 64);
-        assert_eq!(t, l, "chains_resolved({name}) must match across cap sizes");
+        let t = tight.reachable_resolved(&[target]);
+        let l = loose.reachable_resolved(&[target]);
+        assert_eq!(t, l, "direct reachability for {name} must ignore cache size");
     }
 }
 
@@ -839,20 +604,9 @@ fn disabled_cache_returns_identical_values() {
     let ws = ws_with_python(FIXTURE);
     let cached = ChainCache::new(&ws);
     let uncached = ChainCache::without_cache(&ws);
-    let sink = func_id(&ws, "sink");
     let middle = func_id(&ws, "middle");
     let entry = func_id(&ws, "entry");
 
-    assert_eq!(
-        cached.chains_resolved(sink, 32, 64),
-        uncached.chains_resolved(sink, 32, 64),
-        "chains_resolved() must match between cached and uncached"
-    );
-    assert_eq!(
-        cached.downstream_resolved(middle, 6, 12),
-        uncached.downstream_resolved(middle, 6, 12),
-        "downstream_resolved() must match"
-    );
     assert_eq!(
         cached.callees_of_resolved(middle),
         uncached.callees_of_resolved(middle),

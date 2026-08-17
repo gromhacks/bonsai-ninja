@@ -1512,20 +1512,15 @@ fn facade_show_reopens_structured_stable_ids() {
         other => panic!("expected resolver candidate outcome, got {other:?}"),
     }
 
-    let inspect_targets = project
-        .inspect()
-        .chains(bonsai_sdk::InspectQuery {
-            pattern: Some("handle_request"),
-            max_chains: usize::MAX,
-            max_probes: usize::MAX,
-            ..Default::default()
-        })
-        .expect("inspect graph-flow chains");
-    let target_chains = inspect_targets
-        .iter()
-        .find(|target| !target.chains.is_empty() && !target.groups.is_empty())
-        .expect("fixture should emit graph-flow chains and groups");
-    let flow_id = target_chains.chains[0].flow_id.clone();
+    let summaries = project
+        .browse()
+        .symbol_summaries(Some("handle_request"), false)
+        .expect("symbol summary");
+    let flow_id = summaries
+        .first()
+        .expect("handle_request summary")
+        .summary_id
+        .clone();
     assert!(flow_id.starts_with("F:"), "flow_id malformed: {flow_id}");
     match project
         .show()
@@ -1542,13 +1537,9 @@ fn facade_show_reopens_structured_stable_ids() {
         other => panic!("expected inspect flow outcome, got {other:?}"),
     }
 
-    let group_id = target_chains.groups[0].group_id.clone();
+    let group_id = bonsai_sdk::compute_structural_group_id(&[flow_id.clone()]);
     assert!(group_id.starts_with("G:"), "group_id malformed: {group_id}");
-    let expected_member = target_chains.groups[0]
-        .member_flow_ids
-        .first()
-        .expect("group should have member flow ids")
-        .clone();
+    let expected_member = flow_id.clone();
     match project
         .show()
         .by_id(&group_id, Default::default())
@@ -2322,11 +2313,8 @@ fn facade_browse_dump_export_security_trace_and_inspect_work() {
     assert_eq!(paths.from_matches, 1);
     assert_eq!(paths.to_matches, 1);
     assert!(
-        paths
-            .paths
-            .first()
-            .is_some_and(|path| path.functions.iter().any(|func| func.name == "update_user")),
-        "SDK path should expose the same semantic route as the CLI"
+        paths.nodes.iter().any(|func| func.name == "update_user"),
+        "SDK corridor should expose the same semantic graph as the CLI"
     );
     let slice = project.browse().slices(bonsai_sdk::SliceFilters {
         symbol: "result",
@@ -2500,12 +2488,9 @@ fn facade_browse_dump_export_security_trace_and_inspect_work() {
         .expect("inspect funcs")
         .is_empty());
     assert!(!project
-        .inspect()
-        .chains(bonsai_sdk::InspectQuery {
-            pattern: Some("handle_request"),
-            ..Default::default()
-        })
-        .expect("inspect chains")
+        .browse()
+        .symbol_summaries(Some("handle_request"), false)
+        .expect("symbol summaries")
         .is_empty());
 }
 

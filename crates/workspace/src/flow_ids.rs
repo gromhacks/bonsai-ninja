@@ -1,18 +1,13 @@
-//! Workspace-wide per-function flow-id cache.
+//! Workspace-wide per-function symbol-summary-id cache.
 //!
-//! For each function, hashes its backward call chains into stable
-//! content-addressed `F:` ids. Browse rows look up labels here
-//! instead of re-enumerating chains per command. Lives in
+//! For each function, hashes its exact compiler identity into a stable
+//! content-addressed `F:` symbol-evidence id. Browse rows look up labels here
+//! instead of expanding graph paths per command. Lives in
 //! `bonsai_workspace` (not `bonsai_browse`) so prewarm + invalidation
 //! sit on the same lifecycle as [`crate::dataflow::DataFlowCache`].
 //!
-//! The DFS / FNV-1a hash logic is duplicated from
-//! `bonsai_inspect::{chains, flow_id}` (forward dep would cycle).
-//! Drift is contained by public-contract tests in `bonsai_inspect`.
-//! Default cached per-function DFS is capped at `MAX_CHAINS` /
-//! `MAX_PROBES`; truncated functions render with a `…` suffix.
-//! Exact consumers can request uncached exhaustive labels with
-//! [`FlowIdLabelOptions::exhaustive`].
+//! The id uses the same compiler declaration hash as structural inspect.
+//! One callable produces one id; graph fan-out cannot change its cost.
 
 use crate::cache_fingerprint::{
     dependency_metadata_fingerprint_for_sidecar, discard_stale_factstore_sidecar,
@@ -21,7 +16,6 @@ use crate::cache_fingerprint::{
 use crate::factstore_cleanup::{forward_port_unwritten_entries, map_factstore_io};
 use crate::flow_ids_disk::{decode as decode_flow_id_entry, encode as encode_flow_id_entry, FlowIdEntry};
 use ahash::{AHashMap, AHashSet};
-use bonsai_callgraph::ResolvedCallGraph;
 use bonsai_common::{workspace_bonsai_dir, FuncId, MATCHER_POLICY_FINGERPRINT};
 use bonsai_db::{AnalyzerDb, COMPILER_OBJECT_CACHE_VERSION};
 use bonsai_factstore::{FactStoreReader, FactStoreWriter};
@@ -38,6 +32,10 @@ const FLOW_IDS_TABLE_ID: u32 = 3;
 
 /// On-disk format version. Bump when the encoding changes so old
 /// sidecars are rejected on open.
+// v14 (2026-08-17): persist the single symbol id as a scalar rather than a
+// legacy vector of path-derived labels.
+// v13 (2026-08-16): browse labels identify one compiler symbol summary;
+// recursive upstream/downstream path materialization was removed.
 // v12 (2026-08-07): bind flow-id freshness to the compiler frontend ABI so
 // adapter call/identity changes cannot reuse paths derived from older IR.
 // v11 (2026-08-03): regenerate structural flow ids after compiler-object v50
@@ -50,7 +48,7 @@ const FLOW_IDS_TABLE_ID: u32 = 3;
 // v7 (2026-07-16): MessagePack replaces the retired binary codec.
 // v6 (2026-05-27): downstream of IDG/adapter semantic changes,
 // enumerated chains can differ, so reject older sidecars.
-pub const FLOW_IDS_CACHE_VERSION: u32 = 12;
+pub const FLOW_IDS_CACHE_VERSION: u32 = 14;
 
 /// Pipeline-hash field in the factstore header. Folds the matcher
 /// policy fingerprint into 64 bits and mixes in the current workspace
@@ -70,59 +68,6 @@ fn flow_ids_pipeline_hash_for_content(content_fingerprint: u64, sidecar_path: &P
         ^ dependency_metadata_fingerprint_for_sidecar(sidecar_path)
 }
 
-/// Per-function chain cap. Matches `bonsai_inspect`'s `--max-flows`
-/// default so the prewarmed id set is a subset of what inspect
-/// would render for the same target.
-const MAX_CHAINS: usize = 256;
-/// Per-function probe budget. Bounds the DFS edges visited at
-/// `MAX_PROBES * 16` inside [`enumerate_chains`].
-const MAX_PROBES: usize = 1024;
-/// Forward-closure depth for the downstream extension appended to
-/// each backward chain. Matches `inspect`'s `downstream_resolved`
-/// default so the hashed chain matches what inspect would render.
-const DOWNSTREAM_DEPTH: usize = 6;
-/// Forward-closure breadth. Matches `inspect`'s default.
-const DOWNSTREAM_BREADTH: usize = 12;
-/// Maximum IDs surfaced in one browse `flows` cell. Large hub
-/// functions in real-world repos can have hundreds of valid upstream
-/// chains; browse tables are an index, not the full trace view, so
-/// keep the cell bounded and let `inspect --query` expand the rest.
-const MAX_LABELS_PER_FUNC: usize = 32;
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct FlowIdLabelOptions {
-    pub max_chains: usize,
-    pub max_probes: usize,
-    pub downstream_depth: usize,
-    pub downstream_breadth: usize,
-    pub max_labels_per_func: usize,
-}
-
-impl FlowIdLabelOptions {
-    #[must_use]
-    pub const fn exhaustive() -> Self {
-        Self {
-            max_chains: usize::MAX,
-            max_probes: usize::MAX,
-            downstream_depth: usize::MAX,
-            downstream_breadth: usize::MAX,
-            max_labels_per_func: usize::MAX,
-        }
-    }
-}
-
-impl Default for FlowIdLabelOptions {
-    fn default() -> Self {
-        Self {
-            max_chains: MAX_CHAINS,
-            max_probes: MAX_PROBES,
-            downstream_depth: DOWNSTREAM_DEPTH,
-            downstream_breadth: DOWNSTREAM_BREADTH,
-            max_labels_per_func: MAX_LABELS_PER_FUNC,
-        }
-    }
-}
-
 #[derive(Default, Debug)]
 pub struct FlowIdCache {
     inner: RwLock<Inner>,
@@ -130,19 +75,12 @@ pub struct FlowIdCache {
 
 #[derive(Default, Debug)]
 struct Inner {
-    /// Shared resolved call graph. Built once on first use and
-    /// reused across every `labels_for_func` call — the build
-    /// dominates the per-workspace cost on large repos (~1s on
-    /// Redis), so amortising it is the big win even for a single
-    /// CLI invocation.
-    cg: Option<Arc<ResolvedCallGraph>>,
-    labels: AHashMap<FuncId, Arc<[String]>>,
-    truncated: AHashSet<FuncId>,
+    ids: AHashMap<FuncId, Arc<str>>,
     prewarmed: bool,
     /// Optional disk-backed source of truth, populated by
     /// [`FlowIdCache::prewarm_to_disk`] or
     /// [`FlowIdCache::load_from_disk`]. Lookups that miss the
-    /// in-memory map probe this before falling back to the engine.
+    /// in-memory map probe this before hashing the compiler header.
     disk: Option<Arc<FactStoreReader>>,
 }
 
@@ -152,296 +90,43 @@ impl FlowIdCache {
         Self::default()
     }
 
-    /// Flow-id labels for `func`. O(1) on cache hit; on miss runs a
-    /// bounded backward DFS through the shared resolved call graph
-    /// (built lazily on first query and cached for every
-    /// subsequent call), hashes the chain names, memoises the
-    /// result, and returns it.
-    ///
-    /// The `db` / `vfs` arguments are only used when the resolved
-    /// call graph hasn't been built yet or the cache line for
-    /// `func` is missing; warm-path calls never touch them.
-    pub fn labels_for_func(&self, func: FuncId, db: &AnalyzerDb, vfs: &bonsai_vfs::Vfs) -> Arc<[String]> {
+    /// Stable symbol-evidence id for `func`. O(1) on cache hit; a miss hashes
+    /// only the exact compiler declaration header. This deliberately does
+    /// not open a call graph or enumerate paths.
+    pub fn id_for_func(&self, func: FuncId, db: &AnalyzerDb, vfs: &bonsai_vfs::Vfs) -> Arc<str> {
         // Drop the read guard's temporary before the write upgrade.
-        let cached = self.inner.read().labels.get(&func).cloned();
+        let cached = self.inner.read().ids.get(&func).cloned();
         if let Some(hit) = cached {
             return hit;
         }
         if let Some(arc) = self.try_hydrate_from_disk(func) {
             return arc;
         }
-        let cg = self.call_graph(db, vfs);
-        let options = FlowIdLabelOptions::default();
-        let (chains, trunc) = enumerate_chains(&cg, func, options.max_chains, options.max_probes);
         let headers = db.build_global_header_index();
-        // Mirror `inspect`'s chain extension: each backward chain
-        // (root → … → target) gets every resolvable downstream call
-        // path DFS-enumerated from its tail. The hashed name sequence
-        // — and therefore the flow id — matches what
-        // `inspect --query <enclosing_fn>` would emit, so ids from
-        // browse paste directly into `inspect --flow F:...`.
-        let (ids, label_trunc) = collect_flow_ids_for_chains(&cg, headers.as_ref(), db, vfs, chains, options);
-        let arc: Arc<[String]> = Arc::from(ids.into_boxed_slice());
+        let id = symbol_evidence_id(headers.as_ref(), db, vfs, func);
+        let arc: Arc<str> = Arc::from(id);
         let mut inner = self.inner.write();
-        inner.labels.insert(func, arc.clone());
-        if trunc || label_trunc {
-            inner.truncated.insert(func);
-        }
+        inner.ids.insert(func, arc.clone());
         arc
     }
 
-    /// Flow-id labels for a batch of functions. This is the same
-    /// computation as [`Self::labels_for_func`], but it computes cold
-    /// misses in parallel against one shared resolved call graph and
-    /// bulk-inserts the results into the cache.
-    ///
-    /// Full-workspace consumers such as native export need labels for
-    /// every callable; driving that through `labels_for_func` serially
-    /// repeats avoidable scheduler and lock overhead on large graphs.
-    /// The output remains a per-function cache lookup contract: cached
-    /// and disk-backed entries are reused, missing entries are computed
-    /// exactly with the same caps and truncation bit as the scalar path.
-    pub fn labels_for_funcs(
-        &self,
-        funcs: &[FuncId],
-        db: &AnalyzerDb,
-        vfs: &bonsai_vfs::Vfs,
-    ) -> Vec<(FuncId, Arc<[String]>, bool)> {
-        let options = FlowIdLabelOptions::default();
-        if funcs.is_empty() {
-            return Vec::new();
-        }
-
-        let mut unique: Vec<FuncId> = Vec::with_capacity(funcs.len());
-        let mut seen: AHashSet<FuncId> = AHashSet::new();
-        for &func in funcs {
-            if seen.insert(func) {
-                unique.push(func);
-            }
-        }
-
-        let mut resolved: AHashMap<FuncId, (Arc<[String]>, bool)> = AHashMap::new();
-        let mut missing: Vec<FuncId> = Vec::new();
-        for func in unique {
-            if let Some(line) = self.cached_line(func) {
-                resolved.insert(func, line);
-            } else if let Some(line) = self.try_hydrate_from_disk_line(func) {
-                resolved.insert(func, line);
-            } else {
-                missing.push(func);
-            }
-        }
-
-        if !missing.is_empty() {
-            let cg = self.call_graph(db, vfs);
-            let headers = db.build_global_header_index();
-            let computed: Vec<(FuncId, Arc<[String]>, bool)> = missing
-                .par_iter()
-                .map(|&f| {
-                    let (chains, trunc) = enumerate_chains(&cg, f, options.max_chains, options.max_probes);
-                    let (ids, label_trunc) =
-                        collect_flow_ids_for_chains(&cg, headers.as_ref(), db, vfs, chains, options);
-                    (f, Arc::from(ids.into_boxed_slice()), trunc || label_trunc)
-                })
-                .collect();
-            {
-                let mut inner = self.inner.write();
-                for (func, labels, truncated) in &computed {
-                    inner.labels.insert(*func, labels.clone());
-                    if *truncated {
-                        inner.truncated.insert(*func);
-                    }
-                }
-            }
-            for (func, labels, truncated) in computed {
-                resolved.insert(func, (labels, truncated));
-            }
-        }
-
-        funcs
-            .iter()
-            .filter_map(|func| {
-                resolved
-                    .get(func)
-                    .map(|(labels, truncated)| (*func, labels.clone(), *truncated))
-            })
-            .collect()
-    }
-
-    /// Flow-id labels for a batch of functions with caller-selected
-    /// bounds. The default option path delegates to the cached/disk
-    /// backed implementation above; non-default options are computed
-    /// fresh so an exhaustive export cannot accidentally reuse a
-    /// bounded sidecar line.
-    pub fn labels_for_funcs_with_options(
-        &self,
-        funcs: &[FuncId],
-        db: &AnalyzerDb,
-        vfs: &bonsai_vfs::Vfs,
-        options: FlowIdLabelOptions,
-    ) -> Vec<(FuncId, Arc<[String]>, bool)> {
-        if options == FlowIdLabelOptions::default() {
-            return self.labels_for_funcs(funcs, db, vfs);
-        }
-        if funcs.is_empty() {
-            return Vec::new();
-        }
-
-        let mut unique: Vec<FuncId> = Vec::with_capacity(funcs.len());
-        let mut seen: AHashSet<FuncId> = AHashSet::new();
-        for &func in funcs {
-            if seen.insert(func) {
-                unique.push(func);
-            }
-        }
-
-        let cg = self.call_graph(db, vfs);
-        let headers = db.build_global_header_index();
-        let computed_rows: Vec<(FuncId, Arc<[String]>, bool)> = unique
-            .par_iter()
-            .map(|&f| {
-                let (chains, trunc) = enumerate_chains(&cg, f, options.max_chains, options.max_probes);
-                let (ids, label_trunc) =
-                    collect_flow_ids_for_chains(&cg, headers.as_ref(), db, vfs, chains, options);
-                (f, Arc::from(ids.into_boxed_slice()), trunc || label_trunc)
-            })
-            .collect();
-        let computed: AHashMap<FuncId, (Arc<[String]>, bool)> = computed_rows
-            .into_iter()
-            .map(|(func, labels, truncated)| (func, (labels, truncated)))
-            .collect();
-
-        funcs
-            .iter()
-            .filter_map(|func| {
-                computed
-                    .get(func)
-                    .map(|(labels, truncated)| (*func, labels.clone(), *truncated))
-            })
-            .collect()
-    }
-
-    /// Flow-id labels from caller-provided backward chain sets.
-    ///
-    /// Export already enumerates per-target chain sets for its chain
-    /// evidence sections. Feeding those exact chains here avoids a
-    /// second whole-workspace chain enumeration pass while preserving
-    /// the same downstream extension, hashing, caps, and truncation
-    /// semantics as [`Self::labels_for_funcs_with_options`].
-    pub fn labels_for_chain_sets_with_options(
-        &self,
-        chain_sets: Vec<(FuncId, Vec<Vec<FuncId>>, bool)>,
-        db: &AnalyzerDb,
-        vfs: &bonsai_vfs::Vfs,
-        options: FlowIdLabelOptions,
-    ) -> Vec<(FuncId, Arc<[String]>, bool)> {
-        let headers = db.build_global_header_index();
-        self.labels_for_chain_sets_with_index_and_options(chain_sets, db, vfs, headers.as_ref(), options)
-    }
-
-    /// Flow-id labels from caller-provided backward chains and the compiler
-    /// header table already owned by the surrounding semantic phase.
-    ///
-    /// Whole-workspace exporters must use this form: rebuilding a body-level
-    /// global index after releasing the frontend phase reparses every source
-    /// file and overlaps those AST arenas with the complete callgraph.
-    pub fn labels_for_chain_sets_with_index_and_options(
-        &self,
-        chain_sets: Vec<(FuncId, Vec<Vec<FuncId>>, bool)>,
-        db: &AnalyzerDb,
-        vfs: &bonsai_vfs::Vfs,
-        headers: &GlobalIndex,
-        options: FlowIdLabelOptions,
-    ) -> Vec<(FuncId, Arc<[String]>, bool)> {
-        if chain_sets.is_empty() {
-            return Vec::new();
-        }
-        let cg = self.call_graph(db, vfs);
-        let computed: Vec<(FuncId, Arc<[String]>, bool)> = chain_sets
-            .into_par_iter()
-            .map(|(func, chains, chain_truncated)| {
-                let (ids, label_trunc) = collect_flow_ids_for_chains(&cg, headers, db, vfs, chains, options);
-                (
-                    func,
-                    Arc::from(ids.into_boxed_slice()),
-                    chain_truncated || label_trunc,
-                )
-            })
-            .collect();
-        if options == FlowIdLabelOptions::default() {
-            let mut inner = self.inner.write();
-            for (func, labels, truncated) in &computed {
-                inner.labels.insert(*func, labels.clone());
-                if *truncated {
-                    inner.truncated.insert(*func);
-                }
-            }
-        }
-        computed
-    }
-
-    fn cached_line(&self, func: FuncId) -> Option<(Arc<[String]>, bool)> {
-        let inner = self.inner.read();
-        let labels = inner.labels.get(&func)?.clone();
-        Some((labels, inner.truncated.contains(&func)))
+    #[cfg(test)]
+    fn cached_id(&self, func: FuncId) -> Option<Arc<str>> {
+        self.inner.read().ids.get(&func).cloned()
     }
 
     /// Probe the disk store for `func`, decode the payload, and
-    /// hydrate the in-memory cache. Returns the cached labels on
+    /// hydrate the in-memory cache. Returns the cached id on
     /// hit. `None` when there is no disk store, no entry for `func`,
     /// or the entry fails to decode.
-    fn try_hydrate_from_disk(&self, func: FuncId) -> Option<Arc<[String]>> {
-        self.try_hydrate_from_disk_line(func).map(|(labels, _)| labels)
-    }
-
-    fn try_hydrate_from_disk_line(&self, func: FuncId) -> Option<(Arc<[String]>, bool)> {
+    fn try_hydrate_from_disk(&self, func: FuncId) -> Option<Arc<str>> {
         let reader = self.inner.read().disk.clone()?;
         let hit = reader.get(u64::from(func.raw())).ok().flatten()?;
         let entry = decode_flow_id_entry(&hit.payload).ok()?;
-        let entry_truncated = entry.truncated;
-        let arc: Arc<[String]> = Arc::from(entry.labels.into_boxed_slice());
+        let arc: Arc<str> = Arc::from(entry.id);
         let mut inner = self.inner.write();
-        let labels = inner.labels.entry(func).or_insert_with(|| arc.clone()).clone();
-        if entry_truncated {
-            inner.truncated.insert(func);
-        }
-        let truncated = inner.truncated.contains(&func);
-        Some((labels, truncated))
-    }
-
-    /// Build (or return) the shared resolved call graph. Single
-    /// builder lock keeps two concurrent queries from both paying
-    /// the build cost.
-    fn call_graph(&self, db: &AnalyzerDb, _vfs: &bonsai_vfs::Vfs) -> Arc<ResolvedCallGraph> {
-        // Drop the read guard's temporary before the write upgrade.
-        let cached = self.inner.read().cg.clone();
-        if let Some(cg) = cached {
-            return cg;
-        }
-        let built = crate::build_resolved_call_graph_snapshot(db);
-        let arc = Arc::new(built);
-        let mut inner = self.inner.write();
-        // Another thread may have raced us — keep whichever landed
-        // first so every caller sees the same graph instance.
-        if inner.cg.is_none() {
-            inner.cg = Some(arc.clone());
-        }
-        inner.cg.clone().unwrap_or(arc)
-    }
-
-    /// `true` when chain enumeration hit its cap for `func` — the
-    /// label set is a prefix of reality. Callers surface this as a
-    /// trailing `…` in the rendered cell.
-    ///
-    /// Forces a hydrate when the entry is on disk but not yet in
-    /// memory, so the disk record's `truncated` bit is honoured.
-    #[must_use]
-    pub fn was_truncated(&self, func: FuncId) -> bool {
-        if self.inner.read().labels.contains_key(&func) {
-            return self.inner.read().truncated.contains(&func);
-        }
-        let _ = self.try_hydrate_from_disk(func);
-        self.inner.read().truncated.contains(&func)
+        let id = inner.ids.entry(func).or_insert_with(|| arc.clone()).clone();
+        Some(id)
     }
 
     /// How many function entries the next `prewarm_all` call would
@@ -449,7 +134,7 @@ impl FlowIdCache {
     /// happens.
     pub fn pending_count(&self, db: &AnalyzerDb) -> usize {
         let global = db.build_global_header_index();
-        let already: AHashSet<FuncId> = self.inner.read().labels.keys().copied().collect();
+        let already: AHashSet<FuncId> = self.inner.read().ids.keys().copied().collect();
         let mut count = 0usize;
         for file in global.all_files() {
             for d in global.decls_in(file) {
@@ -465,13 +150,13 @@ impl FlowIdCache {
         count
     }
 
-    /// Eagerly populate every function's label set in parallel.
+    /// Eagerly populate every function's summary id in parallel.
     /// `on_each_done` fires once per newly-populated entry (from a
     /// rayon worker, so it must be `Sync`); [`Self::pending_count`]
     /// returns the total up front.
     ///
     /// Skipped by the default CLI path in favour of the lazy
-    /// on-demand populate inside [`Self::labels_for_func`] — a
+    /// on-demand populate inside [`Self::id_for_func`] — a
     /// single `browse` invocation typically only needs a handful
     /// of enclosing functions, so paying the build for *every*
     /// function in the workspace would be wasted work. Call this
@@ -481,9 +166,8 @@ impl FlowIdCache {
     where
         F: Fn(FuncId) + Sync + Send,
     {
-        let cg = self.call_graph(db, vfs);
         let global = db.build_global_header_index();
-        let already: AHashSet<FuncId> = self.inner.read().labels.keys().copied().collect();
+        let already: AHashSet<FuncId> = self.inner.read().ids.keys().copied().collect();
         let mut todo: Vec<FuncId> = Vec::new();
         for file in global.all_files() {
             for decl in global.decls_in(file) {
@@ -502,23 +186,17 @@ impl FlowIdCache {
             self.inner.write().prewarmed = true;
             return;
         }
-        let results: Vec<(FuncId, Arc<[String]>, bool)> = todo
+        let results: Vec<(FuncId, Arc<str>)> = todo
             .par_iter()
             .map(|&f| {
-                let options = FlowIdLabelOptions::default();
-                let (chains, trunc) = enumerate_chains(&cg, f, options.max_chains, options.max_probes);
-                let (ids, label_trunc) =
-                    collect_flow_ids_for_chains(&cg, global.as_ref(), db, vfs, chains, options);
+                let id = symbol_evidence_id(global.as_ref(), db, vfs, f);
                 on_each_done(f);
-                (f, Arc::from(ids.into_boxed_slice()), trunc || label_trunc)
+                (f, Arc::from(id))
             })
             .collect();
         let mut inner = self.inner.write();
-        for (f, ids, trunc) in results {
-            inner.labels.insert(f, ids);
-            if trunc {
-                inner.truncated.insert(f);
-            }
+        for (f, id) in results {
+            inner.ids.insert(f, id);
         }
         inner.prewarmed = true;
     }
@@ -529,13 +207,13 @@ impl FlowIdCache {
         self.prewarm_all_with_progress(db, vfs, |_| {});
     }
 
-    /// Stream-and-write prewarm. Computes flow-id labels for every
+    /// Stream-and-write prewarm. Computes one summary id for every
     /// callable function in parallel, encodes each entry into a
     /// fact-store writer immediately so peak RAM is bounded by the
     /// in-flight rayon chunk, atomically replaces the sidecar at
     /// `path`, and opens the resulting file as the cache's disk
     /// store. After this call the in-memory map is empty;
-    /// subsequent `labels_for_func` calls hydrate one entry at a
+    /// subsequent `id_for_func` calls hydrate one entry at a
     /// time on demand.
     pub fn prewarm_to_disk<F>(
         &self,
@@ -547,7 +225,6 @@ impl FlowIdCache {
     where
         F: Fn(FuncId) + Sync + Send,
     {
-        let cg = self.call_graph(db, vfs);
         let global = db.build_global_header_index();
         let mut funcs: Vec<FuncId> = Vec::new();
         for file in global.all_files() {
@@ -563,19 +240,11 @@ impl FlowIdCache {
         let (already, memory_entries): (AHashSet<FuncId>, Vec<(FuncId, FlowIdEntry)>) = {
             let inner = self.inner.read();
             (
-                inner.labels.keys().copied().collect(),
+                inner.ids.keys().copied().collect(),
                 inner
-                    .labels
+                    .ids
                     .iter()
-                    .map(|(&func, labels)| {
-                        (
-                            func,
-                            FlowIdEntry {
-                                labels: labels.iter().cloned().collect(),
-                                truncated: inner.truncated.contains(&func),
-                            },
-                        )
-                    })
+                    .map(|(&func, id)| (func, FlowIdEntry { id: id.to_string() }))
                     .collect(),
             )
         };
@@ -608,11 +277,9 @@ impl FlowIdCache {
             FLOW_IDS_TABLE_ID,
             flow_ids_pipeline_hash(db, path),
             todo.len(),
-            // Flow-id labels are short (8-16 char hex hashes) and
-            // capped at MAX_LABELS_PER_FUNC per function, so the
-            // payload bytes scale modestly.
+            // Each function owns exactly one short symbol-evidence id.
             todo.len().saturating_mul(256),
-            todo.len().saturating_mul(MAX_LABELS_PER_FUNC),
+            todo.len(),
         )
         .map_err(map_factstore_io)?;
         let written_keys = Mutex::new(AHashSet::<u64>::default());
@@ -627,13 +294,8 @@ impl FlowIdCache {
             if write_error.lock().is_some() {
                 return;
             }
-            let options = FlowIdLabelOptions::default();
-            let (chains, trunc) = enumerate_chains(&cg, f, options.max_chains, options.max_probes);
-            let (ids, label_trunc) =
-                collect_flow_ids_for_chains(&cg, global.as_ref(), db, vfs, chains, options);
             let entry = FlowIdEntry {
-                labels: ids,
-                truncated: trunc || label_trunc,
+                id: symbol_evidence_id(global.as_ref(), db, vfs, f),
             };
             let payload = encode_flow_id_entry(&entry);
             let key = u64::from(f.raw());
@@ -655,8 +317,7 @@ impl FlowIdCache {
         let reader = FactStoreReader::open(path, FLOW_IDS_TABLE_ID, flow_ids_pipeline_hash(db, path))
             .map_err(map_factstore_io)?;
         let mut inner = self.inner.write();
-        inner.labels.clear();
-        inner.truncated.clear();
+        inner.ids.clear();
         inner.disk = Some(Arc::new(reader));
         inner.prewarmed = true;
         Ok(written)
@@ -737,160 +398,31 @@ impl FlowIdCache {
     /// invalidation path when a file changes — coarse but correct.
     pub fn invalidate_all(&self) {
         let mut inner = self.inner.write();
-        inner.cg = None;
-        inner.labels.clear();
-        inner.truncated.clear();
+        inner.ids.clear();
         inner.prewarmed = false;
         inner.disk = None;
     }
 
-    /// Seed the workspace-shared resolved call graph as the cached
-    /// graph for this flow-id cache so the lazy `call_graph()`
-    /// build is skipped. Called once at workspace open after the
-    /// workspace builds its own canonical graph; saves rebuilding
-    /// the same content twice.
-    pub fn seed_call_graph(&self, graph: Arc<ResolvedCallGraph>) {
-        self.inner.write().cg = Some(graph);
-    }
-
-    /// Release only the shared graph allocation after a batch consumer has
-    /// completed. Computed labels and truncation metadata remain valid.
-    pub fn release_call_graph(&self) {
-        self.inner.write().cg = None;
-    }
-
-    /// Release resident presentation labels after a whole-workspace batch has
+    /// Release resident presentation ids after a whole-workspace batch has
     /// serialized them. This is allocation lifetime control only: an attached
     /// factstore remains the exact source for later hydration, and otherwise
-    /// labels are deterministically recomputed from the canonical callgraph.
-    pub fn release_resident_labels(&self) {
+    /// ids are deterministically recomputed from compiler headers.
+    pub fn release_resident_ids(&self) {
         let mut inner = self.inner.write();
-        inner.labels.clear();
-        inner.truncated.clear();
+        inner.ids.clear();
         if inner.disk.is_none() {
             inner.prewarmed = false;
         }
     }
 }
 
-fn collect_flow_ids_for_chains(
-    cg: &ResolvedCallGraph,
+fn symbol_evidence_id(
     headers: &GlobalIndex,
     db: &AnalyzerDb,
     vfs: &bonsai_vfs::Vfs,
-    chains: Vec<Vec<FuncId>>,
-    options: FlowIdLabelOptions,
-) -> (Vec<String>, bool) {
-    let mut seen: AHashSet<String> = AHashSet::new();
-    let mut truncated = false;
-    let mut call_paths = CallPathEnumerator::new(cg);
-    'chains: for chain in chains {
-        let (extended_paths, path_truncated) =
-            call_paths.enumerate_from(&chain, options.downstream_depth, options.downstream_breadth);
-        if path_truncated {
-            truncated = true;
-        }
-        for extended in extended_paths {
-            if extended.is_empty() {
-                continue;
-            }
-            seen.insert(compute_structural_flow_id(headers, db, vfs, &extended));
-            if seen.len() >= options.max_labels_per_func {
-                truncated = true;
-                break 'chains;
-            }
-        }
-    }
-    let mut ids: Vec<String> = seen.into_iter().collect();
-    ids.sort();
-    (ids, truncated)
-}
-
-struct CallPathEnumerator<'a> {
-    cg: &'a ResolvedCallGraph,
-    resolvable_callees_cache: AHashMap<FuncId, Vec<FuncId>>,
-}
-
-impl<'a> CallPathEnumerator<'a> {
-    fn new(cg: &'a ResolvedCallGraph) -> Self {
-        Self {
-            cg,
-            resolvable_callees_cache: AHashMap::new(),
-        }
-    }
-
-    fn enumerate_from(
-        &mut self,
-        base: &[FuncId],
-        max_extra: usize,
-        max_paths: usize,
-    ) -> (Vec<Vec<FuncId>>, bool) {
-        if base.is_empty() {
-            return (Vec::new(), false);
-        }
-        let mut out: Vec<Vec<FuncId>> = Vec::new();
-        let mut stack: Vec<(Vec<FuncId>, usize)> = vec![(base.to_vec(), 0)];
-        let mut truncated = false;
-        while let Some((path, extra)) = stack.pop() {
-            if out.len() >= max_paths {
-                truncated = true;
-                break;
-            }
-            let Some(&tail) = path.last() else {
-                continue;
-            };
-            if extra >= max_extra {
-                out.push(path);
-                continue;
-            }
-            let mut resolvable: Vec<FuncId> = self
-                .resolvable_callees(tail)
-                .iter()
-                .copied()
-                .filter(|callee| !path.contains(callee))
-                .collect();
-            if resolvable.is_empty() {
-                out.push(path);
-                continue;
-            }
-            resolvable.sort_by_key(|f| f.raw());
-            for c in resolvable.into_iter().rev() {
-                let mut next = path.clone();
-                next.push(c);
-                stack.push((next, extra + 1));
-            }
-        }
-        if out.is_empty() {
-            out.push(base.to_vec());
-        }
-        (out, truncated)
-    }
-
-    fn resolvable_callees(&mut self, caller: FuncId) -> &[FuncId] {
-        if !self.resolvable_callees_cache.contains_key(&caller) {
-            let out = resolved_callees_from_graph(self.cg, caller);
-            self.resolvable_callees_cache.insert(caller, out);
-        }
-        self.resolvable_callees_cache
-            .get(&caller)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-    }
-}
-
-fn resolved_callees_from_graph(cg: &ResolvedCallGraph, caller: FuncId) -> Vec<FuncId> {
-    // ResolvedCallGraph edges are emitted from concrete FlowEvent::Call
-    // sites and now carry that source span. Reusing the graph's
-    // adjacency list keeps flow-id downstream expansion aligned with
-    // inspect without re-running alias resolution for every edge.
-    let mut out: Vec<FuncId> = cg
-        .callees_of(caller)
-        .filter(|edge| edge.precision.is_semantic())
-        .map(|edge| edge.to)
-        .collect();
-    out.sort_by_key(|f| f.raw());
-    out.dedup();
-    out
+    symbol: FuncId,
+) -> String {
+    compute_structural_flow_id(headers, db, vfs, &[symbol])
 }
 
 /// Look up a function's display name in the compiler header table. Returns
@@ -960,38 +492,6 @@ pub fn compute_structural_flow_id(
         absorb(&decl.name_span.end.to_string());
     }
     format!("F:{:016x}", hasher.finish())
-}
-
-/// Stable content-hash of a chain's display names. Frozen format:
-/// `F:` + 16 lowercase hex of a null-separated FNV-1a digest.
-///
-/// Same digest body as `bonsai_inspect::compute_flow_id`. Both call
-/// into `bonsai_hash` so the digest is RFC-fixed in one place rather
-/// than re-derived to break a previous workspace → inspect cycle.
-#[must_use]
-pub fn compute_flow_id(chain_names: &[String]) -> String {
-    format!("F:{:016x}", bonsai_hash::fnv1a_names64(chain_names))
-}
-
-/// Backward DFS over `cg` from `target` to its roots. Returns the
-/// chain paths (entry → target) as slices of [`FuncId`]; a
-/// `truncated` flag is set when either the chain cap or the probe
-/// budget was hit. Precision is discarded — the flow-id cache only
-/// hashes names — but the underlying enumeration is the canonical
-/// `bonsai_callgraph::chains::enumerate_chains_resolved`. Earlier
-/// this carried a private byte-equivalent copy that drifted on
-/// cycle / precision-cut edges; consolidating eliminates the
-/// browse F: id / `inspect --flow F:…` parity hazard.
-fn enumerate_chains(
-    cg: &ResolvedCallGraph,
-    target: FuncId,
-    max_chains: usize,
-    max_probes: usize,
-) -> (Vec<Vec<FuncId>>, bool) {
-    let (chains, truncation) =
-        bonsai_callgraph::chains::enumerate_chains_resolved(cg, target, max_chains, max_probes);
-    let truncated = truncation.is_truncated();
-    (chains.into_iter().map(|c| c.funcs).collect(), truncated)
 }
 
 #[cfg(test)]

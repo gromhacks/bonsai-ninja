@@ -98,63 +98,7 @@ fn structural_flow_ids_distinguish_same_named_declarations() {
 }
 
 #[test]
-fn batch_labels_match_scalar_labels() {
-    let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
-    let db = build_db_with(
-        &[(
-            "a.py",
-            "def entry(request):\n    return middle(request)\n\n\
-                 def middle(value):\n    return sink(value)\n\n\
-                 def sink(value):\n    return value\n",
-        )],
-        adapter,
-    );
-    let funcs = [
-        func_id_by_name(&db, "entry"),
-        func_id_by_name(&db, "middle"),
-        func_id_by_name(&db, "sink"),
-    ];
-
-    let scalar_cache = FlowIdCache::new();
-    let batch_cache = FlowIdCache::new();
-    let batch: AHashMap<FuncId, (Arc<[String]>, bool)> = batch_cache
-        .labels_for_funcs(&funcs, &db, db.vfs())
-        .into_iter()
-        .map(|(func, labels, truncated)| (func, (labels, truncated)))
-        .collect();
-    let precomputed_cache = FlowIdCache::new();
-    let cg = precomputed_cache.call_graph(&db, db.vfs());
-    let chain_sets: Vec<(FuncId, Vec<Vec<FuncId>>, bool)> = funcs
-        .iter()
-        .map(|&func| {
-            let (chains, truncated) = enumerate_chains(&cg, func, MAX_CHAINS, MAX_PROBES);
-            (func, chains, truncated)
-        })
-        .collect();
-    let precomputed: AHashMap<FuncId, (Arc<[String]>, bool)> = precomputed_cache
-        .labels_for_chain_sets_with_options(chain_sets, &db, db.vfs(), FlowIdLabelOptions::default())
-        .into_iter()
-        .map(|(func, labels, truncated)| (func, (labels, truncated)))
-        .collect();
-
-    for func in funcs {
-        let scalar_labels = scalar_cache.labels_for_func(func, &db, db.vfs());
-        let scalar_truncated = scalar_cache.was_truncated(func);
-        let (batch_labels, batch_truncated) = batch
-            .get(&func)
-            .unwrap_or_else(|| panic!("missing batch labels for {:?}", func));
-        let (precomputed_labels, precomputed_truncated) = precomputed
-            .get(&func)
-            .unwrap_or_else(|| panic!("missing precomputed labels for {:?}", func));
-        assert_eq!(&scalar_labels, batch_labels);
-        assert_eq!(scalar_truncated, *batch_truncated);
-        assert_eq!(&scalar_labels, precomputed_labels);
-        assert_eq!(scalar_truncated, *precomputed_truncated);
-    }
-}
-
-#[test]
-fn resident_label_release_preserves_exact_recomputation() {
+fn resident_id_release_preserves_exact_recomputation() {
     let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
     let db = build_db_with(
         &[(
@@ -166,24 +110,24 @@ fn resident_label_release_preserves_exact_recomputation() {
     );
     let sink = func_id_by_name(&db, "sink");
     let cache = FlowIdCache::new();
-    let before = cache.labels_for_func(sink, &db, db.vfs());
-    assert!(cache.cached_line(sink).is_some());
+    let before = cache.id_for_func(sink, &db, db.vfs());
+    assert!(cache.cached_id(sink).is_some());
 
-    cache.release_resident_labels();
+    cache.release_resident_ids();
     assert!(
-        cache.cached_line(sink).is_none(),
+        cache.cached_id(sink).is_none(),
         "phase release must drop only resident presentation rows"
     );
 
-    let after = cache.labels_for_func(sink, &db, db.vfs());
+    let after = cache.id_for_func(sink, &db, db.vfs());
     assert_eq!(
         before, after,
-        "released labels must recompute deterministically from compiler facts"
+        "released ids must recompute deterministically from compiler facts"
     );
 }
 
 #[test]
-fn exact_label_options_lift_default_label_caps() {
+fn symbol_summary_id_is_constant_size_under_fan_in() {
     let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
     let mut source = String::new();
     for idx in 0..40 {
@@ -194,29 +138,9 @@ fn exact_label_options_lift_default_label_caps() {
     let sink = func_id_by_name(&db, "sink");
     let cache = FlowIdCache::new();
 
-    let default = cache.labels_for_funcs(&[sink], &db, db.vfs());
-    let (_, default_labels, default_truncated) = default.into_iter().next().expect("default sink labels");
-    assert!(
-        default_truncated,
-        "default labels must expose truncation when the label cap is hit"
-    );
-    assert_eq!(
-        default_labels.len(),
-        MAX_LABELS_PER_FUNC,
-        "default labels stay bounded for browse cells"
-    );
-
-    let exact = cache.labels_for_funcs_with_options(&[sink], &db, db.vfs(), FlowIdLabelOptions::exhaustive());
-    let (_, exact_labels, exact_truncated) = exact.into_iter().next().expect("exact sink labels");
-    assert!(
-        !exact_truncated,
-        "exhaustive labels must not reuse the bounded cached truncation state"
-    );
-    assert_eq!(
-        exact_labels.len(),
-        40,
-        "exhaustive labels must enumerate every fan-in flow id"
-    );
+    let id = cache.id_for_func(sink, &db, db.vfs());
+    assert!(id.starts_with("F:"));
+    assert_eq!(id.len(), 18, "fan-in changes graph degree, not symbol-id size");
 }
 
 #[test]
@@ -358,10 +282,10 @@ fn prewarm_to_disk_preserves_resident_entries() {
         std::process::id()
     ));
     let cache = FlowIdCache::new();
-    let resident = cache.labels_for_func(entry, &db, db.vfs());
+    let resident = cache.id_for_func(entry, &db, db.vfs());
     assert!(
         !resident.is_empty(),
-        "resident line must be computed before prewarm"
+        "resident id must be computed before prewarm"
     );
 
     let written = cache
@@ -378,7 +302,7 @@ fn prewarm_to_disk_preserves_resident_entries() {
         loaded, expected,
         "resident entry must survive sidecar replacement"
     );
-    assert_eq!(restored.labels_for_func(entry, &db, db.vfs()), resident);
+    assert_eq!(restored.id_for_func(entry, &db, db.vfs()), resident);
 
     let _ = std::fs::remove_file(&tmp);
 }

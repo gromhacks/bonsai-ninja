@@ -1283,6 +1283,31 @@ where
             )
         })
         .collect::<Vec<_>>();
+    // Retrieval/path-filtered workspaces intentionally begin without a
+    // whole-workspace store attached. Their candidates retain stable full
+    // workspace FileIds, so bind the existing immutable generation to this
+    // exact raw-anchor worklist before import/syntax planning. This method is
+    // read-only and strong-digest validates every selected source; on a miss
+    // the ordinary adapter-owned Tree-sitter fallback remains exact.
+    let compiler_store_started = debug_security_phase.then(Instant::now);
+    let compiler_store_reused = db
+        .attach_reusable_compiler_object_store_for_files(&raw_scan_files)
+        .unwrap_or_else(|error| {
+            bonsai_diagnostics::debug_log!(
+                "compiler-object",
+                "scoped compiler-object generation unavailable for security planning: {error}"
+            );
+            false
+        });
+    if let Some(started) = compiler_store_started {
+        bonsai_diagnostics::debug_log!(
+            "security-phase",
+            "matcher compiler-object attachment: {:.3}s files={} reused={}",
+            started.elapsed().as_secs_f64(),
+            raw_scan_files.len(),
+            compiler_store_reused
+        );
+    }
     // Package/context gates consume exact file-local import facts. Receiver
     // inheritance is the only ordinary endpoint constraint that needs the
     // workspace declaration table; source rules and untyped API rules keep
@@ -1329,6 +1354,9 @@ where
     // is the compiler's header/body boundary: scheduling changes, but every
     // rule and file keeps the same semantics.
     let package_filter_started = debug_security_phase.then(Instant::now);
+    let text_filter_ns = AtomicU64::new(0);
+    let syntax_load_ns = AtomicU64::new(0);
+    let syntax_filter_ns = AtomicU64::new(0);
     let build_scan_plan = |candidate_files: &[FileId],
                            receiver_base_map: &AHashMap<String, Vec<String>>,
                            inventory_receiver_ancestry: Option<&Arc<bonsai_index::ReceiverAncestry>>,
@@ -1350,6 +1378,7 @@ where
                     .then(|| ws.db().compiler_import_index_uncached(file))
                     .flatten();
                 let compiler_imports = prewarmed_compiler_imports.or(compiler_imports_owned.as_ref());
+                let text_filter_started = debug_security_phase.then(Instant::now);
                 let rules = file_rules.filtered_rule_refs_for_text(FileRuleFilterContext {
                     ws,
                     file,
@@ -1359,6 +1388,9 @@ where
                     prewarmed_import_contexts: import_contexts,
                     compiler_imports,
                 });
+                if let Some(started) = text_filter_started {
+                    record_elapsed_ns(&text_filter_ns, started);
+                }
                 // Import/package filtering is monotone: the syntax header can
                 // only reject more rules, never restore one. Do not hash,
                 // decompress, decode, and integrity-check a compiler syntax
@@ -1366,15 +1398,20 @@ where
                 if rules.is_empty() {
                     return Some((file, rules, None, false));
                 }
+                let syntax_load_started = debug_security_phase.then(Instant::now);
                 let Some(mut syntax) = ws.db().compiler_syntax_header_uncached(file) else {
                     return Some((file, rules, None, false));
                 };
+                if let Some(started) = syntax_load_started {
+                    record_elapsed_ns(&syntax_load_ns, started);
+                }
                 if let Some(ancestry) = inventory_receiver_ancestry.as_ref() {
                     ancestry.apply_to_syntax_header(&mut syntax);
                 }
                 if inventory_receiver_ancestry.is_none() {
                     enrich_compiler_syntax_header_receiver_types(&mut syntax, receiver_base_map);
                 }
+                let syntax_filter_started = debug_security_phase.then(Instant::now);
                 let (filtered_rules, deferred, needs_workspace_constructor_resolution) = file_rules
                     .filtered_rule_refs_for_syntax_header(
                         rules.clone(),
@@ -1384,6 +1421,9 @@ where
                         language.as_str(),
                         receiver_ancestry_complete,
                     );
+                if let Some(started) = syntax_filter_started {
+                    record_elapsed_ns(&syntax_filter_ns, started);
+                }
                 let deferred_plan = deferred.then(|| {
                     (
                         rules,
@@ -1490,10 +1530,13 @@ where
     if let Some(started) = package_filter_started {
         bonsai_diagnostics::debug_log!(
             "security-phase",
-            "matcher header/package filter: {:.3}s raw_candidates={} body_candidates={}",
+            "matcher header/package filter: {:.3}s raw_candidates={} body_candidates={} worker_cpu(text={:.3}s syntax_load={:.3}s syntax_filter={:.3}s)",
             started.elapsed().as_secs_f64(),
             raw_scan_files.len(),
-            scan_plan.len()
+            scan_plan.len(),
+            text_filter_ns.load(Ordering::Relaxed) as f64 / 1_000_000_000.0,
+            syntax_load_ns.load(Ordering::Relaxed) as f64 / 1_000_000_000.0,
+            syntax_filter_ns.load(Ordering::Relaxed) as f64 / 1_000_000_000.0,
         );
         let mut retained_by_rule = AHashMap::<&str, usize>::new();
         for (_, rules) in &scan_plan {
@@ -3216,21 +3259,29 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
             compiler_imports,
         );
         extend_alias_map_with_declared_types(&mut alias_map, &callback_aliases);
-        let mut retained = Vec::new();
+        // Call/new planning used to compare every surviving rule with every
+        // adapter-emitted call. Large files and broad language packs turned
+        // that into a rule x call Cartesian product even though the body
+        // matcher already maintains an exact callee-keyed candidate index.
+        // Reuse that same index here, then restore the input rule order below.
+        // Wildcard/regex rules remain in `call_wildcard_rules`, so this only
+        // changes scheduling cost; it cannot remove a possible exact match.
+        let allowed_call_rule_ids = rules
+            .iter()
+            .filter(|prepared| matches!(prepared.rule.match_spec.kind, MatchKind::Call | MatchKind::New))
+            .map(|prepared| prepared.rule.id.as_str())
+            .collect::<AHashSet<_>>();
+        let mut matched_call_rule_ids = AHashSet::new();
         let mut receiver_ancestry_deferred = false;
-        for prepared in rules {
-            if prepared.rule.match_spec.kind == MatchKind::Return {
-                if return_rule_possible_in_syntax_header(prepared, syntax, source_text) {
-                    retained.push(prepared);
-                }
-                continue;
-            }
-            if !matches!(prepared.rule.match_spec.kind, MatchKind::Call | MatchKind::New) {
-                retained.push(prepared);
-                continue;
-            }
-            let mut rule_matches = false;
-            for call in &syntax.calls {
+        let mut call_candidates = Vec::new();
+        for call in &syntax.calls {
+            call_candidates.clear();
+            push_call_candidate_rules(&mut call_candidates, self, &call.name, &alias_map);
+            for prepared in call_candidates
+                .iter()
+                .copied()
+                .filter(|prepared| allowed_call_rule_ids.contains(prepared.rule.id.as_str()))
+            {
                 let call_kind_matches = prepared.call_kind_allows(call.call_kind);
                 let matched_callee = if call_kind_matches
                     && prepared.name.is_none()
@@ -3274,10 +3325,31 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
                 {
                     workspace_constructor_resolution_required = true;
                 }
-                rule_matches |= direct_match;
+                if direct_match {
+                    matched_call_rule_ids.insert(prepared.rule.id.as_str());
+                }
             }
-            if rule_matches {
-                retained.push(prepared);
+        }
+        let mut retained = Vec::new();
+        for prepared in rules {
+            match prepared.rule.match_spec.kind {
+                MatchKind::Return => {
+                    if return_rule_possible_in_syntax_header(prepared, syntax, source_text) {
+                        retained.push(prepared);
+                    }
+                }
+                MatchKind::Call | MatchKind::New => {
+                    if matched_call_rule_ids.contains(prepared.rule.id.as_str()) {
+                        retained.push(prepared);
+                    }
+                }
+                MatchKind::Read
+                | MatchKind::Write
+                | MatchKind::Param
+                | MatchKind::Type
+                | MatchKind::Missing => {
+                    retained.push(prepared);
+                }
             }
         }
         (

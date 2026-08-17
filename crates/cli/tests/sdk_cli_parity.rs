@@ -1335,39 +1335,28 @@ fn inspect_structural_flow_ids_match_sdk_facade() {
         "json",
         "--all",
     ]);
-    let sdk_targets = project
-        .inspect()
-        .chains(bonsai_sdk::InspectQuery {
-            pattern: Some(target),
-            max_chains: usize::MAX,
-            max_probes: usize::MAX,
-            ..Default::default()
-        })
-        .expect("sdk inspect chains");
-    let sdk_target = sdk_targets
+    let sdk_summaries = project
+        .browse()
+        .symbol_summaries(Some(target), false)
+        .expect("SDK symbol summaries");
+    let sdk_flow_ids: BTreeSet<String> = sdk_summaries
         .iter()
-        .find(|item| item.target == target)
-        .unwrap_or_else(|| panic!("SDK inspect target `{target}` missing: {sdk_targets:#?}"));
-    let sdk_flow_ids: BTreeSet<String> = sdk_target
-        .chains
-        .iter()
-        .map(|chain| chain.flow_id.clone())
+        .map(|summary| summary.summary_id.clone())
         .collect();
-    let sdk_group_ids: BTreeSet<String> = sdk_target
-        .groups
+    let sdk_group_ids: BTreeSet<String> = sdk_flow_ids
         .iter()
-        .map(|group| group.group_id.clone())
+        .map(|flow_id| bonsai_sdk::compute_structural_group_id(std::slice::from_ref(flow_id)))
         .collect();
 
     assert_eq!(
         inspect_decl_flow_ids(&cli, target),
         sdk_flow_ids,
-        "CLI inspect structural flow ids must match SDK inspect chains:\n{cli:#}"
+        "CLI inspect structural flow ids must match SDK symbol summaries:\n{cli:#}"
     );
     assert_eq!(
         inspect_decl_group_ids(&cli, target),
         sdk_group_ids,
-        "CLI inspect grouped flow ids must match SDK inspect groups:\n{cli:#}"
+        "CLI inspect grouped flow ids must derive from the same summary ids:\n{cli:#}"
     );
 }
 
@@ -1469,21 +1458,15 @@ fn show_structural_ids_roundtrip_through_cli_and_sdk() {
         "CLI show R: JSON should contain reopened candidate id {candidate_id}; got:\n{cli_candidate:#}"
     );
 
-    let targets = project
-        .inspect()
-        .chains(bonsai_sdk::InspectQuery {
-            pattern: Some("handle_request"),
-            max_chains: usize::MAX,
-            max_probes: usize::MAX,
-            ..Default::default()
-        })
-        .expect("sdk inspect chains");
-    let target = targets
-        .iter()
-        .find(|target| !target.chains.is_empty() && !target.groups.is_empty())
-        .expect("fixture should emit inspect chains and groups");
-
-    let flow_id = target.chains[0].flow_id.clone();
+    let summaries = project
+        .browse()
+        .symbol_summaries(Some("handle_request"), false)
+        .expect("SDK symbol summaries");
+    let flow_id = summaries
+        .first()
+        .expect("handle_request summary")
+        .summary_id
+        .clone();
     match project
         .show()
         .by_id(&flow_id, Default::default())
@@ -1504,13 +1487,8 @@ fn show_structural_ids_roundtrip_through_cli_and_sdk() {
         "CLI show F: JSON should contain reopened flow id {flow_id}; got:\n{cli_flow:#}"
     );
 
-    let group = &target.groups[0];
-    let group_id = group.group_id.clone();
-    let expected_member = group
-        .member_flow_ids
-        .first()
-        .expect("group should have member flow ids")
-        .clone();
+    let group_id = bonsai_sdk::compute_structural_group_id(&[flow_id.clone()]);
+    let expected_member = flow_id.clone();
     match project
         .show()
         .by_id(&group_id, Default::default())

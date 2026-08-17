@@ -127,6 +127,8 @@ Find an anchor, then pivot to compiler facts:
   --context 8k --no-color --no-progress
 ./target/release/bonsai-ninja inspect ./src --query verify_token \
   --context 16k --no-color --no-progress
+./target/release/bonsai-ninja symbol-summary ./src --symbol verify_token \
+  --context 16k --no-color --no-progress
 ```
 
 When both endpoints are known, request the exact corridor:
@@ -204,16 +206,16 @@ Reopen evidence with:
   --context 16k --no-color --no-progress
 ```
 
-`inspect` is rulepack-free by default. Add `--graph-flow` for structural
-source-body paths or `--taint-flow` for raw taint-engine paths. Those flags
-change requested output scope, not accuracy.
+`inspect` is rulepack-free by default. Add `--graph-flow` for one bounded
+source/evidence unit per matching callable or `--taint-flow` for raw
+taint-engine paths. Those flags change requested output scope, not accuracy.
 
-For symbol lookup, start with plain `inspect`, `refs`, or `calls` and add a
-flow mode only when you need relational evidence. `--graph-flow` computes all
-exact structural paths attached to the matches before paging, so shared helper
-code can produce a much larger artifact than the original text query. If both
-ends are known, use `--from` and `--to` to request the narrower compiler graph
-corridor directly.
+For symbol lookup, start with plain `inspect`, `refs`, or `calls`. Use
+`symbol-summary` for source, signature, imports, direct resolved neighbors,
+and unresolved-call evidence around one callable. `--graph-flow` adds that
+bounded evidence to inspect rows and never recursively enumerates call paths.
+If both ends are known, use `path --from ... --to ...` for the exact compressed
+compiler corridor or `trace --from ... --to ...` to interpret it.
 
 ## Next steps
 

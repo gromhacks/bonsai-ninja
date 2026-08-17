@@ -204,7 +204,7 @@ pub fn name_token_match(haystack: &str, needle: &str) -> bool {
     false
 }
 
-/// Apply `--from` / `--to` filters to a single enumerated chain.
+/// Apply `--from` / `--to` filters to one bounded structural evidence unit.
 ///
 /// `taint_facts` is a closure so callers skip the interprocedural
 /// pass when `hit_text` / `chain_func_names` already decide the match

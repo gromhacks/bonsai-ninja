@@ -170,9 +170,9 @@ fn decl_name_index_no_deadlock_under_parallel_cold_hits() {
 #[test]
 fn flow_ids_cache_no_deadlock_under_parallel_cold_hits() {
     let (ws, caller_func) = fresh_workspace();
-    assert_finishes_within("FlowIdCache::labels_for_func", || {
+    assert_finishes_within("FlowIdCache::id_for_func", || {
         (0..PARALLEL_HITS).into_par_iter().for_each(|_| {
-            let _ = ws.flow_ids().labels_for_func(caller_func, ws.db(), ws.vfs());
+            let _ = ws.flow_ids().id_for_func(caller_func, ws.db(), ws.vfs());
         });
     });
 }

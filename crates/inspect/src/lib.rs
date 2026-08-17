@@ -1,18 +1,17 @@
-//! Chain enumeration + filter engine — the SDK behind `inspect`.
+//! Symbol evidence + filter engine — the SDK behind `inspect`.
 //!
-//! Builds (or fetches a cached) `ResolvedCallGraph`, enumerates chains
-//! to a target `FuncId`, filters them by `--from`/`--to`/kind needles,
-//! and caches every expensive intermediate inside [`ChainCache`].
+//! Builds (or fetches a cached) `ResolvedCallGraph`, hydrates bounded
+//! per-symbol evidence and direct graph neighbors, filters it by
+//! `--from`/`--to`/kind needles, and caches exact intermediate facts inside
+//! [`ChainCache`].
 //! The CLI is a renderer/orchestrator on top; any other consumer
 //! (LSP, MCP daemon, library) can call the same surface.
 
-// `cache` is referenced as a path by the SDK
-// (`bonsai_inspect::cache::CHAINS_CACHE_CAP`); other submodules are
-// internal — consumers go through the re-exports.
+// `cache` exposes the generic bounded memo used by the SDK. Other submodules
+// are internal; consumers go through the re-exports.
 pub mod cache;
 pub(crate) mod call_edges;
 pub(crate) mod chain_cache;
-pub(crate) mod chains;
 pub(crate) mod filter;
 pub(crate) mod flow_id;
 pub(crate) mod query;
@@ -21,11 +20,8 @@ pub(crate) mod query;
 mod chain_cache_tests;
 
 pub use cache::BoundedCache;
-pub use call_edges::{
-    find_call_span_by_name, find_call_span_to_func_uncached, CallEdgeResolver, CallPathTruncation,
-};
+pub use call_edges::{find_call_span_by_name, find_call_span_to_func_uncached, CallEdgeResolver};
 pub use chain_cache::{find_enclosing_func, ChainCache};
-pub use chains::{downstream_funcs_set, enumerate_chains_resolved, ChainTruncation, ResolvedChain};
 pub use filter::{
     chain_matches_filters, chain_matches_filters_for_hit, name_token_match, FactKindFilter, FilterHit,
     InspectFilters, PrecisionFilter,

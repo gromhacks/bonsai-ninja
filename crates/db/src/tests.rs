@@ -539,6 +539,16 @@ fn scoped_semantic_session_lazily_reuses_complete_objects_by_stable_file_identit
     );
     let scoped_db = AnalyzerDb::new(scoped_vfs, registry);
     scoped_db.set_scoped_workspace_root(root.path().to_path_buf());
+    assert!(
+        scoped_db
+            .attach_reusable_compiler_object_store_for_files(&[candidate])
+            .expect("attach exact compiler generation"),
+        "stable scoped file identity must attach the complete immutable generation without lowering"
+    );
+    assert!(
+        scoped_db.compiler_syntax_header_uncached(candidate).is_some(),
+        "scoped header planning must decode the persisted adapter IR"
+    );
     assert_eq!(
         scoped_db
             .ensure_compiler_object_session(&[candidate])

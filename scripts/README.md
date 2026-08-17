@@ -34,6 +34,8 @@ cannot silently accumulate here.
 - `audit-loop.sh` — runs the combined rulepack, fixture, sanitizer, and taint-engine health loop.
 - `audit-public-api.sh` — compares the public Rust API surface with its checked-in snapshot.
 - `audit-release-metadata.py` — validates public Cargo package and repository metadata.
+- `audit-release-binary.py` — rejects distributable binaries that retain the
+  builder's checkout, home, or Cargo source path.
 - `publish-crates.py` — audits the crates.io package graph and performs an
   explicit, resumable dependency-ordered publication when requested.
 - `audit-rust-duplication.py` — rejects large exact clones in shared production Rust code.
@@ -60,6 +62,12 @@ cannot silently accumulate here.
 ## Behavior and portability harnesses
 
 - `check-targets.sh` — checks the release targets and optional source-build target.
+- `build-release.sh` — builds the optimized CLI with deterministic path
+  remapping suitable for redistribution. It keeps compiler output in the
+  non-personal `/tmp/bonsai-ninja-release-target` by default, copies the final
+  executable to Cargo's conventional `target/.../release/` path, and enforces
+  the same generated-artifact budget there. Set
+  `BONSAI_RELEASE_TARGET_DIR` to choose another non-personal build directory.
 - `realworld-lang-benchmark.py` — clones one disposable real-world repository
   per supported language, validates exact taint output, and removes each
   checkout by default; `--check` validates its inventory without network

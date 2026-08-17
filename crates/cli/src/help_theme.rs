@@ -47,7 +47,7 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("inspect", "Find hits and source-backed flows"),
             ("trace", "Expand one entry point's call tree"),
-            ("path", "Ranked call paths"),
+            ("path", "Exact compressed callgraph corridor"),
             ("slice", "Backward symbol slice"),
             ("show", "Open an F:/G:/T:/E:/N:/S:/R: id"),
         ],

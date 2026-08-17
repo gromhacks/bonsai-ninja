@@ -45,9 +45,9 @@ use commands::{
     cmd_args, cmd_cache, cmd_calls, cmd_classes, cmd_comments, cmd_context, cmd_defs, cmd_diagnostics,
     cmd_dump_ast, cmd_dump_callgraph, cmd_dump_cfg, cmd_dump_edges, cmd_dump_hir, cmd_dump_resolution,
     cmd_dump_resolve, cmd_dump_taint, cmd_entrypoints, cmd_export, cmd_imports, cmd_index, cmd_inspect,
-    cmd_operations, cmd_path, cmd_refs, cmd_search, cmd_slice, cmd_strings, cmd_trace, cmd_vars,
-    paging_from_cli, paging_from_cli_output, resolve_selector_arg, ArgsFilters, CallsFilters, ClassesFilters,
-    CommentsFilters, DefsFilters, EntryPointsFilters, ImportsFilters, IndexCommandOptions,
+    cmd_operations, cmd_path, cmd_refs, cmd_search, cmd_slice, cmd_strings, cmd_symbol_summary, cmd_trace,
+    cmd_vars, paging_from_cli, paging_from_cli_output, resolve_selector_arg, ArgsFilters, CallsFilters,
+    ClassesFilters, CommentsFilters, DefsFilters, EntryPointsFilters, ImportsFilters, IndexCommandOptions,
     InspectCommandOptions, InspectFilters, InspectRenderOptions, OperationsFilters, PathCommandOptions,
     RefsFilters, SearchFilters, StringsFilters, VarsFilters,
 };
@@ -1021,6 +1021,26 @@ fn real_main() -> Result<()> {
                 format,
             )
         }
+        Cmd::SymbolSummary {
+            workspace,
+            symbol_pos,
+            symbol,
+            regex,
+            context,
+            page,
+            all,
+            format,
+            output: _,
+        } => {
+            let symbol = resolve_selector_arg(symbol_pos, symbol, "symbol")?;
+            cmd_symbol_summary(
+                &workspace,
+                &symbol,
+                regex,
+                paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
+                format,
+            )
+        }
         Cmd::Inspect {
             workspace,
             symbol_pos,
@@ -1234,6 +1254,7 @@ fn command_workspace_for_page_cache(cmd: &Cmd) -> Option<&std::path::Path> {
         | Cmd::Classes { workspace, .. }
         | Cmd::Refs { workspace, .. }
         | Cmd::Search { workspace, .. }
+        | Cmd::SymbolSummary { workspace, .. }
         | Cmd::Inspect { workspace, .. }
         | Cmd::Export { workspace, .. }
         | Cmd::Security { workspace, .. }
@@ -1267,6 +1288,7 @@ fn command_output_path(cmd: &Cmd) -> Option<&std::path::Path> {
         | Cmd::Classes { output, .. }
         | Cmd::Refs { output, .. }
         | Cmd::Search { output, .. }
+        | Cmd::SymbolSummary { output, .. }
         | Cmd::Inspect { output, .. }
         | Cmd::Export { output, .. }
         | Cmd::Context { output, .. }

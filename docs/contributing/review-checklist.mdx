@@ -130,8 +130,10 @@ class and verify each box.
 - [ ] **Pagination still works** for the affected command.
 - [ ] **Inspect mode contract holds.** Default targeted queries are a light
       indexed syntax/source view. `--taint-flow` requests raw taint paths, and
-      `--graph-flow` requests structural source-body evidence. These flags change
-      output scope, not the exact/narrowed static-evidence contract.
+      `--graph-flow` requests one bounded source/evidence unit per callable.
+      Structural inspect and browse summaries never enumerate recursive call
+      paths; `path` returns an exact compressed endpoint corridor. These flags
+      change output scope, not the exact/narrowed static-evidence contract.
 - [ ] **Stable ID routing holds.** `show F:`, `show G:`, `show T:`,
       `show E:`, `show N:`, `show S:`, and resolver-scoped `show R:`
       delegate to the expected owner command.
@@ -241,8 +243,9 @@ class and verify each box.
       not decode every source segment to rebuild it. A canonical-only sidecar
       remains a valid cold graph but must not satisfy `index --semantic`.
 - [ ] **One canonical callgraph is shared.** Workspace callgraph publication
-      seeds dataflow and flow-ID consumers with the same `Arc`; phase release
-      drops all shared owners without discarding computed labels/facts.
+      seeds graph consumers with the same `Arc`; browse summary IDs derive
+      from compiler headers without retaining another graph owner. Phase
+      release drops all shared owners without discarding computed facts.
 - [ ] **Native export never enumerates paths.** CLI, SDK, and renderer expose
       only the exact `compressed_callgraph` relation. There is no
       `complete_chains`/capped-prefix switch, fixed chain count, BFS probe
@@ -307,7 +310,11 @@ class and verify each box.
       requests ancestry only for typed method candidates it can change, and
       reuses exact parser coverage in the completion audit. Unchecked files
       receive a Tree-sitter diagnostic pass only; declarations and flow bodies
-      are not lowered merely to compute `analysis_complete`. Compare against
+      are not lowered merely to compute `analysis_complete`. A scoped scan
+      with stable full-workspace file ids attaches a reusable compiler-object
+      generation only after exact id/path/adapter/content validation; a cache
+      miss must not eagerly lower every raw-anchor candidate before compact
+      syntax-header filtering. Compare against
       the current measurements in `docs/RELEASE_READINESS.md`, investigate
       material regressions, and do not loosen an SLO without an intentional
       architecture review.
