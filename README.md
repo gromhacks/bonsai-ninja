@@ -1,5 +1,3 @@
-<img src="docs/assets/bonsai-ninja.png" alt="bonsai-ninja banner" width="100%">
-
 # bonsai-ninja
 
 [![CI](https://github.com/gromhacks/bonsai-ninja/actions/workflows/ci.yml/badge.svg)](https://github.com/gromhacks/bonsai-ninja/actions/workflows/ci.yml)
