@@ -14,8 +14,8 @@
 //! Entry points: [`themed_command_groups`] / [`themed_after_help`] for
 //! the root `--help`, [`themed_subcommand_long_about`] /
 //! [`themed_subcommand_after_help`] for per-subcommand `--help`, and
-//! [`try_themed_help`] as the early dispatcher that intercepts
-//! `--help` / `-h` before clap runs.
+//! [`try_themed_help`] as the early dispatcher that intercepts a
+//! no-argument invocation or `--help` / `-h` before clap runs.
 
 use crate::theme;
 use crate::{resolve_theme_early, Cli};
@@ -46,6 +46,7 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         "Flow",
         &[
             ("inspect", "Find hits and source-backed flows"),
+            ("symbol-summary", "Bounded compiler packet for one callable"),
             ("trace", "Expand one entry point's call tree"),
             ("path", "Exact compressed callgraph corridor"),
             ("slice", "Backward symbol slice"),
@@ -464,11 +465,11 @@ pub(crate) fn themed_help_template() -> String {
     )
 }
 
-/// If argv contains `--help` / `-h`, render the target command's
-/// full help with body-text coloring applied, print it, and return
-/// the exit code the caller should use. Returns `None` when no help
-/// was requested, letting main() fall through to clap's normal
-/// parsing.
+/// For a no-argument invocation or argv containing `--help` / `-h`, render
+/// the target command's help with body-text coloring applied, print it, and
+/// return the exit code the caller should use. No arguments intentionally use
+/// the same root long-help path as `--help`. Returns `None` when no help was
+/// requested, letting main() fall through to clap's normal parsing.
 ///
 /// Clap's derive-generated help colors chrome (Usage, section
 /// headings, flag literals, placeholders) via the `styles`
@@ -484,11 +485,14 @@ pub(crate) fn try_themed_help() -> Option<i32> {
     use std::io::Write;
 
     let argv: Vec<String> = std::env::args().collect();
-    // Find either `--help` or `-h` anywhere after the first argument.
-    // Anything after a `--` marker is ignored (positional argument
-    // scope).
-    let mut help_requested = false;
-    let mut long_help_requested = false;
+    // No arguments and root `--help` are the same user action. Start both
+    // switches true in that case so clap's separate missing-subcommand path
+    // cannot drift away from the curated long-help renderer.
+    let no_arguments = argv.len() == 1;
+    let mut help_requested = no_arguments;
+    let mut long_help_requested = no_arguments;
+    // Otherwise find either `--help` or `-h` anywhere after the program name.
+    // Anything after a `--` marker is ignored (positional argument scope).
     for arg in argv.iter().skip(1) {
         if arg == "--" {
             break;
@@ -1007,4 +1011,53 @@ pub(crate) fn help_colors_enabled() -> bool {
         return false;
     }
     std::io::stdout().is_terminal()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use clap::CommandFactory;
+
+    use super::HELP_GROUPS;
+    use crate::Cli;
+
+    #[test]
+    fn flow_group_lists_symbol_summary_exactly_once() {
+        let flow = HELP_GROUPS
+            .iter()
+            .find_map(|(group, entries)| (*group == "Flow").then_some(*entries))
+            .expect("Flow help group");
+        let matches: Vec<_> = flow
+            .iter()
+            .filter(|(command, _)| *command == "symbol-summary")
+            .collect();
+
+        assert_eq!(matches.len(), 1, "Flow must list symbol-summary once");
+        assert_eq!(
+            matches[0].1, "Bounded compiler packet for one callable",
+            "symbol-summary should retain its concise menu description"
+        );
+    }
+
+    #[test]
+    fn curated_menu_covers_every_public_top_level_command() {
+        let clap = Cli::command();
+        let public_commands: BTreeSet<_> = clap.get_subcommands().map(|command| command.get_name()).collect();
+        let curated_commands: BTreeSet<_> = HELP_GROUPS
+            .iter()
+            .flat_map(|(_, entries)| entries.iter())
+            .map(|(command, _)| {
+                command
+                    .split_whitespace()
+                    .next()
+                    .expect("non-empty curated command")
+            })
+            .collect();
+
+        assert_eq!(
+            curated_commands, public_commands,
+            "the curated root menu and clap's public top-level commands must stay in sync"
+        );
+    }
 }

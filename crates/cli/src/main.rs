@@ -325,8 +325,8 @@ fn real_main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    // Intercept `--help` / `-h` before clap parses so we can render
-    // fully themed help output. Clap's derive-generated help only
+    // Intercept a no-argument invocation or `--help` / `-h` before clap parses
+    // so they use one fully themed help path. Clap's derive-generated help only
     // colors chrome (Usage, section headings, flag literals); flag
     // descriptions come from `///` doc comments and have no style
     // slot. We render clap's help to a buffer and post-process it

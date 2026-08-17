@@ -125,6 +125,30 @@ fn run(args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// Run a root help invocation without adding CLI arguments. `NO_COLOR`
+/// disables styling without changing argv, which lets the no-argument path be
+/// compared directly with an explicit `--help` invocation.
+fn run_root_help(args: &[&str]) -> Option<String> {
+    let bin = bin_path()?;
+    let out = Command::new(&bin)
+        .args(args)
+        .env("COLUMNS", "200")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("failed to run bonsai-ninja root help");
+    assert!(
+        out.status.success(),
+        "bonsai-ninja help exited with {}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+fn normalize_help(output: &str) -> String {
+    output.replace("\r\n", "\n").trim_end().to_string()
+}
+
 fn run_inspect_graph(ws: &Path, args_after_ws: &[&str]) -> Option<String> {
     let ws_str = ws.to_str().unwrap().to_string();
     let mut args: Vec<&str> = Vec::with_capacity(args_after_ws.len() + 3);
@@ -2413,6 +2437,7 @@ fn top_level_help_groups_commands() {
     // Each group's commands appear under the grouping block.
     for (group, cmd) in [
         ("Flow", "inspect"),
+        ("Flow", "symbol-summary"),
         ("Flow", "trace"),
         ("Flow", "path"),
         ("Flow", "slice"),
@@ -2452,6 +2477,22 @@ fn top_level_help_groups_commands() {
     assert!(
         debug_idx < options_idx,
         "Debug group should be the last command group before OPTIONS:\n{out}"
+    );
+}
+
+#[test]
+fn no_arguments_matches_root_long_help() {
+    let Some(no_arguments) = run_root_help(&[]) else {
+        return;
+    };
+    let Some(explicit_help) = run_root_help(&["--help"]) else {
+        return;
+    };
+
+    assert_eq!(
+        normalize_help(&no_arguments),
+        normalize_help(&explicit_help),
+        "a no-argument invocation must render the same detailed root help as --help"
     );
 }
 
