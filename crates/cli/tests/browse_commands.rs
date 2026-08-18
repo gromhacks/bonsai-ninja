@@ -2110,6 +2110,88 @@ fn symbol_summary_includes_source_and_parameters() {
 }
 
 #[test]
+fn symbol_summary_preserves_unresolved_callable_parameter_without_resolving_default() {
+    let tmp = tempdir_for_test("bonsai_symbol_summary_callable_parameter");
+    std::fs::write(
+        tmp.join("app.py"),
+        r#"
+from typing import Any, Callable
+
+def apply_authorized_patch(value: str) -> dict[str, Any]:
+    return {"value": value}
+
+def wrapper(
+    value: str,
+    apply_engine: Callable[..., dict[str, Any]] = apply_authorized_patch,
+) -> dict[str, Any]:
+    return apply_engine(value)
+"#,
+    )
+    .expect("write callable-parameter fixture");
+
+    let Some(trace) = run(&["trace", tmp.to_str().unwrap(), "wrapper", "--format", "json"]) else {
+        return;
+    };
+    let trace: serde_json::Value = serde_json::from_str(&trace).expect("trace JSON");
+    assert!(
+        trace["summary"]["analysis_incomplete_reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons
+                .iter()
+                .any(|reason| reason.as_str() == Some("unresolved-call:apply_engine"))),
+        "trace must retain the unresolved callable-parameter invocation: {trace}"
+    );
+
+    let Some(out) = run(&[
+        "symbol-summary",
+        tmp.to_str().unwrap(),
+        "--symbol",
+        "wrapper",
+        "--format",
+        "json",
+        "--all",
+    ]) else {
+        return;
+    };
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("summary JSON");
+    let row = rows.first().expect("wrapper summary");
+    assert_eq!(row["graph_scope"], "direct_resolved_neighbors");
+    assert_eq!(row["analysis_complete"], false);
+    assert!(
+        row["analysis_incomplete_reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons.iter().any(|reason| {
+                reason
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("callable parameter invocation"))
+            })),
+        "symbol-summary must explain the unresolved callable-parameter invocation: {out}"
+    );
+    assert!(
+        row["source"].as_str().is_some_and(
+            |source| source.contains("apply_engine") && source.contains("apply_authorized_patch")
+        ),
+        "summary source must retain the callable default expression: {out}"
+    );
+    assert!(
+        row["direct_callees"].as_array().is_some_and(|callees| callees
+            .iter()
+            .all(|callee| callee["callee"] != "apply_authorized_patch")),
+        "a parameter default must not become a resolved direct callee: {out}"
+    );
+    assert!(
+        row["unresolved_calls"]
+            .as_array()
+            .is_some_and(|calls| calls.iter().any(|call| call["call_text"]
+                .as_str()
+                .is_some_and(|text| text.contains("apply_engine")))),
+        "symbol-summary must preserve unresolved callable-parameter evidence: {out}"
+    );
+
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+#[test]
 fn inspect_from_to_markers_work_on_kotlin() {
     // Cross-class Kotlin flow: handleRequest → updateUser →
     // runAdminCommand → Runtime.getRuntime().exec. Filter markers

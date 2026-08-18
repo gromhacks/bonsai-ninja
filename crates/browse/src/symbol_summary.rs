@@ -11,8 +11,8 @@ use crate::common::format_span;
 use crate::edges::edge_record_from_graph_nodes;
 use crate::refs::read_snippet;
 use bonsai_callgraph::{CallEdge, ResolvedCallGraph};
-use bonsai_common::{FuncId, SymbolId};
-use bonsai_lang_api::DeclKind;
+use bonsai_common::{FuncId, Span, SymbolId};
+use bonsai_lang_api::{for_each_flow_event, DeclKind, FlowEvent};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 
@@ -55,8 +55,9 @@ pub struct SymbolImport {
     pub line: u32,
 }
 
-/// A call expression for which workspace candidates existed but the resolver
-/// could not prove a unique/narrowed runtime target.
+/// A call expression for which the resolver could not prove a runtime target.
+/// This includes ambiguous workspace candidates and callable-parameter
+/// invocations without a compiler-proven binding.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct UnresolvedCallEvidence {
     pub evidence_kind: SymbolEvidenceKind,
@@ -154,10 +155,27 @@ fn symbol_summary(
     sort_edges(&mut direct_callers);
     sort_edges(&mut direct_callees);
 
-    let mut unresolved_calls = graph
+    let unresolved_workspace_spans = graph
         .unresolved_workspace_call_sites()
         .filter(|(caller, _)| *caller == func)
-        .map(|(_, span)| {
+        .map(|(_, span)| span)
+        .collect::<Vec<_>>();
+    let semantic_outgoing_spans = graph
+        .callees_of(func)
+        .filter(|edge| edge.precision.is_semantic())
+        .map(|edge| edge.span)
+        .collect::<Vec<_>>();
+    let unresolved_parameter_spans = unresolved_callable_parameter_spans(
+        &decl.flow_events,
+        &decl.params,
+        &semantic_outgoing_spans,
+        &unresolved_workspace_spans,
+    );
+
+    let mut unresolved_calls = unresolved_workspace_spans
+        .iter()
+        .copied()
+        .map(|span| {
             let (file, line, column) = format_span(&span, ws);
             UnresolvedCallEvidence {
                 evidence_kind: SymbolEvidenceKind::Unresolved,
@@ -170,11 +188,24 @@ fn symbol_summary(
             }
         })
         .collect::<Vec<_>>();
+    unresolved_calls.extend(unresolved_parameter_spans.iter().map(|span| {
+        let (file, line, column) = format_span(span, ws);
+        UnresolvedCallEvidence {
+            evidence_kind: SymbolEvidenceKind::Unresolved,
+            file,
+            line,
+            column,
+            call_text: read_snippet(ws, span),
+            reason: "callable parameter invocation has no compiler-proven binding".to_string(),
+        }
+    }));
     unresolved_calls.sort_by(|left, right| {
         left.file
             .cmp(&right.file)
             .then_with(|| left.line.cmp(&right.line))
             .then_with(|| left.column.cmp(&right.column))
+            .then_with(|| left.call_text.cmp(&right.call_text))
+            .then_with(|| left.reason.cmp(&right.reason))
     });
 
     let mut imports = ws
@@ -201,10 +232,16 @@ fn symbol_summary(
     });
 
     let mut analysis_incomplete_reasons = Vec::new();
-    if !unresolved_calls.is_empty() {
+    if !unresolved_workspace_spans.is_empty() {
         analysis_incomplete_reasons.push(format!(
             "{} workspace call site(s) have candidates but no compiler-proven target",
-            unresolved_calls.len()
+            unresolved_workspace_spans.len()
+        ));
+    }
+    if !unresolved_parameter_spans.is_empty() {
+        analysis_incomplete_reasons.push(format!(
+            "{} callable parameter invocation(s) have no compiler-proven binding",
+            unresolved_parameter_spans.len()
         ));
     }
     Some(SymbolSummary {
@@ -237,6 +274,31 @@ fn symbol_summary(
         analysis_complete: analysis_incomplete_reasons.is_empty(),
         analysis_incomplete_reasons,
     })
+}
+
+/// Collect direct calls through parameters that the context-free callgraph
+/// cannot prove. This stays declaration-local: callers may bind a parameter
+/// at runtime, but that does not justify a resolved summary edge here.
+fn unresolved_callable_parameter_spans(
+    events: &[FlowEvent],
+    params: &[String],
+    semantic_outgoing_spans: &[Span],
+    unresolved_workspace_spans: &[Span],
+) -> Vec<Span> {
+    let mut spans = Vec::new();
+    for_each_flow_event(events, &mut |event| {
+        if let FlowEvent::Call { span, name, .. } = event {
+            if params.iter().any(|param| param == name.trim())
+                && !semantic_outgoing_spans.contains(span)
+                && !unresolved_workspace_spans.contains(span)
+            {
+                spans.push(*span);
+            }
+        }
+    });
+    spans.sort_unstable_by_key(|span| (span.file.raw(), span.start, span.end));
+    spans.dedup();
+    spans
 }
 
 fn summary_edge(ws: &Workspace, graph: &ResolvedCallGraph, edge: &CallEdge) -> Option<SymbolCallEdge> {
