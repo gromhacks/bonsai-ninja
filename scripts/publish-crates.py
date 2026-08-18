@@ -17,9 +17,11 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -72,38 +74,56 @@ def crates_io_retry_delay(
     return max(0.0, (retry_at - current).total_seconds()) + RATE_LIMIT_SAFETY_SECONDS
 
 
-def publish_crate(name: str) -> None:
-    """Publish one verified crate, honoring crates.io's new-crate throttle."""
-    command = ("cargo", "publish", "-p", name, "--locked")
-    while True:
-        process = subprocess.Popen(
-            command,
-            cwd=ROOT,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            bufsize=1,
-        )
-        output: list[str] = []
-        assert process.stdout is not None
-        for line in process.stdout:
-            print(line, end="", flush=True)
-            output.append(line)
-        returncode = process.wait()
-        if returncode == 0:
-            return
+def remove_package_artifacts(name: str, version: str) -> None:
+    """Remove Cargo's per-package staging outputs after they are consumed."""
+    package_root = ROOT / "target" / "package"
+    shutil.rmtree(package_root / f"{name}-{version}", ignore_errors=True)
+    (package_root / f"{name}-{version}.crate").unlink(missing_ok=True)
 
-        delay = crates_io_retry_delay("".join(output))
-        if delay is None:
-            raise subprocess.CalledProcessError(returncode, command)
-        retry_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=delay)
-        print(
-            "  crates.io new-crate rate limit reached; "
-            f"retrying {name} at {retry_at:%Y-%m-%d %H:%M:%S} UTC "
-            f"({delay:.0f}s)",
-            flush=True,
-        )
-        time.sleep(delay)
+
+def publish_crate(name: str, version: str) -> None:
+    """Verify and publish one crate without retaining a duplicate build graph."""
+    command = ("cargo", "publish", "-p", name, "--locked")
+    try:
+        # `cargo publish` performs package verification unless --no-verify is
+        # requested. Give that build a disposable target so publishing many
+        # workspace crates cannot retain one compiled dependency graph per
+        # package and exhaust a hosted runner's disk.
+        with tempfile.TemporaryDirectory(prefix=f"bonsai-publish-{name}-") as target:
+            environment = os.environ.copy()
+            environment["CARGO_TARGET_DIR"] = target
+            while True:
+                process = subprocess.Popen(
+                    command,
+                    cwd=ROOT,
+                    env=environment,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    bufsize=1,
+                )
+                output: list[str] = []
+                assert process.stdout is not None
+                for line in process.stdout:
+                    print(line, end="", flush=True)
+                    output.append(line)
+                returncode = process.wait()
+                if returncode == 0:
+                    return
+
+                delay = crates_io_retry_delay("".join(output))
+                if delay is None:
+                    raise subprocess.CalledProcessError(returncode, command)
+                retry_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=delay)
+                print(
+                    "  crates.io new-crate rate limit reached; "
+                    f"retrying {name} at {retry_at:%Y-%m-%d %H:%M:%S} UTC "
+                    f"({delay:.0f}s)",
+                    flush=True,
+                )
+                time.sleep(delay)
+    finally:
+        remove_package_artifacts(name, version)
 
 
 def metadata() -> dict[str, object]:
@@ -298,14 +318,17 @@ def canonical_crate_contents(
 
 
 def verify_existing_archive(name: str, version: str) -> None:
-    run("cargo", "package", "-p", name, "--locked", "--no-verify")
-    local = (ROOT / "target" / "package" / f"{name}-{version}.crate").read_bytes()
-    remote = download(f"{REGISTRY_API}/{name}/{version}/download")
-    expected_root = f"{name}-{version}"
-    if canonical_crate_contents(
-        local, expected_root=expected_root
-    ) != canonical_crate_contents(remote, expected_root=expected_root):
-        raise ValueError(f"{name} {version}: registry package differs from local package")
+    try:
+        run("cargo", "package", "-p", name, "--locked", "--no-verify")
+        local = (ROOT / "target" / "package" / f"{name}-{version}.crate").read_bytes()
+        remote = download(f"{REGISTRY_API}/{name}/{version}/download")
+        expected_root = f"{name}-{version}"
+        if canonical_crate_contents(
+            local, expected_root=expected_root
+        ) != canonical_crate_contents(remote, expected_root=expected_root):
+            raise ValueError(f"{name} {version}: registry package differs from local package")
+    finally:
+        remove_package_artifacts(name, version)
 
 
 def assert_clean_checkout() -> None:
@@ -338,8 +361,7 @@ def publish(order: list[str], version: str, *, resume: bool) -> None:
             verify_existing_archive(name, version)
             print("  existing registry package contents are identical; skipped", flush=True)
             continue
-        run("cargo", "publish", "--dry-run", "-p", name, "--locked")
-        publish_crate(name)
+        publish_crate(name, version)
         wait_for_registry(name, version)
 
 

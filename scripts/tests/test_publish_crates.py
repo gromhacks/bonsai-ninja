@@ -95,11 +95,17 @@ class CratesIoRetryDelayTests(unittest.TestCase):
             mock.patch.object(publish_crates.time, "sleep") as sleep,
             redirect_stdout(io.StringIO()),
         ):
-            publish_crates.publish_crate("bonsai-ninja-vfs")
+            publish_crates.publish_crate("bonsai-ninja-vfs", "0.2.2")
         self.assertEqual(popen.call_count, 2)
         sleep.assert_called_once_with(
             float(publish_crates.RATE_LIMIT_FALLBACK_SECONDS)
         )
+        targets = {
+            call.kwargs["env"]["CARGO_TARGET_DIR"]
+            for call in popen.call_args_list
+        }
+        self.assertEqual(len(targets), 1)
+        self.assertFalse(Path(targets.pop()).exists())
 
 
 class CanonicalCrateContentsTests(unittest.TestCase):

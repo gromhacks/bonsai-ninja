@@ -354,9 +354,12 @@ owner and canonical identity of every already-published package path, file,
 mode, link, generated manifest, and VCS record. Gzip and tar container metadata
 do not affect that comparison. New-crate HTTP 429 responses are retried at the
 registry-provided UTC time with a safety margin, so throttling pauses the
-release instead of leaving a failed partial publication. Remote CI state and
-publication permissions remain external deployment conditions and are not
-asserted by a local test run.
+release instead of leaving a failed partial publication. Each Cargo package
+verification runs in disposable build storage and removes its staging archive
+after use, preventing a many-crate release from retaining one compiled
+dependency graph per package. Remote CI state and publication permissions
+remain external deployment conditions and are not asserted by a local test
+run.
 
 ## Commands to repeat before tagging
 
