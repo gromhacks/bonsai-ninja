@@ -51,7 +51,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
@@ -115,52 +115,52 @@ criterion = { version = "0.5", features = ["html_reports"] }
 jsonschema = { version = "0.49.9", default-features = false }
 
 # Workspace crates
-bonsai_common = { package = "bonsai-ninja-common", version = "=0.2.1", path = "crates/common" }
-bonsai_hash = { package = "bonsai-ninja-hash", version = "=0.2.1", path = "crates/hash" }
-bonsai_diagnostics = { package = "bonsai-ninja-diagnostics", version = "=0.2.1", path = "crates/diagnostics" }
-bonsai_vfs = { package = "bonsai-ninja-vfs", version = "=0.2.1", path = "crates/vfs" }
-bonsai_parser = { package = "bonsai-ninja-parser", version = "=0.2.1", path = "crates/parser" }
-bonsai_lang_api = { package = "bonsai-ninja-lang-api", version = "=0.2.1", path = "crates/lang_api" }
-bonsai_index = { package = "bonsai-ninja-index", version = "=0.2.1", path = "crates/index" }
-bonsai_resolve = { package = "bonsai-ninja-resolve", version = "=0.2.1", path = "crates/resolve" }
-bonsai_cfg = { package = "bonsai-ninja-cfg", version = "=0.2.1", path = "crates/cfg" }
-bonsai_callgraph = { package = "bonsai-ninja-callgraph", version = "=0.2.1", path = "crates/callgraph" }
-bonsai_taint = { package = "bonsai-ninja-taint", version = "=0.2.1", path = "crates/taint" }
-bonsai_abstract_interp = { package = "bonsai-ninja-abstract-interp", version = "=0.2.1", path = "crates/abstract_interp" }
-bonsai_trace = { package = "bonsai-ninja-trace", version = "=0.2.1", path = "crates/trace" }
-bonsai_db = { package = "bonsai-ninja-db", version = "=0.2.1", path = "crates/db" }
-bonsai_workspace = { package = "bonsai-ninja-workspace", version = "=0.2.1", path = "crates/workspace" }
-bonsai_inspect = { package = "bonsai-ninja-inspect", version = "=0.2.1", path = "crates/inspect" }
-bonsai_browse = { package = "bonsai-ninja-browse", version = "=0.2.1", path = "crates/browse" }
-bonsai_retrieval = { package = "bonsai-ninja-retrieval", version = "=0.2.1", path = "crates/retrieval" }
-bonsai_sdk = { package = "bonsai-ninja-sdk", version = "=0.2.1", path = "crates/sdk" }
-bonsai_testkit = { package = "bonsai-ninja-testkit", version = "=0.2.1", path = "crates/testkit" }
-bonsai_conformance = { package = "bonsai-ninja-conformance", version = "=0.2.1", path = "crates/conformance" }
-bonsai_lang_c = { package = "bonsai-ninja-lang-c", version = "=0.2.1", path = "crates/lang_c" }
-bonsai_lang_cpp = { package = "bonsai-ninja-lang-cpp", version = "=0.2.1", path = "crates/lang_cpp" }
-bonsai_lang_csharp = { package = "bonsai-ninja-lang-csharp", version = "=0.2.1", path = "crates/lang_csharp" }
-bonsai_lang_scala = { package = "bonsai-ninja-lang-scala", version = "=0.2.1", path = "crates/lang_scala" }
-bonsai_lang_rust = { package = "bonsai-ninja-lang-rust", version = "=0.2.1", path = "crates/lang_rust" }
-bonsai_lang_go = { package = "bonsai-ninja-lang-go", version = "=0.2.1", path = "crates/lang_go" }
-bonsai_lang_java = { package = "bonsai-ninja-lang-java", version = "=0.2.1", path = "crates/lang_java" }
-bonsai_lang_kotlin = { package = "bonsai-ninja-lang-kotlin", version = "=0.2.1", path = "crates/lang_kotlin" }
-bonsai_lang_swift = { package = "bonsai-ninja-lang-swift", version = "=0.2.1", path = "crates/lang_swift" }
-bonsai_lang_javascript = { package = "bonsai-ninja-lang-javascript", version = "=0.2.1", path = "crates/lang_javascript" }
-bonsai_lang_typescript = { package = "bonsai-ninja-lang-typescript", version = "=0.2.1", path = "crates/lang_typescript" }
-bonsai_lang_php = { package = "bonsai-ninja-lang-php", version = "=0.2.1", path = "crates/lang_php" }
-bonsai_lang_python = { package = "bonsai-ninja-lang-python", version = "=0.2.1", path = "crates/lang_python" }
-bonsai_lang_perl = { package = "bonsai-ninja-lang-perl", version = "=0.2.1", path = "crates/lang_perl" }
-bonsai_lang_ruby = { package = "bonsai-ninja-lang-ruby", version = "=0.2.1", path = "crates/lang_ruby" }
-bonsai_lang_dart = { package = "bonsai-ninja-lang-dart", version = "=0.2.1", path = "crates/lang_dart" }
-bonsai_lang_objc = { package = "bonsai-ninja-lang-objc", version = "=0.2.1", path = "crates/lang_objc" }
-bonsai_lang_lua = { package = "bonsai-ninja-lang-lua", version = "=0.2.1", path = "crates/lang_lua" }
-bonsai_lang_elixir = { package = "bonsai-ninja-lang-elixir", version = "=0.2.1", path = "crates/lang_elixir" }
-bonsai_lang_erlang = { package = "bonsai-ninja-lang-erlang", version = "=0.2.1", path = "crates/lang_erlang" }
-bonsai_adapters = { package = "bonsai-ninja-adapters", version = "=0.2.1", path = "crates/adapters" }
-bonsai_security = { package = "bonsai-ninja-security", version = "=0.2.1", path = "crates/security" }
-bonsai_rulepack = { package = "bonsai-ninja-rulepack", version = "=0.2.1", path = "security-patterns" }
-bonsai_factstore = { package = "bonsai-ninja-factstore", version = "=0.2.1", path = "crates/factstore" }
-bonsai_idg = { package = "bonsai-ninja-idg", version = "=0.2.1", path = "crates/idg" }
+bonsai_common = { package = "bonsai-ninja-common", version = "=0.2.2", path = "crates/common" }
+bonsai_hash = { package = "bonsai-ninja-hash", version = "=0.2.2", path = "crates/hash" }
+bonsai_diagnostics = { package = "bonsai-ninja-diagnostics", version = "=0.2.2", path = "crates/diagnostics" }
+bonsai_vfs = { package = "bonsai-ninja-vfs", version = "=0.2.2", path = "crates/vfs" }
+bonsai_parser = { package = "bonsai-ninja-parser", version = "=0.2.2", path = "crates/parser" }
+bonsai_lang_api = { package = "bonsai-ninja-lang-api", version = "=0.2.2", path = "crates/lang_api" }
+bonsai_index = { package = "bonsai-ninja-index", version = "=0.2.2", path = "crates/index" }
+bonsai_resolve = { package = "bonsai-ninja-resolve", version = "=0.2.2", path = "crates/resolve" }
+bonsai_cfg = { package = "bonsai-ninja-cfg", version = "=0.2.2", path = "crates/cfg" }
+bonsai_callgraph = { package = "bonsai-ninja-callgraph", version = "=0.2.2", path = "crates/callgraph" }
+bonsai_taint = { package = "bonsai-ninja-taint", version = "=0.2.2", path = "crates/taint" }
+bonsai_abstract_interp = { package = "bonsai-ninja-abstract-interp", version = "=0.2.2", path = "crates/abstract_interp" }
+bonsai_trace = { package = "bonsai-ninja-trace", version = "=0.2.2", path = "crates/trace" }
+bonsai_db = { package = "bonsai-ninja-db", version = "=0.2.2", path = "crates/db" }
+bonsai_workspace = { package = "bonsai-ninja-workspace", version = "=0.2.2", path = "crates/workspace" }
+bonsai_inspect = { package = "bonsai-ninja-inspect", version = "=0.2.2", path = "crates/inspect" }
+bonsai_browse = { package = "bonsai-ninja-browse", version = "=0.2.2", path = "crates/browse" }
+bonsai_retrieval = { package = "bonsai-ninja-retrieval", version = "=0.2.2", path = "crates/retrieval" }
+bonsai_sdk = { package = "bonsai-ninja-sdk", version = "=0.2.2", path = "crates/sdk" }
+bonsai_testkit = { package = "bonsai-ninja-testkit", version = "=0.2.2", path = "crates/testkit" }
+bonsai_conformance = { package = "bonsai-ninja-conformance", version = "=0.2.2", path = "crates/conformance" }
+bonsai_lang_c = { package = "bonsai-ninja-lang-c", version = "=0.2.2", path = "crates/lang_c" }
+bonsai_lang_cpp = { package = "bonsai-ninja-lang-cpp", version = "=0.2.2", path = "crates/lang_cpp" }
+bonsai_lang_csharp = { package = "bonsai-ninja-lang-csharp", version = "=0.2.2", path = "crates/lang_csharp" }
+bonsai_lang_scala = { package = "bonsai-ninja-lang-scala", version = "=0.2.2", path = "crates/lang_scala" }
+bonsai_lang_rust = { package = "bonsai-ninja-lang-rust", version = "=0.2.2", path = "crates/lang_rust" }
+bonsai_lang_go = { package = "bonsai-ninja-lang-go", version = "=0.2.2", path = "crates/lang_go" }
+bonsai_lang_java = { package = "bonsai-ninja-lang-java", version = "=0.2.2", path = "crates/lang_java" }
+bonsai_lang_kotlin = { package = "bonsai-ninja-lang-kotlin", version = "=0.2.2", path = "crates/lang_kotlin" }
+bonsai_lang_swift = { package = "bonsai-ninja-lang-swift", version = "=0.2.2", path = "crates/lang_swift" }
+bonsai_lang_javascript = { package = "bonsai-ninja-lang-javascript", version = "=0.2.2", path = "crates/lang_javascript" }
+bonsai_lang_typescript = { package = "bonsai-ninja-lang-typescript", version = "=0.2.2", path = "crates/lang_typescript" }
+bonsai_lang_php = { package = "bonsai-ninja-lang-php", version = "=0.2.2", path = "crates/lang_php" }
+bonsai_lang_python = { package = "bonsai-ninja-lang-python", version = "=0.2.2", path = "crates/lang_python" }
+bonsai_lang_perl = { package = "bonsai-ninja-lang-perl", version = "=0.2.2", path = "crates/lang_perl" }
+bonsai_lang_ruby = { package = "bonsai-ninja-lang-ruby", version = "=0.2.2", path = "crates/lang_ruby" }
+bonsai_lang_dart = { package = "bonsai-ninja-lang-dart", version = "=0.2.2", path = "crates/lang_dart" }
+bonsai_lang_objc = { package = "bonsai-ninja-lang-objc", version = "=0.2.2", path = "crates/lang_objc" }
+bonsai_lang_lua = { package = "bonsai-ninja-lang-lua", version = "=0.2.2", path = "crates/lang_lua" }
+bonsai_lang_elixir = { package = "bonsai-ninja-lang-elixir", version = "=0.2.2", path = "crates/lang_elixir" }
+bonsai_lang_erlang = { package = "bonsai-ninja-lang-erlang", version = "=0.2.2", path = "crates/lang_erlang" }
+bonsai_adapters = { package = "bonsai-ninja-adapters", version = "=0.2.2", path = "crates/adapters" }
+bonsai_security = { package = "bonsai-ninja-security", version = "=0.2.2", path = "crates/security" }
+bonsai_rulepack = { package = "bonsai-ninja-rulepack", version = "=0.2.2", path = "security-patterns" }
+bonsai_factstore = { package = "bonsai-ninja-factstore", version = "=0.2.2", path = "crates/factstore" }
+bonsai_idg = { package = "bonsai-ninja-idg", version = "=0.2.2", path = "crates/idg" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
