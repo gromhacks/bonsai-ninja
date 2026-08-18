@@ -168,7 +168,19 @@ mod tests {
         let tree = parser.parse(source, None).expect("raw parse");
         assert!(tree.root_node().has_error());
         let edits = swift_parse_recovery_edits(&snapshot, &tree);
-        assert_eq!(edits.len(), 3);
+        let sending = source.find("sending").expect("sending modifier");
+        let empty_tuple = source.rfind("()").expect("empty tuple value");
+        assert_eq!(
+            edits
+                .iter()
+                .map(|edit| (edit.start_byte, edit.end_byte))
+                .collect::<Vec<_>>(),
+            vec![
+                (sending, sending + "sending".len()),
+                (empty_tuple, empty_tuple + "()".len()),
+            ],
+            "the current grammar accepts nonisolated(unsafe) directly; recovery must mask only the remaining damaged syntax"
+        );
         let mut recovered = source.as_bytes().to_vec();
         for edit in edits {
             assert!(edit.apply_to(source, &mut recovered));

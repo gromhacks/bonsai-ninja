@@ -199,3 +199,47 @@ object App {
         .iter()
         .all(|name| name != "unrelated"));
 }
+
+#[test]
+fn operator_calls_follow_scala_precedence_and_right_associativity() {
+    use bonsai_lang_api::FlowEvent;
+
+    let workspace = bonsai_testkit::workspace_with(
+        vec![Arc::new(bonsai_lang_scala::ScalaAdapter::new())],
+        &[(
+            "App.scala",
+            r#"
+object App {
+  def precedence(a: Int, b: Int, c: Int): Int = a + b * c
+  def association(a: List[Int], b: List[Int], c: List[Int]): List[Int] = a :: b :: c
+}
+"#,
+        )],
+    );
+    let global = workspace.db().global_index();
+
+    let call_args = |decl_name: &str, operator: &str| {
+        let decl = global
+            .all_files()
+            .flat_map(|file| global.decls_in(file))
+            .find(|decl| decl.name == decl_name)
+            .unwrap_or_else(|| panic!("missing {decl_name} declaration"));
+        decl.flow_events
+            .iter()
+            .find_map(|event| match event {
+                FlowEvent::Call { name, args, .. } if name == operator => {
+                    Some(args.iter().map(|arg| arg.value_text.clone()).collect::<Vec<_>>())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing `{operator}` call in {decl_name}: {:#?}",
+                    decl.flow_events
+                )
+            })
+    };
+
+    assert_eq!(call_args("precedence", "+"), ["a", "b * c"]);
+    assert_eq!(call_args("association", "::"), ["a", "b :: c"]);
+}

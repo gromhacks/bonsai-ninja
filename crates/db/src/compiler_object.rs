@@ -36,6 +36,10 @@ use std::sync::{
 /// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
 /// or the object validation contract changes in a way that can alter compiler
 /// facts.
+// v91: tree-sitter-language-pack v1.15.0 refreshes the pinned grammars. Swift
+// accepts additional concurrency syntax directly, and Scala corrects operator
+// precedence and associativity. Cached v90 objects were lowered by the v1.8.0
+// grammar set and are not semantically interchangeable.
 // v90: the Swift adapter normalizes the valid unparenthesized conditional-cast
 // plus nil-coalescing form before lowering. Cached v89 objects can retain a
 // grammar diagnostic and omit the cast operand from exact value flow.
@@ -243,7 +247,7 @@ use std::sync::{
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 90;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 91;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;

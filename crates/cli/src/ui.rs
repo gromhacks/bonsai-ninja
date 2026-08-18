@@ -14,9 +14,7 @@
 
 use crate::syntax_highlight::syntax_highlight_cache;
 use crate::theme::{ChromePalette, Theme};
-use comfy_table::{
-    presets::NOTHING, Cell, ColumnConstraint, ContentArrangement, Table, TableComponent, Width,
-};
+use comfy_table::{presets::NOTHING, Cell, ColumnConstraint, ContentArrangement, LineStyle, Table, Width};
 use owo_colors::OwoColorize;
 use std::io::IsTerminal;
 
@@ -194,15 +192,11 @@ impl Ui {
         // divider lines. We also force the header/bottom *intersections*
         // to the same dash character so the rule prints as one
         // continuous line instead of gapping at column boundaries.
-        t.load_preset(NOTHING);
-        t.set_style(TableComponent::HeaderLines, '─');
-        t.set_style(TableComponent::MiddleHeaderIntersections, '─');
-        t.set_style(TableComponent::LeftHeaderIntersection, '─');
-        t.set_style(TableComponent::RightHeaderIntersection, '─');
-        t.set_style(TableComponent::BottomBorder, '─');
-        t.set_style(TableComponent::BottomBorderIntersections, '─');
-        t.set_style(TableComponent::BottomLeftCorner, '─');
-        t.set_style(TableComponent::BottomRightCorner, '─');
+        t.load_style(
+            NOTHING
+                .header_separator(LineStyle::new('─', '─', '─', '─'))
+                .bottom_border(LineStyle::new('─', '─', '─', '─')),
+        );
         t.set_content_arrangement(ContentArrangement::Dynamic);
         t.set_width(terminal_width().unwrap_or(140));
         let cells: Vec<Cell> = headers
