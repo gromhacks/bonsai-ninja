@@ -2486,6 +2486,82 @@ fn dynamic_parameter_receiver_resolves_only_unique_same_file_method() {
 }
 
 #[test]
+fn parameter_invocation_identity_uses_adapter_call_and_receiver_facts() {
+    let params = vec!["callback".to_string(), "$sigiled".to_string()];
+
+    assert!(call_invokes_parameter(&params, "callback", None));
+    assert!(call_invokes_parameter(&params, "$sigiled", None));
+    assert!(call_invokes_parameter(
+        &params,
+        "callback.accept",
+        Some("callback")
+    ));
+    assert!(call_invokes_parameter(
+        &params,
+        "callback.call",
+        Some("(callback)")
+    ));
+
+    assert!(!call_invokes_parameter(&params, "callback_helper", None));
+    assert!(!call_invokes_parameter(
+        &params,
+        "service.accept",
+        Some("service")
+    ));
+    assert!(!call_invokes_parameter(&params, "callback.accept", None));
+}
+
+#[test]
+fn lexical_parameter_prevents_same_named_workspace_call_edge() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            decl(file, 0, "callback", Vec::new()),
+            with_params(
+                decl(file, 1, "wrapper", vec![call(file, "callback")]),
+                &["callback"],
+            ),
+        ],
+    );
+
+    let graph = build_graph(&global, |_| Some("python"));
+    let wrapper = FuncId::new(global.find_by_name("wrapper")[0].raw());
+    let callback = FuncId::new(global.find_by_name("callback")[0].raw());
+    assert!(
+        graph.callees_of(wrapper).all(|edge| edge.to != callback),
+        "a lexical parameter must shadow a same-named workspace declaration"
+    );
+    assert!(
+        graph.unresolved_workspace_call_sites().next().is_none(),
+        "parameter dispatch is a runtime binding gap, not ambiguous workspace evidence"
+    );
+
+    let wrapper_decl = global
+        .decl_of(SymbolId::new(wrapper.raw()))
+        .expect("wrapper declaration");
+    let targets = collect_call_event_targets_with_context_and_aliases(
+        &global,
+        "callback",
+        None,
+        &[],
+        CallKind::Function,
+        Span::new(file, 0, 8),
+        &[],
+        wrapper_decl,
+        &AHashMap::new(),
+        &|_| None,
+        &[],
+    );
+    assert!(
+        targets.is_empty(),
+        "standalone and graph-build resolution must agree on lexical shadowing: {targets:?}"
+    );
+}
+
+#[test]
 fn static_class_receiver_method_resolves_without_bare_name_fanout() {
     let caller_file = FileId::new(1);
     let repo_file = FileId::new(2);

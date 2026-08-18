@@ -47,6 +47,7 @@ pub use vars::{vars, VarOut, VarsFilters};
 
 === callgraph ===
 pub enum EdgeKind {
+pub fn call_invokes_parameter(params: &[String], name: &str, receiver: Option<&str>) -> bool {
 pub fn call_resolves_to_func(
 pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
 pub fn collect_call_event_targets_with_context_and_aliases(

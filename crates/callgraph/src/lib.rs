@@ -2160,7 +2160,7 @@ struct CallSiteFacts<'a> {
     args: &'a [CallArg],
     semantic_receiver: Option<&'a str>,
     alias_qualified: bool,
-    local_value_shadow: bool,
+    lexical_value_shadow: bool,
     explicit_ancestor_constructor: bool,
 }
 
@@ -2224,8 +2224,9 @@ fn add_call_event_edges(
         args,
         semantic_receiver,
         alias_qualified,
-        local_value_shadow: semantic_receiver.is_none()
-            && local_value_binding_shadows_callable(&context.caller_decl.flow_events, short, *span),
+        lexical_value_shadow: semantic_receiver.is_none()
+            && (call_invokes_parameter(&context.caller_decl.params, name, None)
+                || local_value_binding_shadows_callable(&context.caller_decl.flow_events, short, *span)),
         explicit_ancestor_constructor: *call_kind == CallKind::Constructor
             && semantic_receiver.is_some_and(|receiver| {
                 is_super_receiver_with_tokens(
@@ -2257,7 +2258,11 @@ fn collect_ast_bound_call_candidates(
         facts.alias_qualified,
     );
     let from_callable_binding = !values.is_empty();
-    if values.is_empty() && facts.semantic_receiver.is_none() && !facts.alias_qualified {
+    if values.is_empty()
+        && facts.semantic_receiver.is_none()
+        && !facts.alias_qualified
+        && !facts.lexical_value_shadow
+    {
         values = collect_nested_local_callable_targets(
             context.global,
             context.caller_decl,
@@ -2268,6 +2273,7 @@ fn collect_ast_bound_call_candidates(
     if values.is_empty()
         && facts.semantic_receiver.is_none()
         && !facts.alias_qualified
+        && !facts.lexical_value_shadow
         && facts.call_kind == CallKind::Function
         && bonsai_common::qualified_name_owner(facts.name).is_some()
     {
@@ -2379,7 +2385,7 @@ fn collect_workspace_call_candidates(
 ) -> (Vec<FuncId>, bool) {
     if values.is_empty()
         && facts.semantic_receiver.is_none()
-        && !facts.local_value_shadow
+        && !facts.lexical_value_shadow
         && fast_local_callable_reference_name(facts.name)
     {
         values = collect_callable_targets_with_context_aliases_paths_and_method_cache(
@@ -2392,7 +2398,7 @@ fn collect_workspace_call_candidates(
         );
     }
     let typed_receiver_method = facts.semantic_receiver.is_some() && !facts.receiver_types.is_empty();
-    if values.is_empty() && !typed_receiver_method {
+    if values.is_empty() && !typed_receiver_method && !facts.lexical_value_shadow {
         values = collect_qualified_workspace_targets(
             context.global,
             facts.name,
@@ -2411,7 +2417,7 @@ fn collect_workspace_call_candidates(
         && !facts.alias_qualified;
     if values.is_empty()
         && !unresolved_method_receiver
-        && !facts.local_value_shadow
+        && !facts.lexical_value_shadow
         && bonsai_common::qualified_name_owner(facts.name).is_none()
     {
         // A qualified owner is semantic lookup evidence, never permission to
@@ -2430,7 +2436,7 @@ fn collect_workspace_call_candidates(
     if values.is_empty()
         && context.caller_capabilities.build_target_linkage
         && facts.semantic_receiver.is_none()
-        && !facts.local_value_shadow
+        && !facts.lexical_value_shadow
     {
         values = collect_build_target_linked_callable_targets(
             context.global,
@@ -2440,7 +2446,7 @@ fn collect_workspace_call_candidates(
             context.build_targets,
         );
     }
-    if values.is_empty() && !unresolved_method_receiver {
+    if values.is_empty() && !unresolved_method_receiver && !facts.lexical_value_shadow {
         if let Some((alias_target, alias_tail)) = qualified_alias_target_tail(facts.name, context.aliases) {
             values = collect_workspace_module_targets(
                 context.global,
@@ -2469,7 +2475,7 @@ fn collect_qualified_call_fallback(
     context: &CallResolutionContext<'_>,
     state: &mut CallGraphBuildState<'_>,
 ) -> QualifiedCallFallback {
-    if facts.alias_qualified {
+    if facts.alias_qualified || facts.lexical_value_shadow {
         return QualifiedCallFallback::Stop;
     }
     let short = short_callee(facts.name);
@@ -3093,6 +3099,9 @@ fn collect_assign_source_call_targets(
         return Vec::new();
     }
     let member_like = assign_source_call_member_like(trimmed);
+    let lexical_value_shadow = !member_like
+        && (call_invokes_parameter(&caller_decl.params, trimmed, None)
+            || local_value_binding_shadows_callable(&caller_decl.flow_events, trimmed, call_span));
     let receiver = receiver_name_from_call_name(trimmed);
     let short = short_callee(trimmed);
     let lookup_semantics = CallableLookupSemantics {
@@ -3103,10 +3112,10 @@ fn collect_assign_source_call_targets(
         module_path_syntax: caller_capabilities.module_path_syntax,
     };
     let mut targets = collect_local_callable_binding_targets(local_bindings, trimmed, receiver, false);
-    if targets.is_empty() && !member_like {
+    if targets.is_empty() && !member_like && !lexical_value_shadow {
         targets = collect_nested_local_callable_targets(global, caller_decl, trimmed, call_span);
     }
-    if targets.is_empty() {
+    if targets.is_empty() && !lexical_value_shadow {
         targets = collect_callable_targets_with_context_aliases_paths_and_method_cache(
             global,
             trimmed,
@@ -3116,7 +3125,7 @@ fn collect_assign_source_call_targets(
             method_candidate_cache,
         );
     }
-    if targets.is_empty() {
+    if targets.is_empty() && !lexical_value_shadow {
         if let Some((alias_target, alias_tail)) = namespace_alias_target_tail(trimmed, alias_targets) {
             targets = collect_workspace_module_targets(
                 global,
@@ -3132,7 +3141,7 @@ fn collect_assign_source_call_targets(
             );
         }
     }
-    if targets.is_empty() && !member_like && short != trimmed {
+    if targets.is_empty() && !member_like && !lexical_value_shadow && short != trimmed {
         targets = collect_callable_targets_with_context_aliases_paths_and_method_cache(
             global,
             short,
@@ -6828,9 +6837,10 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
     let explicit_ancestor_constructor = call_kind == CallKind::Constructor
         && semantic_receiver
             .is_some_and(|receiver| is_super_receiver_with_tokens(receiver, caller_super_receiver_tokens));
-    let local_value_shadow = semantic_receiver.is_none()
-        && local_value_binding_shadows_callable(&caller_decl.flow_events, name, call_span);
-    let mut targets = if semantic_receiver.is_none() {
+    let lexical_value_shadow = semantic_receiver.is_none()
+        && (call_invokes_parameter(&caller_decl.params, name, None)
+            || local_value_binding_shadows_callable(&caller_decl.flow_events, name, call_span));
+    let mut targets = if semantic_receiver.is_none() && !lexical_value_shadow {
         collect_nested_local_callable_targets(global, caller_decl, name, call_span)
     } else {
         Vec::new()
@@ -6895,7 +6905,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
     }
     if targets.is_empty()
         && semantic_receiver.is_none()
-        && !local_value_shadow
+        && !lexical_value_shadow
         && fast_local_callable_reference_name(name)
     {
         targets = collect_callable_targets_with_context_aliases_and_paths(
@@ -6907,7 +6917,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
         );
     }
     let typed_receiver_method = semantic_receiver.is_some() && !receiver_types.is_empty();
-    if targets.is_empty() && !typed_receiver_method {
+    if targets.is_empty() && !typed_receiver_method && !lexical_value_shadow {
         targets = collect_qualified_workspace_targets(
             global,
             name,
@@ -6922,7 +6932,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
     }
     let unresolved_method_receiver =
         targets.is_empty() && call_kind == CallKind::Method && semantic_receiver.is_some();
-    if targets.is_empty() && !unresolved_method_receiver && !local_value_shadow {
+    if targets.is_empty() && !unresolved_method_receiver && !lexical_value_shadow {
         targets = collect_callable_targets_with_context_aliases_and_paths(
             global,
             name,
@@ -6931,7 +6941,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
             &mut callable_target_cache,
         );
     }
-    if targets.is_empty() && !unresolved_method_receiver && !local_value_shadow {
+    if targets.is_empty() && !unresolved_method_receiver && !lexical_value_shadow {
         let short = short_callee(name);
         // For Rust-style `Type::method` qualified calls, allow the
         // bare-tail fallback ONLY when the qualifier resolves to
@@ -7040,6 +7050,39 @@ fn collect_callable_targets_exact(global: &GlobalIndex, name: &str) -> Vec<FuncI
 #[must_use]
 pub fn short_callee(name: &str) -> &str {
     short_qualified_tail(name)
+}
+
+/// Return whether an adapter-lowered call is dispatched through one of the
+/// enclosing declaration's parameters.
+///
+/// Direct callable syntax (`callback(value)`) carries the parameter in
+/// `name`. Languages whose callable protocol uses member syntax
+/// (`callback.accept(value)`, `callback.call(value)`) carry it in `receiver`.
+/// Both identities are compiler facts emitted by the adapter; this helper
+/// deliberately does not interpret language ids, callable-interface types,
+/// or method names.
+#[must_use]
+pub fn call_invokes_parameter(params: &[String], name: &str, receiver: Option<&str>) -> bool {
+    if params.is_empty() {
+        return false;
+    }
+    let candidate = receiver.unwrap_or_else(|| short_callee(name)).trim();
+    if candidate.is_empty() {
+        return false;
+    }
+    if params.iter().any(|param| param.trim() == candidate) {
+        return true;
+    }
+    let plain_identifier =
+        |text: &str| !text.is_empty() && text.chars().all(|ch| ch == '_' || ch.is_alphanumeric());
+    if plain_identifier(candidate) && params.iter().all(|param| plain_identifier(param.trim())) {
+        return false;
+    }
+    let normalized = normalize_receiver_alias_text(candidate);
+    !normalized.is_empty()
+        && params
+            .iter()
+            .any(|param| normalized_receiver_alias_matches(param, &normalized))
 }
 
 /// Precomputed index used by [`is_workspace_alias_target`] so the

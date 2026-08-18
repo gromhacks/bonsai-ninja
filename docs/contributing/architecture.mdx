@@ -983,7 +983,8 @@ the same rules appear different.
 primitives for `inspect`. Structural graph-flow output owns one source-backed
 evidence unit per matching callable; it does not enumerate recursive caller
 paths. `symbol-summary` exposes the corresponding declaration packet with
-direct resolved neighbors and explicit unresolved calls. Structural `F:`/`G:`
+direct resolved neighbors and explicit unresolved calls, including
+adapter-proven parameter dispatch that has no resolved binding. Structural `F:`/`G:`
 ids hash exact compiler identities. The CLI records the full originating query provenance,
 including qualified from/to identities and kind/file/function filters, so a
 later `show` reopens the same scoped corridor. Lexical-tail matching used

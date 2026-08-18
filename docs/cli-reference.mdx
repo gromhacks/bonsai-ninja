@@ -367,7 +367,11 @@ selects the surviving pair.
 `symbol-summary` returns one self-contained, non-recursive compiler packet per
 matching callable. It includes the declaration, exact source span, signature,
 parameters, file imports, direct compiler-resolved callers and callees with
-edge provenance, and workspace calls whose candidates could not be resolved.
+edge provenance, plus unresolved evidence for ambiguous workspace candidates
+and parameter-dispatched calls without a compiler-proven binding. Parameter
+dispatch is derived from adapter-emitted call/receiver identity, so direct
+callables and member-style callable protocols follow the same contract across
+languages without an API-name list.
 Its work is linear in the selected body and direct graph degree; diamonds and
 cycles cannot multiply into a path set.
 

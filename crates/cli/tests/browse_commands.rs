@@ -2110,6 +2110,203 @@ fn symbol_summary_includes_source_and_parameters() {
 }
 
 #[test]
+fn symbol_summary_preserves_unresolved_callable_parameter_without_resolving_default() {
+    let tmp = tempdir_for_test("bonsai_symbol_summary_callable_parameter");
+    std::fs::write(
+        tmp.join("app.py"),
+        r#"
+from typing import Any, Callable
+
+def apply_authorized_patch(value: str) -> dict[str, Any]:
+    return {"value": value}
+
+def apply_engine(value: str) -> dict[str, Any]:
+    return {"unrelated_global": value}
+
+def wrapper(
+    value: str,
+    apply_engine: Callable[..., dict[str, Any]] = apply_authorized_patch,
+) -> dict[str, Any]:
+    return apply_engine(value)
+"#,
+    )
+    .expect("write callable-parameter fixture");
+
+    let Some(trace) = run(&["trace", tmp.to_str().unwrap(), "wrapper", "--format", "json"]) else {
+        return;
+    };
+    let trace: serde_json::Value = serde_json::from_str(&trace).expect("trace JSON");
+    assert!(
+        trace["summary"]["analysis_incomplete_reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons
+                .iter()
+                .any(|reason| reason.as_str() == Some("unresolved-call:apply_engine"))),
+        "trace must retain the unresolved callable-parameter invocation: {trace}"
+    );
+
+    let Some(out) = run(&[
+        "symbol-summary",
+        tmp.to_str().unwrap(),
+        "--symbol",
+        "wrapper",
+        "--format",
+        "json",
+        "--all",
+    ]) else {
+        return;
+    };
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("summary JSON");
+    let row = rows.first().expect("wrapper summary");
+    assert_eq!(row["graph_scope"], "direct_resolved_neighbors");
+    assert_eq!(row["analysis_complete"], false);
+    assert!(
+        row["analysis_incomplete_reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons.iter().any(|reason| {
+                reason
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("parameter-dispatched call"))
+            })),
+        "symbol-summary must explain the unresolved callable-parameter invocation: {out}"
+    );
+    assert!(
+        row["source"].as_str().is_some_and(
+            |source| source.contains("apply_engine") && source.contains("apply_authorized_patch")
+        ),
+        "summary source must retain the callable default expression: {out}"
+    );
+    assert!(
+        row["direct_callees"]
+            .as_array()
+            .is_some_and(|callees| callees.iter().all(|callee| !matches!(
+                callee["callee"].as_str(),
+                Some("apply_authorized_patch" | "apply_engine")
+            ))),
+        "a parameter default or shadowed same-name global must not become a resolved direct callee: {out}"
+    );
+    assert!(
+        row["unresolved_calls"]
+            .as_array()
+            .is_some_and(|calls| calls.iter().any(|call| call["call_text"]
+                .as_str()
+                .is_some_and(|text| text.contains("apply_engine")))),
+        "symbol-summary must preserve unresolved callable-parameter evidence: {out}"
+    );
+
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+#[test]
+fn symbol_summary_reports_unresolved_parameter_dispatch_for_every_language() {
+    const CASES: &[(&str, &str)] = &[
+        ("c", "run_cb"),
+        ("cpp", "run_cb"),
+        ("csharp", "RunCb"),
+        ("dart", "runCb"),
+        ("elixir", "run_cb"),
+        ("erlang", "run_cb"),
+        ("go", "run"),
+        ("java", "run"),
+        ("javascript", "run"),
+        ("kotlin", "run"),
+        ("lua", "run_cb"),
+        ("objc", "run_cb"),
+        ("perl", "run_cb"),
+        ("php", "run_cb"),
+        ("python", "run"),
+        ("ruby", "run_cb"),
+        ("rust", "run_cb"),
+        ("scala", "runCb"),
+        ("swift", "runCb"),
+        ("typescript", "run"),
+    ];
+
+    for &(language, symbol) in CASES {
+        let workspace = repo_root().join("examples").join(language).join("callback_flow");
+        let Some(out) = run(&[
+            "symbol-summary",
+            workspace.to_str().expect("UTF-8 fixture path"),
+            "--symbol",
+            symbol,
+            "--format",
+            "json",
+            "--all",
+            "--no-progress",
+        ]) else {
+            return;
+        };
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("summary JSON");
+        let row = rows
+            .first()
+            .unwrap_or_else(|| panic!("{language}: missing `{symbol}` summary"));
+        assert_eq!(
+            row["analysis_complete"], false,
+            "{language}: parameter-dispatched call must remain explicitly unresolved: {out}"
+        );
+        assert!(
+            row["unresolved_calls"]
+                .as_array()
+                .is_some_and(|calls| !calls.is_empty()),
+            "{language}: missing unresolved parameter-dispatch evidence: {out}"
+        );
+        assert!(
+            row["analysis_incomplete_reasons"]
+                .as_array()
+                .is_some_and(|reasons| reasons.iter().any(|reason| reason
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("parameter-dispatched call")))),
+            "{language}: missing parameter-dispatch explanation: {out}"
+        );
+    }
+}
+
+#[test]
+fn symbol_summary_does_not_mark_compiler_resolved_parameter_method_unresolved() {
+    let tmp = tempdir_for_test("bonsai_symbol_summary_resolved_parameter_method");
+    std::fs::write(
+        tmp.join("App.java"),
+        r#"
+class Helper {
+    void consume(String value) {}
+}
+
+class App {
+    static void wrapper(Helper helper, String value) {
+        helper.consume(value);
+    }
+}
+"#,
+    )
+    .expect("write resolved parameter-method fixture");
+
+    let Some(out) = run(&[
+        "symbol-summary",
+        tmp.to_str().expect("UTF-8 temp path"),
+        "--symbol",
+        "App.wrapper",
+        "--format",
+        "json",
+        "--all",
+        "--no-progress",
+    ]) else {
+        return;
+    };
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("summary JSON");
+    let row = rows.first().expect("wrapper summary");
+    assert_eq!(row["analysis_complete"], true, "{out}");
+    assert_eq!(row["unresolved_calls"].as_array().map(Vec::len), Some(0), "{out}");
+    assert!(
+        row["direct_callees"]
+            .as_array()
+            .is_some_and(|callees| callees.iter().any(|callee| callee["callee"] == "consume")),
+        "typed parameter dispatch must retain its compiler-resolved edge: {out}"
+    );
+
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+#[test]
 fn inspect_from_to_markers_work_on_kotlin() {
     // Cross-class Kotlin flow: handleRequest → updateUser →
     // runAdminCommand → Runtime.getRuntime().exec. Filter markers
