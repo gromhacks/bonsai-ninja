@@ -329,7 +329,7 @@ fn read_file_with_taint_options(
         // Cross-file callers / callees are an explicit semantic overlay. The
         // default file view must not construct a resolved workspace callgraph.
         let resolved = ws.cached_resolved_call_graph();
-        let global = ws.compiler_linkage_index();
+        let global = ws.compiler_header_index();
         let file_funcs: Vec<FuncId> = global
             .decls_in(file_id)
             .iter()
@@ -750,7 +750,7 @@ fn match_to_locator(m: &FindingMatch) -> Locator {
 }
 
 fn func_to_locator(func: FuncId, ws: &Workspace) -> Locator {
-    let global = ws.compiler_linkage_index();
+    let global = ws.compiler_header_index();
     let symbol = SymbolId::new(func.raw());
     let Some(decl) = global.decl_of(symbol) else {
         return Locator::external(format!("FuncId({})", func.raw()));

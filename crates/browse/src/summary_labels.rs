@@ -37,6 +37,7 @@ struct FuncLineRange {
     end_line: u32,
     width: u64,
     func: FuncId,
+    name: String,
 }
 
 impl<'ws> SummaryAnnotator<'ws> {
@@ -55,11 +56,20 @@ impl<'ws> SummaryAnnotator<'ws> {
     /// Space-joined `F:<16-hex>` ids, or empty when the row is not inside an
     /// indexed callable.
     pub fn labels_for(&self, file_path: &str, line: u32) -> String {
-        let Some(func) = self.enclosing_func(file_path, line) else {
+        let Some(func) = self.enclosing_range(file_path, line).map(|range| range.func) else {
             return String::new();
         };
         let id = self.ws.flow_ids().id_for_func(func, self.ws.db(), self.ws.vfs());
         id.to_string()
+    }
+
+    /// Exact compiler-owned callable name enclosing a rendered source line.
+    /// The same per-file header ranges back the flow-label lookup, so table
+    /// renderers do not decompress one body for every displayed row.
+    #[must_use]
+    pub fn enclosing_function_name(&self, file_path: &str, line: u32) -> Option<String> {
+        self.enclosing_range(file_path, line)
+            .map(|range| range.name.clone())
     }
 
     /// Look up summary ids by symbol name. Used by browse rows
@@ -79,18 +89,18 @@ impl<'ws> SummaryAnnotator<'ws> {
     /// Linear scan through the file's function ranges. Ranges are
     /// pre-sorted narrowest-first so the first hit is the tightest
     /// enclosing scope.
-    fn enclosing_func(&self, file_path: &str, line: u32) -> Option<FuncId> {
+    fn enclosing_range(&self, file_path: &str, line: u32) -> Option<FuncLineRange> {
         let file_id = *self.file_by_path().get(file_path)?;
         self.func_ranges_for_file(file_id)
             .iter()
             .find(|range| line >= range.start_line && line <= range.end_line)
-            .map(|range| range.func)
+            .cloned()
     }
 
     /// Lazy `path → FileId` map. Build once, share across calls.
     fn file_by_path(&self) -> &ahash::AHashMap<String, FileId> {
         self.file_by_path.get_or_init(|| {
-            let global = self.ws.compiler_linkage_index();
+            let global = self.ws.compiler_header_index();
             let mut files = ahash::AHashMap::new();
             for file in global.all_files() {
                 if let Ok(path) = self.ws.vfs().path(file) {
@@ -123,7 +133,7 @@ impl<'ws> SummaryAnnotator<'ws> {
             return Vec::new();
         };
         let map = bonsai_common::cached_span_map_arc(file_id, snap.version, &snap.text);
-        let global = self.ws.compiler_linkage_index();
+        let global = self.ws.compiler_header_index();
         let mut ranges = Vec::new();
         for decl in global.decls_in(file_id) {
             if !matches!(
@@ -140,6 +150,7 @@ impl<'ws> SummaryAnnotator<'ws> {
                 end_line: map.line_col(decl.span.end).line,
                 width: decl.span.end.saturating_sub(decl.span.start),
                 func: FuncId::new(decl.symbol.raw()),
+                name: decl.name.clone(),
             });
         }
         // Pick the narrowest enclosing function/method/constructor

@@ -1,7 +1,8 @@
 //! `bonsai-ninja strings` data layer.
 
 use crate::common::{
-    file_path_matches_filter, format_span, make_name_filter, textual_relevance_key, workspace_file_id,
+    admitted_file_decl_index, file_path_matches_filter, format_span, make_name_filter,
+    source_files_small_first, textual_relevance_key,
 };
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -39,13 +40,24 @@ pub struct StringOut {
 pub fn strings(ws: &Workspace, f: &StringsFilters<'_>) -> Result<Vec<StringOut>, regex::Error> {
     use rayon::prelude::*;
     let contains_match = make_name_filter(f.contains, f.regex)?;
-    let files = ws.vfs().all_files();
+    let files = source_files_small_first(ws);
+    let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
     let mut out: Vec<StringOut> = files
         .par_iter()
         .flat_map_iter(|&file| {
             let mut per_file: Vec<StringOut> = Vec::new();
+            if let Some(needle) = f.file {
+                let path = ws
+                    .vfs()
+                    .path(file)
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if !file_path_matches_filter(ws, &path, needle) {
+                    return per_file.into_iter();
+                }
+            }
             // String inventory consumes only file-local compiler facts.
-            let Some(idx) = ws.db().decl_index_uncached(file) else {
+            let Some(idx) = admitted_file_decl_index(ws, file, &memory_permits) else {
                 return per_file.into_iter();
             };
             for s in &idx.strings {
@@ -64,11 +76,6 @@ pub fn strings(ws: &Workspace, f: &StringsFilters<'_>) -> Result<Vec<StringOut>,
                     }
                 }
                 let (path, line, col) = format_span(&s.span, ws);
-                if f.file
-                    .is_some_and(|needle| !file_path_matches_filter(ws, &path, needle))
-                {
-                    continue;
-                }
                 if let Some(needle) = f.in_fn {
                     let enclosing = enclosing_fn_for_index_line(ws, file, &idx, line).unwrap_or_default();
                     if !enclosing.contains(needle) {
@@ -131,9 +138,7 @@ fn cached_span_map(
 /// alongside table rows without re-implementing the logic.
 #[must_use]
 pub fn enclosing_fn_for_file_line(ws: &Workspace, file_path: &str, line: u32) -> Option<String> {
-    let file = workspace_file_id(ws, file_path)?;
-    let index = ws.db().decl_index_uncached(file)?;
-    enclosing_fn_for_index_line(ws, file, &index, line)
+    crate::summary_labels::SummaryAnnotator::new(ws).enclosing_function_name(file_path, line)
 }
 
 pub(crate) fn enclosing_fn_for_index_line(

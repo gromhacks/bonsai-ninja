@@ -1330,6 +1330,12 @@ impl Workspace {
         if let Some(idg) = self.inner.db.idg_service() {
             return idg.global_linkage_index();
         }
+        // A resident resolver-linkage generation is an immutable strict
+        // superset of the syntax header product. Reuse the same allocation
+        // instead of decoding a second declaration/type table beside it.
+        if let Some(linkage) = self.inner.compiler_linkage.read().clone() {
+            return linkage;
+        }
         if let Some(headers) = self.inner.compiler_headers.read().clone() {
             return headers;
         }
@@ -1484,6 +1490,17 @@ impl Workspace {
     }
 
     fn take_exclusive_compiler_header_index(&self) -> Arc<GlobalIndex> {
+        // Function-scoped graph planning mutates its private header copy by
+        // installing projected linkage. A canonical IDG or resolver-linkage
+        // owner cannot be taken exclusively, so derive the compact mutable
+        // projection directly instead of expecting a standalone header-cache
+        // entry to exist. This also makes warm-IDG targeted queries safe.
+        if let Some(service) = self.inner.db.idg_service() {
+            return Arc::new(service.global_linkage_index().clone_header_index());
+        }
+        if let Some(linkage) = self.inner.compiler_linkage.read().clone() {
+            return Arc::new(linkage.clone_header_index());
+        }
         // Ensure a persisted compiler symbol table is loaded before taking its
         // cache allocation. A missing cache falls back to one exact streamed
         // frontend pass; this function must never independently decode all

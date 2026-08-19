@@ -511,7 +511,7 @@ fn build_cross_edges(graph: &bonsai_callgraph::ResolvedCallGraph, ws: &Workspace
     // Cross-file navigation needs symbol linkage, not retained function
     // bodies. Keep this phase on the compact compiler linkage product so an
     // SDK tree never materializes the whole-workspace body index.
-    let global = ws.compiler_linkage_index();
+    let global = ws.compiler_header_index();
     for edge in graph
         .inner()
         .edges
@@ -579,7 +579,7 @@ fn precision_rank(p: Precision) -> u8 {
 }
 
 fn func_to_locator(func: FuncId, ws: &Workspace) -> Locator {
-    let global = ws.compiler_linkage_index();
+    let global = ws.compiler_header_index();
     let symbol = SymbolId::new(func.raw());
     let Some(decl) = global.decl_of(symbol) else {
         return Locator::external(format!("FuncId({})", func.raw()));

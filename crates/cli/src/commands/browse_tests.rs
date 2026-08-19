@@ -1,7 +1,7 @@
 use super::{
-    exact_identifier_regex_literal, format_summary_labels_for_cell, rendered_table_row_cost,
-    retrieval_prefilter_for_browse_literal_with_limit, retrieval_prefilter_for_search_with_limit, truncate,
-    SearchFilters, SummaryColumnStatus,
+    def_callee_summaries, exact_identifier_regex_literal, format_summary_labels_for_cell,
+    rendered_table_row_cost, retrieval_prefilter_for_browse_literal_with_limit,
+    retrieval_prefilter_for_search_with_limit, truncate, SearchFilters, SummaryColumnStatus,
 };
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{CallKind, FlowEvent};
@@ -65,6 +65,49 @@ fn collect_callees_includes_assignment_source_calls() {
     ];
     let out = bonsai_sdk::collect_callee_names(&events);
     assert_eq!(out, vec!["read_user", "sink"]);
+}
+
+#[test]
+fn definition_callee_previews_keep_same_named_callables_separate() {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    ws.vfs().write(
+        "left.py".to_string(),
+        std::sync::Arc::<str>::from("def root():\n    return left_leaf()\n"),
+    );
+    ws.vfs().write(
+        "right.py".to_string(),
+        std::sync::Arc::<str>::from("def root():\n    return right_leaf()\n"),
+    );
+    let headers = ws.compiler_header_index();
+    let rows = headers
+        .all_files()
+        .flat_map(|file| headers.decls_in(file))
+        .filter(|decl| decl.name == "root")
+        .map(|decl| {
+            let (file, line, column) = bonsai_sdk::format_span(&decl.name_span, &ws);
+            bonsai_sdk::DefOut {
+                name: decl.name.clone(),
+                qualified_name: decl.qualified_name.clone(),
+                kind: "function".to_string(),
+                file,
+                line,
+                column,
+                params: decl.params.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let previews = def_callee_summaries(&ws, &rows, 3);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(previews.len(), 2);
+    for (row, preview) in rows.iter().zip(previews) {
+        match row.file.as_str() {
+            "left.py" => assert_eq!(preview, "left_leaf"),
+            "right.py" => assert_eq!(preview, "right_leaf"),
+            path => panic!("unexpected definition path {path}"),
+        }
+    }
+    assert_eq!(ws.stats().cached_decl_indexes, 0);
 }
 
 #[test]

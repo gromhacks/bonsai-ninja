@@ -268,8 +268,8 @@ pub(crate) fn cmd_defs(
                     let headers =
                         with_summaries_header(&["name", "kind", "location", "signature", "callees"], flows);
                     let mut t = u.table(&headers);
-                    let callees_by_name = callee_summaries(ws, 3);
-                    for d in &rows {
+                    let callees_by_row = def_callee_summaries(ws, &rows, 3);
+                    for (d, callees_cell) in rows.iter().zip(callees_by_row) {
                         // Perl's adapter emits both sigil'd (`$token`) and
                         // bare (`token`) forms for each parameter so the
                         // taint-state lookup succeeds against either shape.
@@ -285,7 +285,6 @@ pub(crate) fn cmd_defs(
                             format!("{}({})", d.name, display_params.join(", "))
                         };
                         let loc = format!("{}:{}:{}", short_file(&d.file), d.line, d.column);
-                        let callees_cell = callees_by_name.get(&d.name).cloned().unwrap_or_default();
                         let mut cells = vec![
                             Cell::new(u.name(&d.name)),
                             Cell::new(u.kind(&d.kind)),
@@ -409,38 +408,45 @@ pub(crate) fn cmd_entrypoints(
     Ok(())
 }
 
-/// Build compact declaration-name → outgoing-call previews from compiler
-/// linkage facts. Rendering a definitions page must not hydrate every
-/// workspace body merely to show three callee names.
-pub(crate) fn callee_summaries(ws: &Workspace, limit: usize) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    let global = ws.compiler_linkage_index();
-    for file in global.all_files() {
-        for decl in global.decls_in(file) {
-            let Some(facts) = global.linkage_facts(decl.symbol) else {
-                continue;
+/// Build one compact outgoing-call preview per rendered definition row.
+/// Exact file/line/column identity keeps same-named callables separate, while
+/// per-function attribution avoids decoding whole-workspace call linkage for
+/// a page-sized presentation field.
+pub(crate) fn def_callee_summaries(ws: &Workspace, rows: &[bonsai_sdk::DefOut], limit: usize) -> Vec<String> {
+    let headers = ws.compiler_header_index();
+    rows.iter()
+        .map(|row| {
+            let Some(file) = bonsai_sdk::workspace_file_id(ws, &row.file) else {
+                return String::new();
             };
-            let mut names = facts
+            let Some(decl) = headers.decls_in(file).iter().find(|decl| {
+                if decl.name != row.name || decl.qualified_name != row.qualified_name {
+                    return false;
+                }
+                let (_, line, column) = bonsai_sdk::format_span(&decl.name_span, ws);
+                line == row.line && column == row.column
+            }) else {
+                return String::new();
+            };
+            let Some(attribution) = ws.db().compiler_function_attribution_uncached(file, decl.span) else {
+                return String::new();
+            };
+            let mut names = attribution
                 .calls
-                .iter()
-                .map(|call| call.name.to_string())
+                .into_iter()
+                .map(|call| call.name)
                 .collect::<Vec<_>>();
             let mut seen = std::collections::HashSet::new();
             names.retain(|name| seen.insert(name.clone()));
-            if names.is_empty() {
-                continue;
-            }
             let total = names.len();
             let shown = names.into_iter().take(limit).collect::<Vec<_>>();
-            let summary = if total > limit {
+            if total > limit {
                 format!("{} (+{})", shown.join(" → "), total - limit)
             } else {
                 shown.join(" → ")
-            };
-            map.entry(decl.name.clone()).or_insert(summary);
-        }
-    }
-    map
+            }
+        })
+        .collect()
 }
 
 /// UTF-8-safe middle truncation: keeps the first `n` characters and
@@ -1562,6 +1568,7 @@ pub(crate) fn cmd_strings(
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
                     let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
+                    let enclosing_ann = bonsai_sdk::SummaryAnnotator::new(ws);
                     let mut flow_status = SummaryColumnStatus::default();
                     let headers =
                         with_summaries_header(&["category", "text", "in", "location", "code"], flows);
@@ -1569,7 +1576,8 @@ pub(crate) fn cmd_strings(
                     for s in &rows {
                         let preview = truncate(&s.text, 60);
                         let loc = format!("{}:{}:{}", short_file(&s.file), s.line, s.column);
-                        let enclosing = enclosing_fn_for_file_line(ws, &s.file, s.line)
+                        let enclosing = enclosing_ann
+                            .enclosing_function_name(&s.file, s.line)
                             .unwrap_or_else(|| "-".to_string());
                         let ext = extension_for(&s.file);
                         let line_text = read_line(ws, &s.file, s.line);
@@ -1605,10 +1613,6 @@ pub(crate) fn cmd_strings(
     }
     Ok(())
 }
-
-// Re-export `enclosing_fn_for_file_line` from `bonsai_sdk::strings` so
-// the renderer can keep using the bare name without qualifying.
-use bonsai_sdk::strings::enclosing_fn_for_file_line;
 
 /// `bonsai-ninja comments` renderer — same shape as `cmd_strings`.
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
@@ -1656,12 +1660,14 @@ pub(crate) fn cmd_comments(
                 |paged, info, cfg| {
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
+                    let enclosing_ann = bonsai_sdk::SummaryAnnotator::new(ws);
                     let headers = &["kind", "text", "in", "location"];
                     let mut t = u.table(headers);
                     for c in &rows {
                         let preview = truncate(&c.text.replace('\n', " "), 100);
                         let loc = format!("{}:{}:{}", short_file(&c.file), c.line, c.column);
-                        let enclosing = enclosing_fn_for_file_line(ws, &c.file, c.line)
+                        let enclosing = enclosing_ann
+                            .enclosing_function_name(&c.file, c.line)
                             .unwrap_or_else(|| "-".to_string());
                         let cells = vec![
                             Cell::new(u.annotation(&c.kind)),
@@ -1779,6 +1785,7 @@ pub(crate) fn cmd_args(
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
                     let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
+                    let enclosing_ann = bonsai_sdk::SummaryAnnotator::new(ws);
                     let mut flow_status = SummaryColumnStatus::default();
                     let headers = with_summaries_header(
                         &["callee text", "pos", "arg", "caller", "location", "code"],
@@ -1793,7 +1800,8 @@ pub(crate) fn cmd_args(
                             .unwrap_or_else(|| a.position.to_string());
                         let value = truncate(&a.value, 50);
                         let loc = format!("{}:{}:{}", short_file(&a.file), a.line, a.column);
-                        let caller = enclosing_fn_for_file_line(ws, &a.file, a.line)
+                        let caller = enclosing_ann
+                            .enclosing_function_name(&a.file, a.line)
                             .unwrap_or_else(|| "-".to_string());
                         let ext = extension_for(&a.file);
                         let line_text = read_line(ws, &a.file, a.line);
@@ -2161,13 +2169,15 @@ pub(crate) fn cmd_refs(
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
                     let (flow_ann, flow_bar) = build_summary_annotator(ws, flows, rows.len() as u64);
+                    let enclosing_ann = bonsai_sdk::SummaryAnnotator::new(ws);
                     let mut flow_status = SummaryColumnStatus::default();
                     let headers = with_summaries_header(&["symbol", "kind", "in", "location", "code"], flows);
                     let mut t = u.table(&headers);
                     for r in &rows {
                         let loc = format!("{}:{}:{}", short_file(&r.file), r.line, r.column);
                         let snip = truncate(r.snippet.trim(), 100);
-                        let enclosing = enclosing_fn_for_file_line(ws, &r.file, r.line)
+                        let enclosing = enclosing_ann
+                            .enclosing_function_name(&r.file, r.line)
                             .unwrap_or_else(|| "-".to_string());
                         let ext = extension_for(&r.file);
                         let code_cell = Cell::new(u.snippet(&snip, ext));

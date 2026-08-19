@@ -6,7 +6,7 @@
 
 use crate::common::{
     best_textual_relevance_key, collect_callees, file_path_matches_filter, format_span, make_name_filter,
-    textual_relevance_key,
+    source_files_small_first, textual_relevance_key,
 };
 use bonsai_workspace::{decl_decorator_names, Workspace};
 use serde::Serialize;
@@ -53,10 +53,12 @@ pub struct DefOut {
 /// `Vec<DefOut>`.
 pub fn defs(ws: &Workspace, f: &DefsFilters<'_>) -> Result<Vec<DefOut>, regex::Error> {
     use rayon::prelude::*;
-    let global = ws.compiler_linkage_index();
+    let global = ws.compiler_header_index();
     let needs_exact_body = f.has_callee.is_some() || f.has_decorator.is_some();
     let name_match = make_name_filter(f.name, f.regex)?;
-    let files: Vec<_> = global.all_files().collect();
+    let kind_filter = f.kind.map(str::to_ascii_lowercase);
+    let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
+    let files = source_files_small_first(ws);
     // Parallel per-file fan-out. Each file produces an independent
     // Vec<DefOut>; rayon merges them into one. Deterministic output
     // comes from the explicit sort after collection — sort key is
@@ -67,6 +69,30 @@ pub fn defs(ws: &Workspace, f: &DefsFilters<'_>) -> Result<Vec<DefOut>, regex::E
     let mut out: Vec<DefOut> = files
         .par_iter()
         .fold(Vec::new, |mut acc, &file| {
+            let file_path = ws.vfs().path(file).map_or_else(
+                |_| "<unknown>".to_string(),
+                |path| path.to_string_lossy().into_owned(),
+            );
+            if f.file
+                .is_some_and(|needle| !file_path_matches_filter(ws, &file_path, needle))
+            {
+                return acc;
+            }
+            let header_matches = |decl: &bonsai_lang_api::Decl| {
+                let kind = format!("{:?}", decl.kind).to_lowercase();
+                kind_filter.as_ref().is_none_or(|needle| kind.contains(needle))
+                    && name_match(&decl.name)
+                    && f.has_param
+                        .is_none_or(|needle| decl.params.iter().any(|param| param.contains(needle)))
+            };
+            if !global.decls_in(file).iter().any(&header_matches) {
+                return acc;
+            }
+            let source_bytes = ws
+                .vfs()
+                .snapshot(file)
+                .map_or(0, |snapshot| snapshot.text.len() as u64);
+            let _memory_permit = needs_exact_body.then(|| memory_permits.acquire(source_bytes));
             let exact_index = needs_exact_body
                 .then(|| ws.db().decl_index_uncached(file))
                 .flatten();
@@ -74,19 +100,11 @@ pub fn defs(ws: &Workspace, f: &DefsFilters<'_>) -> Result<Vec<DefOut>, regex::E
                 .as_ref()
                 .map_or_else(|| global.decls_in(file), |index| index.defs.as_slice());
             for decl in decls {
+                if !header_matches(decl) {
+                    continue;
+                }
                 let (path, line, column) = format_span(&decl.name_span, ws);
-                if f.file
-                    .is_some_and(|needle| !file_path_matches_filter(ws, &path, needle))
-                {
-                    continue;
-                }
                 let kind_str = format!("{:?}", decl.kind).to_lowercase();
-                if f.kind.is_some_and(|k| !kind_str.contains(&k.to_lowercase())) {
-                    continue;
-                }
-                if !name_match(&decl.name) {
-                    continue;
-                }
                 if let Some(needle) = f.has_callee {
                     let mut callees: Vec<String> = Vec::new();
                     collect_callees(&decl.flow_events, &mut callees);
@@ -100,11 +118,6 @@ pub fn defs(ws: &Workspace, f: &DefsFilters<'_>) -> Result<Vec<DefOut>, regex::E
                         .map(|idx| decl_decorator_names(ws, file, idx, decl.span, decl.name_span))
                         .unwrap_or_default();
                     if !decorators.iter().any(|name| name.contains(needle)) {
-                        continue;
-                    }
-                }
-                if let Some(needle) = f.has_param {
-                    if !decl.params.iter().any(|param| param.contains(needle)) {
                         continue;
                     }
                 }

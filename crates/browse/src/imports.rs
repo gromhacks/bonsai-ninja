@@ -424,7 +424,7 @@ pub fn imports(ws: &Workspace, f: &ImportsFilters<'_>) -> Result<Vec<ImportOut>,
     // Lazy workspace-wide cache construction must finish before the Rayon
     // file loop. Initializing linkage recursively from a worker can exhaust
     // the same pool while holding its write lock and deadlock peer workers.
-    let global = f.resolve_workspace_bindings.then(|| ws.compiler_linkage_index());
+    let global = f.resolve_workspace_bindings.then(|| ws.compiler_header_index());
     let files: Vec<_> = ws.vfs().all_files();
     let mut out: Vec<ImportOut> = files
         .par_iter()

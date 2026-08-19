@@ -349,9 +349,13 @@ pub(super) fn make_finding(
             }
         }
     }
-    if let Some(selection) =
-        finite_literal_selection_sanitizer(context.ws, snk, skr, &context.sink_tainted_args)
-    {
+    if let Some(selection) = finite_literal_selection_sanitizer(
+        context.ws,
+        context.global.as_ref(),
+        snk,
+        skr,
+        &context.sink_tainted_args,
+    ) {
         let dedup_key = (selection.file.clone(), selection.line, selection.column);
         if seen_keys.insert(dedup_key) {
             sanitizers_seen.push(selection);

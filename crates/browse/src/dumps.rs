@@ -175,7 +175,7 @@ pub fn dump_callgraph(ws: &Workspace) -> Vec<CallgraphRow> {
 /// (e.g. through `bonsai_inspect::ChainCache::resolved_graph`).
 pub fn callgraph_summary(ws: &Workspace, resolved: &ResolvedCallGraph) -> Vec<CallgraphRow> {
     use rayon::prelude::*;
-    let global = ws.compiler_linkage_index();
+    let global = ws.compiler_header_index();
     let files: Vec<_> = global.all_files().collect();
     let mut rows: Vec<CallgraphRow> = files
         .par_iter()
@@ -296,7 +296,7 @@ pub fn dump_callable_file_qualifier(spec: &str) -> Option<&str> {
 /// choosing one.
 fn resolve_single_callable(ws: &Workspace, symbol: &str) -> Result<Option<Decl>, DumpLookupError> {
     let spec = split_callable_spec(symbol);
-    let global = ws.compiler_linkage_index();
+    let global = ws.compiler_header_index();
     let vfs = ws.db().vfs();
     let wanted_segments = bonsai_common::qualified_name_segments(spec.name);
     let lookup_name = wanted_segments.last().copied().unwrap_or(spec.name);

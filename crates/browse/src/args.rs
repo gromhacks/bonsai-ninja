@@ -9,7 +9,7 @@
 
 use crate::common::{
     decl_or_ancestor_name_matches, filtered_file_decl_index, format_span, make_callable_name_filter,
-    make_name_filter, textual_relevance_key,
+    make_name_filter, source_files_small_first, textual_relevance_key,
 };
 use bonsai_common::Span;
 use bonsai_lang_api::FlowEvent;
@@ -97,7 +97,8 @@ pub fn args(ws: &Workspace, f: &ArgsFilters<'_>) -> Result<Vec<ArgOut>, regex::E
     use rayon::prelude::*;
     let callee_match = make_callable_name_filter(f.callee, f.regex)?;
     let value_match = make_name_filter(f.value, f.regex)?;
-    let files = ws.vfs().all_files();
+    let files = source_files_small_first(ws);
+    let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
     // Per-thread accumulator (not per-file) so we don't pay the
     // per-file Vec allocation cost. See `calls::calls` for the same
     // shape and rationale.
@@ -106,7 +107,7 @@ pub fn args(ws: &Workspace, f: &ArgsFilters<'_>) -> Result<Vec<ArgOut>, regex::E
         .fold(Vec::new, |mut acc, &file| {
             // Argument inventory consumes file-local AST facts only. Avoid a
             // global symbol remap and stream the immutable compiler object.
-            let Some(index) = filtered_file_decl_index(ws, file, f.file) else {
+            let Some(index) = filtered_file_decl_index(ws, file, f.file, &memory_permits) else {
                 return acc;
             };
             let defs_by_symbol = index

@@ -65,6 +65,15 @@ pub fn classes(ws: &Workspace, f: &ClassesFilters<'_>) -> Result<Vec<ClassOut>, 
         .par_iter()
         .flat_map_iter(|&file| {
             let mut per_file: Vec<ClassOut> = Vec::new();
+            let file_path = ws.vfs().path(file).map_or_else(
+                |_| "<unknown>".to_string(),
+                |path| path.to_string_lossy().into_owned(),
+            );
+            if f.file
+                .is_some_and(|needle| !file_path_matches_filter(ws, &file_path, needle))
+            {
+                return per_file.into_iter();
+            }
             let decls = global.decls_in(file);
             for class in decls {
                 if !matches!(
@@ -109,11 +118,6 @@ pub fn classes(ws: &Workspace, f: &ClassesFilters<'_>) -> Result<Vec<ClassOut>, 
                     }
                 }
                 let (path, line, _) = format_span(&class.name_span, ws);
-                if f.file
-                    .is_some_and(|needle| !file_path_matches_filter(ws, &path, needle))
-                {
-                    continue;
-                }
                 per_file.push(ClassOut {
                     name: class.name.clone(),
                     kind: kind_str,

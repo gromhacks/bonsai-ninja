@@ -14,7 +14,7 @@
 //! original declaration search
 //! for name-shaped facts, extended to the other kinds.
 
-use crate::common::{file_path_matches_filter, format_span};
+use crate::common::{file_path_matches_filter, format_span, source_files_small_first};
 use crate::refs::read_snippet;
 use ahash::AHashSet;
 use bonsai_lang_api::{FlowEvent, RefKind};
@@ -124,7 +124,8 @@ fn search_canonical(
     };
     let kind_filter = f.kind.map(str::to_lowercase);
     let file_filter = f.file;
-    let files = ws.vfs().all_files();
+    let files = source_files_small_first(ws);
+    let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
 
     let mut hits: Vec<SearchHit> = files
         .par_iter()
@@ -153,6 +154,11 @@ fn search_canonical(
                 }
                 out.push(hit);
             };
+            let source_bytes = ws
+                .vfs()
+                .snapshot(file_id)
+                .map_or(0, |snapshot| snapshot.text.len() as u64);
+            let _memory_permit = memory_permits.acquire(source_bytes);
             let Some(object) = ws.db().compiler_file_object_uncached(file_id) else {
                 return per_file.into_iter();
             };

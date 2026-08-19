@@ -71,7 +71,7 @@ pub(super) fn sanitized_context_rewrite_covers_consumer(
     {
         return false;
     }
-    let headers = ws.compiler_linkage_index();
+    let headers = ws.compiler_header_index();
     let Some(rewrite_owner) =
         ws.enclosing_index()
             .enclosing_for(headers.as_ref(), rewrite.span.file, rewrite.span.start)
@@ -326,6 +326,7 @@ pub(super) fn runtime_type_rejection_guard_sanitizer(
 
 pub(super) fn finite_literal_selection_sanitizer(
     ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
     sink: &RuleMatch,
     sink_rule: &Rule,
     tainted_args: &[TaintedArgInfo],
@@ -334,10 +335,9 @@ pub(super) fn finite_literal_selection_sanitizer(
     if file_index.finite_literal_selections.is_empty() {
         return None;
     }
-    let headers = ws.compiler_linkage_index();
     let enclosing = ws
         .enclosing_index()
-        .enclosing_for(headers.as_ref(), sink.span.file, sink.span.start)?;
+        .enclosing_for(global, sink.span.file, sink.span.start)?;
     let decl = ws.exact_decl(enclosing.symbol)?;
     let mut calls = Vec::new();
     collect_structured_calls(&decl.flow_events, &mut calls);

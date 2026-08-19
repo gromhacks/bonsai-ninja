@@ -1,6 +1,9 @@
 //! `bonsai-ninja refs` data layer.
 
-use crate::common::{file_path_matches_filter, format_span, textual_relevance_key};
+use crate::common::{
+    admitted_file_decl_index, file_path_matches_filter, format_span, source_files_small_first,
+    textual_relevance_key,
+};
 use bonsai_common::short_qualified_tail;
 use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
@@ -82,7 +85,8 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
             |compiled| compiled.is_match(candidate),
         )
     };
-    let files = ws.vfs().all_files();
+    let files = source_files_small_first(ws);
+    let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
     let mut out: Vec<RefOut> = files
         .par_iter()
         .fold(Vec::new, |mut per_thread, &file| {
@@ -96,7 +100,7 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
             {
                 return per_thread;
             }
-            let Some(index) = ws.db().decl_index_uncached(file) else {
+            let Some(index) = admitted_file_decl_index(ws, file, &memory_permits) else {
                 return per_thread;
             };
             let qualified_call_spans = if query_is_qualified && regex.is_none() {

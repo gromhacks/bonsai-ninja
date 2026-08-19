@@ -114,6 +114,10 @@ class and verify each box.
 - [ ] **Predicates run before allocation.** File/name/kind/caller/callee
       filters are applied during the Tree-sitter IR walk, not after collecting
       every workspace row.
+- [ ] **Broad body scans retain weighted admission.** Each decoded compiler
+      body holds its source-size memory permit until its owned projection has
+      been collected; ordering is restored by the command's deterministic row
+      sort, not by an unbounded file-result buffer.
 - [ ] **No nested lazy construction.** A Rayon file loop does not initialize a
       workspace-wide header, linkage, graph, or body cache. Initialize the
       immutable product before the loop or stream independent file objects.
@@ -261,6 +265,10 @@ class and verify each box.
       `IdgQueryService::global_linkage_index()` and streams exact attribution
       bodies on demand; it never calls `AnalyzerDb::global_index()` and
       materializes every body beside an already-open graph.
+- [ ] **Function attribution batches by file.** A broad consumer opens one
+      validated frame directory per admitted file and range-decodes only its
+      requested function frames; it does not reopen the directory per row or
+      decompress unrequested sibling functions.
 - [ ] **Inspect syntax and IDG residency are sequential.** `inspect
       --taint-flow` records exact AST target spans, releases syntax bodies and
       graph caches, and only then opens the persisted IDG. Broad target sets

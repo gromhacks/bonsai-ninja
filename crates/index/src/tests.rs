@@ -326,6 +326,14 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
     assert!(retained.static_string_maps.is_empty());
     assert!(retained.character_substitutions.is_empty());
 
+    let cloned_headers = global.clone_header_index();
+    assert!(cloned_headers.decl_of(symbol).is_some());
+    assert!(cloned_headers.linkage_facts(symbol).is_none());
+    assert!(
+        global.linkage_facts(symbol).is_some(),
+        "header projection must not consume or mutate canonical linkage"
+    );
+
     global.remove_file(file);
     assert!(global.linkage_facts(symbol).is_none());
 }

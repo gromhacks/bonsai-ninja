@@ -151,7 +151,7 @@ pub fn resolution_coverage(
     ws: &Workspace,
     filters: &ResolutionCoverageFilters<'_>,
 ) -> Vec<ResolutionCoverageFileRow> {
-    let global = ws.compiler_linkage_index();
+    let global = ws.compiler_header_index();
     let index = ResolutionIndex::new(ws);
 
     let mut rows = Vec::new();
@@ -217,7 +217,7 @@ pub(crate) fn resolution_incomplete_reasons(ws: &Workspace) -> Vec<String> {
         return reasons;
     }
 
-    let global = ws.compiler_linkage_index();
+    let global = ws.compiler_header_index();
     let index = ResolutionIndex::new(ws);
     let mut unresolved_call_sites = 0usize;
     let mut dynamic_call_sites = 0usize;
@@ -351,7 +351,7 @@ pub(crate) fn resolution_incomplete_reasons_for_funcs(
     ws: &Workspace,
     funcs: impl IntoIterator<Item = FuncId>,
 ) -> Vec<String> {
-    let global = ws.compiler_linkage_index();
+    let global = ws.compiler_header_index();
     let index = ResolutionIndex::new(ws);
     let mut unique = AHashSet::new();
     let mut aliases_by_file: AHashMap<bonsai_common::FileId, AHashMap<String, AliasTarget>> = AHashMap::new();
@@ -455,7 +455,7 @@ fn workspace_module_tails(ws: &Workspace) -> AHashSet<String> {
     // `module_may_target_workspace` compares the final normalized module
     // segment. Precompute that exact relation once. Walking every workspace
     // file for every imported call site would make coverage superlinear.
-    ws.compiler_linkage_index()
+    ws.compiler_header_index()
         .all_files()
         .filter_map(|file| ws.vfs().path(file).ok())
         .filter_map(|path| bonsai_resolve::module_path_parts(&path.to_string_lossy()).pop())

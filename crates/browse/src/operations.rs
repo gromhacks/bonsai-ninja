@@ -7,8 +7,8 @@
 //! sees the same facts.
 
 use crate::common::{
-    best_textual_relevance_key, file_path_matches_filter, format_span, make_name_filter,
-    textual_relevance_key,
+    admitted_file_decl_index, best_textual_relevance_key, file_path_matches_filter, format_span,
+    make_name_filter, source_files_small_first, textual_relevance_key,
 };
 use bonsai_lang_api::operations_from_flow_events;
 use bonsai_workspace::Workspace;
@@ -56,7 +56,8 @@ pub fn operations(ws: &Workspace, f: &OperationsFilters<'_>) -> Result<Vec<Opera
 
     let kind_match = make_name_filter(f.kind, f.regex)?;
     let name_match = make_name_filter(f.name, f.regex)?;
-    let files = ws.vfs().all_files();
+    let files = source_files_small_first(ws);
+    let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
     let mut out: Vec<OperationOut> = files
         .par_iter()
         .fold(Vec::new, |mut acc, &file| {
@@ -74,7 +75,7 @@ pub fn operations(ws: &Workspace, f: &OperationsFilters<'_>) -> Result<Vec<Opera
             // flow annotator's canonical FileId lookup. Feeding it the VFS's
             // absolute path made every operations-row flow label empty.
             let file_path = crate::common::workspace_relative_path(ws, &absolute_file_path);
-            let Some(index) = ws.db().decl_index_uncached(file) else {
+            let Some(index) = admitted_file_decl_index(ws, file, &memory_permits) else {
                 return acc;
             };
             for decl in &index.defs {

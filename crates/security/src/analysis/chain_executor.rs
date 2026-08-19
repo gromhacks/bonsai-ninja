@@ -595,7 +595,14 @@ impl SourceGroupExecutor<'_> {
                         continue;
                     }
                     let evidence = cached_evidence.get_or_insert_with(|| {
-                        build_call_evidence(ws, &trace_index, &canonical_chain_index, src_func_id, call)
+                        build_call_evidence(
+                            ws,
+                            self.global.as_ref(),
+                            &trace_index,
+                            &canonical_chain_index,
+                            src_func_id,
+                            call,
+                        )
                     });
                     let Some(evidence) = evidence.as_ref() else {
                         metrics.lineage_misses = metrics.lineage_misses.saturating_add(1);

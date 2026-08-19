@@ -1,6 +1,9 @@
 //! `bonsai-ninja comments` data layer.
 
-use crate::common::{file_path_matches_filter, format_span, make_name_filter, textual_relevance_key};
+use crate::common::{
+    admitted_file_decl_index, file_path_matches_filter, format_span, make_name_filter,
+    source_files_small_first, textual_relevance_key,
+};
 use crate::strings::enclosing_fn_for_index_line;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -37,7 +40,8 @@ pub struct CommentOut {
 pub fn comments(ws: &Workspace, f: &CommentsFilters<'_>) -> Result<Vec<CommentOut>, regex::Error> {
     use rayon::prelude::*;
     let contains_match = make_name_filter(f.contains, f.regex)?;
-    let files = ws.vfs().all_files();
+    let files = source_files_small_first(ws);
+    let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
     let mut out: Vec<CommentOut> = files
         .par_iter()
         .flat_map_iter(|&file| {
@@ -52,7 +56,7 @@ pub fn comments(ws: &Workspace, f: &CommentsFilters<'_>) -> Result<Vec<CommentOu
                     return per_file.into_iter();
                 }
             }
-            let Some(idx) = ws.db().decl_index_uncached(file) else {
+            let Some(idx) = admitted_file_decl_index(ws, file, &memory_permits) else {
                 return per_file.into_iter();
             };
             for comment in &idx.comments {

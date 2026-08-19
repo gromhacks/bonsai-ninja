@@ -1383,23 +1383,57 @@ impl AnalyzerDb {
         file: FileId,
         declaration_span: Span,
     ) -> Option<CompilerFunctionAttribution> {
-        let descriptor = source_descriptor(self, file)?;
+        self.compiler_function_attributions_uncached(file, &[declaration_span])
+            .pop()
+            .flatten()
+    }
+
+    /// Load an exact set of function attribution frames from one source file.
+    ///
+    /// The per-file directory is validated once and shared by every requested
+    /// span. Only those frames are read and decompressed; unrequested sibling
+    /// functions remain on disk. Results preserve input order, including a
+    /// `None` for a span not owned by the file. Any damaged persisted frame
+    /// falls back to one canonical Tree-sitter lowering for the complete
+    /// batch, so storage failure changes performance rather than semantics.
+    #[must_use]
+    pub fn compiler_function_attributions_uncached(
+        &self,
+        file: FileId,
+        declaration_spans: &[Span],
+    ) -> Vec<Option<CompilerFunctionAttribution>> {
+        if declaration_spans.is_empty() {
+            return Vec::new();
+        }
+        let Some(descriptor) = source_descriptor(self, file) else {
+            return vec![None; declaration_spans.len()];
+        };
         if let Some(store) = self.inner.compiler_object_store.read().as_ref().cloned() {
             match store.load_attribution_index(&descriptor) {
                 Ok(Some(index)) => {
-                    match store.load_function_attribution(&descriptor, &index, declaration_span) {
-                        Ok(attribution) => return attribution,
-                        Err(error) => {
-                            self.inner
-                                .compiler_object_store_requires_repair
-                                .store(true, std::sync::atomic::Ordering::Release);
-                            bonsai_diagnostics::debug_log!(
-                                "compiler-object",
-                                "compiler function attribution miss for {}: {}",
-                                descriptor.path,
-                                error
-                            );
+                    let mut attributions = Vec::with_capacity(declaration_spans.len());
+                    let mut failure = None;
+                    for &declaration_span in declaration_spans {
+                        match store.load_function_attribution(&descriptor, &index, declaration_span) {
+                            Ok(attribution) => attributions.push(attribution),
+                            Err(error) => {
+                                failure = Some(error);
+                                break;
+                            }
                         }
+                    }
+                    if let Some(error) = failure {
+                        self.inner
+                            .compiler_object_store_requires_repair
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        bonsai_diagnostics::debug_log!(
+                            "compiler-object",
+                            "compiler function attribution miss for {}: {}",
+                            descriptor.path,
+                            error
+                        );
+                    } else {
+                        return attributions;
                     }
                 }
                 Ok(None) => {}
@@ -1416,12 +1450,21 @@ impl AnalyzerDb {
                 }
             }
         }
-        self.compiler_file_object_uncached(file)?
-            .declarations
-            .as_ref()
-            .map(CompilerAttribution::from_decl_index)?
-            .function_at_span(declaration_span)
-            .cloned()
+        let attribution = self.compiler_file_object_uncached(file).and_then(|object| {
+            object
+                .declarations
+                .as_ref()
+                .map(CompilerAttribution::from_decl_index)
+        });
+        declaration_spans
+            .iter()
+            .map(|&span| {
+                attribution
+                    .as_ref()
+                    .and_then(|projection| projection.function_at_span(span))
+                    .cloned()
+            })
+            .collect()
     }
 
     /// Visit exact compiler objects for a deterministic file sequence using
@@ -3182,6 +3225,45 @@ mod tests {
 
         assert!(validate_compiler_object_sidecar_layout(root.path()).is_err());
         assert!(!db.compiler_object_sidecar_is_current(root.path()));
+    }
+
+    #[test]
+    fn function_attribution_batch_preserves_requested_span_order() {
+        let vfs = Arc::new(Vfs::new());
+        let file = vfs.write(
+            "src/input.py".to_string(),
+            Arc::<str>::from(
+                "def first(payload):\n    left(payload)\n\ndef second(other):\n    right(other)\n",
+            ),
+        );
+        let registry = Arc::new(LanguageRegistry::new());
+        registry.register(Arc::new(bonsai_lang_python::PythonAdapter::new()));
+        let db = AnalyzerDb::new(Arc::clone(&vfs), registry);
+        let index = db.decl_index_uncached(file).expect("Python compiler IR");
+        let first = index
+            .defs
+            .iter()
+            .find(|decl| decl.name == "first")
+            .expect("first function")
+            .span;
+        let second = index
+            .defs
+            .iter()
+            .find(|decl| decl.name == "second")
+            .expect("second function")
+            .span;
+        let missing = Span::new(file, second.end.saturating_add(1), second.end.saturating_add(2));
+
+        let batch = db.compiler_function_attributions_uncached(file, &[second, missing, first]);
+        assert_eq!(batch.len(), 3);
+        assert_eq!(batch[0].as_ref().expect("second frame").calls[0].name, "right");
+        assert!(batch[1].is_none());
+        assert_eq!(batch[2].as_ref().expect("first frame").calls[0].name, "left");
+        assert_eq!(
+            db.compiler_function_attribution_uncached(file, first),
+            batch[2],
+            "the single-frame facade must preserve batch semantics"
+        );
     }
 
     #[test]

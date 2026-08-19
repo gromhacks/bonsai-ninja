@@ -4847,7 +4847,7 @@ impl IdgQueryService {
         let segment = self.workspace.segment_view(seg_id)?;
         let idg_node = segment.nodes.get(local_node)?;
         let place = segment.places.get(idg_node.place)?;
-        Some(self.build_point_ref(idg_node.func, place))
+        Some(self.build_point_ref(idg_node.func, place, &segment.strings))
     }
 
     /// Return the compiler identity of a call-argument node.
@@ -6722,7 +6722,7 @@ impl IdgQueryService {
             let Some(ws_node) = Self::ws_node_for(&unified, seg_id, edge.to) else {
                 continue;
             };
-            let point = self.build_point_ref(func, to_place);
+            let point = self.build_point_ref(func, to_place, &segment.strings);
             if point.name.trim().is_empty() {
                 continue;
             }
@@ -9416,20 +9416,19 @@ impl IdgQueryService {
     /// owning decl's name span (used as the default span for places
     /// that don't carry one — Param, Return, Read/Write of a bare
     /// name).
-    fn build_point_ref(&self, func: FuncId, place: &Place) -> PointRef {
+    fn build_point_ref(
+        &self,
+        func: FuncId,
+        place: &Place,
+        strings: &bonsai_factstore::StringPoolBuilder,
+    ) -> PointRef {
         let decl = self.global.decl_of(bonsai_common::SymbolId::new(func.raw()));
         let default_span = decl
             .map(|d| d.name_span)
             .unwrap_or_else(|| Span::empty(bonsai_common::FileId::INVALID, 0));
         let place_name = |name: bonsai_factstore::StrId,
                           path: &smallvec::SmallVec<[bonsai_factstore::StrId; 4]>| {
-            let Some(segment_id) = self.workspace.segment_for_func(func) else {
-                return String::new();
-            };
-            let Some(segment) = self.workspace.segment_view(segment_id) else {
-                return String::new();
-            };
-            let Some(base) = segment.strings.get(name) else {
+            let Some(base) = strings.get(name) else {
                 return String::new();
             };
             if path.is_empty() {
@@ -9437,7 +9436,7 @@ impl IdgQueryService {
             }
             let mut out = base.to_string();
             for part in path {
-                if let Some(segment_part) = segment.strings.get(*part) {
+                if let Some(segment_part) = strings.get(*part) {
                     out.push('.');
                     out.push_str(segment_part);
                 }

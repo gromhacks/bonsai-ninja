@@ -10,7 +10,7 @@
 
 use crate::common::{
     decl_or_ancestor_name_matches, filtered_file_decl_index, format_span, make_callable_name_filter,
-    make_name_filter, textual_relevance_key,
+    make_name_filter, source_files_small_first, textual_relevance_key,
 };
 use bonsai_lang_api::{FlowEvent, RefKind};
 use bonsai_workspace::Workspace;
@@ -72,7 +72,8 @@ pub fn calls(ws: &Workspace, f: &CallsFilters<'_>) -> Result<Vec<CallOut>, regex
     use rayon::prelude::*;
     let callee_match = make_callable_name_filter(f.callee, f.regex)?;
     let caller_match = make_name_filter(f.caller, f.regex)?;
-    let files = ws.vfs().all_files();
+    let files = source_files_small_first(ws);
+    let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
     // `fold` accumulates per-thread (not per-file) so we don't pay
     // the per-file `Vec` allocation cost — `calls` on hub names
     // like TypeScript's `visitNode` produces millions of records,
@@ -87,7 +88,7 @@ pub fn calls(ws: &Workspace, f: &CallsFilters<'_>) -> Result<Vec<CallOut>, regex
             // of constructing a workspace header/linkage table merely to
             // remap unused SymbolIds. This also keeps lazy header construction
             // out of the Rayon body loop.
-            let Some(index) = filtered_file_decl_index(ws, file, f.file) else {
+            let Some(index) = filtered_file_decl_index(ws, file, f.file, &memory_permits) else {
                 return acc;
             };
             let defs_by_symbol = index

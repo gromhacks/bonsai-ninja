@@ -399,6 +399,15 @@ constraint can consult that view. A broader later request rebuilds the exact
 larger projection. Scheduling and recomputation can change; admitted facts and
 matches cannot.
 
+Source-flow compilation follows the same lifetime rule. After its exact
+callgraph corridor is selected, the persisted scoped IDG streams each admitted
+compiler body directly into transfer lowering. It does not populate a
+workspace body/import cache first and then decode the same bodies again for
+the IDG. Endpoint matcher bodies, standalone syntax headers, a previously open
+canonical IDG, and the workspace callgraph cache are released at their phase
+boundaries; the selected compact linkage and source corridor remain exact
+inputs to the scoped graph.
+
 ## Query phase contracts
 
 Commands request the lowest compiler product that can answer their contract:
@@ -407,7 +416,14 @@ Commands request the lowest compiler product that can answer their contract:
   callgraph, rulepack, or IDG.
 - Syntax inventories stream file-local `CompiledFileObject` facts. Definitions
   and cross-file symbol labels may retain compact linker headers; none of these
-  commands retains all function bodies.
+  commands retains all function bodies. Broad body inventories apply file and
+  compact-header predicates before decoding, schedule surviving files behind
+  source-size-weighted memory permits, and sort their owned rows afterward.
+  Entrypoint callee previews group roots by file, open that file's validated
+  attribution directory once, and range-decode only the requested exact
+  function frames behind the same source-weighted admission. Table-only
+  enclosing-function labels come from compiler headers rather than reopening a
+  body for every row.
 - File/name/kind predicates run during the IR walk before result-row
   allocation. JSON pagination estimates serialized fields only and never reads
   text-only source-line previews.

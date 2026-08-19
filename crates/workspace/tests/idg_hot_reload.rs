@@ -71,6 +71,45 @@ fn compiler_linkage_is_singleton_per_source_snapshot() {
 }
 
 #[test]
+fn compiler_headers_reuse_a_resident_linkage_generation() {
+    let ws = Workspace::new(registry());
+    ws.vfs().write(
+        "app.py".to_string(),
+        Arc::<str>::from("def first(value):\n    return value\n"),
+    );
+    let linkage = ws.compiler_linkage_index();
+    let headers = ws.compiler_header_index();
+
+    assert!(Arc::ptr_eq(&linkage, &headers));
+}
+
+#[test]
+fn function_scoped_graph_planning_accepts_a_warm_idg_header_owner() {
+    let ws = Workspace::new(registry());
+    ws.vfs().write(
+        "app.py".to_string(),
+        Arc::<str>::from("def leaf(value):\n    return value\n\ndef root(value):\n    return leaf(value)\n"),
+    );
+    let headers = ws.compiler_header_index();
+    let root = headers
+        .find_by_name("root")
+        .first()
+        .map(|symbol| bonsai_common::FuncId::new(symbol.raw()))
+        .expect("root function");
+    let leaf = headers
+        .find_by_name("leaf")
+        .first()
+        .map(|symbol| bonsai_common::FuncId::new(symbol.raw()))
+        .expect("leaf function");
+    drop(headers);
+    ws.build_and_seed_idg_service();
+
+    let scoped = ws.target_emission_resolved_call_graph(&[root], &[leaf], None);
+    assert!(scoped.funcs.contains(&root));
+    assert!(scoped.funcs.contains(&leaf));
+}
+
+#[test]
 fn idg_service_invalidated_then_rebuilt_after_file_edit() {
     let tmp = std::env::temp_dir().join(format!(
         "bonsai-idg-hot-reload-{}-{}",

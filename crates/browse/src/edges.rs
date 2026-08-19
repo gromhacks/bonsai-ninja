@@ -117,7 +117,7 @@ pub fn dump_edges(ws: &Workspace, f: &EdgesFilters<'_>) -> Vec<EdgeRecord> {
             return records;
         }
     }
-    let global = ws.compiler_linkage_index();
+    let global = ws.compiler_header_index();
     let resolved = ws.cached_resolved_call_graph();
     let mut records: Vec<EdgeRecord> = resolved
         .inner()

@@ -4,7 +4,7 @@
 //! `--function`). The first place to look when `dump-hir` /
 //! `inspect` silently miss a construct.
 
-use crate::common::file_path_matches_filter;
+use crate::common::{file_path_matches_filter, source_files_small_first};
 use bonsai_hash::fnv1a_names_low32;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -84,13 +84,24 @@ pub fn compute_node_id(file_path: &str, start_byte: usize, end_byte: usize, kind
 /// to the optional `--node` drill-down.
 pub fn dump_ast(ws: &Workspace, f: &AstFilters<'_>) -> AstOutcome {
     use rayon::prelude::*;
+    struct SyntaxRelease<'a> {
+        ws: &'a Workspace,
+        file: bonsai_common::FileId,
+    }
+    impl Drop for SyntaxRelease<'_> {
+        fn drop(&mut self) {
+            self.ws.db().release_syntax(self.file);
+        }
+    }
+
     enum FileResult {
         Dump(AstFileDump),
         Ambiguous(Vec<AstFunctionCandidate>),
     }
 
     let depth_cap = f.max_depth.unwrap_or(usize::MAX);
-    let all_files = ws.vfs().all_files();
+    let all_files = source_files_small_first(ws);
+    let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
     // Parallel per-file tree walk. `tree_sitter::Node` isn't Send,
     // but every node we touch is created, walked, and converted to
     // an owned `AstNode` entirely within a single worker's stack —
@@ -108,8 +119,10 @@ pub fn dump_ast(ws: &Workspace, f: &AstFilters<'_>) -> AstOutcome {
                     return None;
                 }
             }
-            let parsed = ws.db().parse(file_id).ok()?;
             let snapshot = ws.vfs().snapshot(file_id).ok()?;
+            let _memory_permit = memory_permits.acquire(snapshot.text.len() as u64);
+            let _syntax_release = SyntaxRelease { ws, file: file_id };
+            let parsed = ws.db().parse(file_id).ok()?;
             let source = snapshot.text.as_ref();
             let tree_root = parsed.tree.root_node();
 

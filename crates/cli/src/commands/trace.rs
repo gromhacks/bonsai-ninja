@@ -502,7 +502,7 @@ fn ambiguous_symbol_error(symbol: &str, count: usize, candidates: &[String]) -> 
 
 pub(crate) fn not_found_with_suggestions(ws: &Workspace, symbol: &str) -> anyhow::Error {
     let needle = symbol.to_lowercase();
-    let global = ws.compiler_linkage_index();
+    let global = ws.compiler_header_index();
     // Collect all candidate names with a similarity score. Higher score =
     // more relevant. Combines: substring containment (either direction),
     // shared-prefix length, and normalized Levenshtein.
@@ -564,7 +564,7 @@ fn common_prefix_len(a: &str, b: &str) -> usize {
 /// formatting them into an error.
 pub(crate) fn nearest_names(ws: &Workspace, symbol: &str, limit: usize) -> Vec<String> {
     let needle = symbol.to_lowercase();
-    let global = ws.compiler_linkage_index();
+    let global = ws.compiler_header_index();
     let mut scored: Vec<(i32, String)> = Vec::new();
     for f in global.all_files() {
         for d in global.decls_in(f) {

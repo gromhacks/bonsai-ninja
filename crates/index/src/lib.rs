@@ -929,6 +929,26 @@ impl GlobalIndex {
         self.linkage_by_symbol.shrink_to_fit();
         self
     }
+
+    /// Clone only declaration/type headers from a complete linkage index.
+    ///
+    /// Unlike `self.clone().into_header_index()`, this never duplicates the
+    /// potentially large call-linkage map even transiently. Targeted query
+    /// planners use the private result as a mutable projection while the
+    /// canonical linkage or IDG generation remains shared and immutable.
+    #[must_use]
+    pub fn clone_header_index(&self) -> Self {
+        Self {
+            identity: self.identity.clone(),
+            by_file: self.by_file.clone(),
+            entries: self.entries.clone(),
+            by_name: self.by_name.clone(),
+            refs_by_symbol: self.refs_by_symbol.clone(),
+            slots_by_file: self.slots_by_file.clone(),
+            finalized_bases_by_type: self.finalized_bases_by_type.clone(),
+            linkage_by_symbol: AHashMap::new(),
+        }
+    }
 }
 
 #[derive(Deserialize)]

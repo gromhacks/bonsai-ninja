@@ -15,6 +15,7 @@
 use bonsai_lang_api::DeclKind;
 use bonsai_workspace::Workspace;
 use serde::{Deserialize, Serialize};
+use std::ops::Deref;
 
 /// Re-export of the common span type so callers don't need a
 /// separate `bonsai_common` dependency.
@@ -27,11 +28,54 @@ pub type NameFilter = Box<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// Stream one exact file-local compiler object after applying a workspace-
 /// relative path filter. Filtering happens before body allocation.
-pub(crate) fn filtered_file_decl_index(
+pub(crate) struct AdmittedDeclIndex<'a> {
+    index: bonsai_lang_api::DeclIndex,
+    _permit: bonsai_common::resources::SyntaxMemoryPermit<'a>,
+}
+
+impl Deref for AdmittedDeclIndex<'_> {
+    type Target = bonsai_lang_api::DeclIndex;
+
+    fn deref(&self) -> &Self::Target {
+        &self.index
+    }
+}
+
+/// Order independent compiler units from smallest to largest so a few large
+/// files cannot occupy every worker while waiting for weighted memory
+/// admission. Browse results are explicitly sorted after collection, so this
+/// changes scheduling only.
+pub(crate) fn source_files_small_first(ws: &Workspace) -> Vec<bonsai_common::FileId> {
+    let mut files = ws.vfs().all_files();
+    files.sort_by_cached_key(|file| ws.vfs().snapshot(*file).map_or(0, |snapshot| snapshot.text.len()));
+    files
+}
+
+/// Decode one exact compiler body while retaining its source-weighted memory
+/// permit for the complete lifetime of the returned IR.
+pub(crate) fn admitted_file_decl_index<'a>(
+    ws: &Workspace,
+    file: bonsai_common::FileId,
+    permits: &'a bonsai_common::SyntaxMemoryPermitPool,
+) -> Option<AdmittedDeclIndex<'a>> {
+    let source_bytes = ws
+        .vfs()
+        .snapshot(file)
+        .map_or(0, |snapshot| snapshot.text.len() as u64);
+    let permit = permits.acquire(source_bytes);
+    let index = ws.db().decl_index_uncached(file)?;
+    Some(AdmittedDeclIndex {
+        index,
+        _permit: permit,
+    })
+}
+
+pub(crate) fn filtered_file_decl_index<'a>(
     ws: &Workspace,
     file: bonsai_common::FileId,
     filter: Option<&str>,
-) -> Option<bonsai_lang_api::DeclIndex> {
+    permits: &'a bonsai_common::SyntaxMemoryPermitPool,
+) -> Option<AdmittedDeclIndex<'a>> {
     if let Some(filter) = filter {
         let path = ws
             .vfs()
@@ -42,7 +86,7 @@ pub(crate) fn filtered_file_decl_index(
             return None;
         }
     }
-    ws.db().decl_index_uncached(file)
+    admitted_file_decl_index(ws, file, permits)
 }
 
 /// Match a declaration or any compiler-owned lexical ancestor by name.
@@ -295,7 +339,7 @@ impl Locator {
         loc.language = db
             .adapter_for(span.file)
             .map(|a| a.language_id().as_str().to_string());
-        let global = ws.compiler_linkage_index();
+        let global = ws.compiler_header_index();
         let decls_in_file: &[bonsai_lang_api::Decl] = global.decls_in(span.file);
         let decls_ref: Vec<&bonsai_lang_api::Decl> = decls_in_file.iter().collect();
         if let Some((_func_id, decl_name)) = bonsai_inspect::find_enclosing_func(&decls_ref, span) {

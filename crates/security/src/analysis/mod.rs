@@ -1605,6 +1605,10 @@ where
     context
         .caches
         .seed_resolved_call_graph(source_call_graph.as_ref());
+    // The source corridor now owns the exact graph snapshot needed by the
+    // scoped IDG. Drop the workspace cache owner so a complete callgraph is
+    // never retained beside that smaller graph generation.
+    context.ws.release_resolved_call_graph_cache();
     on_progress(AnalysisProgress::PhaseTicked);
 
     let mut scoped_func_set: AHashSet<FuncId> = AHashSet::default();
@@ -1653,7 +1657,6 @@ where
         label: "taint-cache",
         detail: cache_report.detail(),
     });
-    ensure_workspace_files_indexed(context.ws, &scoped_files);
     let idg = seed_idg_service_for_rulepack_for_files(
         context.ws,
         context.pack,
@@ -1741,13 +1744,13 @@ fn build_source_group_candidates(
             let Some(path) = chain_funcs_for_lineage(&emission.records, job.start, terminal) else {
                 continue;
             };
-            let Some(chain_names) = chain_names_for_path(context.ws, &path) else {
+            let Some(chain_names) = chain_names_for_path(context.ws, context.global, &path) else {
                 continue;
             };
             if !seen_chains.insert(chain_names.clone()) {
                 continue;
             }
-            let taint_path = taint_path_for_lineage(context.ws, &emission.records, None);
+            let taint_path = taint_path_for_lineage(context.ws, context.global, &emission.records, None);
             let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
             let precision = chain_precision_for_records(&emission.records);
             if !precision.is_semantic() {
@@ -1766,7 +1769,7 @@ fn build_source_group_candidates(
         }
         if lineages.is_empty() {
             let path = vec![job.start];
-            let Some(chain_names) = chain_names_for_path(context.ws, &path) else {
+            let Some(chain_names) = chain_names_for_path(context.ws, context.global, &path) else {
                 continue;
             };
             let taint_path = Vec::new();
@@ -2087,6 +2090,16 @@ where
             source_function_count
         ),
     });
+    // Endpoint matching and source seeding are complete. Keep the compact
+    // linkage `Arc` above, then release phase-local matcher bodies, syntax
+    // headers, and any canonical IDG before opening the scoped source graph.
+    // Every released product is exactly replayable from compiler objects;
+    // retaining it here only multiplies peak memory.
+    crate::matcher::release_matcher_fact_caches();
+    ws.release_idg_service_cache();
+    ws.release_compiler_header_cache();
+    ws.release_exact_body_cache();
+    ws.db().release_global_index();
     let source_scope = compile_source_lineage_scope(
         &SourceLineageCompilationContext {
             ws,
@@ -2132,6 +2145,7 @@ where
         candidates.retain(|candidate| {
             !source_candidate_has_excluded_path(
                 ws,
+                global.as_ref(),
                 candidate,
                 &options.exclude_files,
                 options.exclude_tests,
@@ -2928,7 +2942,7 @@ fn source_finding_match(hit: &RuleMatch, pack: &Rulepack) -> Option<FindingMatch
 
 fn func_id_for_match(ws: &Workspace, hit: &RuleMatch) -> Option<FuncId> {
     let expected_name = hit.enclosing_fn.as_deref();
-    let global = ws.compiler_linkage_index();
+    let global = ws.compiler_header_index();
     if let Some(entry) = ws
         .enclosing_index()
         .enclosing_for(global.as_ref(), hit.span.file, hit.span.start)
@@ -3143,6 +3157,7 @@ struct CallEvidence {
 
 fn build_call_evidence<'a>(
     ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
     trace_index: &AHashMap<u64, &'a TaintedCallEdge>,
     canonical_chain_index: &CanonicalChainIndex<'a>,
     source_func: FuncId,
@@ -3175,7 +3190,7 @@ fn build_call_evidence<'a>(
                 }
             }
             let chain_precision = chain_precision_for_records(&records);
-            let taint_path = taint_path_for_lineage(ws, &records, Some(call));
+            let taint_path = taint_path_for_lineage(ws, global, &records, Some(call));
             (
                 chain_funcs,
                 sanitizer_candidate_funcs,
@@ -3195,7 +3210,7 @@ fn build_call_evidence<'a>(
     if !chain_precision.is_semantic() {
         return None;
     }
-    let chain_names = chain_names_for_path(ws, &chain_funcs)?;
+    let chain_names = chain_names_for_path(ws, global, &chain_funcs)?;
     let sink_decl = ws.exact_decl(SymbolId::new(call.caller.raw()));
     let sink_events = sink_decl.as_deref().map(|decl| decl.flow_events.as_slice());
     let mut sink_tainted_args: Vec<TaintedArgInfo> = call
@@ -3585,6 +3600,7 @@ fn chain_funcs_for_lineage(
 
 fn propagation_step_for_edge(
     ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
     record: &TaintedCallEdge,
     names: &AHashMap<FuncId, String>,
 ) -> Option<TaintPropagationStep> {
@@ -3592,8 +3608,8 @@ fn propagation_step_for_edge(
         return None;
     }
     let (file, line, column) = resolve_span_location(ws, record.call_span);
-    let caller = path_display_name(ws, names, record.caller);
-    let callee = path_display_name(ws, names, record.callee);
+    let caller = path_display_name(global, names, record.caller);
+    let callee = path_display_name(global, names, record.callee);
     TaintPropagationStep {
         caller,
         callee,
@@ -3615,6 +3631,7 @@ fn propagation_step_for_edge(
 
 fn propagation_step_for_terminal_call(
     ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
     call: &TaintedCall,
     names: &AHashMap<FuncId, String>,
 ) -> TaintPropagationStep {
@@ -3635,10 +3652,10 @@ fn propagation_step_for_terminal_call(
             param_name: receiver.to_string(),
         });
     }
-    let caller = path_display_name(ws, names, call.caller);
+    let caller = path_display_name(global, names, call.caller);
     TaintPropagationStep {
         caller: if caller == call.name {
-            func_display_name_with_site(ws, call.caller)
+            func_display_name_with_site(ws, global, call.caller)
         } else {
             caller
         },
@@ -3652,16 +3669,17 @@ fn propagation_step_for_terminal_call(
 
 fn taint_path_for_lineage(
     ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
     records: &[&TaintedCallEdge],
     terminal_call: Option<&TaintedCall>,
 ) -> Vec<TaintPropagationStep> {
-    let names = path_display_names(ws, records, terminal_call);
+    let names = path_display_names(ws, global, records, terminal_call);
     let mut path: Vec<TaintPropagationStep> = records
         .iter()
-        .filter_map(|record| propagation_step_for_edge(ws, record, &names))
+        .filter_map(|record| propagation_step_for_edge(ws, global, record, &names))
         .collect();
     if let Some(call) = terminal_call {
-        path.push(propagation_step_for_terminal_call(ws, call, &names));
+        path.push(propagation_step_for_terminal_call(ws, global, call, &names));
     }
     normalize_taint_path(path)
 }
@@ -3676,6 +3694,7 @@ fn taint_path_for_lineage(
 /// making connected chains look broken.
 fn path_display_names(
     ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
     records: &[&TaintedCallEdge],
     terminal_call: Option<&TaintedCall>,
 ) -> AHashMap<FuncId, String> {
@@ -3692,7 +3711,7 @@ fn path_display_names(
     let mut by_name: BTreeMap<String, Vec<FuncId>> = BTreeMap::new();
     for func in &funcs {
         by_name
-            .entry(func_display_name(ws, *func))
+            .entry(func_display_name(global, *func))
             .or_default()
             .push(*func);
     }
@@ -3701,7 +3720,7 @@ fn path_display_names(
         let ambiguous = ids.len() > 1;
         for func in ids {
             let display = if ambiguous {
-                func_display_name_with_site(ws, func)
+                func_display_name_with_site(ws, global, func)
             } else {
                 name.clone()
             };
@@ -3711,11 +3730,15 @@ fn path_display_names(
     names
 }
 
-fn path_display_name(ws: &Workspace, names: &AHashMap<FuncId, String>, func: FuncId) -> String {
+fn path_display_name(
+    global: &bonsai_index::GlobalIndex,
+    names: &AHashMap<FuncId, String>,
+    func: FuncId,
+) -> String {
     names
         .get(&func)
         .cloned()
-        .unwrap_or_else(|| func_display_name(ws, func))
+        .unwrap_or_else(|| func_display_name(global, func))
 }
 
 fn normalize_taint_path(path: Vec<TaintPropagationStep>) -> Vec<TaintPropagationStep> {
@@ -3796,15 +3819,14 @@ fn merge_taint_report_step(previous: &mut TaintPropagationStep, next: TaintPropa
     }
 }
 
-fn func_display_name(ws: &Workspace, func: FuncId) -> String {
-    ws.compiler_linkage_index()
+fn func_display_name(global: &bonsai_index::GlobalIndex, func: FuncId) -> String {
+    global
         .decl_of(SymbolId::new(func.raw()))
         .map(|decl| decl.name.clone())
         .unwrap_or_else(|| format!("func#{}", func.raw()))
 }
 
-fn func_display_name_with_site(ws: &Workspace, func: FuncId) -> String {
-    let global = ws.compiler_linkage_index();
+fn func_display_name_with_site(ws: &Workspace, global: &bonsai_index::GlobalIndex, func: FuncId) -> String {
     let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
         return format!("func#{}", func.raw());
     };
@@ -3903,14 +3925,6 @@ fn security_scan_files(
         .collect()
 }
 
-fn ensure_workspace_files_indexed(ws: &Workspace, files: &[FileId]) {
-    use rayon::prelude::*;
-    files.par_iter().for_each(|&file| {
-        let _ = ws.db().decl_index(file);
-        let _ = ws.db().import_index(file);
-    });
-}
-
 fn path_is_excluded_with_root(
     root: Option<&Path>,
     path: &str,
@@ -3948,8 +3962,7 @@ fn taint_path_has_excluded_file(
     })
 }
 
-fn func_file_path(ws: &Workspace, func: FuncId) -> Option<String> {
-    let global = ws.compiler_linkage_index();
+fn func_file_path(ws: &Workspace, global: &bonsai_index::GlobalIndex, func: FuncId) -> Option<String> {
     let decl = global.decl_of(SymbolId::new(func.raw()))?;
     ws.vfs()
         .path(decl.span.file)
@@ -3959,6 +3972,7 @@ fn func_file_path(ws: &Workspace, func: FuncId) -> Option<String> {
 
 fn source_candidate_has_excluded_path(
     ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
     candidate: &SourceAnalysisCandidate,
     exclude_files: &[String],
     exclude_tests: bool,
@@ -3978,7 +3992,7 @@ fn source_candidate_has_excluded_path(
         exclude_tests,
         test_path_patterns,
     ) || candidate.path.iter().any(|&func| {
-        func_file_path(ws, func).as_deref().is_some_and(|path| {
+        func_file_path(ws, global, func).as_deref().is_some_and(|path| {
             path_is_excluded_with_root(
                 root.as_deref(),
                 path,
@@ -4093,8 +4107,11 @@ fn merge_source_lineage_status(current: &mut SourceLineageStatus, incoming: Sour
     current.max_paths = current.max_paths.max(incoming.max_paths);
 }
 
-fn chain_names_for_path(ws: &Workspace, path: &[FuncId]) -> Option<Vec<String>> {
-    let global = ws.compiler_linkage_index();
+fn chain_names_for_path(
+    ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
+    path: &[FuncId],
+) -> Option<Vec<String>> {
     let named_funcs: Option<Vec<(FuncId, String)>> = path
         .iter()
         .map(|func| {
@@ -4120,7 +4137,7 @@ fn chain_names_for_path(ws: &Workspace, path: &[FuncId]) -> Option<Vec<String>> 
                     .get(&name)
                     .is_some_and(|distinct| distinct.len() > 1)
                 {
-                    func_display_name_with_site(ws, func)
+                    func_display_name_with_site(ws, global, func)
                 } else {
                     name
                 }

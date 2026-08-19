@@ -1483,6 +1483,29 @@ fn security_finding_workers_reuse_the_planners_resolved_callgraph() {
             && execution.contains("call_graph: chain_call_graph.as_ref()"),
         "the serial source/sink planner must thread one exact resolved callgraph through finding and compiler-guard attribution"
     );
+
+    let analysis_mod = read(&analysis.join("mod.rs"));
+    let chain_executor = read(&analysis.join("chain_executor.rs"));
+    let guard_sanitizers = read(&analysis.join("guard_sanitizers.rs"));
+    for function in [
+        "taint_path_for_lineage",
+        "path_display_names",
+        "chain_names_for_path",
+    ] {
+        let body = function_body(&analysis_mod, function);
+        assert!(
+            !body.contains("compiler_header_index()")
+                && !body.contains("compiler_linkage_index()")
+                && body.contains("global"),
+            "parallel taint helper `{function}` must consume the planner's immutable compiler index instead of lazily opening a workspace-wide cache"
+        );
+    }
+    assert!(
+        function_body(&chain_executor, "execute").contains("self.global.as_ref()")
+            && !function_body(&guard_sanitizers, "finite_literal_selection_sanitizer")
+                .contains("compiler_header_index()"),
+        "finding workers and their guard recognizers must thread the prebuilt compiler index through the parallel phase"
+    );
 }
 
 #[test]
@@ -1514,7 +1537,7 @@ fn syntax_inventory_commands_never_materialize_workspace_bodies() {
     let args = read(&root.join("crates/browse/src/args.rs"));
     for (name, source) in [("calls", calls), ("args", args)] {
         assert!(
-            source.contains("filtered_file_decl_index(ws, file, f.file)")
+            source.contains("filtered_file_decl_index(ws, file, f.file, &memory_permits)")
                 && source.contains(".filter(")
                 && source.contains(".push("),
             "{name} must stream file-local Tree-sitter IR and apply query predicates before collecting output rows"
@@ -1526,8 +1549,10 @@ fn syntax_inventory_commands_never_materialize_workspace_bodies() {
         .find("file_path_matches_filter")
         .expect("filtered compiler-object helper must apply the path predicate");
     let body_decode = filtered_index
-        .find("decl_index_uncached(file)")
-        .expect("filtered compiler-object helper must stream the exact file-local body");
+        .find("admitted_file_decl_index(ws, file, permits)")
+        .expect(
+            "filtered compiler-object helper must delegate exact body decoding through weighted admission",
+        );
     assert!(
         path_predicate < body_decode,
         "browse path predicates must run before a file-local compiler body is decoded"
@@ -1536,8 +1561,8 @@ fn syntax_inventory_commands_never_materialize_workspace_bodies() {
     let imports = read(&root.join("crates/browse/src/imports.rs"));
     let imports_body = function_body(&imports, "imports");
     let linkage_init = imports_body
-        .find("then(|| ws.compiler_linkage_index())")
-        .expect("imports with flow bindings must initialize linkage");
+        .find("then(|| ws.compiler_header_index())")
+        .expect("imports with workspace binding resolution must initialize symbol headers");
     let parallel_loop = imports_body
         .find(".par_iter()")
         .expect("imports must retain parallel file streaming");
@@ -1545,7 +1570,7 @@ fn syntax_inventory_commands_never_materialize_workspace_bodies() {
         linkage_init < parallel_loop
             && !function_body(&imports, "resolve_workspace_module_bindings")
                 .contains("compiler_linkage_index()"),
-        "imports must initialize lazy workspace linkage before entering its Rayon file loop"
+        "imports must initialize lazy workspace headers before entering its Rayon file loop"
     );
 
     let cli_browse = read(&root.join("crates/cli/src/commands/browse.rs"));
@@ -4699,10 +4724,11 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
     let security_analysis = read(&repo_root().join("crates/security/src/analysis/mod.rs"));
     let func_lookup = function_body(&security_analysis, "func_id_for_match");
     assert!(
-        func_lookup.contains("compiler_linkage_index()")
+        func_lookup.contains("compiler_header_index()")
             && func_lookup.contains("enclosing_for(global.as_ref()")
+            && !func_lookup.contains("compiler_linkage_index()")
             && !func_lookup.contains("db().global_index()"),
-        "security finding attribution must use compact compiler linkage for enclosing declarations"
+        "security finding attribution must use independently decodable compiler headers for enclosing declarations"
     );
     let completeness_scan = function_body(&security_analysis, "from_graph");
     assert!(
@@ -4907,6 +4933,22 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
             .contains("build_and_seed_persisted_idg_service_with_transfer_options_for_files_and_call_graph"),
         "security transfer options must enter the persisted scoped compiler path"
     );
+    let source_scope = function_body(&security_analysis, "compile_source_lineage_scope");
+    assert!(
+        !source_scope.contains("decl_index(")
+            && !source_scope.contains("import_index(")
+            && source_scope.contains("release_resolved_call_graph_cache()")
+            && !security_analysis.contains("ensure_workspace_files_indexed"),
+        "security must stream exact scoped compiler bodies into callgraph/IDG construction rather than preloading and retaining the same bodies first"
+    );
+    let source_analysis = function_body(&security_analysis, "run_source_analysis_with_phase_progress");
+    assert!(
+        source_analysis.contains("release_matcher_fact_caches()")
+            && source_analysis.contains("release_idg_service_cache()")
+            && source_analysis.contains("release_compiler_header_cache()")
+            && source_analysis.contains("release_exact_body_cache()"),
+        "source analysis must release endpoint-phase allocations before opening its persisted scoped IDG"
+    );
     let persisted_scope = function_body(
         &workspace,
         "build_and_seed_persisted_idg_service_with_transfer_options_for_files_and_call_graph",
@@ -5006,6 +5048,7 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
 #[test]
 fn security_and_export_idg_consumers_never_materialize_workspace_bodies() {
     let workspace = read(&repo_root().join("crates/workspace/src/lib.rs"));
+    let idg_service = read(&repo_root().join("crates/idg/src/service.rs"));
     let matcher = read(&repo_root().join("crates/security/src/matcher/mod.rs"));
     let security_chain = read(&repo_root().join("crates/security/src/analysis/chain_executor.rs"));
     let security_analysis = read(&repo_root().join("crates/security/src/analysis/mod.rs"));
@@ -5040,6 +5083,19 @@ fn security_and_export_idg_consumers_never_materialize_workspace_bodies() {
             && exact_body_headers.contains("global_linkage_index()")
             && !exact_body_headers.contains("global_index()"),
         "exact-body export beside an open IDG must reuse the graph's compact linkage generation"
+    );
+    let compiler_headers = function_body(&workspace, "compiler_header_index");
+    assert!(
+        compiler_headers.contains("compiler_linkage.read().clone()"),
+        "header-only consumers must reuse an already-resident immutable linkage generation instead of decoding a duplicate symbol table"
+    );
+    let exclusive_headers = function_body(&workspace, "take_exclusive_compiler_header_index");
+    assert!(
+        exclusive_headers.contains("idg_service()")
+            && exclusive_headers.contains("compiler_linkage.read().clone()")
+            && exclusive_headers.matches("clone_header_index()").count() >= 2
+            && !exclusive_headers.contains("clone().into_header_index()"),
+        "function-scoped graph planning must derive an exclusive compact header from warm IDG/linkage owners without cloning their complete call-linkage maps"
     );
 
     let exact_body_cache = read(&repo_root().join("crates/workspace/src/exact_body_cache.rs"));
@@ -5109,6 +5165,8 @@ fn security_and_export_idg_consumers_never_materialize_workspace_bodies() {
     let compiler_object = read(&repo_root().join("crates/db/src/compiler_object.rs"));
     let attribution = function_body(&taint_reachable, "cached_function_attribution");
     let compiler_attribution = function_body(&compiler_object, "compiler_function_attribution_uncached");
+    let compiler_attribution_batch =
+        function_body(&compiler_object, "compiler_function_attributions_uncached");
     let attribution_load = function_body(&compiler_object, "load_function_attribution");
     assert!(
         attribution.contains("compiler_function_attribution_uncached(file, declaration.span)")
@@ -5116,10 +5174,19 @@ fn security_and_export_idg_consumers_never_materialize_workspace_bodies() {
             && !attribution.contains("decl_index_remapped_to_headers")
             && attribution_load.contains("attribution_payload_range")
             && !attribution_load.contains("compressed_object_payload")
-            && compiler_attribution.contains("load_attribution_index(&descriptor)")
-            && compiler_attribution.contains("load_function_attribution")
-            && compiler_attribution.contains("CompilerAttribution::from_decl_index"),
+            && compiler_attribution.contains("compiler_function_attributions_uncached")
+            && compiler_attribution_batch.contains("load_attribution_index(&descriptor)")
+            && compiler_attribution_batch.contains("load_function_attribution")
+            && compiler_attribution_batch.contains("CompilerAttribution::from_decl_index"),
         "compact taint queries must range-decode one exact adapter attribution frame independently of sibling/full compiler bodies"
+    );
+    let point_renderer = function_body(&idg_service, "build_point_ref");
+    let point_resolver = function_body(&idg_service, "resolve_point");
+    assert!(
+        idg_service.contains("strings: &bonsai_factstore::StringPoolBuilder")
+            && !point_renderer.contains("segment_view")
+            && point_resolver.contains("&segment.strings"),
+        "IDG point rendering must reuse the owning segment's validated string table instead of loading that segment again"
     );
     let distilled = function_body(&taint_reachable, "build_function_call_event_summaries");
     assert!(
@@ -5138,6 +5205,89 @@ fn security_and_export_idg_consumers_never_materialize_workspace_bodies() {
             && attribution_insert.contains("pop_lru()")
             && attribution_insert.contains("estimated_bytes > self.budget_bytes"),
         "shared compiler attribution must be byte-weighted and evictable; function counts are not a memory bound"
+    );
+    let browse_entrypoints = read(&repo_root().join("crates/browse/src/entrypoints.rs"));
+    let entrypoints = function_body(&browse_entrypoints, "entrypoints");
+    assert!(
+        entrypoints.contains("compiler_function_attributions_uncached(*file, &spans)")
+            && entrypoints.contains("SyntaxMemoryPermitPool::for_current_process()")
+            && !entrypoints.contains("compiler_attribution_uncached")
+            && !entrypoints.contains("exact_decl_with_headers")
+            && !entrypoints.contains("cached_resolved_call_graph"),
+        "entrypoint inventory must decode one memory-bounded exact attribution projection per file without hydrating bodies or the full callgraph"
+    );
+    let browse_defs = read(&repo_root().join("crates/browse/src/defs.rs"));
+    let defs = function_body(&browse_defs, "defs");
+    assert!(
+        defs.contains("compiler_header_index()")
+            && defs.contains("SyntaxMemoryPermitPool::for_current_process()")
+            && defs.find("file_path_matches_filter").is_some_and(|filter| {
+                defs.find("decl_index_uncached").is_some_and(|body| filter < body)
+            })
+            && !defs.contains("compiler_linkage_index()"),
+        "definition inventory must apply compact file/header predicates before memory-bounded exact body hydration"
+    );
+    let browse_imports = read(&repo_root().join("crates/browse/src/imports.rs"));
+    assert!(
+        function_body(&browse_imports, "imports").contains("compiler_header_index()")
+            && !function_body(&browse_imports, "imports").contains("compiler_linkage_index()"),
+        "import inventory may resolve workspace declarations from symbol headers without opening call linkage"
+    );
+    let browse_common = read(&repo_root().join("crates/browse/src/common.rs"));
+    assert!(
+        function_body(&browse_common, "admitted_file_decl_index")
+            .contains("permits.acquire(source_bytes)")
+            && struct_body(&browse_common, "AdmittedDeclIndex").contains("_permit"),
+        "broad browse body scans must retain a source-weighted permit for the complete lifetime of each decoded compiler IR"
+    );
+    for (module, function) in [
+        ("args.rs", "args"),
+        ("calls.rs", "calls"),
+        ("comments.rs", "comments"),
+        ("operations.rs", "operations"),
+        ("refs.rs", "refs"),
+        ("strings.rs", "strings"),
+        ("vars.rs", "vars"),
+    ] {
+        let source = read(&repo_root().join("crates/browse/src").join(module));
+        let body = function_body(&source, function);
+        assert!(
+            body.contains("source_files_small_first(ws)")
+                && body.contains("SyntaxMemoryPermitPool::for_current_process()")
+                && (body.contains("admitted_file_decl_index") || body.contains("filtered_file_decl_index")),
+            "{function} must use the continuous source-weighted browse body scheduler"
+        );
+    }
+    let browse_search = read(&repo_root().join("crates/browse/src/search.rs"));
+    let canonical_search = function_body(&browse_search, "search_canonical");
+    assert!(
+        canonical_search.contains("source_files_small_first(ws)")
+            && canonical_search.contains("SyntaxMemoryPermitPool::for_current_process()")
+            && canonical_search.contains("memory_permits.acquire(source_bytes)"),
+        "canonical broad search must retain source-weighted admission while each exact compiler object is decoded"
+    );
+    let browse_ast = read(&repo_root().join("crates/browse/src/ast.rs"));
+    let dump_ast = function_body(&browse_ast, "dump_ast");
+    assert!(
+        dump_ast.contains("source_files_small_first(ws)")
+            && dump_ast.contains("memory_permits.acquire")
+            && dump_ast.contains("SyntaxRelease"),
+        "whole-workspace AST dumps must use weighted parse admission and release each Tree-sitter tree after its owned projection is built"
+    );
+    let browse_summary_labels = read(&repo_root().join("crates/browse/src/summary_labels.rs"));
+    let enclosing_name = function_body(&browse_summary_labels, "enclosing_function_name");
+    assert!(
+        enclosing_name.contains("enclosing_range")
+            && !enclosing_name.contains("decl_index_uncached"),
+        "browse table enclosing-function labels must reuse cached compiler header ranges instead of decoding a body per row"
+    );
+    let cli_browse = read(&repo_root().join("crates/cli/src/commands/browse.rs"));
+    assert!(
+        !cli_browse.contains("enclosing_fn_for_file_line(ws")
+            && function_body(&cli_browse, "def_callee_summaries")
+                .contains("compiler_function_attribution_uncached")
+            && !function_body(&cli_browse, "def_callee_summaries").contains("compiler_linkage_index"),
+        "CLI browse renderers must reuse page-local compiler headers and exact attribution frames"
     );
     let taint_index = read(&repo_root().join("crates/workspace/src/taint_index.rs"));
     let resident_insert = function_body(&taint_index, "insert_resident");

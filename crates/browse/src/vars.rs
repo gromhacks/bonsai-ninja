@@ -3,7 +3,10 @@
 //! Returns every assignment captured in any function's flow events,
 //! filtered by name / file / enclosing-fn / source-identifier.
 
-use crate::common::{file_path_matches_filter, format_span, make_name_filter, textual_relevance_key};
+use crate::common::{
+    admitted_file_decl_index, file_path_matches_filter, format_span, make_name_filter,
+    source_files_small_first, textual_relevance_key,
+};
 use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -45,7 +48,8 @@ pub struct VarOut {
 pub fn vars(ws: &Workspace, f: &VarsFilters<'_>) -> Result<Vec<VarOut>, regex::Error> {
     use rayon::prelude::*;
     let name_match = make_name_filter(f.name, f.regex)?;
-    let files = ws.vfs().all_files();
+    let files = source_files_small_first(ws);
+    let memory_permits = bonsai_common::SyntaxMemoryPermitPool::for_current_process();
     let mut out: Vec<VarOut> = files
         .par_iter()
         .fold(Vec::new, |mut acc, &file| {
@@ -59,7 +63,7 @@ pub fn vars(ws: &Workspace, f: &VarsFilters<'_>) -> Result<Vec<VarOut>, regex::E
                     return acc;
                 }
             }
-            let Some(index) = ws.db().decl_index_uncached(file) else {
+            let Some(index) = admitted_file_decl_index(ws, file, &memory_permits) else {
                 return acc;
             };
             for decl in &index.defs {
