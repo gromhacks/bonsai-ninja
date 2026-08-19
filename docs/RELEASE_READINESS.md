@@ -6,7 +6,7 @@ not duplicate dated performance history.
 
 ## Status
 
-The full local release pass completed on 2026-08-17. Documentation claims,
+The full local release pass completed on 2026-08-18. Documentation claims,
 links, command examples, current repository counts, and the rulepack validator
 were rechecked on that date. The release candidate also passed 227
 release security unit tests, 34 release rulepack conformance tests, 81
@@ -167,32 +167,33 @@ and their generated workspace caches are not retained after the gate.
 
 The required release test uses the sibling 30,055-source Elasticsearch
 checkout pinned by the release workflow at `e9741368da0`. The controlled
-empty-cache semantic prewarm remains 600.59 seconds. On August 17, the
-complete five-scenario gate finished in 203.75 seconds under the 3 GiB
-scheduler; the isolated warm production-taint command also recorded
-682,688,512 bytes maximum RSS with zero swaps.
+empty-cache semantic prewarm completed in 601.99 seconds. On August 18, the
+complete five-scenario gate finished in 214.78 seconds under the 3 GiB
+scheduler. The cold prewarm recorded 3,199,860,736 bytes maximum RSS and zero
+swaps; a fresh process validated and reopened that generation in 2.38 seconds
+at 99,254,272 bytes maximum RSS.
 
 | Operation | Time | Enforced SLO |
 |---|---:|---:|
-| Cold semantic generation | 600.59 s | completion required |
-| Fresh-process semantic reuse | 2.33 s | 15 s |
-| Default inspect | 7.82 s | 30 s |
-| Exact raw-taint inspect | 26.33 s | 30 s |
-| Fresh-cache production taint | 29.95 s | 45 s |
-| Warm production taint | 10.57 s | 30 s |
-| `tree --max-depth 1` | 0.04 s | 30 s |
-| Search | 3.92 s | 30 s |
-| Definitions | 13.56 s | 30 s |
-| Imports | 7.83 s | 30 s |
-| Classes | 8.60 s | 30 s |
-| Entry points | 28.02 s | 30 s |
-| Calls | 3.62 s | 30 s |
-| Arguments | 3.67 s | 30 s |
-| Scoped `read-file` | 1.58 s | 30 s |
-| Source inventory | 3.31 s | 30 s |
-| High-severity sink inventory | 19.74 s | 30 s |
-| Sanitizer inventory | 15.52 s | 30 s |
-| Dependency inventory | 11.07 s | 30 s |
+| Cold semantic generation | 601.99 s | completion required |
+| Fresh-process semantic reuse | 2.38 s | 15 s |
+| Default inspect | 7.42 s | 30 s |
+| Exact raw-taint inspect | 27.62 s | 30 s |
+| Fresh-cache production taint | 31.98 s | 45 s |
+| Warm production taint | 11.03 s | 30 s |
+| `tree --max-depth 1` | 0.02 s | 30 s |
+| Search | 4.42 s | 30 s |
+| Definitions | 14.21 s | 30 s |
+| Imports | 8.55 s | 30 s |
+| Classes | 9.44 s | 30 s |
+| Entry points | 29.65 s | 30 s |
+| Calls | 3.99 s | 30 s |
+| Arguments | 3.92 s | 30 s |
+| Scoped `read-file` | 1.80 s | 30 s |
+| Source inventory | 3.73 s | 30 s |
+| High-severity sink inventory | 21.50 s | 30 s |
+| Sanitizer inventory | 16.42 s | 30 s |
+| Dependency inventory | 10.94 s | 30 s |
 
 Command:
 
@@ -221,13 +222,13 @@ remain identical.
 The cold semantic row is a deliberate one-time whole-workspace build, not a
 normal command startup cost. It rebuilt exact compiler objects, linkage,
 callgraph, retrieval, and IDG sidecars for all 30,055 sources after the cache
-was explicitly cleared. The validated cache directory was 7,113,750,880 bytes
-(about 6.62 GiB): 888,833,019 bytes of compiler objects, 317,799,303 bytes of
-callgraph, 1,505,969,092 bytes of linkage, 224,728,416 bytes of retrieval, and
-4,160,252,580 bytes of IDG. Ordinary commands compute exact requested facts
+was explicitly cleared. The validated cache directory was 7,113,366,296 bytes
+(about 6.62 GiB): 888,833,012 bytes of compiler objects, 317,781,391 bytes of
+callgraph, 1,505,969,092 bytes of linkage, 224,727,923 bytes of retrieval, and
+4,160,212,431 bytes of IDG. Ordinary commands compute exact requested facts
 on demand; users only pay this full prewarm when they explicitly run
 `index --semantic`. A fresh process reused the completed semantic generation
-in 2.33 seconds.
+in 2.38 seconds.
 
 The August 17 security-planning correction restored immutable compiler-object
 attachment for path-filtered workspaces that retain deterministic
@@ -256,6 +257,18 @@ preceding compiler ABI, a candidate that parallelized global header replay was
 rejected after the controlled cold gate slowed from 566.14 to 572.00 seconds;
 phase-local speedups are not accepted when allocator residency reduces later
 exact-work concurrency.
+
+The August 18 IDG correction removed two independent repeated-decode paths in
+semantic prewarm. Receiver-state projection now reuses the already-open outer
+segment instead of reopening source and target segments for every projected
+edge. Interprocedural summary input is compiled by one canonical segment pass
+into exact fixed-width node-address, local-edge, and call-boundary spools;
+bounded page caching changes only locality. On the same current compiler ABI
+and cache schema, the isolated IDG phase fell from 220.17 to 187.06 seconds
+(15.0%), and complete cold generation fell from 637.62 to 601.99 seconds
+(5.6%). The resulting sidecar sizes and semantic scope are unchanged, and the
+386-test IDG suite covers recursion, scope, page eviction, and outer-segment
+reuse.
 
 ## Production-scale native export measurement
 

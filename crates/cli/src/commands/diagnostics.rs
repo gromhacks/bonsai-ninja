@@ -80,10 +80,16 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
     // default behavior; it suppresses graph sidecars, not syntax objects.
     let _ = options.structural_only;
     if !options.watch && !options.prewarm_dataflow {
+        let maintenance = progress::ScopedSpinner::new("maintaining compiler cache");
         bonsai_for_cli().cache(root).maintain_persisted_sidecars()?;
+        maintenance.finish();
         let project = open_project_sidecar_validation_only(root)?;
         let compiler_cache_hit = project.cache().compiler_object_generation_is_current();
-        project.cache().warm_compiler_object_sidecar()?;
+        if !compiler_cache_hit {
+            let compiler = progress::ScopedSpinner::new("compiling Tree-sitter objects");
+            project.cache().warm_compiler_object_sidecar()?;
+            compiler.finish();
+        }
         let stats = project.stats();
         cli_println!(
             "{}",
@@ -158,7 +164,9 @@ pub(super) fn run_semantic_workers(root: &std::path::Path) -> Result<SemanticWar
     // fresh manifest can coexist with crash staging files or sidecars from an
     // older schema; reclaim those under writer locks without opening or
     // decoding any compiler graph.
+    let maintenance = progress::ScopedSpinner::new("maintaining semantic cache");
     bonsai_for_cli().cache(root).maintain_persisted_sidecars()?;
+    maintenance.finish();
     let mut rebuilt = false;
     loop {
         // Cache validation hashes the complete source snapshot and may inspect
@@ -171,8 +179,9 @@ pub(super) fn run_semantic_workers(root: &std::path::Path) -> Result<SemanticWar
         }
         let phases = semantic_phase_plan(&stats.validation);
         rebuilt |= !phases.is_empty();
-        for phase in phases {
-            run_semantic_phase_process(&executable, root, phase)?;
+        let phase_count = phases.len();
+        for (index, phase) in phases.into_iter().enumerate() {
+            run_semantic_phase_process(&executable, root, phase, index + 1, phase_count)?;
         }
         // Each worker publishes atomically. This final validation proves every
         // artifact describes the same current snapshot. An edit between
@@ -200,14 +209,18 @@ pub(super) fn run_semantic_workers(root: &std::path::Path) -> Result<SemanticWar
 /// rather than opening every body in a large workspace.
 pub(super) fn run_graph_query_workers(root: &std::path::Path) -> Result<()> {
     let executable = std::env::current_exe()?;
+    let maintenance = progress::ScopedSpinner::new("maintaining semantic cache");
     bonsai_for_cli().cache(root).maintain_persisted_sidecars()?;
+    maintenance.finish();
     loop {
         let stats = semantic_cache_stats(&executable, root)?;
         if graph_query_generation_is_current(&stats.validation) {
             return Ok(());
         }
-        for phase in graph_query_phase_plan(&stats.validation) {
-            run_semantic_phase_process(&executable, root, phase)?;
+        let phases = graph_query_phase_plan(&stats.validation);
+        let phase_count = phases.len();
+        for (index, phase) in phases.into_iter().enumerate() {
+            run_semantic_phase_process(&executable, root, phase, index + 1, phase_count)?;
         }
         let validation = semantic_cache_stats(&executable, root)?.validation;
         if graph_query_generation_is_current(&validation) {
@@ -224,17 +237,63 @@ fn run_semantic_phase_process(
     executable: &std::path::Path,
     root: &std::path::Path,
     phase: SemanticWorkerPhase,
+    ordinal: usize,
+    total: usize,
 ) -> Result<()> {
-    let phase_name = match phase {
+    let phase_name = semantic_phase_name(phase);
+    let label = format!(
+        "semantic {ordinal}/{total} · {}",
+        semantic_phase_progress_action(phase)
+    );
+    let stage = progress::ScopedSpinner::new(&label);
+    let started = std::time::Instant::now();
+    let status = semantic_phase_command(executable, root, phase).status()?;
+    stage.finish();
+    bonsai_diagnostics::debug_log!(
+        "semantic-index",
+        "phase={} elapsed_seconds={:.3}",
+        phase_name,
+        started.elapsed().as_secs_f64()
+    );
+    if !status.success() {
+        anyhow::bail!("semantic {phase_name} worker exited with {status}");
+    }
+    Ok(())
+}
+
+fn semantic_phase_name(phase: SemanticWorkerPhase) -> &'static str {
+    match phase {
         SemanticWorkerPhase::Compiler => "compiler",
         SemanticWorkerPhase::Retrieval => "retrieval",
         SemanticWorkerPhase::Callgraph => "callgraph",
         SemanticWorkerPhase::Linkage => "linkage",
         SemanticWorkerPhase::Idg => "idg",
         SemanticWorkerPhase::Manifest => "manifest",
-    };
+    }
+}
+
+fn semantic_phase_progress_action(phase: SemanticWorkerPhase) -> &'static str {
+    match phase {
+        SemanticWorkerPhase::Compiler => "compiling Tree-sitter objects",
+        SemanticWorkerPhase::Linkage => "building declaration linkage",
+        SemanticWorkerPhase::Callgraph => "resolving callgraph",
+        SemanticWorkerPhase::Retrieval => "building retrieval index",
+        SemanticWorkerPhase::Idg => "building IDG query accelerator",
+        SemanticWorkerPhase::Manifest => "publishing cache manifest",
+    }
+}
+
+fn semantic_phase_command(
+    executable: &std::path::Path,
+    root: &std::path::Path,
+    phase: SemanticWorkerPhase,
+) -> Command {
+    let phase_name = semantic_phase_name(phase);
     let mut command = Command::new(executable);
     command
+        // The parent owns the continuously updating phase spinner. Suppress
+        // nested worker chrome so a child cannot erase or overwrite it.
+        .arg("--no-progress")
         .arg("index")
         .arg("--semantic")
         .arg("--semantic-worker")
@@ -243,11 +302,7 @@ fn run_semantic_phase_process(
     if let Some(timeout_ms) = crate::PARSE_TIMEOUT_MS.get().copied().flatten() {
         command.arg("--parse-timeout").arg(timeout_ms.to_string());
     }
-    let status = command.status()?;
-    if !status.success() {
-        anyhow::bail!("semantic {phase_name} worker exited with {status}");
-    }
-    Ok(())
+    command
 }
 
 fn semantic_generation_is_current(validation: &bonsai_sdk::CacheValidationReport) -> bool {
@@ -278,6 +333,7 @@ fn semantic_cache_stats(
     executable: &std::path::Path,
     root: &std::path::Path,
 ) -> Result<bonsai_sdk::CacheStats> {
+    let stage = progress::ScopedSpinner::new("validating semantic generation");
     let output = Command::new(executable)
         .arg("cache")
         .arg("stats")
@@ -287,6 +343,7 @@ fn semantic_cache_stats(
         .arg("--no-color")
         .arg("--no-progress")
         .output()?;
+    stage.finish();
     if !output.status.success() {
         anyhow::bail!(
             "semantic cache validation exited with {}\nstdout:\n{}\nstderr:\n{}",
@@ -580,6 +637,46 @@ mod semantic_phase_tests {
     use super::*;
     use bonsai_sdk::{CacheFreshnessStatus, CacheSidecarValidation, CacheValidationReport};
     use std::path::PathBuf;
+
+    #[test]
+    fn semantic_workers_have_distinct_user_facing_progress_actions() {
+        let phases = [
+            SemanticWorkerPhase::Compiler,
+            SemanticWorkerPhase::Linkage,
+            SemanticWorkerPhase::Callgraph,
+            SemanticWorkerPhase::Retrieval,
+            SemanticWorkerPhase::Idg,
+            SemanticWorkerPhase::Manifest,
+        ];
+        let actions = phases.map(semantic_phase_progress_action);
+        assert!(actions.iter().all(|action| !action.trim().is_empty()));
+        let unique = actions.into_iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), phases.len());
+    }
+
+    #[test]
+    fn semantic_worker_child_defers_progress_rendering_to_parent() {
+        let command = semantic_phase_command(
+            std::path::Path::new("bonsai-ninja"),
+            std::path::Path::new("workspace"),
+            SemanticWorkerPhase::Idg,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            [
+                "--no-progress",
+                "index",
+                "--semantic",
+                "--semantic-worker",
+                "idg",
+                "workspace",
+            ]
+        );
+    }
 
     #[test]
     fn context_row_cost_covers_pretty_nested_json() {

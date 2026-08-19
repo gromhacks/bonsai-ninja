@@ -83,13 +83,13 @@ separate the first explicit semantic index from commands run after it exists:
 
 | Cache state and operation | Measured time | Result |
 |---|---:|---|
-| Empty cache: `index --semantic` | 10m 00.6s | 7.11 GB validated reusable cache under the 3 GiB scheduling profile |
-| Empty analysis cache: complete production taint analysis | 30.0s | Requested analysis completed without requiring the whole semantic prewarm |
-| After index: semantic generation reopen | 2.3s | Existing compiler objects, linkage, callgraph, retrieval, and IDG validated and reused |
-| After index: search | 3.9s | Exact requested matches |
-| After index: call lookup | 3.6s | Compiler-resolved call rows |
-| After index: default inspect | 7.8s | Structural evidence for the requested target |
-| After index: complete production taint analysis | 10.6s | Requested fixed point completed without a semantic cap |
+| Empty cache: `index --semantic` | 10m 02.0s | 7.11 GB validated reusable cache; 2.98 GiB maximum RSS and zero swaps under the 3 GiB scheduling profile |
+| Empty analysis cache: complete production taint analysis | 32.0s | Requested analysis completed without requiring the whole semantic prewarm |
+| After index: semantic generation reopen | 2.4s | Existing compiler objects, linkage, callgraph, retrieval, and IDG validated and reused |
+| After index: search | 4.4s | Exact requested matches |
+| After index: call lookup | 4.0s | Compiler-resolved call rows |
+| After index: default inspect | 7.4s | Structural evidence for the requested target |
+| After index: complete production taint analysis | 11.0s | Requested fixed point completed without a semantic cap |
 | After index: default native export | 4m 05s | 4.54 GB compiler, callgraph, flow, and compiled-IDG facts |
 | After index: `--full-propagations` export | 7m 36s | 6.42 GB with the same exact propagation relation materialized as individual rows |
 

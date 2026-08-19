@@ -32,6 +32,14 @@ and files written with
 `NO_PROGRESS=1` for quiet script/LLM runs; use `--no-color` separately to
 disable ANSI styling while keeping progress visible.
 
+`index --semantic` keeps one parent-owned terminal display across its
+process-isolated workers. It reports validation plus five numbered phases:
+compiler objects, declaration linkage, callgraph, retrieval, and the IDG query
+accelerator. Plain `index` reports compiler-cache maintenance, workspace
+ingest, and Tree-sitter object compilation. Progress is intentionally absent
+when stderr is captured or redirected because that is a non-interactive
+stream; use a terminal to see live animation.
+
 `--html-output <PATH>` writes the selected command's ordinary human-readable
 view as a standalone responsive report using the active bonsai theme. It is a
 presentation sink only: it never enables semantic or security work. It is
@@ -120,6 +128,9 @@ same memory budget; eviction causes exact recomputation, not missing files or
 facts. After the IDG worker, the parent validates
 that every artifact describes the same workspace snapshot; an intervening edit
 restarts the exact worker sequence until a coherent generation is current.
+The interactive parent labels each ordered worker while the worker receives
+`--no-progress`; this keeps one stable display without changing phase work or
+captured command output.
 
 ## context
 

@@ -401,9 +401,7 @@ fn cache_rebuild(workspace: Option<std::path::PathBuf>, warm_export: bool) -> Re
     // making their peaks additive. No source, edge, or fixed-point cap is
     // involved.
     print_kv("rebuilding", &workspace_root.display().to_string());
-    let spin = progress::ScopedSpinner::new("warming structural compiler sidecars");
     let _ = super::diagnostics::run_semantic_workers(&workspace_root)?;
-    spin.finish();
 
     if warm_export {
         let (project, _footer) = open_project_index_only(&workspace_root)?;

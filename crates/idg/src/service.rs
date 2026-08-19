@@ -7488,7 +7488,10 @@ impl IdgQueryService {
         let mut structural_boundary_demand = AHashSet::default();
         {
             let mut record_non_call_relation =
-                |from_segment: SegmentId, to_segment: SegmentId, edge: &IdgEdge| {
+                |from_segment: SegmentId,
+                 to_segment: SegmentId,
+                 edge: &IdgEdge,
+                 local_segment: Option<&crate::segment::IdgSegment>| {
                     let projected_heap_relation = edge.meta.kind.is_inter()
                         && (Self::node_is_projected_storage(&unified, from_segment, edge.from)
                             || Self::node_is_projected_storage(&unified, to_segment, edge.to));
@@ -7521,11 +7524,9 @@ impl IdgQueryService {
                             (IdgEdgeKind::InterFieldCallArg, Some(caller), Some(callee))
                                 if caller != callee =>
                             {
-                                let (arg_idx, param_idx) = self
-                                    .workspace
-                                    .segment_view(from_segment)
-                                    .zip(self.workspace.segment_view(to_segment))
-                                    .and_then(|(from_segment_view, to_segment_view)| {
+                                let mut resolve_indices =
+                                    |from_segment_view: &crate::segment::IdgSegment,
+                                     to_segment_view: &crate::segment::IdgSegment| {
                                         let from_node = from_segment_view.nodes.get(edge.from)?;
                                         let to_node = to_segment_view.nodes.get(edge.to)?;
                                         let from_place = from_segment_view.places.get(from_node.place)?;
@@ -7533,17 +7534,32 @@ impl IdgQueryService {
                                         field_cross_call_arg_and_param_indices(
                                             &mut field_cross_call_index,
                                             from_segment,
-                                            &from_segment_view,
+                                            from_segment_view,
                                             to_segment,
-                                            &to_segment_view,
+                                            to_segment_view,
                                             caller,
                                             callee,
                                             edge.meta.via_span,
                                             from_place,
                                             to_place,
                                         )
-                                    })
-                                    .unwrap_or((u32::MAX, u32::MAX));
+                                    };
+                                // Compiler-side IDG segments are spooled to
+                                // bound RSS. The outer loop already decoded
+                                // this complete local segment, so reuse that
+                                // view for both endpoints. Reopening it once
+                                // per projected field edge used to deserialize
+                                // the same body twice for every edge and made
+                                // query-accelerator compilation scale with
+                                // `projected_edges * segment_size`.
+                                let indices = with_idg_segment_pair(
+                                    &self.workspace,
+                                    from_segment,
+                                    to_segment,
+                                    local_segment,
+                                    &mut resolve_indices,
+                                );
+                                let (arg_idx, param_idx) = indices.unwrap_or((u32::MAX, u32::MAX));
                                 Some(CrossCallEdge {
                                     caller,
                                     callee,
@@ -7585,13 +7601,13 @@ impl IdgQueryService {
                     continue;
                 };
                 for edge in &segment.edges {
-                    record_non_call_relation(segment_id, segment_id, edge);
+                    record_non_call_relation(segment_id, segment_id, edge, Some(&segment));
                 }
             }
             self.workspace
                 .visit_cross_file_edges(|edges| {
                     for edge in edges {
-                        record_non_call_relation(edge.from_segment, edge.to_segment, &edge.edge);
+                        record_non_call_relation(edge.from_segment, edge.to_segment, &edge.edge, None);
                     }
                 })
                 .expect("validated IDG cross-file relation remains readable");
@@ -9778,6 +9794,31 @@ fn lift_call_arg_edge(
 struct FieldCrossCallIndex {
     call_arg: AHashMap<(SegmentId, FuncId, Span, String), Option<u32>>,
     param: AHashMap<(SegmentId, FuncId, String), Option<u32>>,
+}
+
+/// Resolve one edge against its two segment dictionaries without reopening a
+/// compiler-spooled segment that the caller already has in hand. Same-segment
+/// fallback lookups likewise decode once and borrow the one view twice.
+fn with_idg_segment_pair<R>(
+    workspace: &IdgWorkspace,
+    from_segment: SegmentId,
+    to_segment: SegmentId,
+    local_segment: Option<&crate::segment::IdgSegment>,
+    resolve: impl FnOnce(&crate::segment::IdgSegment, &crate::segment::IdgSegment) -> Option<R>,
+) -> Option<R> {
+    if let Some(segment) = local_segment {
+        debug_assert_eq!(
+            from_segment, to_segment,
+            "a local segment hint must cover both endpoints"
+        );
+        return resolve(segment, segment);
+    }
+    let from_view = workspace.segment_view(from_segment)?;
+    if from_segment == to_segment {
+        return resolve(&from_view, &from_view);
+    }
+    let to_view = workspace.segment_view(to_segment)?;
+    resolve(&from_view, &to_view)
 }
 
 impl FieldCrossCallIndex {

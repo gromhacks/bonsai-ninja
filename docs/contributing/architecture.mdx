@@ -540,13 +540,19 @@ snapshot.
 
 Interprocedural return summaries are compiled from structural call boundaries
 identified by caller, resolved callee, and exact call span. The compiler
-reconstructs one function-local CSR at a time from canonical segment edges,
-composes the current callee summaries, and requeues callers whenever a callee
-summary grows. Recursive and mutually recursive components therefore reach
-their least fixed point without a depth, iteration, or graph-size cap. The
-contextual query runtime stores matched call and return boundaries in sorted
-sparse source rows and streams ordinary local relations directly into CSR;
-it does not retain a second workspace-sized endpoint relation.
+streams the canonical segments once to build compact function layouts, numeric
+node addresses, ordinary local-edge pages, and call-boundary spools. The
+fixed-point loop reconstructs one function-local CSR from those fixed-width
+pages, composes the current callee summaries, and requeues callers whenever a
+callee summary grows. Recursive and mutually recursive components therefore
+reach their least fixed point without a depth, iteration, or graph-size cap.
+The bounded page cache changes I/O locality only: evicted pages are reread from
+the complete spool, never omitted. The contextual query runtime reuses the
+outer decoded segment for same-segment receiver-state projection and the
+numeric address pages for cross-segment projection; it must not reopen and
+MessagePack-decode a segment once per projected edge. It stores matched call
+and return boundaries in sorted sparse source rows and does not retain a
+second workspace-sized endpoint relation.
 
 Symbolic field flow is compiled into numeric access-path facts and algebraic
 transforms emitted from the adapter-lowered AST. Query setup streams the

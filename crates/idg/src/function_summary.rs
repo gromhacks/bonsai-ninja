@@ -372,6 +372,206 @@ struct CompactAddressPager {
     cache_capacity: usize,
 }
 
+#[derive(Copy, Clone)]
+struct BaseEdgePageEntry {
+    offset: u64,
+    function_count: u32,
+    edge_count: u32,
+}
+
+/// Compact function-local edges for one source segment.
+///
+/// The fixed-point worklist may revisit callers in recursive components many
+/// times. Keeping this already-lowered relation in a bounded page cache avoids
+/// reparsing the source segment's MessagePack body on every revisit without
+/// retaining a second workspace-wide body graph in memory.
+struct BaseEdgePage {
+    funcs: Box<[FuncId]>,
+    offsets: Box<[u32]>,
+    edges: Box<[(u32, u32)]>,
+}
+
+impl BaseEdgePage {
+    fn from_by_func(mut by_func: AHashMap<FuncId, Vec<(u32, u32)>>) -> Self {
+        let mut funcs: Vec<FuncId> = by_func.keys().copied().collect();
+        funcs.sort_unstable_by_key(|func| func.raw());
+        let mut offsets = Vec::with_capacity(funcs.len().saturating_add(1));
+        let mut edges = Vec::new();
+        offsets.push(0);
+        for func in &funcs {
+            if let Some(func_edges) = by_func.remove(func) {
+                edges.extend(func_edges);
+            }
+            offsets.push(u32::try_from(edges.len()).expect("function-summary base edge count exceeds u32"));
+        }
+        Self {
+            funcs: funcs.into_boxed_slice(),
+            offsets: offsets.into_boxed_slice(),
+            edges: edges.into_boxed_slice(),
+        }
+    }
+
+    fn edges_for(&self, func: FuncId) -> &[(u32, u32)] {
+        let Ok(index) = self
+            .funcs
+            .binary_search_by_key(&func.raw(), |candidate| candidate.raw())
+        else {
+            return &[];
+        };
+        let start = self.offsets[index] as usize;
+        let end = self.offsets[index + 1] as usize;
+        &self.edges[start..end]
+    }
+}
+
+/// Exact anonymous-file spool for compact base relations. Memory controls
+/// cache locality only: eviction causes an exact fixed-width page read, never
+/// a skipped function, edge, or fixed-point iteration.
+struct BaseEdgePager {
+    file: std::fs::File,
+    entries: Vec<Option<BaseEdgePageEntry>>,
+    write_offset: u64,
+    pages: AHashMap<SegmentId, Arc<BaseEdgePage>>,
+    order: VecDeque<SegmentId>,
+    capacity: usize,
+    page_loads: usize,
+    cache_hits: usize,
+}
+
+/// One-pass lowering products for ordinary function summaries. The canonical
+/// IDG body is decoded once per source segment; later fixed-point and address
+/// projection work pages only compact fixed-width compiler relations.
+struct LocalSummaryInputs {
+    layouts: AHashMap<FuncId, FunctionLayout>,
+    addresses: CompactAddressPager,
+    base_pages: BaseEdgePager,
+    boundary_inputs: BoundaryPairSpool,
+    boundary_outputs: BoundaryPairSpool,
+}
+
+impl BaseEdgePager {
+    fn new(segment_count: usize) -> Self {
+        let workers = bonsai_common::compiler_worker_count(rayon::current_num_threads());
+        Self {
+            file: tempfile::tempfile().expect("create function-summary base-edge spool"),
+            entries: vec![None; segment_count],
+            write_offset: 0,
+            pages: AHashMap::default(),
+            order: VecDeque::new(),
+            capacity: workers.saturating_mul(2).max(2),
+            page_loads: 0,
+            cache_hits: 0,
+        }
+    }
+
+    fn write_page(&mut self, segment: SegmentId, page: &BaseEdgePage) {
+        let index = segment.0 as usize;
+        if self.entries.len() <= index {
+            self.entries.resize(index + 1, None);
+        }
+        let payload_len = page
+            .funcs
+            .len()
+            .saturating_mul(4)
+            .saturating_add(page.offsets.len().saturating_mul(4))
+            .saturating_add(page.edges.len().saturating_mul(8));
+        let mut payload = Vec::with_capacity(payload_len);
+        for func in &page.funcs {
+            payload.extend_from_slice(&func.raw().to_le_bytes());
+        }
+        for offset in &page.offsets {
+            payload.extend_from_slice(&offset.to_le_bytes());
+        }
+        for (from, to) in &page.edges {
+            payload.extend_from_slice(&from.to_le_bytes());
+            payload.extend_from_slice(&to.to_le_bytes());
+        }
+        self.file
+            .seek(SeekFrom::Start(self.write_offset))
+            .and_then(|_| self.file.write_all(&payload))
+            .expect("write function-summary base-edge spool");
+        self.entries[index] = Some(BaseEdgePageEntry {
+            offset: self.write_offset,
+            function_count: u32::try_from(page.funcs.len())
+                .expect("function-summary base function count exceeds u32"),
+            edge_count: u32::try_from(page.edges.len())
+                .expect("function-summary base edge count exceeds u32"),
+        });
+        self.write_offset = self
+            .write_offset
+            .checked_add(u64::try_from(payload.len()).expect("base-edge payload exceeds u64"))
+            .expect("function-summary base-edge spool exceeds u64");
+    }
+
+    fn page(&mut self, segment: SegmentId) -> Option<Arc<BaseEdgePage>> {
+        if let Some(page) = self.pages.get(&segment) {
+            self.cache_hits = self.cache_hits.saturating_add(1);
+            return Some(Arc::clone(page));
+        }
+        let entry = self.entries.get(segment.0 as usize).copied().flatten()?;
+        let function_count = entry.function_count as usize;
+        let edge_count = entry.edge_count as usize;
+        let func_bytes = function_count
+            .checked_mul(4)
+            .expect("base function bytes overflow");
+        let offset_bytes = function_count
+            .checked_add(1)
+            .and_then(|count| count.checked_mul(4))
+            .expect("base offset bytes overflow");
+        let edge_bytes = edge_count.checked_mul(8).expect("base edge bytes overflow");
+        let payload_len = func_bytes
+            .checked_add(offset_bytes)
+            .and_then(|bytes| bytes.checked_add(edge_bytes))
+            .expect("base-edge page bytes overflow");
+        let mut payload = vec![0_u8; payload_len];
+        read_exact_at(&self.file, entry.offset, &mut payload).expect("read function-summary base-edge spool");
+
+        let mut funcs = Vec::with_capacity(function_count);
+        for bytes in payload[..func_bytes].chunks_exact(4) {
+            funcs.push(FuncId::new(u32::from_le_bytes(
+                bytes.try_into().expect("base function bytes"),
+            )));
+        }
+        let offsets_end = func_bytes + offset_bytes;
+        let mut offsets = Vec::with_capacity(function_count.saturating_add(1));
+        for bytes in payload[func_bytes..offsets_end].chunks_exact(4) {
+            offsets.push(u32::from_le_bytes(bytes.try_into().expect("base offset bytes")));
+        }
+        assert_eq!(offsets.first().copied(), Some(0), "invalid base offset origin");
+        assert_eq!(
+            offsets.last().copied(),
+            Some(entry.edge_count),
+            "invalid base offset extent"
+        );
+        assert!(
+            offsets.windows(2).all(|pair| pair[0] <= pair[1]),
+            "base offsets must be monotone"
+        );
+        let mut edges = Vec::with_capacity(edge_count);
+        for bytes in payload[offsets_end..].chunks_exact(8) {
+            edges.push((
+                u32::from_le_bytes(bytes[..4].try_into().expect("base edge source bytes")),
+                u32::from_le_bytes(bytes[4..].try_into().expect("base edge target bytes")),
+            ));
+        }
+        let page = Arc::new(BaseEdgePage {
+            funcs: funcs.into_boxed_slice(),
+            offsets: offsets.into_boxed_slice(),
+            edges: edges.into_boxed_slice(),
+        });
+        while self.pages.len() >= self.capacity {
+            let Some(evicted) = self.order.pop_front() else {
+                break;
+            };
+            self.pages.remove(&evicted);
+        }
+        self.pages.insert(segment, Arc::clone(&page));
+        self.order.push_back(segment);
+        self.page_loads = self.page_loads.saturating_add(1);
+        Some(page)
+    }
+}
+
 impl CompactAddressPager {
     fn new(segment_count: usize) -> Self {
         Self {
@@ -458,13 +658,17 @@ fn summary_segments(workspace: &IdgWorkspace, scope_funcs: Option<&AHashSet<Func
     segments
 }
 
-fn build_layout(
+fn build_local_summary_inputs(
     workspace: &IdgWorkspace,
     segments: &[SegmentId],
     scope_funcs: Option<&AHashSet<FuncId>>,
-) -> (AHashMap<FuncId, FunctionLayout>, CompactAddressPager) {
+    max_precision: Option<Precision>,
+) -> LocalSummaryInputs {
     let mut layouts = AHashMap::default();
     let mut addresses = CompactAddressPager::new(workspace.segment_count());
+    let mut base_pages = BaseEdgePager::new(workspace.segment_count());
+    let mut boundary_inputs = BoundaryPairSpool::new();
+    let mut boundary_outputs = BoundaryPairSpool::new();
     for &segment_id in segments {
         let Some(segment) = workspace.segment_view(segment_id) else {
             continue;
@@ -510,6 +714,19 @@ fn build_layout(
             });
         }
         addresses.write_page(segment_id, &segment_addresses);
+        let base_edges = BaseEdgePage::from_by_func(segment_base_edges(&segment, &layouts, max_precision));
+        base_pages.write_page(segment_id, &base_edges);
+        for edge in &segment.edges {
+            record_call_boundary(
+                &mut boundary_inputs,
+                &mut boundary_outputs,
+                &segment_addresses,
+                &segment_addresses,
+                edge,
+                max_precision,
+                scope_funcs,
+            );
+        }
     }
     for layout in layouts.values_mut() {
         layout.params.sort_unstable();
@@ -517,7 +734,13 @@ fn build_layout(
         layout.outputs.sort_unstable();
         layout.outputs.dedup();
     }
-    (layouts, addresses)
+    LocalSummaryInputs {
+        layouts,
+        addresses,
+        base_pages,
+        boundary_inputs,
+        boundary_outputs,
+    }
 }
 
 fn compact_address(addresses: &[CompactAddress], node: NodeId) -> Option<CompactAddress> {
@@ -733,11 +956,10 @@ fn compile_function(
 }
 
 fn compile_summaries_to_fixed_point(
-    workspace: &IdgWorkspace,
     layouts: &AHashMap<FuncId, FunctionLayout>,
+    base_pages: &mut BaseEdgePager,
     boundaries: &CallBoundaries,
     callers_by_callee: &AHashMap<FuncId, Vec<FuncId>>,
-    max_precision: Option<Precision>,
 ) -> AHashMap<FuncId, Vec<(u32, u32)>> {
     let mut summaries: AHashMap<FuncId, Vec<(u32, u32)>> =
         layouts.keys().copied().map(|func| (func, Vec::new())).collect();
@@ -752,15 +974,14 @@ fn compile_summaries_to_fixed_point(
         }
         for (segment_id, mut funcs) in by_segment {
             funcs.sort_unstable_by_key(|func| func.raw());
-            let Some(segment) = workspace.segment_view(segment_id) else {
-                continue;
-            };
-            let base_edges = segment_base_edges(&segment, layouts, max_precision);
+            let base_edges = base_pages
+                .page(segment_id)
+                .expect("a function layout must retain its exact base-edge page");
             for func in funcs {
                 let Some(layout) = layouts.get(&func) else {
                     continue;
                 };
-                let edges = base_edges.get(&func).map(Vec::as_slice).unwrap_or_default();
+                let edges = base_edges.edges_for(func);
                 let compilation = compile_function(func, layout, edges, boundaries, &summaries);
                 if summaries.get(&func) == Some(&compilation.summary) {
                     continue;
@@ -817,7 +1038,13 @@ pub(crate) fn return_taint_param_indices_in_scope(
     max_precision: Option<Precision>,
 ) -> ReturnSummaryBatch {
     let segments = summary_segments(workspace, scope_funcs);
-    let (layouts, mut address_pages) = build_layout(workspace, &segments, scope_funcs);
+    let LocalSummaryInputs {
+        layouts,
+        addresses: mut address_pages,
+        mut base_pages,
+        mut boundary_inputs,
+        mut boundary_outputs,
+    } = build_local_summary_inputs(workspace, &segments, scope_funcs, max_precision);
     bonsai_diagnostics::debug_log!(
         "idg-summary",
         "ordinary layout functions={} nodes={} params={} outputs={}",
@@ -829,27 +1056,6 @@ pub(crate) fn return_taint_param_indices_in_scope(
         layouts.values().map(|layout| layout.params.len()).sum::<usize>(),
         layouts.values().map(|layout| layout.outputs.len()).sum::<usize>()
     );
-    let mut boundary_inputs = BoundaryPairSpool::new();
-    let mut boundary_outputs = BoundaryPairSpool::new();
-    for &segment_id in &segments {
-        let Some(segment) = workspace.segment_view(segment_id) else {
-            continue;
-        };
-        let Some(addresses) = address_pages.page(segment_id) else {
-            continue;
-        };
-        for edge in &segment.edges {
-            record_call_boundary(
-                &mut boundary_inputs,
-                &mut boundary_outputs,
-                &addresses,
-                &addresses,
-                edge,
-                max_precision,
-                scope_funcs,
-            );
-        }
-    }
     workspace
         .visit_cross_file_edges(|edges| {
             // Relation chunks are persisted in canonical stitch order, which
@@ -897,7 +1103,6 @@ pub(crate) fn return_taint_param_indices_in_scope(
             }
         })
         .expect("validated IDG cross-file relation remains readable");
-    drop(address_pages);
     let boundaries = build_call_boundaries(boundary_inputs, boundary_outputs);
     bonsai_diagnostics::debug_log!(
         "idg-summary",
@@ -930,18 +1135,20 @@ pub(crate) fn return_taint_param_indices_in_scope(
         continuations.dedup();
     }
 
-    let ordinary = compile_summaries_to_fixed_point(
-        workspace,
-        &layouts,
-        &boundaries,
-        &callers_by_callee,
-        max_precision,
-    );
+    let ordinary =
+        compile_summaries_to_fixed_point(&layouts, &mut base_pages, &boundaries, &callers_by_callee);
     bonsai_diagnostics::debug_log!(
         "idg-summary",
         "ordinary fixed point functions={} pairs={}",
         ordinary.len(),
         ordinary.values().map(Vec::len).sum::<usize>()
+    );
+    bonsai_diagnostics::debug_log!(
+        "idg-summary",
+        "ordinary base pages loads={} cache_hits={} bytes={}",
+        base_pages.page_loads,
+        base_pages.cache_hits,
+        base_pages.write_offset
     );
 
     let mut requested: Vec<FuncId> = funcs.to_vec();
@@ -971,31 +1178,39 @@ pub(crate) fn return_taint_param_indices_in_scope(
             .map_or((u32::MAX, func.raw()), |layout| (layout.segment.0, func.raw()))
     });
     let mut cached_segment = None;
-    let mut cached_base_edges: AHashMap<FuncId, Vec<(u32, u32)>> = AHashMap::default();
+    let mut cached_base_edges: Option<Arc<BaseEdgePage>> = None;
     let mut cached_local_nodes: AHashMap<FuncId, Vec<NodeId>> = AHashMap::default();
     for func in layout_funcs {
         let Some(layout) = layouts.get(&func) else {
             continue;
         };
         if cached_segment != Some(layout.segment) {
-            if let Some(segment) = workspace.segment_view(layout.segment) {
-                cached_base_edges = segment_base_edges(&segment, &layouts, max_precision);
+            if let Some(addresses) = address_pages.page(layout.segment) {
+                cached_base_edges = Some(
+                    base_pages
+                        .page(layout.segment)
+                        .expect("an address page must retain its exact base-edge page"),
+                );
                 cached_local_nodes.clear();
-                for (node_index, node) in segment.nodes.nodes.iter().enumerate() {
-                    cached_local_nodes.entry(node.func).or_default().push(NodeId(
+                for (node_index, address) in addresses.iter().enumerate() {
+                    if !layouts.contains_key(&address.func) {
+                        continue;
+                    }
+                    let local_nodes = cached_local_nodes.entry(address.func).or_default();
+                    debug_assert_eq!(local_nodes.len(), address.compact as usize);
+                    local_nodes.push(NodeId(
                         u32::try_from(node_index).expect("segment-local IDG node count exceeds u32"),
                     ));
                 }
             } else {
-                cached_base_edges.clear();
+                cached_base_edges = None;
                 cached_local_nodes.clear();
             }
             cached_segment = Some(layout.segment);
         }
         let base_edges = cached_base_edges
-            .get(&func)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+            .as_deref()
+            .map_or(&[][..], |page| page.edges_for(func));
         let compilation = compile_function(func, layout, base_edges, &boundaries, &ordinary);
         let local_nodes = cached_local_nodes
             .get(&func)
@@ -1302,6 +1517,45 @@ pub(crate) fn try_visit_local_storage_taint_by_param<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base_edge_spool_reuses_bounded_fixed_width_pages_exactly() {
+        let first_func = FuncId::new(7);
+        let second_func = FuncId::new(9);
+        let mut first = AHashMap::default();
+        first.insert(first_func, vec![(0, 1), (1, 2)]);
+        first.insert(second_func, vec![(3, 4)]);
+        let mut second = AHashMap::default();
+        second.insert(first_func, vec![(5, 6)]);
+
+        let mut pager = BaseEdgePager::new(2);
+        pager.capacity = 1;
+        pager.write_page(SegmentId(0), &BaseEdgePage::from_by_func(first));
+        pager.write_page(SegmentId(1), &BaseEdgePage::from_by_func(second));
+
+        let first_page = pager.page(SegmentId(0)).expect("first exact page");
+        assert_eq!(first_page.edges_for(first_func), &[(0, 1), (1, 2)]);
+        assert_eq!(first_page.edges_for(second_func), &[(3, 4)]);
+        let cached = pager.page(SegmentId(0)).expect("cached exact page");
+        assert!(Arc::ptr_eq(&first_page, &cached));
+
+        assert_eq!(
+            pager
+                .page(SegmentId(1))
+                .expect("second exact page")
+                .edges_for(first_func),
+            &[(5, 6)]
+        );
+        assert_eq!(
+            pager
+                .page(SegmentId(0))
+                .expect("reloaded exact page")
+                .edges_for(first_func),
+            &[(0, 1), (1, 2)]
+        );
+        assert_eq!(pager.page_loads, 3);
+        assert_eq!(pager.cache_hits, 1);
+    }
 
     #[test]
     fn call_boundary_external_merge_is_sorted_exact_and_deduplicated_across_runs() {

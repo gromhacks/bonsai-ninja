@@ -4513,6 +4513,7 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
     let workers = function_body(&diagnostics, "run_semantic_workers");
     let phase_plan = function_body(&diagnostics, "semantic_phase_plan");
     let phase_process = function_body(&diagnostics, "run_semantic_phase_process");
+    let phase_command = function_body(&diagnostics, "semantic_phase_command");
     assert!(
         workers.contains("semantic_phase_plan")
             && workers.contains("run_semantic_phase_process")
@@ -4521,8 +4522,9 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
             && phase_plan.contains("SemanticWorkerPhase::Callgraph")
             && phase_plan.contains("SemanticWorkerPhase::Linkage")
             && phase_plan.contains("SemanticWorkerPhase::Idg")
-            && phase_process.contains("Command::new(executable)")
-            && phase_process.contains("command.status()?")
+            && phase_command.contains("Command::new(executable)")
+            && phase_command.contains("--no-progress")
+            && phase_process.contains("semantic_phase_command(executable, root, phase).status()?")
             && phase_process.contains("if !status.success()"),
         "CLI semantic prewarm must run exact phases sequentially across OS-reclaimed process boundaries"
     );
