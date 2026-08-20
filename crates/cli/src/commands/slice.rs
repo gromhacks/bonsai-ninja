@@ -12,7 +12,8 @@ use crate::progress;
 use crate::{cli_println, ui};
 
 use super::{
-    open_project_index_only as open_project, page_info_to_json, paged_json_incomplete_reasons, short_file,
+    open_project_index_filtered_paths, open_project_index_matching_literal, page_info_to_json,
+    paged_json_incomplete_reasons, short_file,
 };
 
 pub(crate) fn cmd_slice(
@@ -23,7 +24,15 @@ pub(crate) fn cmd_slice(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_project(root)?;
+    let (project, _footer) = if let Some(file) = file.filter(|file| !file.trim().is_empty()) {
+        open_project_index_filtered_paths(root, &[file.to_string()], &[])?
+    } else {
+        // Compiler-qualified selectors are not required to occur verbatim in
+        // source. Use only their declaration token for lexical candidate
+        // selection; the slice engine resolves the complete selector against
+        // typed declarations.
+        open_project_index_matching_literal(root, bonsai_callgraph::short_callee(symbol))?
+    };
     let filters = SliceFilters {
         symbol,
         line: line.unwrap_or(0),

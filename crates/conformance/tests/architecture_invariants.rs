@@ -1390,13 +1390,13 @@ fn plain_read_file_reuses_one_exact_compiler_body_without_semantic_graphs() {
         .find("if semantic_overlays_requested")
         .expect("read-file semantic overlay gate");
     let callgraph = body
-        .find("cached_resolved_call_graph()")
+        .find("resolved_call_graph_direct_neighborhood")
         .expect("explicit read-file callgraph overlay");
     assert!(
         body.contains("rulepack.is_some()")
             && body.contains("filters.max_inlined_bodies.is_some()")
             && callgraph > overlay_gate,
-        "plain read-file must not build a resolved callgraph; only explicit semantic overlays may enter that path"
+        "plain read-file must not open callgraph partitions; only explicit semantic overlays may enter that path"
     );
 
     let workspace = read(&root.join("crates/workspace/src/lib.rs"));
@@ -3413,10 +3413,9 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
         "memory-bounded inspect closures must schedule every independent entry together instead of leaving one arbitrary entry on the serial critical path"
     );
     assert!(
-        inspect.contains("inspect_eager_window")
-            && inspect.contains("!report.taint_flows.is_empty()")
-            && function_body(&inspect, "inspect_eager_window").contains("if has_raw_taint"),
-        "raw-taint inspect must render only the requested page instead of eagerly formatting unrelated future pages"
+        inspect.contains("inspect_requested_window")
+            && function_body(&inspect, "inspect_requested_window").contains("requested_page_window"),
+        "inspect must render only the requested page instead of eagerly formatting unrelated future pages"
     );
     for forbidden in [
         "dataflow().graph_for",
@@ -3496,10 +3495,135 @@ fn browse_summaries_remain_lightweight_and_machine_readable() {
     assert!(
         browse.contains("summary_ids: Vec<String>")
             && json_emitter.contains("SummaryAnnotator::new(ws)")
+            && json_emitter.contains("if cfg.json_wrapped() && !crate::filter::active().is_active()")
+            && json_emitter
+                .find("page_cache::emit_paged_text")
+                .zip(json_emitter.find("let annotator = bonsai_sdk::SummaryAnnotator::new(ws)"))
+                .is_some_and(|(paginate, annotate)| paginate < annotate)
             && json_emitter.contains("emit_json_paged_cached")
             && !browse.contains("flows && !partial_workspace")
             && !browse.contains("CallEdgeResolver"),
-        "browse --summaries must expose compiler summary identities in JSON and scoped workspaces without reviving graph traversal or silently disabling the flag"
+        "browse --summaries must expose compiler summary identities in JSON, annotate only the requested page when possible, and preserve scoped workspaces without silently disabling the flag"
+    );
+}
+
+#[test]
+fn targeted_cli_queries_do_not_hydrate_unrelated_workspace_graphs() {
+    let root = repo_root();
+    let symbol_summary = read(&root.join("crates/browse/src/symbol_summary.rs"));
+    let summaries = function_body(&symbol_summary, "symbol_summaries");
+    assert!(
+        summaries.contains("resolved_call_graph_direct_neighborhood")
+            && !summaries.contains("cached_resolved_call_graph"),
+        "symbol-summary must read only direct persisted graph partitions"
+    );
+
+    let browse_slice = read(&root.join("crates/browse/src/slice.rs"));
+    assert!(
+        function_body(&browse_slice, "slices").contains("compiler_header_index()")
+            && !function_body(&browse_slice, "slices").contains("compiler_linkage_index()")
+            && !function_body(&browse_slice, "semantic_function_name")
+                .contains("compiler_linkage_index()"),
+        "slice must select exact bodies from compact compiler headers without opening whole-workspace linkage"
+    );
+    let cli_slice = read(&root.join("crates/cli/src/commands/slice.rs"));
+    let slice = function_body(&cli_slice, "cmd_slice");
+    assert!(
+        slice.contains("open_project_index_matching_literal")
+            && slice.contains("bonsai_callgraph::short_callee(symbol)")
+            && slice.contains("open_project_index_filtered_paths")
+            && !slice.contains("open_project(root)"),
+        "slice must scope workspace hydration by its required symbol/file selector"
+    );
+
+    let resolution = read(&root.join("crates/browse/src/resolution.rs"));
+    let coverage = function_body(&resolution, "resolution_coverage");
+    assert!(
+        coverage.contains("file_path_matches_filter")
+            && coverage.contains("ResolutionIndex::for_functions")
+            && coverage
+                .find("file_path_matches_filter")
+                .zip(coverage.find("ResolutionIndex::for_functions"))
+                .is_some_and(|(filter, graph)| filter < graph),
+        "file-scoped resolution coverage must apply its file predicate before opening direct graph partitions"
+    );
+
+    let read_file = read(&root.join("crates/sdk/src/read_file.rs"));
+    let view = function_body(&read_file, "read_file_with_taint_options");
+    assert!(
+        view.contains("resolved_call_graph_direct_neighborhood")
+            && !view.contains("cached_resolved_call_graph()"),
+        "read-file connected overlays must use only the selected file's direct compiler neighborhood"
+    );
+}
+
+#[test]
+fn cli_diagnostic_rendering_reuses_exact_partitions_and_formats_one_page() {
+    let root = repo_root();
+    let edges = read(&root.join("crates/browse/src/edges.rs"));
+    let dump_edges = function_body(&edges, "dump_edges");
+    assert!(
+        dump_edges.contains("dump_persisted_filtered_edges(ws, f)")
+            && dump_edges
+                .find("dump_persisted_filtered_edges(ws, f)")
+                .zip(dump_edges.find("cached_resolved_call_graph"))
+                .is_some_and(|(partitioned, resident)| partitioned < resident),
+        "dump-edges must stream the exact partitioned relation before considering a resident whole-workspace graph"
+    );
+
+    let cli_dump = read(&root.join("crates/cli/src/commands/dump.rs"));
+    let ast = function_body(&cli_dump, "cmd_dump_ast");
+    let taint = function_body(&cli_dump, "render_taint_report_text_paged");
+    assert!(
+        ast.contains("ast_text_units")
+            && ast.contains("render_ast_text_unit")
+            && !ast.contains("render_ast_text_lines"),
+        "dump-ast must retain lightweight node references and format only the requested page"
+    );
+    assert!(
+        taint.contains("&report.records")
+            && taint.contains("taint_record_text_cost")
+            && taint.contains("render_taint_report_text(report, paged, compact)")
+            && !taint.contains("page_cache::capture")
+            && !taint.contains("serde_json"),
+        "dump-taint text must paginate structured propagation records before formatting them"
+    );
+}
+
+#[test]
+fn taint_callgraph_and_flow_rendering_reuse_report_scoped_compiler_artifacts() {
+    let root = repo_root();
+    let workspace = read(&root.join("crates/workspace/src/lib.rs"));
+    let canonical = function_body(&workspace, "build_resolved_call_graph");
+    let scoped = function_body(&workspace, "source_reachable_resolved_call_graph_with_scope");
+    assert!(
+        canonical.contains("compiler_linkage_index()")
+            && !canonical.contains("compiler_header_index()")
+            && scoped.contains("callgraph_query_service")
+            && scoped.contains("source_reachable_call_graph_from_relation")
+            && scoped
+                .find("source_reachable_call_graph_from_relation")
+                .zip(scoped.find("decl_index_remapped_to_headers"))
+                .is_some_and(|(persisted, compile)| persisted < compile),
+        "the canonical graph must retain compiler return linkage, and warm taint/source-lineage planning must replay exact persisted partitions before recompiling source bodies"
+    );
+
+    let security = read(&root.join("crates/cli/src/commands/security.rs"));
+    let attach = function_body(&security, "attach_flow_evidence_to_report");
+    let units = function_body(&security, "build_taint_text_units");
+    assert!(
+        attach.contains("let mut body_cache = bonsai_sdk::FlowBodyCache::new(ws)")
+            && attach
+                .find("FlowBodyCache::new")
+                .zip(attach.find("for combined"))
+                .is_some_and(|(cache, loop_start)| cache < loop_start)
+            && units.contains("render_workspace.map(bonsai_sdk::FlowBodyCache::new)")
+            && units
+                .find("FlowBodyCache::new")
+                .zip(units.find("for (finding_idx"))
+                .is_some_and(|(cache, loop_start)| cache < loop_start)
+            && !units.contains("page_cache::capture"),
+        "taint rendering must share one function-body evidence cache across every finding and retain structured units until the selected page"
     );
 }
 
@@ -3562,6 +3686,42 @@ fn production_callgraph_consumers_share_the_workspace_graph() {
         clone_sites.is_empty(),
         "read-only production consumers must use `cached_resolved_call_graph()`; cloning the full graph is prohibitive on large workspaces:\n  {}",
         clone_sites.join("\n  ")
+    );
+}
+
+#[test]
+fn cli_paging_formats_only_the_requested_page() {
+    let root = repo_root();
+    let page_cache = read(&root.join("crates/cli/src/page_cache.rs"));
+    let trace = read(&root.join("crates/cli/src/commands/trace.rs"));
+    let tree = read(&root.join("crates/cli/src/commands/tree.rs"));
+    let window = function_body(&page_cache, "requested_page_window");
+    let emit = function_body(&page_cache, "emit_paged_text");
+    let replay = function_body(&page_cache, "replay_if_hit");
+    assert!(
+        window.contains("pages.insert(current_page.clamp(1, total_pages))")
+            && !window.contains("for page")
+            && emit.contains("requested_page_window")
+            && !page_cache.contains("EAGER_PAGE_LIMIT")
+            && !replay.contains("requested_page_arg().is_none()"),
+        "CLI paging must format only the requested page while allowing a fresh repeated page to replay"
+    );
+    let trace_plan = function_body(&trace, "trace_page_rows");
+    let trace_render = function_body(&trace, "render_trace_text_page");
+    assert!(
+        trace_plan.contains("for step in &trace.steps")
+            && trace_plan.contains("depth_by_path")
+            && !trace_plan.contains("flat_map")
+            && trace_render.contains("for row in rows")
+            && !trace.contains("fn trace_text_lines"),
+        "trace paging must plan steps once and format only the requested page without a paths-times-steps rescan"
+    );
+    let tree_page = function_body(&tree, "render_text_paged");
+    assert!(
+        tree_page.contains("tree_text_rows(out)")
+            && tree_page.contains("row.render()")
+            && !tree.contains("fn render_text_lines"),
+        "tree paging must retain structural rows and style only the requested page"
     );
 }
 

@@ -13,7 +13,7 @@ use anyhow::Context;
 use bonsai_common::{dependency_metadata::collect_dependency_metadata_fingerprints, write_atomic_bytes};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -34,12 +34,14 @@ thread_local! {
     static CAPTURE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
-const EAGER_PAGE_LIMIT: u64 = 4;
 // Page boundaries and semantic command planning are part of the cached
 // rendering contract. Version 12 invalidates payloads produced before
 // explicit out-of-range pages failed closed and before the full-result token
 // estimate became stable across every page.
-const RENDER_CACHE_VERSION: u32 = 12;
+// Version 13 stores only the page the caller requested. Earlier versions
+// eagerly formatted neighboring pages, multiplying render cost for commands
+// whose exact analysis had already completed.
+const RENDER_CACHE_VERSION: u32 = 13;
 
 /// Stable structural ids are hashes of rendered chains, so the id alone
 /// cannot be inverted into the target declaration that made the query
@@ -71,6 +73,7 @@ struct StructuralIdHints {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CachedPage {
     pub number: u64,
+    pub total_pages: u64,
     pub cursor: String,
     pub text: String,
 }
@@ -195,7 +198,7 @@ fn cache_disabled() -> bool {
 }
 
 pub(crate) fn replay_if_hit(workspace: &Path) -> anyhow::Result<bool> {
-    if cache_disabled() || requested_page_arg().is_none() {
+    if cache_disabled() {
         return Ok(false);
     }
     let stage = progress::ScopedSpinner::new("validating rendered page cache");
@@ -412,28 +415,45 @@ fn save_pages_value(
     filters_hash: u64,
     pages: Vec<CachedPage>,
 ) -> anyhow::Result<()> {
-    // The rendered-page cache exists to make page 2+ cheap. Persisting a
-    // single terminal page adds dependency/rulepack freshness walks and disk
-    // I/O to narrow commands without any possible replay consumer.
-    if cache_disabled() || pages.len() <= 1 {
+    // The rendered-page cache exists to make repeated requests and page
+    // turns cheap. Persist one requested page from a multi-page report, but
+    // avoid freshness walks and disk I/O for terminal single-page commands.
+    if cache_disabled() || pages.is_empty() || pages.iter().all(|page| page.total_pages <= 1) {
         return Ok(());
     }
     let dir = cache_dir(workspace);
     std::fs::create_dir_all(&dir)?;
+    let workspace_fingerprint = match remembered_workspace_fingerprint(workspace) {
+        Some(fingerprint) => fingerprint,
+        None => workspace_fingerprint(workspace)?,
+    };
+    let dependency_metadata_fingerprint = dependency_metadata_fingerprint(workspace)?;
+    let rulepack_fingerprint = rulepack_fingerprint_for_command(workspace)?;
+    let mut by_number = BTreeMap::new();
+    if let Some(existing) = read_cache(workspace)? {
+        let same_report = existing.command == command
+            && existing.filters_hash == filters_hash
+            && existing.workspace_fingerprint == workspace_fingerprint
+            && existing.dependency_metadata_fingerprint == dependency_metadata_fingerprint
+            && existing.rulepack_fingerprint == rulepack_fingerprint;
+        if same_report {
+            by_number.extend(existing.pages.into_iter().map(|page| (page.number, page)));
+        }
+    }
+    // Newly rendered bytes win if this process refreshed a page already in
+    // the on-demand cache. No unrequested page is formatted or synthesized.
+    by_number.extend(pages.into_iter().map(|page| (page.number, page)));
     let cache = PageCacheFile {
         version: RENDER_CACHE_VERSION,
         binary_version: binary_cache_fingerprint().to_string(),
         matcher_policy_fingerprint: bonsai_common::MATCHER_POLICY_FINGERPRINT,
-        workspace_fingerprint: match remembered_workspace_fingerprint(workspace) {
-            Some(fingerprint) => fingerprint,
-            None => workspace_fingerprint(workspace)?,
-        },
-        dependency_metadata_fingerprint: dependency_metadata_fingerprint(workspace)?,
-        rulepack_fingerprint: rulepack_fingerprint_for_command(workspace)?,
+        workspace_fingerprint,
+        dependency_metadata_fingerprint,
+        rulepack_fingerprint,
         normalized_argv_hash: normalized_argv_hash(),
         command: command.to_string(),
         filters_hash,
-        pages,
+        pages: by_number.into_values().collect(),
     };
     // Per docs/contributing/design-patterns.mdx::Lossless Caches: a
     // partially written cache file must not survive a crash and replay
@@ -442,23 +462,12 @@ fn save_pages_value(
     atomic_write_json(&cache_path(workspace), &cache)
 }
 
-pub(crate) fn eager_window(current_page: u64, total_pages: u64) -> BTreeSet<u64> {
+pub(crate) fn requested_page_window(current_page: u64, total_pages: u64) -> BTreeSet<u64> {
     let mut pages = BTreeSet::new();
     if total_pages == 0 {
         return pages;
     }
-    let current = current_page.clamp(1, total_pages);
-    let end = current
-        .saturating_add(EAGER_PAGE_LIMIT.saturating_sub(1))
-        .min(total_pages);
-    for page in current..=end {
-        pages.insert(page);
-    }
-    if current > 1 {
-        for page in 1..=EAGER_PAGE_LIMIT.min(total_pages) {
-            pages.insert(page);
-        }
-    }
+    pages.insert(current_page.clamp(1, total_pages));
     pages
 }
 
@@ -501,7 +510,7 @@ where
     let mut cached_pages = Vec::new();
     let render_label = format!("rendering {command} page");
     let render_stage = progress::ScopedSpinner::new(&render_label);
-    for page_number in eager_window(current_page, current_info.total_pages) {
+    for page_number in requested_page_window(current_page, current_info.total_pages) {
         let mut page_cfg = cfg.clone();
         if page_number != current_page {
             page_cfg.page = paging::PageArg::Number(page_number);
@@ -510,6 +519,7 @@ where
         let text = capture(|| render_page(&slice, &info, &page_cfg))?;
         cached_pages.push(CachedPage {
             number: info.page_number,
+            total_pages: info.total_pages,
             cursor: info.cursor,
             text,
         });
@@ -517,7 +527,7 @@ where
     render_stage.finish();
     bonsai_diagnostics::debug_log!(
         "page-cache",
-        "{command} eager pages rendered: {:.3}s pages={}",
+        "{command} requested page rendered: {:.3}s pages={}",
         paging_started.elapsed().as_secs_f64(),
         cached_pages.len()
     );
@@ -533,9 +543,8 @@ where
         save_started.elapsed().as_secs_f64(),
         paging_started.elapsed().as_secs_f64()
     );
-    // Eager cache population renders nearby pages through the canonical
-    // paginator. Those internal renders must not replace the user's actual
-    // current page in `--page next` history.
+    // Cache publication must not replace the user's actual current page in
+    // `--page next` history.
     paging::write_last_cursor(command, filters_hash, &current_info.cursor);
     if let Some(page) = cached_pages.iter().find(|p| p.number == current_page) {
         emit_cached_text(&page.text)?;
@@ -544,7 +553,9 @@ where
 }
 
 fn requested_page(cache: &PageCacheFile) -> Option<&CachedPage> {
-    let arg = requested_page_arg()?;
+    let Some(arg) = requested_page_arg() else {
+        return cache.pages.iter().find(|page| page.number == 1);
+    };
     if arg.eq_ignore_ascii_case("next") {
         let current = paging::last_cursor(&cache.command, cache.filters_hash)?;
         return page_after_cursor(&cache.pages, &current);

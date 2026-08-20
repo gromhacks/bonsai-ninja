@@ -76,7 +76,7 @@ pub use bonsai_browse::{
     ResolutionCoverageFileRow, ResolutionCoverageFilters, ResolveFilters, ResolveOutcome, ResolveTrace,
     SearchFilters, SearchHit, SliceFilters, SliceOutcome, SliceRow, SliceStep, StringOut, StringsFilters,
     SummaryAnnotator, SymbolCallEdge, SymbolEvidenceKind, SymbolImport, SymbolSummary, TaintFilters,
-    TaintOutcome, TaintReport, UnresolvedCallEvidence, VarOut, VarsFilters,
+    TaintOutcome, TaintRecord, TaintReport, UnresolvedCallEvidence, VarOut, VarsFilters,
 };
 pub use bonsai_inspect::{
     chain_matches_filters, chain_matches_filters_for_hit, chain_to_names, compute_flow_id,
@@ -91,13 +91,13 @@ pub use bonsai_security::{
     source_rule_matches_filters, tree_file_rel, workspace_languages, AnalysisProgress,
     CombinedFindingWithChain, CombinedSourceAnalysisCandidate, DependencyInventory,
     DependencyInventoryOptions, DependencyRow, Finding, FindingMatch, FindingStatus, FindingWithChain,
-    FlowFunctionBody, FlowRole as SecurityFlowRole, FlowSourceLine, PackAuditCount, PackAuditFamilyCount,
-    PackAuditLanguage, PackAuditReport, PackInventoryOptions, PackRuleRow, PackTreeFile, PackTreeLanguage,
-    PackTreeReport, PackTreeRule, PackValidationIssue, PackValidationReport, Rule, RuleKind, RuleMatch,
-    Rulepack, RulepackMetadata, RuntimeDisabledRule, SecurityInventoryOptions, SecurityMatchRow,
-    SecurityReport, Severity, SourceAnalysisCandidate, SourceAnalysisOptions, SourceAnalysisReport,
-    SourceLineageLimits, SourceLineageStatus, SourceLineageSummary, TaintAnalysisOptions,
-    TaintAnalysisReport, TaintPropagationArg, TaintPropagationStep, TrustClass,
+    FlowBodyCache, FlowFunctionBody, FlowRole as SecurityFlowRole, FlowSourceLine, PackAuditCount,
+    PackAuditFamilyCount, PackAuditLanguage, PackAuditReport, PackInventoryOptions, PackRuleRow,
+    PackTreeFile, PackTreeLanguage, PackTreeReport, PackTreeRule, PackValidationIssue, PackValidationReport,
+    Rule, RuleKind, RuleMatch, Rulepack, RulepackMetadata, RuntimeDisabledRule, SecurityInventoryOptions,
+    SecurityMatchRow, SecurityReport, Severity, SourceAnalysisCandidate, SourceAnalysisOptions,
+    SourceAnalysisReport, SourceLineageLimits, SourceLineageStatus, SourceLineageSummary,
+    TaintAnalysisOptions, TaintAnalysisReport, TaintPropagationArg, TaintPropagationStep, TrustClass,
 };
 pub use bonsai_trace::{
     summarize_incomplete_reasons, PathSummary, PathTermination, TraceResult, TraceStep, TraceStepKind,

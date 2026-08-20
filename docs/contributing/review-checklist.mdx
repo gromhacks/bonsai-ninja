@@ -250,6 +250,14 @@ class and verify each box.
       seeds graph consumers with the same `Arc`; browse summary IDs derive
       from compiler headers without retaining another graph owner. Phase
       release drops all shared owners without discarding computed facts.
+- [ ] **Scoped graph planning reuses persisted relations.** Warm taint and
+      source-lineage planning run their exact forward/reverse/return/callback
+      fixed point over validated callgraph partitions before considering body
+      recompilation. The canonical persisted graph must consume exact function
+      linkage, not declaration-only headers, so factory-return receiver
+      dispatch matches scoped compilation. Add cold-versus-persisted
+      edge/function parity tests for every scope change; never replace the
+      fixed point with a depth, BFS, or path-count shortcut.
 - [ ] **Native export never enumerates paths.** CLI, SDK, and renderer expose
       only the exact `compressed_callgraph` relation. There is no
       `complete_chains`/capped-prefix switch, fixed chain count, BFS probe
@@ -301,11 +309,15 @@ class and verify each box.
       sparse-frontier profile covered at 1/2/3 GiB; do not use live RSS to
       collapse a warmed exact query to one worker, and do not add a minimum
       worker count that ignores the configured budget.
-- [ ] **Broad raw-flow paging performs only requested presentation work.** Row
-      costs are worker-precomputed and reused. The renderer must not serialize
-      or rescan every exact flow for each page and must not eagerly format
-      future raw-taint pages. Every result remains reachable through stable
-      page/cursor navigation.
+- [ ] **Paging performs only requested presentation work.** Exact analysis and
+      stable row costs may cover the complete result, but every text/JSON
+      renderer formats and caches only the requested page. It must not
+      serialize or rescan every exact flow per page or eagerly format future
+      pages. Every result remains reachable through stable page/cursor
+      navigation, and an identical page may replay only after exact freshness
+      validation. Multi-finding security text must also reuse one flow-body
+      cache for the report rather than rebuilding identical source functions
+      for each finding.
 - [ ] **Broad matcher scheduling has no artificial barriers.** Raw source
       ingestion uses memory-weighted parallel read windows but publishes VFS
       entries in canonical order. Raw rule-anchor planning uses the bounded

@@ -1454,10 +1454,10 @@ fn filter_report_to_security_group_id(report: &mut TaintAnalysisReport, group_id
 }
 
 fn attach_flow_evidence_to_report(ws: &bonsai_sdk::Workspace, report: &mut TaintAnalysisReport) {
+    let mut body_cache = bonsai_sdk::FlowBodyCache::new(ws);
     for combined in &mut report.findings {
         if combined.finding.hops.is_empty() {
-            combined.finding.hops = bonsai_sdk::build_flow_bodies(
-                ws,
+            combined.finding.hops = body_cache.build_flow_bodies(
                 &combined.chain_funcs,
                 &combined.finding.source,
                 &combined.finding.taint_path,
@@ -1474,7 +1474,10 @@ fn render_chain_funcs(item: &TaintAnalysisRenderFinding) -> Vec<FuncId> {
     item.chain_func_ids.iter().copied().map(FuncId::new).collect()
 }
 
-fn attach_flow_evidence_to_render_finding(ws: &bonsai_sdk::Workspace, item: &mut TaintAnalysisRenderFinding) {
+fn attach_flow_evidence_to_render_finding(
+    body_cache: &mut bonsai_sdk::FlowBodyCache<'_>,
+    item: &mut TaintAnalysisRenderFinding,
+) {
     if !item.finding.finding.hops.is_empty() {
         return;
     }
@@ -1482,8 +1485,7 @@ fn attach_flow_evidence_to_render_finding(ws: &bonsai_sdk::Workspace, item: &mut
     if chain_funcs.is_empty() {
         return;
     }
-    item.finding.finding.hops = bonsai_sdk::build_flow_bodies(
-        ws,
+    item.finding.finding.hops = body_cache.build_flow_bodies(
         &chain_funcs,
         &item.finding.finding.source,
         &item.finding.finding.taint_path,
@@ -1495,7 +1497,6 @@ fn build_taint_pages<C, R>(
     report: &TaintAnalysisRenderReport,
     paging_cfg: &paging::PagingConfig,
     filters_hash: u64,
-    eager_pages: bool,
     cost_finding: C,
     mut render_page: R,
 ) -> Result<(Vec<page_cache::CachedPage>, u64)>
@@ -1514,13 +1515,7 @@ where
     )?;
     let current_page = current_info.page_number;
     let mut pages = Vec::new();
-    let page_numbers: Vec<u64> = if eager_pages {
-        page_cache::eager_window(current_page, current_info.total_pages)
-            .into_iter()
-            .collect()
-    } else {
-        vec![current_page]
-    };
+    let page_numbers = page_cache::requested_page_window(current_page, current_info.total_pages);
     for page_number in page_numbers {
         let mut page_cfg = paging_cfg.clone();
         if page_number != current_page {
@@ -1531,6 +1526,7 @@ where
         let text = page_cache::capture(|| render_page(&paged_idx, &info, &page_cfg))?;
         pages.push(page_cache::CachedPage {
             number: page_number,
+            total_pages: info.total_pages,
             cursor: info.cursor,
             text,
         });
@@ -1547,7 +1543,6 @@ fn build_taint_json_pages(
         report,
         paging_cfg,
         filters_hash,
-        false,
         taint_json_cost_bytes,
         |paged_idx, info, page_cfg| render_taint_json_page(report, paged_idx, info, page_cfg),
     )
@@ -1606,10 +1601,10 @@ fn build_taint_text_pages(
         .unwrap_or(u64::MAX / 8)
         .max(unit_target_bytes);
 
-    let units = build_taint_text_units(workspace, render_workspace, pack, report, unit_target_bytes)?;
+    let units = build_taint_text_units(render_workspace, report, unit_target_bytes)?;
     let page_bounds = taint_text_page_bounds(&units, page_payload_budget_bytes);
     let current_page = resolve_taint_text_page(&page_bounds, paging_cfg, filters_hash)?;
-    let page_numbers: Vec<u64> = page_cache::eager_window(current_page, page_bounds.len() as u64)
+    let page_numbers: Vec<u64> = page_cache::requested_page_window(current_page, page_bounds.len() as u64)
         .into_iter()
         .collect();
     let mut pages = Vec::new();
@@ -1622,33 +1617,40 @@ fn build_taint_text_pages(
         let next_cursor = page_bounds.get(page_idx + 1).map(|(next_start, _)| {
             paging::cursor_id("security/taint-analysis", filters_hash, *next_start as u64)
         });
-        let payload_bytes: u64 = units[start..end].iter().map(|unit| unit.text.len() as u64).sum();
-        let info = paging::PageInfo {
+        let estimated_payload_bytes: u64 = units[start..end].iter().map(|unit| unit.estimated_bytes).sum();
+        let mut info = paging::PageInfo {
             page_number,
             total_pages: page_bounds.len() as u64,
             page_size: (end - start) as u64,
             shown_rows: (end - start) as u64,
             total_rows: units.len() as u64,
             budget,
-            tokens_used: paging::bytes_to_tokens(payload_bytes),
+            tokens_used: paging::bytes_to_tokens(estimated_payload_bytes),
             cursor: cursor.clone(),
             next_cursor,
             is_last: page_idx + 1 >= page_bounds.len(),
             start_offset: start as u64,
             total_tokens_uncapped: units
                 .iter()
-                .map(|unit| paging::bytes_to_tokens(unit.text.len() as u64))
+                .map(|unit| paging::bytes_to_tokens(unit.estimated_bytes))
                 .sum(),
         };
-        let text = page_cache::capture(|| {
-            render_taint_analysis_text_units(report, &units[start..end], &info)?;
+        let body = page_cache::capture(|| {
+            render_taint_analysis_text_body(workspace, pack, report, &units[start..end])?;
             if let Some(diff) = report.baseline.as_ref() {
                 render_baseline_summary_text(diff);
             }
             Ok(())
         })?;
+        info.tokens_used = paging::bytes_to_tokens(body.len() as u64);
+        let text = page_cache::capture(|| {
+            cli_print!("{body}");
+            render_paging_footer(&info, "bonsai-ninja security <workspace> taint-analysis");
+            Ok(())
+        })?;
         pages.push(page_cache::CachedPage {
             number: page_number,
+            total_pages: page_bounds.len() as u64,
             cursor,
             text,
         });
@@ -1663,56 +1665,93 @@ fn build_taint_text_pages(
 
 #[derive(Clone)]
 struct TaintTextUnit {
-    text: String,
+    finding: std::sync::Arc<TaintAnalysisRenderFinding>,
+    finding_idx: usize,
+    flow: Option<crate::commands::InspectFlowRendered>,
+    chunk_idx: usize,
+    total_chunks: usize,
+    estimated_bytes: u64,
 }
 
 fn build_taint_text_units(
-    workspace: &Path,
     render_workspace: Option<&bonsai_sdk::Workspace>,
-    pack: &Rulepack,
     report: &TaintAnalysisRenderReport,
     unit_target_bytes: u64,
 ) -> Result<Vec<TaintTextUnit>> {
     let mut units = Vec::new();
+    let mut body_cache = render_workspace.map(bonsai_sdk::FlowBodyCache::new);
     for (finding_idx, original) in report.findings.iter().enumerate() {
         let mut item = original.clone();
-        if let Some(ws) = render_workspace {
-            attach_flow_evidence_to_render_finding(ws, &mut item);
+        if let Some(cache) = body_cache.as_mut() {
+            attach_flow_evidence_to_render_finding(cache, &mut item);
         }
+        let item = std::sync::Arc::new(item);
         match flow_from_finding_hops(&item.finding, finding_idx) {
             Some(flow) => {
                 let chunks = split_security_flow_for_context(&flow, unit_target_bytes);
                 let total_chunks = chunks.len().max(1);
-                for (chunk_idx, chunk) in chunks.iter().enumerate() {
-                    let text = page_cache::capture(|| {
-                        render_taint_analysis_text_unit(
-                            workspace,
-                            pack,
-                            &item,
-                            finding_idx,
-                            Some(chunk),
-                            chunk_idx,
-                            total_chunks,
-                        )
-                    })?;
-                    units.push(TaintTextUnit { text });
+                for (chunk_idx, chunk) in chunks.into_iter().enumerate() {
+                    let estimated_bytes = taint_text_unit_estimated_bytes(&item, Some(&chunk));
+                    units.push(TaintTextUnit {
+                        finding: item.clone(),
+                        finding_idx,
+                        flow: Some(chunk),
+                        chunk_idx,
+                        total_chunks,
+                        estimated_bytes,
+                    });
                 }
             }
             None => {
-                let text = page_cache::capture(|| {
-                    render_taint_analysis_text_unit(workspace, pack, &item, finding_idx, None, 0, 1)
-                })?;
-                units.push(TaintTextUnit { text });
+                let estimated_bytes = taint_text_unit_estimated_bytes(&item, None);
+                units.push(TaintTextUnit {
+                    finding: item,
+                    finding_idx,
+                    flow: None,
+                    chunk_idx: 0,
+                    total_chunks: 1,
+                    estimated_bytes,
+                });
             }
         }
     }
     Ok(units)
 }
 
-fn render_taint_analysis_text_units(
+fn taint_text_unit_estimated_bytes(
+    item: &TaintAnalysisRenderFinding,
+    flow: Option<&crate::commands::InspectFlowRendered>,
+) -> u64 {
+    let finding = &item.finding.finding;
+    let metadata = finding.finding_id.len()
+        + finding.source.rule_id.len()
+        + finding.sink.rule_id.len()
+        + finding.source.file.len()
+        + finding.sink.file.len()
+        + finding.source.text.len().min(256)
+        + finding.sink.text.len().min(256);
+    flow.map_or_else(
+        || {
+            taint_json_cost_bytes(item)
+                .saturating_add(metadata as u64)
+                .saturating_add(8_192)
+        },
+        |flow| {
+            flow.functions
+                .iter()
+                .map(security_function_cost_bytes)
+                .sum::<u64>()
+                .saturating_add(metadata as u64)
+                .saturating_add(2_048)
+        },
+    )
+}
+
+fn render_taint_analysis_text_body(
+    workspace: &Path,
+    pack: &Rulepack,
     report: &TaintAnalysisRenderReport,
     units: &[TaintTextUnit],
-    info: &paging::PageInfo,
 ) -> Result<()> {
     render_taint_analysis_report_heading(&report.summary);
     if report.analysis_complete {
@@ -1736,9 +1775,16 @@ fn render_taint_analysis_text_units(
         );
     }
     for unit in units {
-        cli_print!("{}", unit.text);
+        render_taint_analysis_text_unit(
+            workspace,
+            pack,
+            &unit.finding,
+            unit.finding_idx,
+            unit.flow.as_ref(),
+            unit.chunk_idx,
+            unit.total_chunks,
+        )?;
     }
-    render_paging_footer(info, "bonsai-ninja security <workspace> taint-analysis");
     Ok(())
 }
 
@@ -1777,7 +1823,7 @@ fn render_taint_analysis_text_unit(
             cli_println!("  {}", u.warn("[NEW since baseline]"));
         }
     } else {
-        render_finding_continuation_header(u, finding_idx + 1, &item.finding, chunk_idx + 1, total_chunks);
+        render_finding_flow_part_header(u, finding_idx + 1, &item.finding, chunk_idx + 1, total_chunks);
     }
     if let Some(flow) = flow {
         let header_name = if item.finding.additional_sinks.is_empty() {
@@ -1805,7 +1851,7 @@ fn render_taint_analysis_text_unit(
     Ok(())
 }
 
-fn render_finding_continuation_header(
+fn render_finding_flow_part_header(
     u: &Ui,
     idx: usize,
     combined: &CombinedFindingWithChain,
@@ -1821,14 +1867,10 @@ fn render_finding_continuation_header(
     cli_println!("{}", u.ruler('═', 70));
     cli_println!(
         "{} · {} · {}  {}",
-        u.annotation(&format!("FINDING {idx} continued")),
+        u.annotation(&format!("FINDING {idx} · FLOW {chunk}/{total_chunks}")),
         u.name(vuln_class),
         severity_cell(u, &sev),
         u.dim(&f.finding_id),
-    );
-    cli_println!(
-        "  {}",
-        u.dim(&format!("flow code part {chunk} of {total_chunks}"))
     );
     cli_println!("{}", u.ruler('─', 70));
 }
@@ -1843,7 +1885,7 @@ fn taint_text_page_bounds(units: &[TaintTextUnit], page_payload_budget_bytes: u6
         let mut end = start;
         let mut bytes = 0u64;
         while end < units.len() {
-            let cost = units[end].text.len() as u64;
+            let cost = units[end].estimated_bytes;
             if end > start && bytes.saturating_add(cost) > page_payload_budget_bytes {
                 break;
             }
@@ -2002,7 +2044,7 @@ fn split_security_line_for_context(
         next.text = line.text[start..end].to_string();
         if part > 0 {
             next.step = None;
-            next.annotation = Some("continued long source line".to_string());
+            next.annotation = Some(format!("source line part {}", part + 1));
         }
         out.push(next);
         start = end;
@@ -2756,9 +2798,9 @@ fn cmd_source_analysis(
             let total_pages = current_info.total_pages;
             let current_page = current_info.page_number;
             pagination_progress.finish();
-            let page_render_progress = ScopedProgress::new("rendering source page window");
+            let page_render_progress = ScopedProgress::new("rendering source page");
             let mut cached_pages = Vec::new();
-            for page_number in page_cache::eager_window(current_page, total_pages) {
+            for page_number in page_cache::requested_page_window(current_page, total_pages) {
                 let mut page_cfg = paging_cfg.clone();
                 page_cfg.page = paging::PageArg::Number(page_number);
                 let (paged, info) = paging::paginate(
@@ -2785,6 +2827,7 @@ fn cmd_source_analysis(
                 })?;
                 cached_pages.push(page_cache::CachedPage {
                     number: page_number,
+                    total_pages,
                     cursor: info.cursor,
                     text,
                 });

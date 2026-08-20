@@ -12,8 +12,8 @@ use bonsai_sdk::{FlowEntryExit, InlinedDecl, LineMark, MarkKind, ReadFileFilters
 use std::path::{Path, PathBuf};
 
 use super::{
-    emit_json_value_paged_cached, open_project_index_matching_path, open_project_index_only,
-    open_project_index_only_with_rulepack,
+    emit_json_value_paged_cached, open_project_index_matching_literal, open_project_index_matching_path,
+    open_project_index_only, open_project_index_only_with_rulepack,
 };
 use crate::args::BrowseFormat;
 use crate::cli_println;
@@ -150,7 +150,8 @@ fn resolve_read_file_target(workspace: &Path, path: Option<&str>, symbol: Option
 }
 
 fn resolve_symbol_path(workspace: &Path, symbol: &str) -> Result<String> {
-    let (project, _footer) = open_project_index_only(workspace)?;
+    let literal = bonsai_callgraph::short_callee(symbol);
+    let (project, _footer) = open_project_index_matching_literal(workspace, literal)?;
     let stage = progress::ScopedSpinner::new("resolving symbol path");
     let defs = project.browse().defs(bonsai_sdk::DefsFilters {
         name: Some(symbol),
@@ -169,7 +170,11 @@ fn resolve_symbol_path(workspace: &Path, symbol: &str) -> Result<String> {
     match candidates.as_slice() {
         [one] => Ok(one.file.clone()),
         [] => {
-            let suggestions = nearest_symbol_suggestions(&project, symbol, 6)?;
+            // A failed exact lookup is the only path that needs a global
+            // suggestion inventory. Keep successful `--symbol` reads scoped
+            // to files containing the declaration spelling.
+            let (suggestion_project, _footer) = open_project_index_only(workspace)?;
+            let suggestions = nearest_symbol_suggestions(&suggestion_project, symbol, 6)?;
             if suggestions.is_empty() {
                 anyhow::bail!("read-file --symbol `{symbol}` did not match any definition");
             }

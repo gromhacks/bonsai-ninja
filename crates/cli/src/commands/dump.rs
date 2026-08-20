@@ -186,6 +186,11 @@ pub(crate) fn cmd_dump_resolution(
     format: BrowseFormat,
 ) -> Result<()> {
     let paging_cfg = paging_with_row_limit(paging_cfg, limit);
+    // Resolution coverage needs the full declaration/import/type header set
+    // even when rows are filtered to one file. The browse layer applies the
+    // file predicate before opening graph partitions, so a warm query still
+    // decodes only the selected functions' direct relation without making a
+    // cold query misclassify cross-file calls as external.
     let (project, _footer) = open_project(root)?;
     let filters = bonsai_sdk::ResolutionCoverageFilters {
         file: file_filter,
@@ -456,21 +461,18 @@ pub(crate) fn cmd_dump_ast(
             }
         }
         BrowseFormat::Text => {
-            let lines = render_ast_text_lines(&file_dumps, compact, file_dumps.len());
+            let units = ast_text_units(&file_dumps);
             page_cache::emit_paged_text(
                 root_dir,
-                &lines,
+                &units,
                 &paging_cfg,
                 "dump-ast",
                 filters_hash,
-                // `render_ast_text_lines` has already produced the exact
-                // visible line, including indentation and styling. Charge
-                // its actual bytes plus the newline; fixed per-line padding
-                // made small scoped ASTs consume only ~10% of each page.
-                |line| line.len() as u64 + 1,
+                |unit| ast_text_unit_cost(unit, compact),
                 |paged, info, _cfg| {
-                    for line in paged {
-                        cli_println!("{line}");
+                    let u = ui();
+                    for unit in paged {
+                        cli_println!("{}", render_ast_text_unit(u, unit, compact));
                     }
                     render_paging_footer(info, "bonsai-ninja dump-ast <workspace>");
                     Ok(())
@@ -481,37 +483,86 @@ pub(crate) fn cmd_dump_ast(
     Ok(())
 }
 
-fn render_ast_text_lines(file_dumps: &[bonsai_sdk::AstFileDump], compact: bool, total: usize) -> Vec<String> {
-    let u = ui();
-    let mut lines = Vec::new();
+#[derive(Clone, serde::Serialize)]
+enum AstTextUnit<'a> {
+    NoMatch,
+    Blank,
+    FileHeader(&'a str),
+    Node {
+        node: &'a bonsai_sdk::AstNode,
+        depth: usize,
+    },
+    Summary {
+        files: usize,
+        nodes: usize,
+    },
+}
+
+fn ast_text_units(file_dumps: &[bonsai_sdk::AstFileDump]) -> Vec<AstTextUnit<'_>> {
+    let mut units = Vec::new();
     if file_dumps.is_empty() {
-        lines.push(u.dim("(no AST matched)"));
-        return lines;
+        units.push(AstTextUnit::NoMatch);
+        return units;
     }
     let mut total_nodes = 0usize;
     for file_dump in file_dumps {
-        lines.push(String::new());
-        lines.push(format!("{} {}", u.heading("═══"), u.path(&file_dump.path)));
-        total_nodes += render_ast_node_text(u, &file_dump.root, 0, compact, &mut lines);
+        units.push(AstTextUnit::Blank);
+        units.push(AstTextUnit::FileHeader(&file_dump.path));
+        total_nodes += push_ast_node_units(&file_dump.root, 0, &mut units);
     }
-    lines.push(String::new());
-    lines.push(u.dim(&format!("({total} file(s), {total_nodes} node(s))")));
-    lines
+    units.push(AstTextUnit::Blank);
+    units.push(AstTextUnit::Summary {
+        files: file_dumps.len(),
+        nodes: total_nodes,
+    });
+    units
 }
 
-/// Render one `AstNode` + its subtree. Returns the total number of
-/// nodes emitted so the outer render can show a summary line.
-/// Indentation is 2 spaces per level. In compact mode the verbatim
-/// source text is dropped; in full mode it's shown dim-styled after
-/// the kind / range / id header.
-fn render_ast_node_text(
-    u: &Ui,
-    node: &bonsai_sdk::AstNode,
+fn push_ast_node_units<'a>(
+    node: &'a bonsai_sdk::AstNode,
     depth: usize,
-    compact: bool,
-    lines: &mut Vec<String>,
+    units: &mut Vec<AstTextUnit<'a>>,
 ) -> usize {
-    let indent = "  ".repeat(depth);
+    units.push(AstTextUnit::Node { node, depth });
+    let mut total = 1;
+    for child in &node.children {
+        total += push_ast_node_units(child, depth + 1, units);
+    }
+    total
+}
+
+fn ast_text_unit_cost(unit: &AstTextUnit<'_>, compact: bool) -> u64 {
+    match unit {
+        AstTextUnit::NoMatch | AstTextUnit::Blank => 32,
+        AstTextUnit::FileHeader(path) => path.len() as u64 + 96,
+        AstTextUnit::Summary { .. } => 128,
+        AstTextUnit::Node { node, depth } => {
+            let preview = if compact || !node.children.is_empty() {
+                0
+            } else {
+                node.text.as_deref().map_or(0, |text| text.len().min(100))
+            };
+            (depth.saturating_mul(2)
+                + node.field.as_deref().map_or(0, str::len)
+                + node.kind.len()
+                + node.node_id.len()
+                + preview
+                + 192) as u64
+        }
+    }
+}
+
+fn render_ast_text_unit(u: &Ui, unit: &AstTextUnit<'_>, compact: bool) -> String {
+    let AstTextUnit::Node { node, depth } = unit else {
+        return match unit {
+            AstTextUnit::NoMatch => u.dim("(no AST matched)"),
+            AstTextUnit::Blank => String::new(),
+            AstTextUnit::FileHeader(path) => format!("{} {}", u.heading("═══"), u.path(path)),
+            AstTextUnit::Summary { files, nodes } => u.dim(&format!("({files} file(s), {nodes} node(s))")),
+            AstTextUnit::Node { .. } => unreachable!(),
+        };
+    };
+    let indent = "  ".repeat(*depth);
     let field_prefix = match node.field.as_deref() {
         Some(field) => format!("{}: ", u.kind(field)),
         None => String::new(),
@@ -521,12 +572,12 @@ fn render_ast_node_text(
         node.start_line, node.start_column, node.end_line, node.end_column
     );
     if compact {
-        lines.push(format!(
+        format!(
             "{indent}{field_prefix}{} {} {}",
             u.name(&node.kind),
             u.path(&range),
             u.dim(&node.node_id),
-        ));
+        )
     } else {
         let text_preview = match node.text.as_deref() {
             Some(text) if !text.is_empty() && node.children.is_empty() => {
@@ -536,18 +587,13 @@ fn render_ast_node_text(
             }
             _ => String::new(),
         };
-        lines.push(format!(
+        format!(
             "{indent}{field_prefix}{} {} {}{text_preview}",
             u.name(&node.kind),
             u.path(&range),
             u.dim(&node.node_id),
-        ));
+        )
     }
-    let mut total = 1;
-    for child in &node.children {
-        total += render_ast_node_text(u, child, depth + 1, compact, lines);
-    }
-    total
 }
 
 // dump-resolve — stage-by-stage trace of the name resolver. Trace
@@ -1002,29 +1048,47 @@ fn render_taint_report_text_paged(
     paging_cfg: &paging::PagingConfig,
     filters_hash: u64,
 ) -> Result<()> {
-    let rendered = page_cache::capture(|| {
-        render_taint_report_text(report, compact);
-        Ok(())
-    })?;
-    let lines: Vec<String> = rendered.lines().map(str::to_string).collect();
     page_cache::emit_paged_text(
         root,
-        &lines,
+        &report.records,
         paging_cfg,
         "dump-taint",
         filters_hash,
-        |line| line.len() as u64 + 128,
+        taint_record_text_cost,
         |paged, info, _cfg| {
-            for line in paged {
-                cli_println!("{line}");
-            }
+            render_taint_report_text(report, paged, compact);
             render_paging_footer(info, "bonsai-ninja dump-taint <workspace>");
             Ok(())
         },
     )
 }
 
-fn render_taint_report_text(report: &bonsai_sdk::TaintReport, compact: bool) {
+fn taint_record_text_cost(record: &bonsai_sdk::TaintRecord) -> u64 {
+    let fixed_text = record.taint_id.len()
+        + record.caller_name.len()
+        + record.caller_file.len()
+        + record.callee_name.len()
+        + record.callee_file.len()
+        + record.call_file.len()
+        + record.call_code.len()
+        + record.edge_kind.len()
+        + record.edge_precision.len();
+    let args = record
+        .tainted_args
+        .iter()
+        .map(|arg| arg.value_text.len() + arg.param_name.len() + 48)
+        .sum::<usize>();
+    // Labels, coordinates, ANSI styling, and table framing are bounded
+    // overhead. Keep this allocation-free because the paginator evaluates
+    // every record even though only one page is rendered.
+    fixed_text.saturating_add(args).saturating_add(768) as u64
+}
+
+fn render_taint_report_text(
+    report: &bonsai_sdk::TaintReport,
+    records: &[bonsai_sdk::TaintRecord],
+    compact: bool,
+) {
     let u = ui();
     // Header — source, seed, precision, pair count.
     let mut seed_preview = report.seeds.clone();
@@ -1057,7 +1121,7 @@ fn render_taint_report_text(report: &bonsai_sdk::TaintReport, compact: bool) {
             cli_println!("{line}");
         }
     }
-    if report.records.is_empty() {
+    if records.is_empty() {
         cli_println!();
         cli_println!(
             "  {}",
@@ -1074,7 +1138,7 @@ fn render_taint_report_text(report: &bonsai_sdk::TaintReport, compact: bool) {
             "args",
             "call site",
         ]);
-        for record in &report.records {
+        for record in records {
             let arrow = format!("{} → {}", record.caller_name, record.callee_name);
             let args: String = record
                 .tainted_args
@@ -1097,7 +1161,7 @@ fn render_taint_report_text(report: &bonsai_sdk::TaintReport, compact: bool) {
         return;
     }
     // Full render — one multi-line block per propagation.
-    for record in &report.records {
+    for record in records {
         cli_println!();
         cli_println!(
             "{} {} {}",

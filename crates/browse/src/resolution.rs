@@ -106,7 +106,14 @@ struct ResolutionIndex {
 
 impl ResolutionIndex {
     fn new(ws: &Workspace) -> Self {
-        let resolved = ws.cached_resolved_call_graph();
+        Self::from_graph(ws, ws.cached_resolved_call_graph())
+    }
+
+    fn for_functions(ws: &Workspace, functions: &[FuncId]) -> Self {
+        Self::from_graph(ws, ws.resolved_call_graph_direct_neighborhood(functions, None))
+    }
+
+    fn from_graph(ws: &Workspace, resolved: std::sync::Arc<bonsai_callgraph::ResolvedCallGraph>) -> Self {
         let unresolved = resolved
             .unresolved_workspace_call_sites()
             .map(|(caller, span)| CallSiteKey::new(caller, span))
@@ -152,20 +159,36 @@ pub fn resolution_coverage(
     filters: &ResolutionCoverageFilters<'_>,
 ) -> Vec<ResolutionCoverageFileRow> {
     let global = ws.compiler_header_index();
-    let index = ResolutionIndex::new(ws);
+    let files = global
+        .all_files()
+        .filter(|file| {
+            let Ok(path) = ws.vfs().path(*file) else {
+                return false;
+            };
+            filters
+                .file
+                .is_none_or(|needle| file_path_matches_filter(ws, &path.to_string_lossy(), needle))
+        })
+        .collect::<Vec<_>>();
+    let selected_functions = filters.file.map(|_| {
+        files
+            .iter()
+            .flat_map(|file| global.decls_in(*file))
+            .filter(|decl| is_callable_decl(decl.kind))
+            .map(|decl| FuncId::new(decl.symbol.raw()))
+            .collect::<Vec<_>>()
+    });
+    let index = selected_functions.as_deref().map_or_else(
+        || ResolutionIndex::new(ws),
+        |functions| ResolutionIndex::for_functions(ws, functions),
+    );
 
     let mut rows = Vec::new();
-    for file in global.all_files() {
+    for file in files {
         let Ok(path) = ws.vfs().path(file) else {
             continue;
         };
         let absolute_file_path = path.to_string_lossy().to_string();
-        if filters
-            .file
-            .is_some_and(|needle| !file_path_matches_filter(ws, &absolute_file_path, needle))
-        {
-            continue;
-        }
         let mut file_row = ResolutionCoverageFileRow {
             file: workspace_relative_path(ws, &absolute_file_path),
             ..ResolutionCoverageFileRow::default()
@@ -352,18 +375,17 @@ pub(crate) fn resolution_incomplete_reasons_for_funcs(
     funcs: impl IntoIterator<Item = FuncId>,
 ) -> Vec<String> {
     let global = ws.compiler_header_index();
-    let index = ResolutionIndex::new(ws);
-    let mut unique = AHashSet::new();
+    let unique = funcs.into_iter().collect::<AHashSet<_>>();
+    let mut functions = unique.iter().copied().collect::<Vec<_>>();
+    functions.sort_unstable_by_key(|func| func.raw());
+    let index = ResolutionIndex::for_functions(ws, &functions);
     let mut aliases_by_file: AHashMap<bonsai_common::FileId, AHashMap<String, AliasTarget>> = AHashMap::new();
     let mut unresolved_call_sites = 0usize;
     let mut dynamic_call_sites = 0usize;
     let mut macro_call_sites = 0usize;
     let mut receiver_type_gaps = 0usize;
 
-    for func in funcs {
-        if !unique.insert(func) {
-            continue;
-        }
+    for func in functions {
         let symbol = bonsai_common::SymbolId::new(func.raw());
         let Some(header_decl) = global.decl_of(symbol) else {
             continue;

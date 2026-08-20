@@ -328,7 +328,6 @@ fn read_file_with_taint_options(
     if semantic_overlays_requested {
         // Cross-file callers / callees are an explicit semantic overlay. The
         // default file view must not construct a resolved workspace callgraph.
-        let resolved = ws.cached_resolved_call_graph();
         let global = ws.compiler_header_index();
         let file_funcs: Vec<FuncId> = global
             .decls_in(file_id)
@@ -336,6 +335,7 @@ fn read_file_with_taint_options(
             .map(|d| FuncId::new(d.symbol.raw()))
             .collect();
         drop(global);
+        let resolved = ws.resolved_call_graph_direct_neighborhood(&file_funcs, None);
         for func in &file_funcs {
             for caller_edge in resolved
                 .callers_of(*func)

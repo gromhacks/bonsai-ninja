@@ -6,10 +6,10 @@ not duplicate dated performance history.
 
 ## Status
 
-The full local release pass completed on 2026-08-18. Documentation claims,
+The full local release pass completed on 2026-08-19. Documentation claims,
 links, command examples, current repository counts, and the rulepack validator
 were rechecked on that date. The release candidate also passed 227
-release security unit tests, 34 release rulepack conformance tests, 81
+release security unit tests, 34 release rulepack conformance tests, 85
 architecture invariants, 1,320 command/switch checks, standalone execution,
 and the complete Elasticsearch gate on that date. Local `main` has no known
 failing release gate.
@@ -53,7 +53,7 @@ The final local pass completed these checks with zero failures:
 | Release binary build-path privacy | Passed |
 | Documentation structure, links, navigation, binary help claims, and skill copies | Passed |
 | Native archive checksum and fresh-profile relocation smoke | Passed on macOS arm64 |
-| Build-artifact size gate | 13.01 GiB / 32 GiB combined limit (workspace and privacy-safe release targets) |
+| Build-artifact size gate | 20.52 GiB / 32 GiB combined limit (workspace and privacy-safe release targets) |
 
 The build-artifact measurement was taken after the full debug test matrix,
 release rustdoc, and optimized CLI build. Generated analysis caches and test
@@ -173,27 +173,35 @@ scheduler. The cold prewarm recorded 3,199,860,736 bytes maximum RSS and zero
 swaps; a fresh process validated and reopened that generation in 2.38 seconds
 at 99,254,272 bytes maximum RSS.
 
+After the final August 19 CLI performance pass, the same five scenarios
+completed in 533.11 seconds. The compiler-object cache was reusable, but the
+intentional callgraph ABI change invalidated and exactly rebuilt the derived
+callgraph/IDG generation in 343.71 seconds before the warm measurements. The
+cold semantic-generation row below remains the last controlled completely
+empty-cache prewarm measurement; it is not replaced by that partial derived
+generation rebuild.
+
 | Operation | Time | Enforced SLO |
 |---|---:|---:|
 | Cold semantic generation | 601.99 s | completion required |
-| Fresh-process semantic reuse | 2.38 s | 15 s |
-| Default inspect | 7.42 s | 30 s |
-| Exact raw-taint inspect | 27.62 s | 30 s |
-| Fresh-cache production taint | 31.98 s | 45 s |
-| Warm production taint | 11.03 s | 30 s |
-| `tree --max-depth 1` | 0.02 s | 30 s |
-| Search | 4.42 s | 30 s |
-| Definitions | 14.21 s | 30 s |
-| Imports | 8.55 s | 30 s |
-| Classes | 9.44 s | 30 s |
-| Entry points | 29.65 s | 30 s |
-| Calls | 3.99 s | 30 s |
-| Arguments | 3.92 s | 30 s |
-| Scoped `read-file` | 1.80 s | 30 s |
-| Source inventory | 3.73 s | 30 s |
-| High-severity sink inventory | 21.50 s | 30 s |
-| Sanitizer inventory | 16.42 s | 30 s |
-| Dependency inventory | 10.94 s | 30 s |
+| Fresh-process semantic reuse | 2.46 s | 15 s |
+| Default inspect | 7.36 s | 30 s |
+| Exact raw-taint inspect | 28.46 s | 30 s |
+| Fresh-cache production taint | 33.09 s | 45 s |
+| Warm production taint | 11.30 s | 30 s |
+| `tree --max-depth 1` | 0.04 s | 30 s |
+| Search | 4.04 s | 30 s |
+| Definitions | 8.86 s | 30 s |
+| Imports | 7.72 s | 30 s |
+| Classes | 8.94 s | 30 s |
+| Entry points | 13.35 s | 30 s |
+| Calls | 3.92 s | 30 s |
+| Arguments | 5.85 s | 30 s |
+| Scoped `read-file` | 1.75 s | 30 s |
+| Source inventory | 3.45 s | 30 s |
+| High-severity sink inventory | 20.84 s | 30 s |
+| Sanitizer inventory | 16.37 s | 30 s |
+| Dependency inventory | 11.59 s | 30 s |
 
 Command:
 

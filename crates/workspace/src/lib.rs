@@ -234,6 +234,241 @@ fn target_emission_requires_callee(
         .is_some_and(|decl| !decl.receiver_field_writes.is_empty())
 }
 
+type ScopedCallEdgeKey = (u32, u32, u32, u64, u64, u8, u8);
+
+fn scoped_call_edge_key(edge: &bonsai_callgraph::CallEdge) -> ScopedCallEdgeKey {
+    (
+        edge.from.raw(),
+        edge.to.raw(),
+        edge.span.file.raw(),
+        edge.span.start,
+        edge.span.end,
+        edge.kind as u8,
+        edge.precision.rank(),
+    )
+}
+
+fn relation_callees(
+    relation: &dyn bonsai_idg::workspace_adapter::CallGraphRelation,
+    caller: FuncId,
+    max_precision: Option<Precision>,
+) -> Vec<bonsai_callgraph::CallEdge> {
+    let mut edges = Vec::new();
+    relation.visit_callees(caller, &mut |edge| {
+        if max_precision.is_none_or(|max| edge.precision <= max) {
+            edges.push(edge.clone());
+        }
+    });
+    edges
+}
+
+fn relation_callers(
+    relation: &dyn bonsai_idg::workspace_adapter::CallGraphRelation,
+    callee: FuncId,
+    max_precision: Option<Precision>,
+) -> Vec<bonsai_callgraph::CallEdge> {
+    let mut edges = Vec::new();
+    relation.visit_callers(callee, &mut |edge| {
+        if max_precision.is_none_or(|max| edge.precision <= max) {
+            edges.push(edge.clone());
+        }
+    });
+    edges
+}
+
+fn insert_scoped_call_edge(
+    edges: &mut Vec<bonsai_callgraph::CallEdge>,
+    seen: &mut AHashSet<ScopedCallEdgeKey>,
+    edge: bonsai_callgraph::CallEdge,
+) {
+    if seen.insert(scoped_call_edge_key(&edge)) {
+        edges.push(edge);
+    }
+}
+
+/// Replay the security/source-lineage callgraph fixed point over a validated
+/// partitioned compiler relation. This is semantically identical to the cold
+/// body-compilation path below, but a warm command decodes only relation
+/// partitions touched by the exact worklist instead of resolving the same
+/// source bodies again in every fresh CLI process.
+fn source_reachable_call_graph_from_relation(
+    global: Arc<GlobalIndex>,
+    relation: &dyn bonsai_idg::workspace_adapter::CallGraphRelation,
+    source_funcs: &[FuncId],
+    target_funcs: &[FuncId],
+    max_precision: Option<Precision>,
+) -> SourceReachableCallGraph {
+    let target_set: AHashSet<FuncId> = target_funcs.iter().copied().collect();
+    let mut reached_funcs: AHashSet<FuncId> = source_funcs.iter().copied().collect();
+    let mut reverse_output_funcs: AHashSet<FuncId> = source_funcs
+        .iter()
+        .copied()
+        .filter(|func| has_summary_output(global.as_ref(), *func))
+        .collect();
+    let mut pending_reached: Vec<FuncId> = reached_funcs.iter().copied().collect();
+    pending_reached.sort_unstable_by_key(|func| std::cmp::Reverse(func.raw()));
+    let mut pending_reverse_output: Vec<FuncId> = reverse_output_funcs.iter().copied().collect();
+    pending_reverse_output.sort_unstable_by_key(|func| std::cmp::Reverse(func.raw()));
+    let mut processed_reached = AHashSet::new();
+    let mut processed_reverse_output = AHashSet::new();
+    let mut known_edges = Vec::new();
+    let mut known_edge_keys = AHashSet::new();
+
+    while !pending_reached.is_empty() || !pending_reverse_output.is_empty() {
+        while let Some(caller) = pending_reached.pop() {
+            if !processed_reached.insert(caller) {
+                continue;
+            }
+            for edge in relation_callees(relation, caller, max_precision) {
+                if reached_funcs.insert(edge.to) {
+                    pending_reached.push(edge.to);
+                }
+                insert_scoped_call_edge(&mut known_edges, &mut known_edge_keys, edge);
+            }
+        }
+        while let Some(callee) = pending_reverse_output.pop() {
+            if !processed_reverse_output.insert(callee) {
+                continue;
+            }
+            for edge in relation_callers(relation, callee, max_precision) {
+                if !has_summary_output(global.as_ref(), edge.from) {
+                    continue;
+                }
+                if reverse_output_funcs.insert(edge.from) {
+                    pending_reverse_output.push(edge.from);
+                }
+                if reached_funcs.insert(edge.from) {
+                    pending_reached.push(edge.from);
+                }
+                insert_scoped_call_edge(&mut known_edges, &mut known_edge_keys, edge);
+            }
+        }
+    }
+
+    // A target may consume a value returned by an already-reached function.
+    // Compile that reverse target-call relation to a fixed point independent
+    // of declaration order, matching the cold compiler worklist.
+    let mut target_callers_by_callee: AHashMap<FuncId, Vec<bonsai_callgraph::CallEdge>> = AHashMap::new();
+    for &target in &target_set {
+        for edge in relation_callees(relation, target, max_precision) {
+            target_callers_by_callee.entry(edge.to).or_default().push(edge);
+        }
+    }
+    for edges in target_callers_by_callee.values_mut() {
+        edges.sort_unstable_by_key(scoped_call_edge_key);
+    }
+    let mut return_corridor_funcs = AHashSet::new();
+    let mut pending: Vec<FuncId> = reached_funcs.iter().copied().collect();
+    pending.sort_unstable_by_key(|func| std::cmp::Reverse(func.raw()));
+    let mut processed = AHashSet::new();
+    while let Some(callee) = pending.pop() {
+        if !processed.insert(callee) {
+            continue;
+        }
+        let Some(edges) = target_callers_by_callee.get(&callee) else {
+            continue;
+        };
+        for edge in edges {
+            return_corridor_funcs.insert(edge.from);
+            return_corridor_funcs.insert(edge.to);
+            if reached_funcs.insert(edge.from) {
+                pending.push(edge.from);
+            }
+            insert_scoped_call_edge(&mut known_edges, &mut known_edge_keys, edge.clone());
+        }
+    }
+
+    known_edges.sort_unstable_by_key(scoped_call_edge_key);
+    let merged = bonsai_callgraph::CallGraph::from_unique_edges(known_edges);
+    let reached_target_set: AHashSet<FuncId> = target_set
+        .iter()
+        .copied()
+        .filter(|target| reached_funcs.contains(target))
+        .collect();
+    let mut relevant_funcs: AHashSet<FuncId> = if target_set.is_empty() || reached_target_set.is_empty() {
+        reached_funcs.clone()
+    } else {
+        let mut can_reach_target = reached_target_set.clone();
+        let mut stack: Vec<FuncId> = reached_target_set.iter().copied().collect();
+        while let Some(func) = stack.pop() {
+            for edge in merged.callers(func) {
+                if reached_funcs.contains(&edge.from) && can_reach_target.insert(edge.from) {
+                    stack.push(edge.from);
+                }
+            }
+        }
+        reached_funcs.intersection(&can_reach_target).copied().collect()
+    };
+    relevant_funcs.extend(return_corridor_funcs);
+
+    // Retain output providers connected by already-admitted semantic edges.
+    let mut provider_stack: Vec<FuncId> = relevant_funcs.iter().copied().collect();
+    while let Some(func) = provider_stack.pop() {
+        for edge in merged.callees(func) {
+            if relevant_funcs.contains(&edge.to) || !has_summary_output(global.as_ref(), edge.to) {
+                continue;
+            }
+            relevant_funcs.insert(edge.to);
+            provider_stack.push(edge.to);
+        }
+    }
+    extend_func_set_with_semantic_callback_dispatchers_in_call_graph(
+        &mut relevant_funcs,
+        &reached_target_set,
+        global.as_ref(),
+        &merged,
+        max_precision,
+    );
+
+    let mut filtered = bonsai_callgraph::CallGraph::new();
+    for edge in &merged.edges {
+        if relevant_funcs.contains(&edge.from) && relevant_funcs.contains(&edge.to) {
+            filtered.add_edge(edge.clone());
+        }
+    }
+    let mut files: Vec<FileId> = relevant_funcs
+        .iter()
+        .filter_map(|func| global.declaring_file(SymbolId::new(func.raw())))
+        .collect();
+    files.sort_unstable_by_key(|file| file.raw());
+    files.dedup();
+    let mut funcs: Vec<FuncId> = relevant_funcs.into_iter().collect();
+    funcs.sort_unstable_by_key(|func| func.raw());
+    let nodes = funcs
+        .iter()
+        .filter_map(|func| {
+            global
+                .decl_of(SymbolId::new(func.raw()))
+                .map(|decl| bonsai_callgraph::CallGraphNode {
+                    func: *func,
+                    name: decl.name.clone().into_boxed_str(),
+                    qualified_name: decl
+                        .qualified_name
+                        .as_deref()
+                        .map(|name| name.to_string().into_boxed_str()),
+                    kind: decl.kind,
+                    file: decl.name_span.file,
+                    name_span: decl.name_span,
+                })
+        })
+        .collect();
+    SourceReachableCallGraph {
+        graph: Arc::new(bonsai_callgraph::ResolvedCallGraph::from_persisted_parts(
+            nodes,
+            filtered.edges,
+            Vec::new(),
+            Vec::new(),
+        )),
+        linkage_index: global,
+        files,
+        funcs,
+        reached_targets: target_set
+            .iter()
+            .filter(|target| reached_funcs.contains(target))
+            .count(),
+    }
+}
+
 fn summary_output_shape(events: &[FlowEvent]) -> bool {
     for event in events {
         match event {
@@ -2037,6 +2272,32 @@ impl Workspace {
         Some(service.materialize_direct_between(starts, targets))
     }
 
+    /// Return only the direct compiler-resolved callers and callees adjacent
+    /// to `functions`.
+    ///
+    /// A fresh partitioned sidecar keeps this proportional to the selected
+    /// callables' graph degree. If no exact sidecar exists, the canonical
+    /// complete graph remains the correctness-preserving cold fallback.
+    #[must_use]
+    pub fn resolved_call_graph_direct_neighborhood(
+        &self,
+        functions: &[FuncId],
+        max_precision: Option<Precision>,
+    ) -> Arc<bonsai_callgraph::ResolvedCallGraph> {
+        if functions.is_empty() {
+            return Arc::new(bonsai_callgraph::ResolvedCallGraph::default());
+        }
+        if let Some(graph) = self.inner.resolved_call_graph.read().as_ref().cloned() {
+            return graph;
+        }
+        if let Some(service) = self.callgraph_query_service() {
+            if let Ok(graph) = service.materialize_direct_neighborhood(functions, max_precision) {
+                return Arc::new(graph);
+            }
+        }
+        self.cached_resolved_call_graph()
+    }
+
     /// Materialize the exact compiler-resolved subgraph reachable from
     /// `starts`.
     ///
@@ -2069,8 +2330,16 @@ impl Workspace {
     }
 
     fn build_resolved_call_graph(&self) -> bonsai_callgraph::ResolvedCallGraph {
-        let headers = self.compiler_header_index();
-        bonsai_taint::build_resolved_call_graph_snapshot_with_headers(&self.inner.db, headers.as_ref())
+        // Receiver and factory-return resolution depends on the compiler's
+        // exact per-function linkage facts, not declaration/type headers
+        // alone. Building the canonical graph from the header-only view made
+        // its persisted relation strictly weaker than a cold scoped query
+        // (for example, `repo = Type.wrap(...); repo.run()` in Ruby). Load the
+        // independently decodable linkage payload for this graph-construction
+        // phase; later ownership transitions still release it before the IDG
+        // opens.
+        let linkage = self.compiler_linkage_index();
+        bonsai_taint::build_resolved_call_graph_snapshot_with_headers(&self.inner.db, linkage.as_ref())
     }
 
     pub fn source_reachable_resolved_call_graph(
@@ -2144,6 +2413,32 @@ impl Workspace {
         target_emissions_only: bool,
         function_scoped: bool,
     ) -> SourceReachableCallGraph {
+        if !target_emissions_only && !function_scoped {
+            if let Some(service) = self.callgraph_query_service() {
+                let global = self.compiler_linkage_index();
+                let scoped = source_reachable_call_graph_from_relation(
+                    global,
+                    service.as_ref(),
+                    source_funcs,
+                    target_funcs,
+                    max_precision,
+                );
+                if bonsai_idg::workspace_adapter::CallGraphRelation::check_error(service.as_ref()).is_ok() {
+                    bonsai_diagnostics::debug_log!(
+                        "compiler-cache",
+                        "source-reachable callgraph reused persisted partitions: funcs={} files={} targets={}",
+                        scoped.funcs.len(),
+                        scoped.files.len(),
+                        scoped.reached_targets
+                    );
+                    return scoped;
+                }
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "source-reachable callgraph partition replay failed; compiling exact bodies"
+                );
+            }
+        }
         let mut global = if function_scoped {
             self.take_exclusive_compiler_header_index()
         } else {

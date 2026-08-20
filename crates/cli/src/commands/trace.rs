@@ -28,10 +28,11 @@ const TRACE_SEMANTIC_CACHE_KIND: &str = "trace-result-v1";
 #[derive(Clone, Serialize)]
 struct TracePageRow<'a> {
     path: &'a PathSummary,
-    // One step is the smallest independently pageable trace fact. Keeping an
-    // entire path in one row made a single deep path exceed `--context` even
-    // though no semantic work was capped.
-    steps: Vec<&'a TraceStep>,
+    // One step is the smallest independently pageable trace fact. The depth
+    // is planned in the same single pass so a page beginning mid-path does
+    // not rescan earlier trace steps merely to recover indentation.
+    step: &'a TraceStep,
+    depth: usize,
     #[serde(skip)]
     cost: u64,
 }
@@ -130,14 +131,10 @@ pub(crate) fn cmd_trace(
                         analysis_incomplete_reasons.sort();
                         analysis_incomplete_reasons.dedup();
                         let path_ids = slice.iter().map(|row| row.path.path_id).collect::<BTreeSet<_>>();
-                        let step_ids = slice
-                            .iter()
-                            .flat_map(|row| row.steps.iter().map(|step| step.id))
-                            .collect::<BTreeSet<_>>();
+                        let step_ids = slice.iter().map(|row| row.step.id).collect::<BTreeSet<_>>();
                         let state_ids = slice
                             .iter()
-                            .flat_map(|row| row.steps.iter())
-                            .flat_map(|step| [step.state_before, step.state_after])
+                            .flat_map(|row| [row.step.state_before, row.step.state_after])
                             .flatten()
                             .collect::<BTreeSet<_>>();
                         let mut seen_paths = BTreeSet::new();
@@ -145,10 +142,7 @@ pub(crate) fn cmd_trace(
                             .iter()
                             .filter_map(|row| seen_paths.insert(row.path.path_id).then_some(row.path))
                             .collect::<Vec<_>>();
-                        let steps = slice
-                            .iter()
-                            .flat_map(|row| row.steps.iter().copied())
-                            .collect::<Vec<_>>();
+                        let steps = slice.iter().map(|row| row.step).collect::<Vec<_>>();
                         let edges = trace
                             .edges
                             .iter()
@@ -205,18 +199,16 @@ pub(crate) fn cmd_trace(
             }
         }
         OutputFormat::Text => {
-            let lines = trace_text_lines(&trace, root, &trace.paths);
+            let rows = trace_page_rows(&trace);
             page_cache::emit_paged_text(
                 root,
-                &lines,
+                &rows,
                 &paging_cfg,
                 "trace",
                 filters_hash,
-                |line| line.len() as u64 + 128,
+                |row| row.cost,
                 |paged, info, _cfg| {
-                    for line in paged {
-                        cli_println!("{line}");
-                    }
+                    render_trace_text_page(&trace, root, paged);
                     render_paging_footer(info, "bonsai-ninja trace <workspace> <symbol>");
                     Ok(())
                 },
@@ -228,27 +220,36 @@ pub(crate) fn cmd_trace(
 }
 
 fn trace_page_rows(trace: &TraceResult) -> Vec<TracePageRow<'_>> {
-    trace
+    let paths = trace
         .paths
         .iter()
-        .flat_map(|path| {
-            trace
-                .steps
-                .iter()
-                .filter(move |step| step.path_id == path.path_id)
-                .map(move |step| {
-                    // Pretty JSON repeats indentation and field names around
-                    // each step. Include conservative edge/state allowance so
-                    // the selected page stays inside its render budget.
-                    let serialized = serde_json::to_vec(step).map_or(0, |bytes| bytes.len());
-                    TracePageRow {
-                        path,
-                        steps: vec![step],
-                        cost: serialized.saturating_add(384) as u64,
-                    }
-                })
-        })
-        .collect()
+        .map(|path| (path.path_id, path))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut depth_by_path = std::collections::BTreeMap::<_, usize>::new();
+    let mut rows = Vec::with_capacity(trace.steps.len());
+    for step in &trace.steps {
+        let Some(path) = paths.get(&step.path_id).copied() else {
+            continue;
+        };
+        let depth = depth_by_path.entry(step.path_id).or_default();
+        if matches!(step.kind, TraceStepKind::ExitFunction | TraceStepKind::Return) && *depth > 0 {
+            *depth -= 1;
+        }
+        // Pretty JSON repeats indentation and field names around each step.
+        // Include conservative path/edge/state and themed-text allowance so
+        // either renderer remains inside the same stable page plan.
+        let serialized = serde_json::to_vec(step).map_or(0, |bytes| bytes.len());
+        rows.push(TracePageRow {
+            path,
+            step,
+            depth: *depth,
+            cost: serialized.saturating_add(512) as u64,
+        });
+        if matches!(step.kind, TraceStepKind::EnterFunction) {
+            *depth = depth.saturating_add(1);
+        }
+    }
+    rows
 }
 
 /// CLI-themed text rendering for `trace`. Indents by call depth so the
@@ -259,14 +260,9 @@ fn trace_page_rows(trace: &TraceResult) -> Vec<TracePageRow<'_>> {
 /// `to_text` (in `bonsai_sdk::trace_render`) is still available for SDK
 /// consumers that want a plain transcript without ANSI; this CLI path
 /// is the one users hit by default.
-fn trace_text_lines(
-    trace: &TraceResult,
-    workspace_root: &std::path::Path,
-    paged_paths: &[PathSummary],
-) -> Vec<String> {
+fn render_trace_text_page(trace: &TraceResult, workspace_root: &std::path::Path, rows: &[TracePageRow<'_>]) {
     use TraceStepKind as K;
     let ui = ui();
-    let mut lines = Vec::new();
     let entry_label = trace
         .query
         .entry_symbol
@@ -279,10 +275,10 @@ fn trace_text_lines(
     } else {
         format!("▸ trace {}", entry_label)
     };
-    lines.push(String::new());
-    lines.push(ui.heading(&header));
-    lines.push(String::new());
-    lines.push(format!(
+    cli_println!();
+    cli_println!("{}", ui.heading(&header));
+    cli_println!();
+    cli_println!(
         "  {} {}    {} {}    {} {}    {} {}",
         ui.label("language"),
         ui.name(&trace.summary.language),
@@ -292,13 +288,13 @@ fn trace_text_lines(
         ui.name(&trace.summary.total_steps.to_string()),
         ui.label("precision"),
         ui.name(&format!("{:?}", trace.summary.precision)),
-    ));
+    );
     if trace.summary.truncated_paths > 0 {
-        lines.push(format!(
+        cli_println!(
             "  {} {}",
             ui.label("truncated paths"),
             ui.warn(&trace.summary.truncated_paths.to_string()),
-        ));
+        );
     }
     if !trace.summary.analysis_complete {
         let mut reasons = trace.summary.truncation_reasons.clone();
@@ -306,70 +302,58 @@ fn trace_text_lines(
         reasons.sort();
         reasons.dedup();
         let reasons = summarize_incomplete_reasons(&reasons, 8);
-        lines.extend(ui.wrapped_warn_labeled_lines("analysis incomplete", &reasons));
+        for line in ui.wrapped_warn_labeled_lines("analysis incomplete", &reasons) {
+            cli_println!("{line}");
+        }
     }
     let ws_root = workspace_root
         .canonicalize()
         .unwrap_or_else(|_| workspace_root.to_path_buf());
 
-    for path in paged_paths {
-        lines.push(String::new());
-        lines.push(format!(
-            "{} {}  {}",
-            ui.label("PATH"),
-            ui.name(&path.path_id.to_string()),
-            ui.dim(&format!(
-                "[steps {}-{}, terminated by {:?}, precision {:?}]",
-                path.first_step, path.last_step, path.terminated_by, path.precision
-            )),
-        ));
-        lines.push(ui.ruler('─', 70));
-
-        let mut depth: usize = 0;
-        for step in trace.steps.iter().filter(|s| s.path_id == path.path_id) {
-            // Adjust depth BEFORE printing for ExitFunction/Return so the
-            // exit aligns with the matching enter.
-            if matches!(step.kind, K::ExitFunction | K::Return) && depth > 0 {
-                depth -= 1;
-            }
-            let indent = "  ".repeat(depth + 1);
-            let (kind, label) = if step.precision.is_semantic() {
-                (step.kind, step_label(step))
-            } else {
-                (
-                    K::Diagnostic,
-                    "Suppressed diagnostic-precision trace step".to_string(),
-                )
-            };
-            let kind_tag = format!("[{}]", short_step_kind(kind));
-            lines.push(format!(
-                "{}{} {}  {}",
-                indent,
-                ui.kind(&kind_tag),
-                ui.name(&label),
-                ui.dim(&format_step_loc(
-                    &step.span.file,
-                    step.span.start_line,
-                    step.span.start_col,
-                    &ws_root
+    let mut current_path = None;
+    for row in rows {
+        if current_path != Some(row.path.path_id) {
+            let path = row.path;
+            current_path = Some(path.path_id);
+            cli_println!();
+            cli_println!(
+                "{} {}  {}",
+                ui.label("PATH"),
+                ui.name(&path.path_id.to_string()),
+                ui.dim(&format!(
+                    "[steps {}-{}, terminated by {:?}, precision {:?}]",
+                    path.first_step, path.last_step, path.terminated_by, path.precision
                 )),
-            ));
-            // Indent FURTHER inside the function we just entered so
-            // subsequent statements visibly nest under the call.
-            if matches!(step.kind, K::EnterFunction | K::Call) {
-                depth = depth.saturating_add(1);
-                if matches!(step.kind, K::Call) && depth > 0 {
-                    // Call alone doesn't enter a body in the trace
-                    // sequence — the matching `EnterFunction` will. Undo
-                    // the bump so we don't double-indent.
-                    depth -= 1;
-                }
-            }
+            );
+            cli_println!("{}", ui.ruler('─', 70));
         }
+        let step = row.step;
+        let indent = "  ".repeat(row.depth + 1);
+        let (kind, label) = if step.precision.is_semantic() {
+            (step.kind, step_label(step))
+        } else {
+            (
+                K::Diagnostic,
+                "Suppressed diagnostic-precision trace step".to_string(),
+            )
+        };
+        let kind_tag = format!("[{}]", short_step_kind(kind));
+        cli_println!(
+            "{}{} {}  {}",
+            indent,
+            ui.kind(&kind_tag),
+            ui.name(&label),
+            ui.dim(&format_step_loc(
+                &step.span.file,
+                step.span.start_line,
+                step.span.start_col,
+                &ws_root
+            )),
+        );
     }
 
     let summary = summarize_precision(trace);
-    lines.push(String::new());
+    cli_println!();
     let non_semantic = summary.over_approximate.saturating_add(summary.unknown);
     let mut tally = format!(
         "{}  exact={}  narrowed={}",
@@ -383,9 +367,8 @@ fn trace_text_lines(
             ui.warn(&non_semantic.to_string())
         ));
     }
-    lines.push(tally);
-    lines.push(String::new());
-    lines
+    cli_println!("{tally}");
+    cli_println!();
 }
 
 /// Compact `[tag]` shown in front of every trace step. Maps each

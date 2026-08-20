@@ -180,6 +180,29 @@ fn json_opts_into_wrap_with_context() {
 }
 
 #[test]
+fn paged_summary_json_keeps_structured_ids_on_the_requested_rows() {
+    let ws = ws();
+    let Some(value) = json_wrapped_value(&[
+        "calls",
+        ws.to_str().unwrap(),
+        "--summaries",
+        "--format",
+        "json",
+        "--context",
+        "1",
+    ]) else {
+        return;
+    };
+    let rows = value["rows"].as_array().expect("summary rows");
+    assert!(
+        !rows.is_empty(),
+        "summary page must retain the requested call row"
+    );
+    assert!(rows.iter().all(|row| row["summary_ids"].is_array()), "{value}");
+    assert_eq!(value["page"]["number"].as_u64(), Some(1));
+}
+
+#[test]
 fn dump_taint_paging_preserves_structured_semantic_and_presentation_coverage() {
     let ws = ws();
     let Some(value) = json_wrapped_value(&[
@@ -1482,7 +1505,7 @@ fn security_taint_analysis_never_exceeds_context_across_pages() {
 }
 
 #[test]
-fn security_page_turn_reuses_rendered_page_cache() {
+fn security_replays_requested_page_and_renders_page_turn_on_demand() {
     let _guard = page_cache_test_lock();
     let tmp = isolated_complex_ws("security-page-cache");
     let ws = tmp.path();
@@ -1501,9 +1524,19 @@ fn security_page_turn_reuses_rendered_page_cache() {
         .map(|entry| entry.path())
         .find(|path| path.extension().is_some_and(|ext| ext == "json"))
         .expect("page cache file should be written");
-    let before = std::fs::metadata(&cache_file)
-        .and_then(|m| m.modified())
-        .expect("cache mtime before page turn");
+    let before = std::fs::read(&cache_file).expect("cache bytes before replay");
+    let Some(replayed) = run(&["security", ws_str, "taint-analysis", "--context", "1k"]) else {
+        return;
+    };
+    assert_eq!(
+        first, replayed,
+        "an identical page-1 request must replay exact cached text"
+    );
+    assert_eq!(
+        before,
+        std::fs::read(&cache_file).expect("cache bytes after replay"),
+        "replaying the requested page must not rewrite its cache"
+    );
     let Some(second) = run(&[
         "security",
         ws_str,
@@ -1519,12 +1552,17 @@ fn security_page_turn_reuses_rendered_page_cache() {
         second.contains("page 2 of"),
         "cached page turn should render page 2:\n{second}"
     );
-    let after = std::fs::metadata(&cache_file)
-        .and_then(|m| m.modified())
-        .expect("cache mtime after page turn");
-    assert_eq!(
+    let after = std::fs::read(&cache_file).expect("cache bytes after page turn");
+    assert_ne!(
         before, after,
-        "page turn should replay the cached rendered page instead of recomputing and rewriting the cache"
+        "page 1 must not pre-render page 2; a page turn publishes only the newly requested page"
+    );
+    let Some(page_one_again) = run(&["security", ws_str, "taint-analysis", "--context", "1k"]) else {
+        return;
+    };
+    assert_eq!(
+        page_one_again, first,
+        "rendering page 2 on demand must retain the already-rendered page 1"
     );
 }
 
@@ -1541,9 +1579,17 @@ fn rendered_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> Option
         .map(|entry| entry.path())
         .find(|path| path.extension().is_some_and(|ext| ext == "json"))
         .expect("page cache file should be written");
-    let before = std::fs::metadata(&cache_file)
-        .and_then(|m| m.modified())
-        .expect("cache mtime before page turn");
+    let before = std::fs::read(&cache_file).expect("cache bytes before replay");
+    let replayed = run(args)?;
+    assert_eq!(
+        first, replayed,
+        "identical command must replay page 1 for {args:?}"
+    );
+    assert_eq!(
+        before,
+        std::fs::read(&cache_file).expect("cache bytes after replay"),
+        "page-1 replay must not rewrite the cache for {args:?}"
+    );
 
     let mut next_args = args.to_vec();
     next_args.extend(["--page", "2"]);
@@ -1553,13 +1599,16 @@ fn rendered_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> Option
         "cached page turn should render page 2 for {:?}:\n{second}",
         args
     );
-    let after = std::fs::metadata(&cache_file)
-        .and_then(|m| m.modified())
-        .expect("cache mtime after page turn");
-    assert_eq!(
+    let after = std::fs::read(&cache_file).expect("cache bytes after page turn");
+    assert_ne!(
         before, after,
-        "page turn should replay the cached rendered page instead of recomputing and rewriting the cache for {:?}",
+        "page turn must render on demand instead of pre-rendering future pages for {:?}",
         args
+    );
+    let page_one_again = run(args)?;
+    assert_eq!(
+        page_one_again, first,
+        "rendering page 2 must retain cached page 1 for {args:?}"
     );
     Some(true)
 }
@@ -1584,9 +1633,17 @@ fn rendered_json_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> O
         .map(|entry| entry.path())
         .find(|path| path.extension().is_some_and(|ext| ext == "json"))
         .expect("page cache file should be written");
-    let before = std::fs::metadata(&cache_file)
-        .and_then(|m| m.modified())
-        .expect("cache mtime before JSON page turn");
+    let before = std::fs::read(&cache_file).expect("cache bytes before JSON replay");
+    let replayed = run(args)?;
+    assert_eq!(
+        first, replayed,
+        "identical JSON command must replay page 1 for {args:?}"
+    );
+    assert_eq!(
+        before,
+        std::fs::read(&cache_file).expect("cache bytes after JSON replay"),
+        "JSON page-1 replay must not rewrite the cache for {args:?}"
+    );
 
     let mut next_args = args.to_vec();
     next_args.extend(["--page", "2"]);
@@ -1602,13 +1659,17 @@ fn rendered_json_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> O
         "cached JSON page turn should render page 2 for {:?}:\n{second}",
         args
     );
-    let after = std::fs::metadata(&cache_file)
-        .and_then(|m| m.modified())
-        .unwrap_or_else(|e| panic!("cache mtime after JSON page turn for {args:?}: {e}"));
-    assert_eq!(
+    let after = std::fs::read(&cache_file)
+        .unwrap_or_else(|e| panic!("cache bytes after JSON page turn for {args:?}: {e}"));
+    assert_ne!(
         before, after,
-        "JSON page turn should replay the cached rendered page instead of recomputing for {:?}",
+        "JSON page turn must render on demand instead of pre-rendering future pages for {:?}",
         args
+    );
+    let page_one_again = run(args)?;
+    assert_eq!(
+        page_one_again, first,
+        "rendering JSON page 2 must retain cached page 1 for {args:?}"
     );
     Some(true)
 }

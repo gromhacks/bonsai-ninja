@@ -862,6 +862,48 @@ where
     F: Fn(&T) -> u64,
     L: Fn(&bonsai_sdk::SummaryAnnotator<'_>, &T) -> String,
 {
+    // Bare exhaustive JSON and secondary filtering genuinely consume every
+    // rendered summary label. A normal paged request does not: select its
+    // exact rows first, then open the semantic annotator only inside the one
+    // requested-page renderer.
+    if cfg.json_wrapped() && !crate::filter::active().is_active() {
+        let rows_by_ref = rows.iter().collect::<Vec<_>>();
+        let force_wrapper = cfg.context.is_some() || !matches!(cfg.page, paging::PageArg::First);
+        return page_cache::emit_paged_text(
+            workspace,
+            &rows_by_ref,
+            cfg,
+            command,
+            filters_hash,
+            |row| row_cost_bytes(*row).saturating_add(192),
+            |slice, info, _cfg| {
+                let annotator = bonsai_sdk::SummaryAnnotator::new(ws);
+                let annotated = slice
+                    .iter()
+                    .map(|row| SummaryJsonRow {
+                        row: *row,
+                        summary_ids: labels_for(&annotator, *row)
+                            .split_whitespace()
+                            .map(str::to_string)
+                            .collect(),
+                    })
+                    .collect::<Vec<_>>();
+                if !force_wrapper && page_covers_entire_result(info) {
+                    cli_println!("{}", serde_json::to_string_pretty(&annotated)?);
+                    return Ok(());
+                }
+                let wrapped = serde_json::json!({
+                    "analysis_complete": page_covers_entire_result(info),
+                    "analysis_incomplete_reasons": paged_json_incomplete_reasons(command, info),
+                    "rows": annotated,
+                    "page": page_info_to_json(info),
+                });
+                cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
+                Ok(())
+            },
+        );
+    }
+
     let annotator = bonsai_sdk::SummaryAnnotator::new(ws);
     let annotated: Vec<SummaryJsonRow<'_, T>> = rows
         .iter()

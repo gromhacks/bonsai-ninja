@@ -106,7 +106,7 @@ pub fn symbol_summaries(
 ) -> Result<Vec<SymbolSummary>, regex::Error> {
     let matcher = bonsai_inspect::Matcher::build(pattern, regex)?;
     let targets = bonsai_inspect::matching_func_ids(ws, &matcher);
-    let graph = ws.cached_resolved_call_graph();
+    let graph = ws.resolved_call_graph_direct_neighborhood(&targets, None);
     let headers = ws.compiler_header_index();
     let mut summaries = targets
         .into_iter()

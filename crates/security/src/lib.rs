@@ -55,7 +55,7 @@ pub use finding::{
     compute_finding_id, AlternateTaintFlow, Finding, FindingMatch, FindingStatus, TaintFlowRef,
     TaintPropagationArg, TaintPropagationStep, TaintedArgInfo,
 };
-pub use flow_evidence::{build_flow_bodies, FlowFunctionBody, FlowRole, FlowSourceLine};
+pub use flow_evidence::{build_flow_bodies, FlowBodyCache, FlowFunctionBody, FlowRole, FlowSourceLine};
 pub use loader::{
     load_rulepack, load_workspace_local_rules, parse_severity, rulepack_semantic_files, LanguageRuleMetadata,
     LoadError, PackageMatchSemantics, PackageTailBindingSemantics, Rulepack, RulepackMetadata,

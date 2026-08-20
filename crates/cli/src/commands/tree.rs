@@ -401,84 +401,143 @@ fn render_text_paged(
     all: bool,
     filters_hash: u64,
 ) -> Result<()> {
-    let lines = render_text_lines(out);
+    let rows = tree_text_rows(out);
     let cfg =
         paging::config_from_raw(context, page, all, FormatClass::Text).map_err(|e| anyhow::anyhow!(e))?;
-    let rows: Vec<usize> = (0..lines.len()).collect();
-    let (page_rows, info) = paging::paginate(&rows, &cfg, "tree", filters_hash, |idx| {
-        lines[*idx].len() as u64 + 128
-    })?;
-    for idx in page_rows {
-        cli_println!("{}", lines[idx]);
+    let (page_rows, info) = paging::paginate(&rows, &cfg, "tree", filters_hash, TreeTextRow::cost)?;
+    for row in page_rows {
+        cli_println!("{}", row.render());
     }
     render_paging_footer(&info, "bonsai-ninja tree <workspace>");
     Ok(())
 }
 
-fn render_text_lines(out: &StructuralTreeOut) -> Vec<String> {
-    let u = ui();
-    let mut lines = Vec::new();
+#[derive(Clone)]
+enum TreeTextRow<'a> {
+    Header {
+        files: usize,
+        files_scanned: usize,
+        dirs: usize,
+    },
+    Incomplete(&'a [String]),
+    RerunHint,
+    Blank,
+    Node {
+        node: &'a StructuralTreeNode,
+        prefix: String,
+        is_last: bool,
+    },
+}
+
+impl TreeTextRow<'_> {
+    fn cost(&self) -> u64 {
+        match self {
+            Self::Header { .. } => 192,
+            Self::Incomplete(reasons) => reasons.iter().map(String::len).sum::<usize>() as u64 + 192,
+            Self::RerunHint => 192,
+            Self::Blank => 32,
+            Self::Node { node, prefix, .. } => (prefix.len() + node.name.len()) as u64 + 128,
+        }
+    }
+
+    fn render(&self) -> String {
+        let u = ui();
+        match self {
+            Self::Header {
+                files,
+                files_scanned,
+                dirs,
+            } => {
+                let file_chip = if files_scanned > files {
+                    format!(
+                        "{} file{} ({} scanned)",
+                        files,
+                        if *files == 1 { "" } else { "s" },
+                        files_scanned
+                    )
+                } else {
+                    format!("{} file{}", files, if *files == 1 { "" } else { "s" })
+                };
+                u.heading(&format!(
+                    "tree — {} · {} dir{}",
+                    file_chip,
+                    dirs,
+                    if *dirs == 1 { "" } else { "s" },
+                ))
+            }
+            Self::Incomplete(reasons) => {
+                let reasons = if reasons.is_empty() {
+                    "analysis-incomplete".to_string()
+                } else {
+                    reasons.join("; ")
+                };
+                format!("{} {}", u.warn("tree view incomplete:"), u.dim(&reasons))
+            }
+            Self::RerunHint => {
+                u.dim("rerun with --all and avoid restrictive --max-depth when you need every node")
+            }
+            Self::Blank => String::new(),
+            Self::Node {
+                node,
+                prefix,
+                is_last,
+            } => {
+                let connector = if *is_last { "└── " } else { "├── " };
+                let name = match node.kind {
+                    StructuralNodeKind::Dir => u.kind(&format!("{}/", node.name)),
+                    StructuralNodeKind::File => u.name(&node.name),
+                };
+                format!("{prefix}{}{}", u.dim(connector), name)
+            }
+        }
+    }
+}
+
+fn tree_text_rows(out: &StructuralTreeOut) -> Vec<TreeTextRow<'_>> {
+    let mut rows = Vec::new();
     // Heading
-    let total = out.summary.files;
-    let scanned = out.summary.files_scanned;
     // When `--max-depth` truncated the rendered tree, the rendered
     // file count is much smaller than what the underlying scan saw.
     // Surface the scanned count so users don't read "0 files" and
     // assume the workspace is empty.
-    let file_chip = if scanned > total {
-        format!(
-            "{} file{} ({} scanned)",
-            total,
-            if total == 1 { "" } else { "s" },
-            scanned
-        )
-    } else {
-        format!("{} file{}", total, if total == 1 { "" } else { "s" })
-    };
-    let header = format!(
-        "tree — {} · {} dir{}",
-        file_chip,
-        out.summary.dirs,
-        if out.summary.dirs == 1 { "" } else { "s" },
-    );
-    lines.push(u.heading(&header));
+    rows.push(TreeTextRow::Header {
+        files: out.summary.files,
+        files_scanned: out.summary.files_scanned,
+        dirs: out.summary.dirs,
+    });
     if !out.analysis_complete {
-        let reasons = if out.analysis_incomplete_reasons.is_empty() {
-            "analysis-incomplete".to_string()
-        } else {
-            out.analysis_incomplete_reasons.join("; ")
-        };
-        lines.push(format!("{} {}", u.warn("tree view incomplete:"), u.dim(&reasons)));
-        lines.push(u.dim("rerun with --all and avoid restrictive --max-depth when you need every node"));
+        rows.push(TreeTextRow::Incomplete(&out.analysis_incomplete_reasons));
+        rows.push(TreeTextRow::RerunHint);
     }
-    lines.push(String::new());
+    rows.push(TreeTextRow::Blank);
 
     let last = out.roots.len().saturating_sub(1);
     for (root_index, root) in out.roots.iter().enumerate() {
         let is_last = root_index == last;
-        render_node_lines(root, "", is_last, &mut lines);
+        collect_tree_node_rows(root, String::new(), is_last, &mut rows);
     }
 
-    lines.push(String::new());
-    lines
+    rows.push(TreeTextRow::Blank);
+    rows
 }
 
-fn render_node_lines(node: &StructuralTreeNode, prefix: &str, is_last: bool, lines: &mut Vec<String>) {
-    let u = ui();
-    let connector = if is_last { "└── " } else { "├── " };
+fn collect_tree_node_rows<'a>(
+    node: &'a StructuralTreeNode,
+    prefix: String,
+    is_last: bool,
+    rows: &mut Vec<TreeTextRow<'a>>,
+) {
     let next_prefix = format!("{prefix}{}", if is_last { "    " } else { "│   " });
-
-    // Node line: connector + name.
-    let name_styled = match node.kind {
-        StructuralNodeKind::Dir => u.kind(&format!("{}/", node.name)),
-        StructuralNodeKind::File => u.name(&node.name),
-    };
-    lines.push(format!("{prefix}{}{}", u.dim(connector), name_styled));
+    rows.push(TreeTextRow::Node {
+        node,
+        prefix,
+        is_last,
+    });
 
     let last = node.children.len().saturating_sub(1);
     for (child_index, child) in node.children.iter().enumerate() {
         let child_is_last = child_index == last;
-        render_node_lines(child, &next_prefix, child_is_last, lines);
+        collect_tree_node_rows(child, next_prefix.clone(), child_is_last, rows);
     }
 }
 

@@ -1,10 +1,10 @@
 use super::{
     build_filter_marker, calculate_inspect_taint_flow_json_upper_bound, dedup_structural_flows,
-    import_hit_text, inspect_eager_window, inspect_taint_flow_json_upper_bound, render_inspect_report_text,
-    retrieval_prefilter_for_inspect_with_limit, taint_flow_contains_needle, taint_flow_matches_query,
-    walk_flow_hits, FlowHitWalkContext, HitOut, InspectFilters, InspectFlowRendered, InspectJsonPageUnit,
-    InspectOut, InspectRenderOptions, InspectReport, InspectSummary, InspectTaintFlow, InspectTaintStep,
-    InspectTaintedArg, Matcher,
+    import_hit_text, inspect_requested_window, inspect_taint_flow_json_upper_bound,
+    render_inspect_report_text, retrieval_prefilter_for_inspect_with_limit, taint_flow_contains_needle,
+    taint_flow_matches_query, walk_flow_hits, FlowHitWalkContext, HitOut, InspectFilters,
+    InspectFlowRendered, InspectJsonPageUnit, InspectOut, InspectRenderOptions, InspectReport,
+    InspectSummary, InspectTaintFlow, InspectTaintStep, InspectTaintedArg, Matcher,
 };
 use crate::args::FactKindFilter;
 use crate::paging::{FormatClass, PageArg, PagingConfig};
@@ -24,18 +24,16 @@ fn span(start: u32) -> Span {
 }
 
 #[test]
-fn raw_taint_render_caches_only_the_requested_page() {
+fn inspect_render_caches_only_the_requested_page() {
     assert_eq!(
-        inspect_eager_window(7, 100_000, true)
+        inspect_requested_window(7, 100_000)
             .into_iter()
             .collect::<Vec<_>>(),
         vec![7]
     );
     assert_eq!(
-        inspect_eager_window(7, 100, false)
-            .into_iter()
-            .collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 7, 8, 9, 10]
+        inspect_requested_window(7, 100).into_iter().collect::<Vec<_>>(),
+        vec![7]
     );
 }
 

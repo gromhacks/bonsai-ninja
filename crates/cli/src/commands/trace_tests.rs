@@ -53,9 +53,9 @@ fn programmatic_trace_pages_retain_the_steps_for_each_path() {
     let rows = trace_page_rows(&trace);
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].path.path_id, 7);
-    assert_eq!(rows[0].steps[0].id, 0);
-    assert_eq!(rows[1].steps[0].id, 1);
+    assert_eq!(rows[0].step.id, 0);
+    assert_eq!(rows[1].step.id, 1);
     assert_eq!(rows[2].path.path_id, 9);
-    assert_eq!(rows[2].steps[0].id, 2);
+    assert_eq!(rows[2].step.id, 2);
     assert!(rows.iter().all(|row| row.cost > 384));
 }

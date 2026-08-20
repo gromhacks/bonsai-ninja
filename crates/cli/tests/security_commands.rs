@@ -2351,6 +2351,51 @@ def handle():
 }
 
 #[test]
+fn taint_analysis_split_flow_keeps_numbered_finding_parts() {
+    let ws = temp_workspace("numbered-taint-flow-parts");
+    let long_literal = "x".repeat(6_000);
+    std::fs::write(
+        ws.join("app.py"),
+        format!(
+            r#"
+import os
+from flask import request
+
+def handle():
+    cmd = request.args.get("cmd")
+    padding = "{long_literal}"
+    os.system(cmd)
+"#
+        ),
+    )
+    .expect("write long vulnerable fixture");
+
+    let base = [
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--context",
+        "1k",
+    ];
+    let first = run(&base).unwrap();
+    let mut second_args = base.to_vec();
+    second_args.extend(["--page", "2"]);
+    let second = run(&second_args).unwrap();
+    let rendered = format!("{first}\n{second}");
+
+    assert!(
+        rendered.contains("FINDING 1 · FLOW 2/"),
+        "split flow parts must retain the finding number and use an explicit numeric part:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("FINDING 1 continued") && !rendered.contains("continued long source line"),
+        "taint output must not use ambiguous continuation labels:\n{rendered}"
+    );
+}
+
+#[test]
 fn taint_analysis_all_text_reuses_cached_render_payload() {
     let ws = temp_workspace("all-text-cache-taint");
     std::fs::write(
@@ -2539,7 +2584,7 @@ def handle():
 }
 
 #[test]
-fn security_paged_renderers_do_not_wrap_shared_page_cache_progress() {
+fn security_paged_renderers_use_one_intentional_progress_layer() {
     let ws = temp_workspace("security-page-cache-progress");
     std::fs::write(
         ws.join("app.py"),
@@ -2578,9 +2623,15 @@ def handle():
     let mut source_text_args = common.to_vec();
     source_text_args.extend(["source-analysis", "--context", "1k"]);
     let source_text = run_command(&source_text_args, &[("BONSAI_DEBUG", "security-phase")]).unwrap();
+    assert_eq!(
+        source_text.stderr.matches("rendering source page:").count(),
+        1,
+        "source-analysis text should expose exactly one requested-page render phase:\n{}",
+        source_text.stderr
+    );
     assert!(
-        !source_text.stderr.contains("rendering source page:"),
-        "source-analysis text should rely on its granular render/save phases:\n{}",
+        !source_text.stderr.contains("rendering source page window"),
+        "source-analysis must not imply that unrequested pages are rendered:\n{}",
         source_text.stderr
     );
 

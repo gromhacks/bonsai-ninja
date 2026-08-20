@@ -112,10 +112,12 @@ pub fn compute_edge_id(
 /// its result set even though exact coverage still examines every candidate
 /// edge.
 pub fn dump_edges(ws: &Workspace, f: &EdgesFilters<'_>) -> Vec<EdgeRecord> {
-    if f.from.is_some() || f.to.is_some() {
-        if let Some(records) = dump_persisted_filtered_edges(ws, f) {
-            return records;
-        }
+    // The partition visitor is exact for filtered and unfiltered reports and
+    // keeps broad diagnostic dumps bounded by one compiler file relation.
+    // Falling back to the resident graph is required only when the validated
+    // sidecar is unavailable or corrupt.
+    if let Some(records) = dump_persisted_filtered_edges(ws, f) {
+        return records;
     }
     let global = ws.compiler_header_index();
     let resolved = ws.cached_resolved_call_graph();

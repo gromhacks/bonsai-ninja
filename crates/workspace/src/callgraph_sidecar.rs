@@ -22,6 +22,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+// v35 (2026-08-19): canonical graph construction consumes exact compiler
+// function-linkage facts, keeping persisted receiver/factory dispatch equal
+// to scoped cold compilation.
 // v34 (2026-08-08): qualified receiver-less calls cannot fall back to an
 // unrelated bare terminal name, and same-signature declaration families use
 // callable shape rather than parameter spelling.
@@ -91,7 +94,7 @@ use std::sync::Arc;
 // v13 (2026-07-18): metadata and graph payloads are independent factstore
 // entries, so freshness checks do not recursively decode millions of edges.
 // v12 (2026-07-16): MessagePack replaced the retired binary codec.
-pub const CALLGRAPH_CACHE_VERSION: u32 = 34;
+pub const CALLGRAPH_CACHE_VERSION: u32 = 35;
 
 const CALLGRAPH_TABLE_ID: u32 = 102;
 const METADATA_KEY: u64 = 0;
@@ -593,6 +596,120 @@ impl CallgraphQueryService {
             .filter(|site| visited.contains(&site.caller))
             .copied()
             .collect::<Vec<_>>();
+        Ok(ResolvedCallGraph::from_persisted_parts(
+            nodes,
+            edges,
+            local_bindings,
+            unresolved_workspace_sites,
+        ))
+    }
+
+    /// Materialize only the exact incoming and outgoing edges adjacent to
+    /// `functions`.
+    ///
+    /// One-symbol evidence packets need direct degree, not every caller
+    /// ancestor or reachable callee. The persisted graph stores both
+    /// directions by endpoint file, so this query decodes the selected
+    /// partitions and the opposite endpoint nodes without hydrating the
+    /// unrelated workspace graph.
+    pub(crate) fn materialize_direct_neighborhood(
+        &self,
+        functions: &[FuncId],
+        max_precision: Option<bonsai_common::Precision>,
+    ) -> std::io::Result<ResolvedCallGraph> {
+        if functions.is_empty() {
+            return Ok(ResolvedCallGraph::from_persisted_parts(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
+
+        let requested = functions.iter().copied().collect::<AHashSet<_>>();
+        let mut requested_by_file = BTreeMap::<u32, AHashSet<FuncId>>::new();
+        for &function in &requested {
+            let file = self.node_file(function).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("callgraph neighborhood is missing function {}", function.raw()),
+                )
+            })?;
+            requested_by_file.entry(file.raw()).or_default().insert(function);
+        }
+
+        let mut edges = Vec::new();
+        let mut adjacent = requested.clone();
+        for (file, file_functions) in &requested_by_file {
+            let partition = self.partition(FileId::new(*file))?;
+            for edge in partition.outgoing.iter().filter(|edge| {
+                file_functions.contains(&edge.from) && max_precision.is_none_or(|max| edge.precision <= max)
+            }) {
+                adjacent.insert(edge.to);
+                edges.push(edge.clone());
+            }
+            for edge in partition.incoming.iter().filter(|edge| {
+                file_functions.contains(&edge.to) && max_precision.is_none_or(|max| edge.precision <= max)
+            }) {
+                adjacent.insert(edge.from);
+                edges.push(edge.clone());
+            }
+        }
+
+        let edge_key = |edge: &CallEdge| {
+            (
+                edge.from.raw(),
+                edge.to.raw(),
+                edge.span.file.raw(),
+                edge.span.start,
+                edge.span.end,
+                edge.kind as u8,
+                edge.precision.rank(),
+            )
+        };
+        edges.sort_unstable_by_key(edge_key);
+        edges.dedup_by_key(|edge| edge_key(edge));
+
+        let mut adjacent_by_file = BTreeMap::<u32, AHashSet<FuncId>>::new();
+        for &function in &adjacent {
+            let file = self.node_file(function).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("callgraph neighborhood endpoint {} is missing", function.raw()),
+                )
+            })?;
+            adjacent_by_file.entry(file.raw()).or_default().insert(function);
+        }
+
+        let mut nodes = Vec::new();
+        for (file, file_functions) in adjacent_by_file {
+            nodes.extend(
+                self.partition(FileId::new(file))?
+                    .nodes
+                    .into_iter()
+                    .filter(|node| file_functions.contains(&node.func)),
+            );
+        }
+        let mut local_bindings = Vec::new();
+        let mut unresolved_workspace_sites = Vec::new();
+        for (file, file_functions) in requested_by_file {
+            let partition = self.partition(FileId::new(file))?;
+            local_bindings.extend(
+                partition
+                    .local_bindings
+                    .iter()
+                    .filter(|binding| file_functions.contains(&binding.caller))
+                    .cloned(),
+            );
+            unresolved_workspace_sites.extend(
+                partition
+                    .unresolved_workspace_sites
+                    .iter()
+                    .filter(|site| file_functions.contains(&site.caller))
+                    .copied(),
+            );
+        }
+
         Ok(ResolvedCallGraph::from_persisted_parts(
             nodes,
             edges,
@@ -2021,6 +2138,29 @@ mod tests {
             reaching.nodes().iter().map(|node| node.func).collect::<Vec<_>>(),
             vec![FuncId::new(1), FuncId::new(2), FuncId::new(3)]
         );
+
+        let neighborhood = service
+            .materialize_direct_neighborhood(&[FuncId::new(2)], None)
+            .expect("query direct compiler neighborhood");
+        assert_eq!(
+            neighborhood
+                .inner()
+                .edges
+                .iter()
+                .map(|edge| (edge.from, edge.to))
+                .collect::<Vec<_>>(),
+            vec![(FuncId::new(1), FuncId::new(2)), (FuncId::new(2), FuncId::new(3))]
+        );
+        assert_eq!(
+            neighborhood
+                .nodes()
+                .iter()
+                .map(|node| node.func)
+                .collect::<Vec<_>>(),
+            vec![FuncId::new(1), FuncId::new(2), FuncId::new(3)]
+        );
+        assert_eq!(neighborhood.local_binding_records().len(), 1);
+        assert_eq!(neighborhood.unresolved_workspace_site_records().len(), 1);
 
         let direct = service
             .materialize_direct_between(&[FuncId::new(1)], &[FuncId::new(2), FuncId::new(3)])

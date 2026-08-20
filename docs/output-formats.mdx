@@ -28,10 +28,15 @@ and the current rows or JSON lines. Use `--page next` or the printed
 artifact.
 
 Paging is deterministic and fail-closed. A numeric page beyond the reported
-last page is an error rather than an alias for the last page. `next` and
-printed cursors reuse the validated page cache when available, and the
-footer's uncapped token estimate describes the complete result consistently
-on every page, not only the rows currently rendered.
+last page is an error rather than an alias for the last page. Only the
+requested page is formatted and cached; later pages are rendered on demand
+through `--page next`, a number, or the printed cursor. Repeating the same
+page reuses it after binary, source, dependency, and rulepack freshness
+validation. The footer's uncapped token estimate describes the complete
+result consistently on every page, not only the rows currently rendered.
+An oversized security finding keeps its original `FINDING N` identity on
+every part and uses `FLOW X/Y` for the page-sized units; there is no separate
+“continued” item or renumbering.
 
 These are presentation controls, not analysis budgets. The semantic IDG
 closure runs to a fixed point before authoritative taint/security facts are

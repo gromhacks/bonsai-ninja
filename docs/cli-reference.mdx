@@ -253,6 +253,9 @@ bonsai-ninja security ./src taint-analysis --format sarif --all --output-path fi
 Text output is labelled `TAINT FLOW`. Each step is derived from the
 finding's source-specific taint path and annotates the source, tainted
 argument propagation, receiver evidence where relevant, and sink operand.
+When one finding needs more than one page-sized flow unit, every unit retains
+the same `FINDING N` number and is labelled `FLOW 1/M`, `FLOW 2/M`, and so on;
+the renderer does not introduce a second “continued” numbering scheme.
 Unfiltered analysis preserves exact local-trust flows and caps their emitted
 severity at `medium`; it does not silently discard them. The bundled
 `production` profile applies `trust: remote` and `severity: high`, keeping
@@ -267,7 +270,12 @@ not a user-facing finding mode.
 
 Repeated `taint-analysis` runs with the same workspace fingerprint and
 filter set reuse validated render/page cache payloads when possible. Text
-output can rebuild flow bodies lazily from compact cached findings; JSON
+output rebuilds flow bodies through one report-scoped source-body cache,
+plans every lossless flow unit, and formats only the requested page. Warm
+source-to-sink scope planning replays validated partitioned callgraph
+relations through the same exact fixed point instead of resolving identical
+source bodies again; a missing or rejected relation falls back to compiler
+body resolution. JSON
 `--all` reuses only cache entries that already contain bulk flow evidence.
 If source content, rule filters, paging shape, or cache schema changes, the
 command discards the stale render cache and recomputes the requested

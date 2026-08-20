@@ -981,12 +981,21 @@ source-to-sink callgraph/IDG corridor, then propagates only through that
 semantic corridor. `source-analysis` uses a source-lineage corridor from the
 resolved callgraph, including summary-output caller support, and seeds a scoped
 IDG over only the files/functions needed for the rendered lineage. Neither
-  surface uses whole-workspace per-source/per-sink traversal for production
-  evidence. The broader workspace dataflow sidecar remains a compatibility
-  cache for navigation and older SDK/query surfaces; native export reads the
-  canonical IDG. The output formats (text / JSON / SARIF) live in
-  `report.rs`. Sanitizer-credit calculation has its own generic module; the
-  credit taxonomy lives in `security-patterns/metadata.yml`.
+surface uses whole-workspace per-source/per-sink traversal for production
+evidence. On a fresh partitioned callgraph, both security scopes replay the
+same uncapped forward, summary-output reverse, target-return, provider, and
+callback fixed point directly over validated file relations. A cache miss or
+integrity failure falls back to exact adapter-body resolution; storage warmth
+cannot change the selected functions or edges. Canonical callgraph generation
+uses the compiler's exact function-linkage payload as well as declaration/type
+headers, so persisted factory-return and receiver dispatch remain identical to
+a scoped cold compile. The broader workspace dataflow
+sidecar remains a compatibility cache for navigation and older SDK/query
+surfaces; native export reads the canonical IDG. The output formats (text /
+JSON / SARIF) live in `report.rs`. Text flow evidence shares one source-body
+cache across a report and retains structured page units until the requested
+page is rendered. Sanitizer-credit calculation has its own generic module;
+the credit taxonomy lives in `security-patterns/metadata.yml`.
 
 **`security-patterns` / `bonsai_rulepack`** owns the source-controlled YAML
 and compiles only those rule files into a deterministic archive. The security

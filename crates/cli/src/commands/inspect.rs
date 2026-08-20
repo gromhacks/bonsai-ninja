@@ -1715,14 +1715,11 @@ fn finish_inspect(
             let output_text = current_text.clone();
             let mut cached_pages = vec![page_cache::CachedPage {
                 number: current_info.page_number,
+                total_pages: current_info.total_pages,
                 cursor: current_info.cursor.clone(),
                 text: current_text,
             }];
-            for page_number in inspect_eager_window(
-                current_info.page_number,
-                current_info.total_pages,
-                !report.taint_flows.is_empty(),
-            ) {
+            for page_number in inspect_requested_window(current_info.page_number, current_info.total_pages) {
                 if page_number == current_info.page_number {
                     continue;
                 }
@@ -1738,6 +1735,7 @@ fn finish_inspect(
                 if let Some(info) = page_info {
                     cached_pages.push(page_cache::CachedPage {
                         number: info.page_number,
+                        total_pages: info.total_pages,
                         cursor: info.cursor,
                         text,
                     });
@@ -1753,18 +1751,11 @@ fn finish_inspect(
     Ok(())
 }
 
-/// Pages worth rendering into the opportunistic text cache.
-///
-/// Raw taint reports can contain hundreds of thousands of exact paths. Their
-/// current page is already cached above; eagerly formatting future pages adds
-/// unrelated work to the requested command and repeatedly walks the complete
-/// pagination plan. Structural reports remain cheap enough to retain the
-/// normal look-ahead window. This affects cached presentation only.
-fn inspect_eager_window(current_page: u64, total_pages: u64, has_raw_taint: bool) -> BTreeSet<u64> {
-    if has_raw_taint {
-        return BTreeSet::from([current_page.clamp(1, total_pages.max(1))]);
-    }
-    page_cache::eager_window(current_page, total_pages)
+/// Render only the page requested by the caller. Exact graph analysis is
+/// complete before this presentation step; formatting neighboring pages
+/// would add unrelated latency without improving the current answer.
+fn inspect_requested_window(current_page: u64, total_pages: u64) -> BTreeSet<u64> {
+    page_cache::requested_page_window(current_page, total_pages)
 }
 
 /// Pick a source-literal candidate for a semantic inspect name.
@@ -3494,27 +3485,20 @@ fn semantic_direct_callers(
     graph: &bonsai_callgraph::ResolvedCallGraph,
     target: bonsai_common::FuncId,
 ) -> Vec<RefOut> {
-    let global = ws.compiler_header_index();
-    let target_name = global
-        .decl_of(bonsai_common::SymbolId::new(target.raw()))
-        .map(|decl| decl.name.clone())
-        .unwrap_or_default();
     let mut callers: Vec<RefOut> = graph
         .callers_of(target)
         .filter(|edge| edge.precision.is_semantic())
-        .filter_map(|edge| {
-            let caller_decl = ws.exact_decl(bonsai_common::SymbolId::new(edge.from.raw()))?;
-            let span =
-                find_call_span_to_func_uncached(ws, &caller_decl, target, &target_name).unwrap_or(edge.span);
+        .map(|edge| {
+            let span = edge.span;
             let (file, line, column) = format_span(&span, ws);
-            Some(RefOut {
+            RefOut {
                 symbol: func_display_name(ws, edge.from),
                 file,
                 line,
                 column,
                 kind: edge_kind_label(edge.kind).to_string(),
                 snippet: read_snippet(ws, &span),
-            })
+            }
         })
         .collect();
     callers.sort_by(|a, b| {

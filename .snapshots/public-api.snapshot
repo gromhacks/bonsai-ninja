@@ -463,7 +463,7 @@ pub use bundled::bundled_rulepack_root;
 pub use compile::{compile_rule_to_inspect_args, CompiledRule};
 pub use deps::{build_inventory, DependencyInventory, DependencyRow};
 pub use finding::{
-pub use flow_evidence::{build_flow_bodies, FlowFunctionBody, FlowRole, FlowSourceLine};
+pub use flow_evidence::{build_flow_bodies, FlowBodyCache, FlowFunctionBody, FlowRole, FlowSourceLine};
 pub use loader::{
 pub use matcher::{
 pub use report::{

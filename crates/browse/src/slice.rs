@@ -152,7 +152,7 @@ pub fn slices(ws: &Workspace, filters: &SliceFilters<'_>) -> SliceOutcome {
         finalize_outcome(&mut outcome);
         return outcome;
     }
-    let global = ws.compiler_linkage_index();
+    let global = ws.compiler_header_index();
     let mut rows = Vec::new();
     for file in global.all_files() {
         let Ok(path) = ws.vfs().path(file) else {
@@ -1046,7 +1046,7 @@ fn semantic_immediate_sources(
 }
 
 fn semantic_function_name(ws: &Workspace, func: FuncId) -> String {
-    ws.compiler_linkage_index()
+    ws.compiler_header_index()
         .decl_of(SymbolId::new(func.raw()))
         .map(|decl| decl.name.clone())
         .unwrap_or_else(|| format!("F:{}", func.raw()))

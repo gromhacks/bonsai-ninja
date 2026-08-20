@@ -1,6 +1,6 @@
 use super::{
-    cache_is_fresh, content_tree_fingerprint, dependency_metadata_fingerprint, eager_window,
-    page_after_cursor, read_json_cache_file, remember_structural_id_hints, rulepack_dir_skipped,
+    cache_is_fresh, content_tree_fingerprint, dependency_metadata_fingerprint, page_after_cursor,
+    read_json_cache_file, remember_structural_id_hints, requested_page_window, rulepack_dir_skipped,
     serialize_json_bounded, structural_id_hint, workspace_fingerprint, CachedPage, PageCacheFile,
     MAX_PAYLOAD_BYTES, RENDER_CACHE_VERSION,
 };
@@ -17,12 +17,9 @@ fn tempdir(name: &str) -> PathBuf {
 }
 
 #[test]
-fn eager_window_keeps_page_cache_opportunistic() {
-    let window = eager_window(10, 100);
-    assert_eq!(
-        window.into_iter().collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 10, 11, 12, 13]
-    );
+fn page_window_formats_only_the_requested_page() {
+    let window = requested_page_window(10, 100);
+    assert_eq!(window.into_iter().collect::<Vec<_>>(), vec![10]);
 }
 
 #[test]
@@ -30,6 +27,7 @@ fn next_page_replay_resolves_from_the_current_cached_cursor() {
     let pages = (1..=3)
         .map(|number| CachedPage {
             number,
+            total_pages: 3,
             cursor: format!("P:{number:08x}"),
             text: format!("page {number}"),
         })
@@ -63,7 +61,7 @@ fn oversized_cache_value_is_rejected_during_serialization() {
 }
 
 #[test]
-fn eager_page_rendering_preserves_the_displayed_cursor() {
+fn requested_page_rendering_preserves_the_displayed_cursor() {
     crate::paging::clear_cursor_history_for_tests();
     let root = tempdir("displayed-cursor");
     let rows: Vec<String> = (0..8).map(|index| format!("row-{index}")).collect();
@@ -90,7 +88,7 @@ fn eager_page_rendering_preserves_the_displayed_cursor() {
     assert_eq!(
         crate::paging::last_cursor("cache-cursor-test", 17).as_deref(),
         Some(expected_cursor.as_str()),
-        "eagerly rendered neighboring pages must not replace the displayed page"
+        "rendering the requested page must preserve its displayed cursor"
     );
     let next_cfg = crate::paging::PagingConfig::new(
         Some(64),

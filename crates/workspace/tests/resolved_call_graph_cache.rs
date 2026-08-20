@@ -11,6 +11,13 @@ fn registry() -> Arc<LanguageRegistry> {
     r
 }
 
+fn ruby_registry() -> Arc<LanguageRegistry> {
+    let registry = Arc::new(LanguageRegistry::new());
+    let adapter: AdapterArc = Arc::new(bonsai_lang_ruby::RubyAdapter::new());
+    registry.register(adapter);
+    registry
+}
+
 fn ws_with(file: &str, src: &str) -> Workspace {
     let ws = Workspace::new(registry());
     ws.vfs().write(file.to_string(), Arc::<str>::from(src));
@@ -196,6 +203,194 @@ fn source_reachable_target_return_corridor_compiles_cross_file_callers() {
         reachable.graph.callees_of(target).any(|edge| edge.to == source),
         "the cross-file target-to-source call edge must remain in the scoped compiler graph"
     );
+}
+
+#[test]
+fn persisted_source_reachable_scope_matches_cold_compiler_fixed_point() {
+    let root = tempdir("persisted-source-reachable-parity");
+    std::fs::write(
+        root.join("app.py"),
+        concat!(
+            "def source(value):\n",
+            "    return relay(value)\n\n",
+            "def relay(value):\n",
+            "    return source(value)\n\n",
+            "def outer(value):\n",
+            "    return relay(value)\n\n",
+            "def target1(value):\n",
+            "    return source(value)\n\n",
+            "def target2(value):\n",
+            "    return target1(value)\n",
+        ),
+    )
+    .expect("write parity fixture");
+
+    let cold = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::lazy_query())
+        .expect("open cold workspace");
+    let cold_global = cold.compiler_linkage_index();
+    let cold_func = |name: &str| {
+        let symbol = cold_global
+            .find_by_name(name)
+            .first()
+            .copied()
+            .unwrap_or_else(|| panic!("missing {name}"));
+        bonsai_common::FuncId::new(symbol.raw())
+    };
+    let cold_scope = cold.source_reachable_resolved_call_graph(
+        &[cold_func("source")],
+        &[cold_func("target1"), cold_func("target2")],
+        Some(bonsai_common::Precision::Narrowed),
+    );
+    cold.save_callgraph_sidecar(&root)
+        .expect("persist complete callgraph");
+    let cold_funcs = cold_scope.funcs.iter().map(|func| func.raw()).collect::<Vec<_>>();
+    let cold_files = cold_scope.files.iter().map(|file| file.raw()).collect::<Vec<_>>();
+    let cold_edges = cold_scope
+        .graph
+        .inner()
+        .edges
+        .iter()
+        .map(|edge| {
+            (
+                edge.from.raw(),
+                edge.to.raw(),
+                edge.span.file.raw(),
+                edge.span.start,
+                edge.span.end,
+                edge.kind as u8,
+                edge.precision.rank(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let cold_reached_targets = cold_scope.reached_targets;
+    drop(cold_scope);
+    drop(cold_global);
+    drop(cold);
+
+    let warm = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::lazy_query())
+        .expect("reopen warm workspace");
+    let warm_global = warm.compiler_linkage_index();
+    let warm_func = |name: &str| {
+        let symbol = warm_global
+            .find_by_name(name)
+            .first()
+            .copied()
+            .unwrap_or_else(|| panic!("missing {name}"));
+        bonsai_common::FuncId::new(symbol.raw())
+    };
+    let warm_scope = warm.source_reachable_resolved_call_graph(
+        &[warm_func("source")],
+        &[warm_func("target1"), warm_func("target2")],
+        Some(bonsai_common::Precision::Narrowed),
+    );
+    let warm_edges = warm_scope
+        .graph
+        .inner()
+        .edges
+        .iter()
+        .map(|edge| {
+            (
+                edge.from.raw(),
+                edge.to.raw(),
+                edge.span.file.raw(),
+                edge.span.start,
+                edge.span.end,
+                edge.kind as u8,
+                edge.precision.rank(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        warm_scope.funcs.iter().map(|func| func.raw()).collect::<Vec<_>>(),
+        cold_funcs
+    );
+    assert_eq!(
+        warm_scope.files.iter().map(|file| file.raw()).collect::<Vec<_>>(),
+        cold_files
+    );
+    assert_eq!(warm_edges, cold_edges);
+    assert_eq!(warm_scope.reached_targets, cold_reached_targets);
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn persisted_graph_retains_factory_receiver_dispatch_used_by_scoped_security() {
+    let root = tempdir("persisted-factory-receiver-parity");
+    std::fs::write(
+        root.join("app.rb"),
+        concat!(
+            "module Executor\n",
+            "  def self.execute(cmd); system(cmd); end\n",
+            "end\n\n",
+            "class Repository\n",
+            "  def initialize(data); @data = data; end\n",
+            "  def self.wrap(data); new(data); end\n",
+            "  def run; Executor.execute(@data); end\n",
+            "end\n\n",
+            "class AuditedRepository < Repository; end\n\n",
+            "module Storage\n",
+            "  def self.persist(data)\n",
+            "    repo = AuditedRepository.wrap(data)\n",
+            "    repo.run\n",
+            "  end\n",
+            "end\n",
+        ),
+    )
+    .expect("write Ruby receiver fixture");
+
+    let cold = Workspace::open_with_options(&root, ruby_registry(), WorkspaceOpenOptions::lazy_query())
+        .expect("open cold Ruby workspace");
+    let global = cold.compiler_linkage_index();
+    let func = |qualified: &str| {
+        let symbol = global
+            .find_by_name(qualified)
+            .first()
+            .copied()
+            .unwrap_or_else(|| panic!("missing {qualified}"));
+        bonsai_common::FuncId::new(symbol.raw())
+    };
+    let persist = func("app.Storage.persist");
+    let run = func("app.Repository.run");
+    let execute = func("app.Executor.execute");
+
+    let canonical = cold.cached_resolved_call_graph();
+    assert!(
+        canonical.callees_of(persist).any(|edge| edge.to == run),
+        "canonical graph must use compiler return linkage to resolve repo.run"
+    );
+    assert!(canonical.callees_of(run).any(|edge| edge.to == execute));
+    cold.save_callgraph_sidecar(&root)
+        .expect("persist Ruby callgraph");
+    drop(canonical);
+    drop(global);
+    drop(cold);
+
+    let warm = Workspace::open_with_options(&root, ruby_registry(), WorkspaceOpenOptions::lazy_query())
+        .expect("reopen warm Ruby workspace");
+    let warm_global = warm.compiler_linkage_index();
+    let warm_func = |qualified: &str| {
+        let symbol = warm_global
+            .find_by_name(qualified)
+            .first()
+            .copied()
+            .unwrap_or_else(|| panic!("missing {qualified}"));
+        bonsai_common::FuncId::new(symbol.raw())
+    };
+    let scope = warm.source_reachable_resolved_call_graph(
+        &[warm_func("app.Storage.persist")],
+        &[warm_func("app.Executor.execute")],
+        Some(bonsai_common::Precision::Narrowed),
+    );
+    assert_eq!(scope.reached_targets, 1);
+    assert!(scope
+        .graph
+        .callees_of(warm_func("app.Storage.persist"))
+        .any(|edge| edge.to == warm_func("app.Repository.run")));
+
+    std::fs::remove_dir_all(bonsai_common::workspace_bonsai_dir(&root)).ok();
+    std::fs::remove_dir_all(&root).ok();
 }
 
 #[test]
