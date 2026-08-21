@@ -45,6 +45,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
         self.assertIn(toolchain, workflow)
         self.assertIn('toolchain: "1.88"', workflow)
+        self.assertIn(
+            'RUSTUP_TOOLCHAIN: "1.88"',
+            workflow,
+            "pack-audit must use the action-installed toolchain directly",
+        )
         self.assertLess(
             workflow.index(toolchain),
             workflow.index(cargo_build),

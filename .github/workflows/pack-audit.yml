@@ -39,6 +39,14 @@ permissions:
   contents: read
   pull-requests: read
 
+env:
+  # Use the action-installed toolchain directly. Without this override Cargo
+  # rereads rust-toolchain.toml and may collide with components preinstalled
+  # on a newly updated ubuntu-latest runner image.
+  RUSTUP_TOOLCHAIN: "1.88"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   audit:
     name: rulepack audits
