@@ -1564,6 +1564,30 @@ impl AnalyzerDb {
     /// stale, corrupt, or missing entries are recompiled from the registered
     /// language adapter.
     pub fn save_compiler_object_sidecar(&self, workspace_root: &Path) -> std::io::Result<usize> {
+        self.save_compiler_object_sidecar_inner(workspace_root, None)
+    }
+
+    /// Persist the complete compiler-object generation and report one tick
+    /// after each exact source unit has been prepared for publication.
+    ///
+    /// The callback observes completed units only; it cannot alter scheduling,
+    /// admitted files, payload order, or compiler error handling.
+    pub fn save_compiler_object_sidecar_with_progress<F>(
+        &self,
+        workspace_root: &Path,
+        on_file: F,
+    ) -> std::io::Result<usize>
+    where
+        F: Fn() + Sync,
+    {
+        self.save_compiler_object_sidecar_inner(workspace_root, Some(&on_file))
+    }
+
+    fn save_compiler_object_sidecar_inner(
+        &self,
+        workspace_root: &Path,
+        on_file: Option<&(dyn Fn() + Sync)>,
+    ) -> std::io::Result<usize> {
         let _generation_guard = self.inner.compiler_object_generation_build.lock();
         let path = compiler_object_sidecar_path(workspace_root);
         let _sidecar_guard = CompilerObjectSidecarWriteGuard::acquire(&path)?;
@@ -1574,7 +1598,7 @@ impl AnalyzerDb {
             .into_iter()
             .filter_map(|file| source_descriptor(self, file))
             .collect::<Vec<_>>();
-        self.write_compiler_object_generation(&path, descriptors, None)
+        self.write_compiler_object_generation(&path, descriptors, None, on_file)
     }
 
     /// Ensure that exact compiler objects for `files` are reusable for the
@@ -1652,7 +1676,7 @@ impl AnalyzerDb {
                 .tempdir()?,
         );
         let path = temporary_root.path().join("compiler-objects.factstore");
-        self.write_compiler_object_generation(&path, descriptors, Some(temporary_root))
+        self.write_compiler_object_generation(&path, descriptors, Some(temporary_root), None)
     }
 
     fn write_compiler_object_generation(
@@ -1660,6 +1684,7 @@ impl AnalyzerDb {
         path: &Path,
         mut descriptors: Vec<SourceDescriptor>,
         temporary_root: Option<Arc<tempfile::TempDir>>,
+        on_file: Option<&(dyn Fn() + Sync)>,
     ) -> std::io::Result<usize> {
         descriptors.sort_unstable_by_key(|descriptor| descriptor.file.raw());
         descriptors.dedup_by_key(|descriptor| descriptor.file.raw());
@@ -1702,6 +1727,9 @@ impl AnalyzerDb {
                 )?;
                 if files[index].replace(metadata).is_some() {
                     return Err(invalid_data("duplicate compiler-object metadata"));
+                }
+                if let Some(on_file) = on_file {
+                    on_file();
                 }
                 Ok(())
             },

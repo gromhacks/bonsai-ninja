@@ -1089,6 +1089,11 @@ struct FileCallgraphInfo {
     capabilities: LanguageCapabilities,
 }
 
+struct StreamingCallgraphScope<'a> {
+    files: &'a [FileId],
+    symbols: Option<&'a AHashSet<SymbolId>>,
+}
+
 /// Compiler-facing callbacks used to derive per-file call-resolution facts.
 ///
 /// Keeping these capabilities together prevents production call sites from
@@ -1383,6 +1388,43 @@ impl ResolvedCallGraph {
         )
     }
 
+    /// Build the exact streamed graph and report one tick after each caller
+    /// file has been fully resolved.
+    pub fn build_with_file_semantics_streaming_with_progress<F, T, P, G, C, D, Q>(
+        global: &GlobalIndex,
+        file_semantics: CallGraphFileSemantics<F, T, P, G, C>,
+        body_for_file: D,
+        on_file: Q,
+    ) -> Self
+    where
+        F: FnMut(FileId) -> AHashMap<String, String>,
+        T: FnMut(FileId) -> AHashMap<String, AliasTarget>,
+        P: Fn(FileId) -> Option<String>,
+        G: Fn(FileId) -> Option<&'static str>,
+        C: Fn(FileId) -> LanguageCapabilities,
+        D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
+        Q: Fn() + Sync,
+    {
+        let CallGraphFileSemantics {
+            aliases: aliases_for_file,
+            alias_targets: alias_targets_for_file,
+            path: path_for_file,
+            language: language_for_file,
+            capabilities: capabilities_for_file,
+        } = file_semantics;
+        let context = Self::build_context(global, path_for_file, language_for_file, capabilities_for_file);
+        let files = global.all_files().collect::<Vec<_>>();
+        Self::build_with_file_semantics_for_files_streaming_with_context_and_progress(
+            global,
+            aliases_for_file,
+            alias_targets_for_file,
+            &files,
+            &context,
+            body_for_file,
+            on_file,
+        )
+    }
+
     /// Build the resolved call graph for a subset of caller files.
     ///
     /// Resolution still consults the workspace-wide symbol, path, and
@@ -1491,7 +1533,7 @@ impl ResolvedCallGraph {
         let resolve_file = |info: &FileCallgraphInfo| {
             resolve_file_call_edges(global, context, info, global.decls_in(info.file))
         };
-        let resolution = collect_resolved_file_edges(&file_infos, resolve_file);
+        let resolution = collect_resolved_file_edges(&file_infos, resolve_file, || {});
         let cg = CallGraph::from_unique_edges(resolution.edges);
         let nodes = callgraph_nodes(global, &cg);
         Self {
@@ -1521,10 +1563,48 @@ impl ResolvedCallGraph {
             global,
             aliases_for_file,
             alias_targets_for_file,
-            included_files,
-            None,
+            StreamingCallgraphScope {
+                files: included_files,
+                symbols: None,
+            },
             context,
             body_for_file,
+            || {},
+        )
+    }
+
+    /// Resolve a selected set of caller files from disposable exact bodies
+    /// and report one tick after each file's call sites have been resolved.
+    ///
+    /// Progress observation is deliberately outside resolver semantics: the
+    /// callback runs only after a complete file result exists and cannot
+    /// alter candidate discovery, edge admission, or deterministic merging.
+    pub fn build_with_file_semantics_for_files_streaming_with_context_and_progress<F, T, D, Q>(
+        global: &GlobalIndex,
+        aliases_for_file: F,
+        alias_targets_for_file: T,
+        included_files: &[FileId],
+        context: &ResolvedCallGraphBuildContext,
+        body_for_file: D,
+        on_file: Q,
+    ) -> Self
+    where
+        F: FnMut(FileId) -> AHashMap<String, String>,
+        T: FnMut(FileId) -> AHashMap<String, AliasTarget>,
+        D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
+        Q: Fn() + Sync,
+    {
+        Self::build_with_file_semantics_streaming_with_context_scoped(
+            global,
+            aliases_for_file,
+            alias_targets_for_file,
+            StreamingCallgraphScope {
+                files: included_files,
+                symbols: None,
+            },
+            context,
+            body_for_file,
+            on_file,
         )
     }
 
@@ -1563,28 +1643,32 @@ impl ResolvedCallGraph {
             global,
             aliases_for_file,
             alias_targets_for_file,
-            &included_files,
-            Some(&included_symbols),
+            StreamingCallgraphScope {
+                files: &included_files,
+                symbols: Some(&included_symbols),
+            },
             context,
             body_for_file,
+            || {},
         )
     }
 
-    fn build_with_file_semantics_streaming_with_context_scoped<F, T, D>(
+    fn build_with_file_semantics_streaming_with_context_scoped<F, T, D, Q>(
         global: &GlobalIndex,
         mut aliases_for_file: F,
         mut alias_targets_for_file: T,
-        included_files: &[FileId],
-        included_symbols: Option<&AHashSet<SymbolId>>,
+        scope: StreamingCallgraphScope<'_>,
         context: &ResolvedCallGraphBuildContext,
         body_for_file: D,
+        on_file: Q,
     ) -> Self
     where
         F: FnMut(FileId) -> AHashMap<String, String>,
         T: FnMut(FileId) -> AHashMap<String, AliasTarget>,
         D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
+        Q: Fn() + Sync,
     {
-        let mut files = included_files.to_vec();
+        let mut files = scope.files.to_vec();
         files.sort_by_key(|file| file.raw());
         files.dedup();
         let file_infos = files
@@ -1603,13 +1687,13 @@ impl ResolvedCallGraph {
             .collect::<Vec<_>>();
         let resolve_file = |info: &FileCallgraphInfo| {
             body_for_file(info.file).map_or_else(FileCallgraphResolution::default, |mut index| {
-                if let Some(included) = included_symbols {
+                if let Some(included) = scope.symbols {
                     index.defs.retain(|decl| included.contains(&decl.symbol));
                 }
                 resolve_file_call_edges(global, context, info, &index.defs)
             })
         };
-        let resolution = collect_resolved_file_edges(&file_infos, resolve_file);
+        let resolution = collect_resolved_file_edges(&file_infos, resolve_file, on_file);
         let cg = CallGraph::from_unique_edges(resolution.edges);
         let nodes = callgraph_nodes(global, &cg);
         Self {
@@ -2004,14 +2088,21 @@ struct FileCallgraphResolution {
     unresolved_workspace_sites: Vec<UnresolvedWorkspaceCallSite>,
 }
 
-fn collect_resolved_file_edges<R>(
+fn collect_resolved_file_edges<R, Q>(
     file_infos: &[FileCallgraphInfo],
     resolve_file: R,
+    on_file: Q,
 ) -> FileCallgraphResolution
 where
     R: Fn(&FileCallgraphInfo) -> FileCallgraphResolution + Sync,
+    Q: Fn() + Sync,
 {
     let workers = callgraph_resolver_worker_count();
+    let resolve_and_report = |info: &FileCallgraphInfo| {
+        let result = resolve_file(info);
+        on_file();
+        result
+    };
     let file_results = if rayon::current_thread_index().is_some() {
         // A cold semantic service may be requested by several workers in an
         // existing Rayon batch. Building and synchronously joining a nested
@@ -2019,14 +2110,14 @@ where
         // guard. Resolve serially on that worker instead; the fact set is
         // identical and nested concurrency remains bounded by the caller's
         // compiler scheduler.
-        file_infos.iter().map(&resolve_file).collect()
+        file_infos.iter().map(&resolve_and_report).collect()
     } else {
         match rayon::ThreadPoolBuilder::new().num_threads(workers).build() {
             Ok(pool) => pool.install(|| {
                 use rayon::prelude::*;
-                file_infos.par_iter().map(&resolve_file).collect::<Vec<_>>()
+                file_infos.par_iter().map(&resolve_and_report).collect::<Vec<_>>()
             }),
-            Err(_) => file_infos.iter().map(resolve_file).collect(),
+            Err(_) => file_infos.iter().map(resolve_and_report).collect(),
         }
     };
     let edge_count = file_results.iter().map(|result| result.edges.len()).sum();

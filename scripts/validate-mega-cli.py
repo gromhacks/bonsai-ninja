@@ -323,6 +323,30 @@ def collect_flow_ids(value: Any) -> tuple[list[str], list[str]]:
     return flows, groups
 
 
+def derive_taint_args(ws: Path, rules_dir: Path) -> list[Any]:
+    """Build the exhaustive fixture query without production filtering."""
+
+    return [
+        "security",
+        ws,
+        "taint-analysis",
+        "--rules-dir",
+        rules_dir,
+        # The fixture matrix covers every trust boundary and severity, while
+        # the production review profile intentionally selects remote/high
+        # findings. Disable profile filtering so a local CLI/stdin source is
+        # still exercised in each language.
+        "--profile",
+        "all",
+        # The fixture expectations also exercise the explicitly enabled
+        # inferred-source surface.
+        "--inferred-sources",
+        "--format",
+        "json",
+        "--all",
+    ]
+
+
 def export_files(value: Any) -> list[str]:
     if not isinstance(value, dict):
         return []
@@ -459,19 +483,7 @@ class Validator:
         taint = self.check(
             lang,
             "derive taint",
-            [
-                "security",
-                ws,
-                "taint-analysis",
-                "--rules-dir",
-                self.rules_dir,
-                # The fixture expectations exercise the explicitly enabled
-                # inferred-source surface.
-                "--inferred-sources",
-                "--format",
-                "json",
-                "--all",
-            ],
+            derive_taint_args(ws, self.rules_dir),
             json_out=True,
         )
         raw_rows = taint.get("rows", []) if isinstance(taint, dict) else taint
@@ -485,7 +497,7 @@ class Validator:
                 Failure(
                     lang,
                     "derive taint",
-                    ["security", str(ws), "taint-analysis"],
+                    ["security", str(ws), "taint-analysis", "--profile", "all"],
                     f"expected {expected_findings} findings, got {got}",
                 )
             )
@@ -502,7 +514,7 @@ class Validator:
                 Failure(
                     lang,
                     "derive taint",
-                    ["security", str(ws), "taint-analysis"],
+                    ["security", str(ws), "taint-analysis", "--profile", "all"],
                     "undecorated run_pipeline inherited handle_request decorators",
                 )
             )

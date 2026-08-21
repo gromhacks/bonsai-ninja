@@ -45,7 +45,8 @@ pub(crate) fn is_explicitly_disabled() -> bool {
     *NO_PROGRESS.get().unwrap_or(&false) || std::env::var("NO_PROGRESS").is_ok()
 }
 
-fn color_disabled() -> bool {
+#[must_use]
+pub(crate) fn is_color_disabled() -> bool {
     *NO_COLOR_PROGRESS.get().unwrap_or(&false) || std::env::var("NO_COLOR").is_ok()
 }
 
@@ -79,7 +80,7 @@ pub(crate) fn progress_bar(label: &str, total: u64) -> ProgressBar {
         return ProgressBar::hidden();
     }
     let bar = ProgressBar::with_draw_target(Some(total), ProgressDrawTarget::stderr());
-    let template = if color_disabled() {
+    let template = if is_color_disabled() {
         "  {msg:<24} [{bar:30}] {pos}/{len} ({eta})"
     } else {
         "  {msg:<24} [{bar:30.cyan/blue}] {pos}/{len} ({eta})"
@@ -100,7 +101,7 @@ pub(crate) fn spinner(label: &str) -> ProgressBar {
         return ProgressBar::hidden();
     }
     let spin = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
-    let template = if color_disabled() {
+    let template = if is_color_disabled() {
         "  {spinner} {msg}"
     } else {
         "  {spinner:.cyan} {msg}"

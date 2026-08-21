@@ -177,12 +177,15 @@ cache writes, and rendering. Programmatic output stays clean: JSON,
 SARIF, DOT, graph exports, and `--output-path` files do not contain
 progress text.
 
-Indexing keeps a parent-owned display alive across process-isolated compiler
-workers. Structural indexing reports compiler-cache maintenance, workspace
-ingest, and Tree-sitter object compilation. `index --semantic` additionally
-reports validation and the numbered compiler-object, declaration-linkage,
-callgraph, retrieval, and IDG-query-accelerator phases. Worker processes stay
-quiet so they cannot erase, duplicate, or interleave the parent display.
+Indexing keeps one active display across process-isolated compiler workers.
+Structural indexing reports compiler-cache maintenance, workspace ingest, and
+Tree-sitter object compilation. `index --semantic` additionally reports
+validation and the numbered compiler-object, declaration-linkage, callgraph,
+retrieval, and IDG-query-accelerator phases. The active worker owns that phase
+line; compiler-object and callgraph work show completed-file counters and an
+ETA, while non-counted phases show a spinner. Workers are sequential, so their
+displays cannot interleave and exiting a worker still reclaims the phase's
+memory.
 
 Use `--no-progress` or `NO_PROGRESS=1` to suppress progress bars. Bars are
 also hidden automatically when stderr is not a TTY. `--no-color` and

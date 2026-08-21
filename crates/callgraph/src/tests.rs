@@ -399,7 +399,8 @@ fn streamed_file_bodies_match_fully_resident_callgraph() {
     headers.insert_header_preprocessed(caller_index.clone());
     headers.finalize_semantic_facts();
     let bodies = AHashMap::from([(target_file, target_index), (caller_file, caller_index)]);
-    let actual = ResolvedCallGraph::build_with_file_semantics_streaming(
+    let completed = std::sync::atomic::AtomicUsize::new(0);
+    let actual = ResolvedCallGraph::build_with_file_semantics_streaming_with_progress(
         &headers,
         CallGraphFileSemantics::new(
             |_| AHashMap::new(),
@@ -414,8 +415,12 @@ fn streamed_file_bodies_match_fully_resident_callgraph() {
                 .cloned()
                 .map(|index| headers.remap_file_to_existing_symbols(index))
         },
+        || {
+            completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        },
     );
 
+    assert_eq!(completed.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert_eq!(
         bonsai_common::wire::encode(&actual).expect("encode streamed callgraph"),
         bonsai_common::wire::encode(&expected).expect("encode resident callgraph")

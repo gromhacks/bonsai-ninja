@@ -1363,6 +1363,27 @@ impl Workspace {
         self.inner.db.save_compiler_object_sidecar(root)
     }
 
+    /// Persist the complete compiler-object generation while reporting each
+    /// source unit after its exact payload is ready for publication.
+    pub fn save_compiler_object_sidecar_with_progress<F>(
+        &self,
+        root: &Path,
+        on_file: F,
+    ) -> std::io::Result<usize>
+    where
+        F: Fn() + Sync,
+    {
+        if !self.is_complete_workspace_index() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "compiler-object sidecars require a complete workspace index",
+            ));
+        }
+        self.inner
+            .db
+            .save_compiler_object_sidecar_with_progress(root, on_file)
+    }
+
     /// Ensure a complete semantic phase consumes one immutable generation of
     /// adapter-lowered compiler objects.
     ///
@@ -1466,6 +1487,36 @@ impl Workspace {
             return Ok(());
         }
         callgraph_sidecar::save_callgraph_sidecar(&path, &self.inner.db, graph)
+    }
+
+    /// Build and persist the canonical resolved callgraph while reporting one
+    /// completed unit per caller file.
+    ///
+    /// The progress callback is observational. Resolution still consumes the
+    /// complete compiler linkage and exact streamed file bodies, then merges
+    /// them in the canonical callgraph representation before publication.
+    pub fn save_callgraph_sidecar_with_progress<F>(&self, root: &Path, on_file: F) -> std::io::Result<()>
+    where
+        F: Fn() + Sync,
+    {
+        if !self.is_complete_workspace_index() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "callgraph sidecars require a complete workspace index",
+            ));
+        }
+        let path = callgraph_sidecar::callgraph_sidecar_path(root);
+        if callgraph_sidecar::validate_callgraph_sidecar_for_db(&path, &self.inner.db).is_ok() {
+            return Ok(());
+        }
+        let linkage = self.compiler_linkage_index();
+        let graph = bonsai_taint::build_resolved_call_graph_snapshot_with_headers_and_progress(
+            &self.inner.db,
+            linkage.as_ref(),
+            on_file,
+        );
+        self.seed_resolved_call_graph(Arc::new(graph));
+        self.save_callgraph_sidecar(root)
     }
 
     /// Check whether the compiler linkage artifact exactly matches the

@@ -6,10 +6,10 @@ not duplicate dated performance history.
 
 ## Status
 
-The full local release pass completed on 2026-08-19. Documentation claims,
+The full local release pass completed on 2026-08-20. Documentation claims,
 links, command examples, current repository counts, and the rulepack validator
 were rechecked on that date. The release candidate also passed 227
-release security unit tests, 34 release rulepack conformance tests, 85
+release security unit tests, 34 release rulepack conformance tests, 87
 architecture invariants, 1,320 command/switch checks, standalone execution,
 and the complete Elasticsearch gate on that date. Local `main` has no known
 failing release gate.
@@ -37,7 +37,7 @@ The final local pass completed these checks with zero failures:
 | 20 adapter/parser conformance suites | Passed |
 | Adapter `FlowEvent` behavioral audit | Passed |
 | Cross-language taint target | 1,386 tests passed, including 1,233 applicable scenario/language cells |
-| IDG, taint, resolver, callgraph, workspace, and conformance suites | Passed |
+| IDG, taint, resolver, callgraph, workspace, and 87 architecture invariants | Passed |
 | Full optimized security package | Passed |
 | Rulepack taint replay | 0 errors, 0 warnings, 0 misses |
 | Release CLI command/language matrix | 1,320 combinations passed |
@@ -53,11 +53,12 @@ The final local pass completed these checks with zero failures:
 | Release binary build-path privacy | Passed |
 | Documentation structure, links, navigation, binary help claims, and skill copies | Passed |
 | Native archive checksum and fresh-profile relocation smoke | Passed on macOS arm64 |
-| Build-artifact size gate | 20.52 GiB / 32 GiB combined limit (workspace and privacy-safe release targets) |
+| Build-artifact size gate | 2.91 GiB / 32 GiB combined limit (workspace and privacy-safe release targets) |
 
-The build-artifact measurement was taken after the full debug test matrix,
-release rustdoc, and optimized CLI build. Generated analysis caches and test
-outputs are not release inputs.
+The full debug test matrix and release rustdoc passed before accumulated Cargo
+generations were cleaned. The reported artifact measurement is the final
+privacy-remapped optimized CLI build retained for deployment. Generated
+analysis caches and test outputs are not release inputs.
 
 The rulepack replay command was:
 
@@ -166,42 +167,34 @@ and their generated workspace caches are not retained after the gate.
 ## Large-workspace scale gate
 
 The required release test uses the sibling 30,055-source Elasticsearch
-checkout pinned by the release workflow at `e9741368da0`. The controlled
-empty-cache semantic prewarm completed in 601.99 seconds. On August 18, the
-complete five-scenario gate finished in 214.78 seconds under the 3 GiB
-scheduler. The cold prewarm recorded 3,199,860,736 bytes maximum RSS and zero
-swaps; a fresh process validated and reopened that generation in 2.38 seconds
-at 99,254,272 bytes maximum RSS.
-
-After the final August 19 CLI performance pass, the same five scenarios
-completed in 533.11 seconds. The compiler-object cache was reusable, but the
-intentional callgraph ABI change invalidated and exactly rebuilt the derived
-callgraph/IDG generation in 343.71 seconds before the warm measurements. The
-cold semantic-generation row below remains the last controlled completely
-empty-cache prewarm measurement; it is not replaced by that partial derived
-generation rebuild.
+checkout pinned by the release workflow at `e9741368da0`. On August 20, the
+controlled empty-cache semantic prewarm completed in 658.84 seconds. It
+recorded 3,788,292,096 bytes maximum RSS and zero swaps; a fresh process
+validated and reopened that generation in 2.62 seconds at 99,287,040 bytes
+maximum RSS. The same release candidate completed the five-scenario SLO gate
+in 197.09 seconds under the 3 GiB scheduler.
 
 | Operation | Time | Enforced SLO |
 |---|---:|---:|
-| Cold semantic generation | 601.99 s | completion required |
-| Fresh-process semantic reuse | 2.46 s | 15 s |
-| Default inspect | 7.36 s | 30 s |
-| Exact raw-taint inspect | 28.46 s | 30 s |
-| Fresh-cache production taint | 33.09 s | 45 s |
-| Warm production taint | 11.30 s | 30 s |
-| `tree --max-depth 1` | 0.04 s | 30 s |
-| Search | 4.04 s | 30 s |
-| Definitions | 8.86 s | 30 s |
-| Imports | 7.72 s | 30 s |
-| Classes | 8.94 s | 30 s |
-| Entry points | 13.35 s | 30 s |
-| Calls | 3.92 s | 30 s |
-| Arguments | 5.85 s | 30 s |
-| Scoped `read-file` | 1.75 s | 30 s |
-| Source inventory | 3.45 s | 30 s |
-| High-severity sink inventory | 20.84 s | 30 s |
-| Sanitizer inventory | 16.37 s | 30 s |
-| Dependency inventory | 11.59 s | 30 s |
+| Cold semantic generation | 658.84 s | completion required |
+| Fresh-process semantic reuse | 2.62 s | 15 s |
+| Default inspect | 7.22 s | 30 s |
+| Exact raw-taint inspect | 27.24 s | 30 s |
+| Fresh-cache production taint | 32.27 s | 45 s |
+| Warm production taint | 10.90 s | 30 s |
+| `tree --max-depth 1` | 0.02 s | 30 s |
+| Search | 4.14 s | 30 s |
+| Definitions | 8.43 s | 30 s |
+| Imports | 7.71 s | 30 s |
+| Classes | 8.47 s | 30 s |
+| Entry points | 12.28 s | 30 s |
+| Calls | 3.85 s | 30 s |
+| Arguments | 5.82 s | 30 s |
+| Scoped `read-file` | 1.79 s | 30 s |
+| Source inventory | 3.70 s | 30 s |
+| High-severity sink inventory | 21.15 s | 30 s |
+| Sanitizer inventory | 15.76 s | 30 s |
+| Dependency inventory | 11.34 s | 30 s |
 
 Command:
 
@@ -230,13 +223,13 @@ remain identical.
 The cold semantic row is a deliberate one-time whole-workspace build, not a
 normal command startup cost. It rebuilt exact compiler objects, linkage,
 callgraph, retrieval, and IDG sidecars for all 30,055 sources after the cache
-was explicitly cleared. The validated cache directory was 7,113,366,296 bytes
-(about 6.62 GiB): 888,833,012 bytes of compiler objects, 317,781,391 bytes of
-callgraph, 1,505,969,092 bytes of linkage, 224,727,923 bytes of retrieval, and
-4,160,212,431 bytes of IDG. Ordinary commands compute exact requested facts
-on demand; users only pay this full prewarm when they explicitly run
-`index --semantic`. A fresh process reused the completed semantic generation
-in 2.38 seconds.
+was explicitly cleared. The validated cache directory was 7,114,762,932 bytes
+(about 6.63 GiB): 888,833,012 bytes of compiler objects, 317,949,495 bytes of
+callgraph, 1,505,969,092 bytes of linkage, 224,742,044 bytes of retrieval, and
+4,161,426,830 bytes of IDG, plus the manifest. Ordinary commands compute exact
+requested facts on demand; users only pay this full prewarm when they
+explicitly run `index --semantic`. A fresh process reused the completed
+semantic generation in 2.62 seconds.
 
 The August 17 security-planning correction restored immutable compiler-object
 attachment for path-filtered workspaces that retain deterministic

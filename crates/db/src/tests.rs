@@ -386,6 +386,31 @@ fn compiler_object_generation_replays_typed_adapter_ir_without_reparsing() {
 }
 
 #[test]
+fn compiler_object_progress_ticks_once_per_completed_source_unit() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let vfs = Arc::new(Vfs::new());
+    vfs.write(root.path().join("one.py"), "def one():\n    return 1\n");
+    vfs.write(root.path().join("two.py"), "def two():\n    return 2\n");
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_python::PythonAdapter::new()));
+    let db = AnalyzerDb::new(vfs, registry);
+    db.set_workspace_root(root.path().to_path_buf());
+    let completed = AtomicUsize::new(0);
+
+    let files = db
+        .save_compiler_object_sidecar_with_progress(root.path(), || {
+            completed.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("save compiler objects with progress");
+
+    assert_eq!(files, 2);
+    assert_eq!(completed.load(Ordering::SeqCst), files);
+    assert!(db.compiler_object_generation_matches_current_snapshot());
+}
+
+#[test]
 fn compiler_syntax_header_replays_adapter_call_targets_without_body_decode() {
     let root = tempfile::tempdir().expect("tempdir");
     let path = root.path().join("fixture.py");

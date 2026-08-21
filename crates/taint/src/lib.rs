@@ -30,8 +30,9 @@ pub use idg_api::{
 };
 pub use idg_build::{
     build_resolved_call_graph_snapshot, build_resolved_call_graph_snapshot_for_files,
-    build_resolved_call_graph_snapshot_with_headers, compiler_idg_file_semantics, compiler_idg_service,
-    ensure_idg_service,
+    build_resolved_call_graph_snapshot_with_headers,
+    build_resolved_call_graph_snapshot_with_headers_and_progress, compiler_idg_file_semantics,
+    compiler_idg_service, ensure_idg_service,
 };
 pub use idg_query::{
     IdgReturnQuery, IdgTaintCallScope, IdgTaintQuery, IdgTaintSeed, IdgTaintSource, IdgTaintTargets,

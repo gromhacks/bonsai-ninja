@@ -22,6 +22,8 @@ use super::{
     paged_json_incomplete_reasons,
 };
 
+const SEMANTIC_PHASE_POSITION_ENV: &str = "BONSAI_SEMANTIC_PHASE_POSITION";
+
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct IndexCommandOptions {
     pub(crate) watch: bool,
@@ -243,14 +245,16 @@ fn run_semantic_phase_process(
     total: usize,
 ) -> Result<()> {
     let phase_name = semantic_phase_name(phase);
-    let label = format!(
-        "semantic {ordinal}/{total} · {}",
-        semantic_phase_progress_action(phase)
-    );
-    let stage = progress::ScopedSpinner::new(&label);
     let started = std::time::Instant::now();
-    let status = semantic_phase_command(executable, root, phase).status()?;
-    stage.finish();
+    let mut command = semantic_phase_command(
+        executable,
+        root,
+        phase,
+        progress::is_disabled(),
+        progress::is_color_disabled(),
+    );
+    command.env(SEMANTIC_PHASE_POSITION_ENV, format!("{ordinal}/{total}"));
+    let status = command.status()?;
     bonsai_diagnostics::debug_log!(
         "semantic-index",
         "phase={} elapsed_seconds={:.3}",
@@ -289,12 +293,19 @@ fn semantic_phase_command(
     executable: &std::path::Path,
     root: &std::path::Path,
     phase: SemanticWorkerPhase,
+    suppress_progress: bool,
+    suppress_color: bool,
 ) -> Command {
     let phase_name = semantic_phase_name(phase);
     let mut command = Command::new(executable);
-    // The parent owns the continuously updating phase spinner. Suppress
-    // nested worker chrome so a child cannot erase or overwrite it.
-    command.arg("--no-progress");
+    // The worker owns its phase UI because it can report real compiler units.
+    // Preserve explicit/non-TTY suppression across the process boundary.
+    if suppress_progress {
+        command.arg("--no-progress");
+    }
+    if suppress_color {
+        command.arg("--no-color");
+    }
     // Compiler-input scope is semantic state. Pass the public flag explicitly
     // across the process-reclamation boundary instead of relying only on an
     // inherited environment variable.
@@ -433,24 +444,65 @@ fn graph_query_phase_plan(validation: &bonsai_sdk::CacheValidationReport) -> Vec
 }
 
 fn run_semantic_worker(root: &std::path::Path, phase: SemanticWorkerPhase) -> Result<()> {
+    let label = std::env::var(SEMANTIC_PHASE_POSITION_ENV).map_or_else(
+        |_| semantic_phase_progress_action(phase).to_string(),
+        |position| format!("semantic {position} · {}", semantic_phase_progress_action(phase)),
+    );
     if phase == SemanticWorkerPhase::Manifest {
+        let stage = progress::ScopedSpinner::new(&label);
         let _ = bonsai_for_cli().cache(root).write_manifest()?;
+        stage.finish();
         return Ok(());
     }
     if phase == SemanticWorkerPhase::Compiler {
         let cache = bonsai_for_cli().cache(root);
         if cache.migrate_legacy_compiler_object_sidecar()?.is_some() {
+            let stage = progress::ScopedSpinner::new(&label);
             let _ = cache.write_manifest()?;
+            stage.finish();
             return Ok(());
         }
     }
     let project = open_project_sidecar_validation_only(root)?;
     match phase {
-        SemanticWorkerPhase::Compiler => project.cache().warm_compiler_object_sidecar(),
-        SemanticWorkerPhase::Retrieval => project.cache().warm_retrieval_sidecar(),
-        SemanticWorkerPhase::Callgraph => project.cache().warm_callgraph_sidecar(),
-        SemanticWorkerPhase::Linkage => project.cache().warm_compiler_linkage_sidecar(),
-        SemanticWorkerPhase::Idg => project.cache().warm_idg_sidecar_and_manifest(),
+        SemanticWorkerPhase::Compiler => {
+            let bar = progress::progress_bar(&label, project.stats().files as u64);
+            let result = project
+                .workspace()
+                .save_compiler_object_sidecar_with_progress(root, || bar.inc(1))
+                .map(|_| ())
+                .map_err(anyhow::Error::from);
+            bar.finish_and_clear();
+            result
+        }
+        SemanticWorkerPhase::Callgraph => {
+            let total = project.workspace().compiler_linkage_index().all_files().count() as u64;
+            let bar = progress::progress_bar(&label, total);
+            let result = project
+                .workspace()
+                .save_callgraph_sidecar_with_progress(root, || bar.inc(1))
+                .map_err(anyhow::Error::from);
+            bar.finish_and_clear();
+            result
+        }
+        SemanticWorkerPhase::Retrieval => {
+            let stage = progress::ScopedSpinner::new(&label);
+            let result = project.cache().warm_retrieval_sidecar();
+            stage.finish();
+            result
+        }
+        SemanticWorkerPhase::Linkage => {
+            let stage = progress::ScopedSpinner::new(&label);
+            let result = project.cache().warm_compiler_linkage_sidecar();
+            stage.finish();
+            result
+        }
+        SemanticWorkerPhase::Idg => {
+            let stage = progress::ScopedSpinner::new(&label);
+            let result = project.cache().warm_idg_sidecar_and_manifest();
+            stage.finish();
+            result
+        }
         SemanticWorkerPhase::Manifest => unreachable!("manifest phase returned before workspace open"),
     }
 }
@@ -667,11 +719,13 @@ mod semantic_phase_tests {
     }
 
     #[test]
-    fn semantic_worker_child_defers_progress_rendering_to_parent() {
+    fn semantic_worker_child_owns_progress_unless_parent_suppresses_it() {
         let command = semantic_phase_command(
             std::path::Path::new("bonsai-ninja"),
             std::path::Path::new("workspace"),
             SemanticWorkerPhase::Idg,
+            false,
+            false,
         );
         let args = command
             .get_args()
@@ -679,15 +733,22 @@ mod semantic_phase_tests {
             .collect::<Vec<_>>();
         assert_eq!(
             args,
-            [
-                "--no-progress",
-                "index",
-                "--semantic",
-                "--semantic-worker",
-                "idg",
-                "workspace",
-            ]
+            ["index", "--semantic", "--semantic-worker", "idg", "workspace",]
         );
+
+        let command = semantic_phase_command(
+            std::path::Path::new("bonsai-ninja"),
+            std::path::Path::new("workspace"),
+            SemanticWorkerPhase::Idg,
+            true,
+            true,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(args.first().map(String::as_str), Some("--no-progress"));
+        assert_eq!(args.get(1).map(String::as_str), Some("--no-color"));
     }
 
     #[test]

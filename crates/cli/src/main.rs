@@ -1241,8 +1241,13 @@ fn configured_main_stack_bytes() -> usize {
 
 fn command_workspace_for_page_cache(cmd: &Cmd) -> Option<&std::path::Path> {
     match cmd {
-        Cmd::Index { workspace, .. }
-        | Cmd::Context { workspace, .. }
+        // `index` publishes compiler artifacts and may launch isolated
+        // semantic workers. It is never a rendered query: consulting the
+        // page cache here adds a full freshness walk to every worker and,
+        // more importantly, must never be allowed to replay presentation
+        // bytes in place of required side effects.
+        Cmd::Index { .. } => None,
+        Cmd::Context { workspace, .. }
         | Cmd::Trace { workspace, .. }
         | Cmd::Path { workspace, .. }
         | Cmd::Slice { workspace, .. }
@@ -1329,5 +1334,25 @@ fn security_action_output_path(action: &SecurityAction) -> Option<&std::path::Pa
         | SecurityAction::TaintAnalysis { output, .. }
         | SecurityAction::SourceAnalysis { output, .. }
         | SecurityAction::Pack { output, .. } => output.output_path.as_deref(),
+    }
+}
+
+#[cfg(test)]
+mod page_cache_command_tests {
+    use super::*;
+
+    #[test]
+    fn index_is_never_eligible_for_rendered_page_replay() {
+        let cli = Cli::try_parse_from(["bonsai-ninja", "index", "."]).expect("index command should parse");
+        assert!(command_workspace_for_page_cache(&cli.command).is_none());
+    }
+
+    #[test]
+    fn rendered_query_remains_eligible_for_page_replay() {
+        let cli = Cli::try_parse_from(["bonsai-ninja", "defs", "."]).expect("defs command should parse");
+        assert_eq!(
+            command_workspace_for_page_cache(&cli.command),
+            Some(std::path::Path::new("."))
+        );
     }
 }

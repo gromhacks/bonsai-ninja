@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "anyhow",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-abstract-interp"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "bonsai-ninja-cfg",
@@ -205,7 +205,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-adapters"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-lang-api",
  "bonsai-ninja-lang-c",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-browse"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "bonsai-ninja-adapters",
@@ -261,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-callgraph"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "bonsai-ninja-common",
@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-cfg"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-lang-api",
@@ -284,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-common"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-hash",
  "dirs",
@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-conformance"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-adapters",
  "bonsai-ninja-common",
@@ -311,7 +311,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-db"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "bonsai-ninja-abstract-interp",
@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-diagnostics"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "serde",
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-factstore"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "crossbeam-channel",
@@ -361,11 +361,11 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-hash"
-version = "0.2.4"
+version = "0.2.5"
 
 [[package]]
 name = "bonsai-ninja-idg"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "bonsai-ninja-callgraph",
@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-index"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "bonsai-ninja-common",
@@ -398,7 +398,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-inspect"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "bonsai-ninja-callgraph",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-api"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "bonsai-ninja-common",
@@ -432,7 +432,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-c"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-cpp"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -458,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-csharp"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-dart"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -482,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-elixir"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -492,7 +492,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-erlang"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -502,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-go"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-java"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -528,7 +528,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-javascript"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-kotlin"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -552,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-lua"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-db",
@@ -563,7 +563,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-objc"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-perl"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -587,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-php"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-python"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -613,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-ruby"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -626,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-rust"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-scala"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-swift"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -664,7 +664,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-lang-typescript"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-common",
  "bonsai-ninja-conformance",
@@ -676,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-parser"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "bonsai-ninja-common",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-resolve"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "bonsai-ninja-common",
@@ -700,7 +700,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-retrieval"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "bonsai-ninja-adapters",
@@ -720,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-rulepack"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "sha2",
  "zstd",
@@ -728,7 +728,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-sdk"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "anyhow",
@@ -754,7 +754,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-security"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "anyhow",
@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-taint"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "bonsai-ninja-callgraph",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-testkit"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bonsai-ninja-lang-api",
  "bonsai-ninja-workspace",
@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-trace"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "bonsai-ninja-abstract-interp",
@@ -872,7 +872,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-vfs"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "bonsai-ninja-common",
@@ -883,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-ninja-workspace"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ahash",
  "bonsai-ninja-abstract-interp",

@@ -3780,6 +3780,7 @@ fn compiler_objects_are_exact_single_frontend_inputs() {
     let metadata_for = function_body(&compiler_object, "metadata_for");
     let prepare = function_body(&compiler_object, "prepare_compiler_object");
     let save = function_body(&compiler_object, "save_compiler_object_sidecar");
+    let save_inner = function_body(&compiler_object, "save_compiler_object_sidecar_inner");
     let write_generation = function_body(&compiler_object, "write_compiler_object_generation");
     let parallel_compiler_work = function_body(&compiler_object, "try_visit_parallel");
     let append_compiler_object = function_body(&compiler_object, "append_prepared_compiler_object");
@@ -3800,7 +3801,8 @@ fn compiler_objects_are_exact_single_frontend_inputs() {
             && append_compiler_object.contains("browse_key(descriptor.file)")
             && prepare.matches("ensure_source_version").count() == 3
             && prepare.contains("Ok(Some(prepared)) => {")
-            && save.contains("write_compiler_object_generation")
+            && save.contains("save_compiler_object_sidecar_inner")
+            && save_inner.contains("write_compiler_object_generation")
             && write_generation.contains("PreparedFactStorePayload")
             && write_generation.contains("syntax_worker_count_for_sources")
             && write_generation.contains("SyntaxMemoryPermitPool")
@@ -4718,7 +4720,11 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
             && phase_plan.contains("SemanticWorkerPhase::Idg")
             && phase_command.contains("Command::new(executable)")
             && phase_command.contains("--no-progress")
-            && phase_process.contains("semantic_phase_command(executable, root, phase).status()?")
+            && phase_command.contains("--no-color")
+            && phase_command.contains("--semantic-worker")
+            && phase_process.contains("semantic_phase_command(")
+            && phase_process.contains("command.status()?")
+            && phase_process.contains("SEMANTIC_PHASE_POSITION_ENV")
             && phase_process.contains("if !status.success()"),
         "CLI semantic prewarm must run exact phases sequentially across OS-reclaimed process boundaries"
     );
