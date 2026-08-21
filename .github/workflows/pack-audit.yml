@@ -55,6 +55,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Install the pinned toolchain before Cargo reads rust-toolchain.toml.
+      # Relying on ubuntu-latest's ambient rustup components can leave a
+      # conflicting cargo-clippy binary and fail before the audit compiles.
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.88"
+
       - name: install python deps
         run: python3 -m pip install --require-hashes -r .github/requirements/pack-audit.txt
 

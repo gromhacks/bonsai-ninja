@@ -10,6 +10,12 @@ from pathlib import Path
 WORKFLOW = (
     Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release.yml"
 )
+PACK_AUDIT_WORKFLOW = (
+    Path(__file__).resolve().parents[2]
+    / ".github"
+    / "workflows"
+    / "pack-audit.yml"
+)
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
@@ -30,6 +36,19 @@ class ReleaseWorkflowTests(unittest.TestCase):
             'Out-File -Encoding ascii "$artifact.zip.sha256"',
             workflow,
             "Out-File emits CRLF on Windows and breaks sha256sum -c on Linux",
+        )
+
+    def test_pack_audit_installs_pinned_rust_before_cargo(self) -> None:
+        workflow = PACK_AUDIT_WORKFLOW.read_text(encoding="utf-8")
+        toolchain = "dtolnay/rust-toolchain@"
+        cargo_build = "cargo build --release --locked -p bonsai-ninja"
+
+        self.assertIn(toolchain, workflow)
+        self.assertIn('toolchain: "1.88"', workflow)
+        self.assertLess(
+            workflow.index(toolchain),
+            workflow.index(cargo_build),
+            "pack-audit must install Rust before invoking Cargo",
         )
 
 
