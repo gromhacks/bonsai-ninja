@@ -216,13 +216,23 @@ workflows.
 
 # Run production-oriented security analysis.
 ./target/release/bonsai-ninja security ./my-app taint-analysis \
-  --profile production --context 16k --no-color --no-progress
+  --context 16k --no-color --no-progress
 
-# Or write an exhaustive SARIF artifact for CI.
+# Write every production-profile result to SARIF for CI.
 ./target/release/bonsai-ninja security ./my-app taint-analysis \
-  --profile production --format sarif --all \
+  --format sarif --all \
   --output-path findings.sarif.json --no-color --no-progress
 ```
+
+The bundled rulepack defaults `source-analysis` and `taint-analysis` to its
+`production` profile: remote/high review plus common non-production path
+exclusions. Independently, compiler-backed commands exclude
+adapter-classified minified JavaScript/TypeScript bundles by default so
+generated distribution artifacts do not dominate indexing, graphs, security,
+or export. Add the global `--minified-js` switch when bundle internals are in
+scope. Use `--profile all --minified-js` together for an unfiltered security
+audit over every supported source representation. `tree` remains a direct
+filesystem view and still displays excluded bundles.
 
 The complete walkthrough is in [Getting Started](docs/getting-started.mdx).
 For any unfamiliar option, use the binary's `--help` and the

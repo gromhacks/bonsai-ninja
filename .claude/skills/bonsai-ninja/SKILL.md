@@ -199,14 +199,20 @@ Start from externally reachable input and prove source-to-sink paths:
 
 ```shell
 ./target/release/bonsai-ninja security <workspace> source-analysis \
-  --profile production --context 16k --no-color --no-progress
+  --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja security <workspace> taint-analysis \
-  --profile production --context 16k --no-color --no-progress
+  --context 16k --no-color --no-progress
 ```
 
-The bundled `production` profile selects remote input, high-severity taint
-findings, a 16k context budget, and common non-production path exclusions from
-rulepack metadata. Explicit flags override profile values.
+The bundled `production` profile is the default. It selects remote input,
+high-severity taint findings, a 16k context budget, and common non-production
+path exclusions from rulepack metadata. Separately, compiler-backed commands
+exclude adapter-classified minified JavaScript/TypeScript before parsing,
+graph construction, security, and export. Use global `--minified-js` when
+bundle internals are intentionally in scope. Use `--profile all
+--minified-js` together for an unfiltered security audit over every supported
+source representation. `tree` is a direct filesystem view and remains
+unfiltered. Explicit security flags override profile values.
 
 Inspect the security model when a finding or gap needs explanation:
 
@@ -244,7 +250,7 @@ Write SARIF with:
 
 ```shell
 ./target/release/bonsai-ninja security <workspace> taint-analysis \
-  --profile production --format sarif --all \
+  --format sarif --all \
   --output-path findings.sarif.json --no-color --no-progress
 ```
 

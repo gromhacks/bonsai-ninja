@@ -4200,6 +4200,15 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && function_body(&idg_workspace, "rebuild_indexes").contains("self.maintain_indexes = true"),
         "sidecar IDG builds must lower each compiler unit once, spool typed stitch objects without semantic caps, release transient indexes at segment boundaries, and defer query-only edge indexes to warm load"
     );
+    let field_forwarding = function_body(&idg_builder, "stitch_field_argument_forwarding");
+    let fallback_segment = function_body(&idg_builder, "activate_fallback_segment");
+    assert!(
+        field_forwarding.contains("hydrate_segments")
+            && field_forwarding.contains("segment.rebuild_build_lookups()")
+            && fallback_segment.contains("hydrate_segment(requested)")
+            && fallback_segment.contains("segment.rebuild_build_lookups()"),
+        "exact post-spool IDG mutation passes must restore transient reverse interning indexes for demanded segments instead of degrading canonical vector lookup to quadratic scans"
+    );
     assert!(
         struct_body(&idg_workspace, "IdgSegmentSpool").contains("PreparedFactStorePayload")
             && struct_body(&idg_workspace, "WireChunkSpool").contains("PreparedFactStorePayload")
@@ -4909,8 +4918,12 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
             && compiler_linkage.contains("global_linkage_index()")
             && compiler_linkage.contains("compiler_linkage.read()")
             && compiler_linkage.contains("compiler_linkage.write()")
+            && compiler_linkage.contains("persisted_compiler_header_index_for_files")
+            && compiler_linkage.contains("decl_index_remapped_to_headers")
+            && compiler_linkage.contains("project_linkage_from_remapped_file")
+            && compiler_linkage.contains("install_projected_linkage")
             && compiler_linkage.contains("build_global_linkage_index()"),
-        "Workspace must own the compact compiler linkage lifetime shared by IDG and streamed exact-body consumers"
+        "Workspace must own the compact compiler linkage lifetime shared by IDG and streamed exact-body consumers, while scoped workspaces rebind selected bodies to persisted full-workspace symbol identities"
     );
     let guarded_invalidation = function_body(&workspace, "invalidate_after_file_change");
     let invalidation = function_body(&workspace, "invalidate_after_file_change_locked");
@@ -5923,6 +5936,51 @@ fn structured_security_guards_are_rulepack_driven() {
             && xxe_pack.contains("configured_argument_factory_guard:"),
         "configured argument factory roles must be declared in the rule schema and rulepack"
     );
+}
+
+#[test]
+fn default_security_review_profile_is_rulepack_policy() {
+    let root = repo_root();
+    let command = read(&root.join("crates/cli/src/commands/security.rs"));
+    let show = read(&root.join("crates/cli/src/commands/show.rs"));
+    let metadata = read(&root.join("security-patterns/metadata.yml"));
+    let selector = function_body(&command, "selected_security_profile");
+    assert!(
+        selector.contains("metadata.default_profile.as_deref()")
+            && selector.contains("apply_default")
+            && !selector.contains("production")
+            && metadata.contains("default_profile: production"),
+        "the rulepack must select its default review profile; shared CLI code must not hard-code a profile spelling"
+    );
+    assert!(
+        show.contains("cmd_security_unprofiled") && !show.contains("Some(\"all\".to_string())"),
+        "stable-id reopening must bypass review defaults generically instead of hard-coding a rulepack profile name"
+    );
+}
+
+#[test]
+fn minified_source_classification_is_adapter_owned() {
+    let root = repo_root();
+    let javascript = read(&root.join("crates/lang_javascript/src/lib.rs"));
+    assert!(
+        javascript.contains("fn ecmascript_source_file_representation")
+            && javascript.contains(".min.")
+            && javascript.contains("-min."),
+        "the ECMAScript frontend must own its source-representation conventions"
+    );
+    for relative in [
+        "crates/workspace/src/lib.rs",
+        "crates/workspace/src/semantic_context.rs",
+        "crates/sdk/src/lib.rs",
+        "crates/cli/src/commands/read_file.rs",
+    ] {
+        let contents = read(&root.join(relative));
+        let source = production_source(&contents);
+        assert!(
+            !source.contains(".min.") && !source.contains("-min."),
+            "shared production code must consume adapter-owned source representation facts, not filename conventions: {relative}"
+        );
+    }
 }
 
 #[test]

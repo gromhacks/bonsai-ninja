@@ -1220,7 +1220,7 @@ def handle():
 }
 
 #[test]
-fn taint_analysis_sarif_includes_source_independent_api_misuse_by_default() {
+fn taint_analysis_sarif_includes_source_independent_api_misuse_in_all_profile() {
     let ws = temp_workspace("sarif-source-independent");
     std::fs::write(
         ws.join("App.java"),
@@ -1242,6 +1242,8 @@ class App {
         "--rules-dir",
         &rules_dir(),
         "taint-analysis",
+        "--profile",
+        "all",
         "--format",
         "sarif",
     ])
@@ -1265,7 +1267,7 @@ class App {
 }
 
 #[test]
-fn taint_analysis_sarif_includes_java_owasp_api_misuse_without_fake_flows() {
+fn taint_analysis_all_profile_includes_java_owasp_api_misuse_without_fake_flows() {
     let ws = temp_workspace("sarif-java-owasp-api-misuse");
     std::fs::write(
         ws.join("App.java"),
@@ -1290,6 +1292,8 @@ class App {
         "--rules-dir",
         &rules_dir(),
         "taint-analysis",
+        "--profile",
+        "all",
         "--format",
         "sarif",
     ])
@@ -1918,6 +1922,8 @@ fn c_mega_flow_renders_precise_command_sink_chain() {
         "--rules-dir",
         &rules_dir(),
         "taint-analysis",
+        "--profile",
+        "all",
         "--all",
         "--context",
         "32k",
@@ -2030,21 +2036,25 @@ def login():
     )
     .expect("write fixture");
 
+    let rules = rules_dir();
     for (subcommand, rule_flag, rule_value) in [
         ("sources", "--rule", "python.flask.request_form"),
         ("source-analysis", "--source", "^python\\.flask\\.request_form$"),
     ] {
-        let out = run(&[
+        let mut args = vec![
             "security",
             ws.to_str().unwrap(),
             "--rules-dir",
-            &rules_dir(),
+            rules.as_str(),
             subcommand,
             rule_flag,
             rule_value,
-            "--all",
-        ])
-        .unwrap();
+        ];
+        if subcommand == "source-analysis" {
+            args.extend(["--profile", "all"]);
+        }
+        args.push("--all");
+        let out = run(&args).unwrap();
         assert!(
             out.contains("examples/tutorial/flaskr/auth.py:"),
             "security {subcommand} must print a complete, copyable workspace-relative path:\n{out}"
@@ -2762,6 +2772,8 @@ fn taint_analysis_run_across_every_mega_flow_lang() {
             "--rules-dir",
             &rules_dir(),
             "taint-analysis",
+            "--profile",
+            "all",
             // Inferred entry-point sources are CLI-opt-in (commit
             // 1f4922c). The expected counts in expected_mega_finding_count
             // were authored against the inferred-on surface.
@@ -3240,6 +3252,20 @@ def handle():
         }
         std::fs::write(path, vulnerable).expect("write production-profile fixture");
     }
+    let vulnerable_javascript = r#"
+const child_process = require("child_process");
+const express = require("express");
+function handle(req) {
+  child_process.exec(req.query);
+}
+"#;
+    for relative in ["public/app.js", "public/vendor.min.js", "public/legacy-min.js"] {
+        let path = ws.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create JavaScript production-profile fixture dir");
+        }
+        std::fs::write(path, vulnerable_javascript).expect("write JavaScript production-profile fixture");
+    }
 
     let out = run(&[
         "security",
@@ -3247,8 +3273,6 @@ def handle():
         "--rules-dir",
         &rules_dir(),
         "taint-analysis",
-        "--profile",
-        "production",
         "--format",
         "json",
         "--all",
@@ -3258,7 +3282,7 @@ def handle():
     let rows = json_rows(&parsed);
     assert_eq!(
         rows.len(),
-        2,
+        3,
         "first-party files, including Java package namespaces named `example`, should remain:\n{out}"
     );
     assert!(
@@ -3272,6 +3296,10 @@ def handle():
         out.contains("src/main/java/com/example/app.py"),
         "the Java package namespace component `example` must not be treated as an example-project directory:\n{out}"
     );
+    assert!(
+        out.contains("public/app.js"),
+        "maintained JavaScript must remain in the production profile:\n{out}"
+    );
     for excluded in [
         "tests/",
         "testdata/",
@@ -3284,12 +3312,37 @@ def handle():
         "docs/",
         "docs_src/",
         "support/",
+        "vendor.min.js",
+        "legacy-min.js",
     ] {
         assert!(
             !out.contains(excluded),
             "production profile leaked excluded path `{excluded}`:\n{out}"
         );
     }
+
+    let minified_out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--minified-js",
+        "--format",
+        "json",
+        "--all",
+    ])
+    .unwrap();
+    let minified_parsed: serde_json::Value =
+        serde_json::from_str(&minified_out).expect("minified JavaScript opt-in JSON");
+    let minified_rows = json_rows(&minified_parsed);
+    assert_eq!(
+        minified_rows.len(),
+        5,
+        "--minified-js should admit adapter-classified minified compiler inputs:\n{minified_out}"
+    );
+    assert!(minified_out.contains("public/vendor.min.js"));
+    assert!(minified_out.contains("public/legacy-min.js"));
 }
 
 #[test]
@@ -3377,6 +3430,8 @@ def exec_cmd(cmd):
         "--rules-dir",
         &rules_dir(),
         "taint-analysis",
+        "--profile",
+        "all",
         "--format",
         "json",
         "--all",
@@ -3634,6 +3689,8 @@ fn inferred_sources_use_objc_bound_parameter_name() {
         "--rules-dir",
         &rules_dir(),
         "source-analysis",
+        "--profile",
+        "all",
         "--inferred-sources",
         "--format",
         "json",
@@ -3822,6 +3879,8 @@ function handler(req, res) {
         "--rules-dir",
         &rules_dir(),
         "taint-analysis",
+        "--profile",
+        "all",
         "--inferred-sources",
         "--format",
         "json",

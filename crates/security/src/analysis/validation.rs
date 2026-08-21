@@ -673,6 +673,25 @@ fn validate_rulepack_metadata(pack: &Rulepack, issues: &mut Vec<PackValidationIs
             );
         }
     }
+    if let Some(default_profile) = pack.metadata.default_profile.as_deref() {
+        if default_profile.trim().is_empty() {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-default-profile",
+                None,
+                "metadata default_profile must not be empty",
+            );
+        } else if !pack.metadata.profiles.contains_key(default_profile) {
+            push_validation_issue(
+                issues,
+                "error",
+                "unknown-default-profile",
+                None,
+                &format!("metadata default_profile `{default_profile}` does not name a declared profile"),
+            );
+        }
+    }
     if pack
         .metadata
         .test_path_patterns

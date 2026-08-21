@@ -730,7 +730,10 @@ fn workspace_fingerprint(root: &Path) -> anyhow::Result<bonsai_sdk::WorkspaceCon
     // Git is only an exact freshness proof for the manifest's previously
     // content-hashed compiler inputs. Any mismatch falls back to the complete
     // filesystem/content walk in the SDK.
-    bonsai_sdk::workspace_source_fingerprint_for_cache_validation(root)
+    bonsai_sdk::workspace_source_fingerprint_for_cache_validation_with_minified(
+        root,
+        crate::include_minified_sources(),
+    )
 }
 
 /// FNV-1a 64-bit, the same digest the dataflow sidecar uses

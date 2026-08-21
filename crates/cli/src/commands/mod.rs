@@ -319,7 +319,7 @@ fn bonsai_with_rulepack(
 }
 
 pub(crate) fn bonsai_for_cli() -> bonsai_sdk::Bonsai {
-    let bonsai = bonsai_sdk::Bonsai::new();
+    let bonsai = bonsai_sdk::Bonsai::new().with_minified_sources(crate::include_minified_sources());
     match crate::PARSE_TIMEOUT_MS.get().copied().flatten() {
         Some(ms) => bonsai.with_parse_timeout(Duration::from_millis(ms)),
         None => bonsai,

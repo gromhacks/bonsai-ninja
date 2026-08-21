@@ -5,7 +5,8 @@ use bonsai_lang_api::{
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
     AdapterContext, AdapterError, CallArg, CallKind, CallTargetExtraction, DeclIndex, DeclKind, FieldWrite,
     FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
-    LanguageId, ModifierVocabulary, TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
+    LanguageId, ModifierVocabulary, SourceFileRepresentation, TypeAliasBinding, TypeAliasVocabulary,
+    Visibility, EMPTY_HANDLER,
 };
 use tree_sitter::Node;
 
@@ -59,8 +60,9 @@ const TYPESCRIPT_VOCAB: ModifierVocabulary = ModifierVocabulary {
 use bonsai_lang_javascript::{
     apply_ecmascript_assigned_member_callable_owners, apply_javascript_getter_property_sources,
     apply_js_ts_commonjs_named_export_aliases, apply_js_ts_default_export_aliases,
-    extract_ecmascript_pseudo_call, js_ts_imports, js_ts_module_segments, js_ts_require_calls,
-    populate_ecmascript_compiler_facts, JS_TS_MODULE_RESOLUTION_EXTENSIONS,
+    ecmascript_source_file_representation, extract_ecmascript_pseudo_call, js_ts_imports,
+    js_ts_module_segments, js_ts_require_calls, populate_ecmascript_compiler_facts,
+    JS_TS_MODULE_RESOLUTION_EXTENSIONS,
 };
 use tree_sitter::{Language, Tree};
 
@@ -246,6 +248,10 @@ impl LanguageAdapter for TypeScriptAdapter {
     }
     fn file_extensions(&self) -> &'static [&'static str] {
         &["ts", "tsx", "mts", "cts"]
+    }
+
+    fn source_file_representation(&self, path: &std::path::Path) -> SourceFileRepresentation {
+        ecmascript_source_file_representation(path)
     }
     fn tree_sitter_language(&self) -> Result<Language, AdapterError> {
         language_from_pack(PACK_NAME)

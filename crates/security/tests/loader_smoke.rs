@@ -92,7 +92,8 @@ fn metadata_injects_profiles_test_paths_and_language_package_semantics() {
     let tmp = tempdir();
     write(
         &tmp.path().join("metadata.yml"),
-        r#"profiles:
+        r#"default_profile: production
+profiles:
   production:
     trust: remote
     severity: high
@@ -123,6 +124,7 @@ languages:
     );
 
     let pack = load_rulepack(tmp.path()).expect("metadata-backed pack loads");
+    assert_eq!(pack.metadata.default_profile.as_deref(), Some("production"));
     let profile = pack
         .metadata
         .profiles

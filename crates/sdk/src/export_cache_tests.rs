@@ -39,7 +39,7 @@ fn write_cache(root: &Path, rulepack_root: Option<&Path>) {
 fn cache_is_fresh(root: &Path, rulepack_root: Option<&Path>) -> bool {
     let cache = default_export_cache_path(root);
     let file = std::fs::File::open(cache).expect("open export cache");
-    export_cache_is_fresh_via_fd(root, rulepack_root, &file).expect("freshness check")
+    export_cache_is_fresh_via_fd(root, rulepack_root, false, &file).expect("freshness check")
 }
 
 #[test]
@@ -113,7 +113,7 @@ fn export_cache_requires_metadata_sidecar() {
 
     let file = std::fs::File::open(&cache).expect("open raw cache");
     assert!(
-        !export_cache_is_fresh_via_fd(&root, None, &file).expect("freshness check"),
+        !export_cache_is_fresh_via_fd(&root, None, false, &file).expect("freshness check"),
         "cache without fingerprint metadata must not be replayed"
     );
     assert!(!default_export_cache_metadata_path(&root).exists());

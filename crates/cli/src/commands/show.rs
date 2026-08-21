@@ -423,7 +423,7 @@ fn show_dump_taint_propagation(args: ShowArgs<'_>, id: &str, paging_cfg: paging:
 }
 
 fn show_security_finding(args: ShowArgs<'_>, id: &str) -> Result<()> {
-    super::security::cmd_security(
+    super::security::cmd_security_unprofiled(
         args.workspace,
         SecurityAction::TaintAnalysis {
             rules_dir: args.rules_dir.map(Path::to_path_buf),
@@ -458,7 +458,7 @@ fn show_security_finding(args: ShowArgs<'_>, id: &str) -> Result<()> {
 }
 
 fn show_security_flow(args: &ShowArgs<'_>, id: &str) -> Result<()> {
-    super::security::cmd_security(
+    super::security::cmd_security_unprofiled(
         args.workspace,
         SecurityAction::TaintAnalysis {
             rules_dir: args.rules_dir.map(Path::to_path_buf),
@@ -493,7 +493,7 @@ fn show_security_flow(args: &ShowArgs<'_>, id: &str) -> Result<()> {
 }
 
 fn show_security_group(args: &ShowArgs<'_>, id: &str) -> Result<()> {
-    super::security::cmd_security(
+    super::security::cmd_security_unprofiled(
         args.workspace,
         SecurityAction::TaintAnalysis {
             rules_dir: args.rules_dir.map(Path::to_path_buf),

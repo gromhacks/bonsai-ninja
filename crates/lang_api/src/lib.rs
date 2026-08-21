@@ -161,6 +161,20 @@ impl LanguageOwnershipEvidence {
     }
 }
 
+/// Adapter-owned classification of a source file's representation.
+///
+/// Shared workspace and analysis crates consume this generic fact; they must
+/// not recognize language ids, extensions, or minifier naming conventions on
+/// their own. A file excluded by a workspace policy remains valid source and
+/// can be admitted explicitly.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SourceFileRepresentation {
+    #[default]
+    Maintained,
+    Minified,
+}
+
 /// The full contract an adapter must implement. See spec §5.5.
 ///
 /// The trait is intentionally object-safe so a registry can store
@@ -175,6 +189,12 @@ pub trait LanguageAdapter: Send + Sync + 'static {
 
     /// File extensions this adapter claims (lowercase, no leading dot).
     fn file_extensions(&self) -> &'static [&'static str];
+
+    /// Classify a path using conventions owned by this language frontend.
+    /// The default treats every supported source as maintained code.
+    fn source_file_representation(&self, _path: &std::path::Path) -> SourceFileRepresentation {
+        SourceFileRepresentation::Maintained
+    }
 
     /// The Tree-sitter `Language` used for parsing. Most adapters fetch
     /// this from `tree_sitter_language_pack::get_language`.

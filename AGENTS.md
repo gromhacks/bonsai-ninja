@@ -330,25 +330,33 @@ Start from externally reachable input, then prove source-to-sink paths.
 
 ```shell
 ./target/release/bonsai-ninja index <workspace> --no-progress
-./target/release/bonsai-ninja security <workspace> source-analysis --profile production --context 16k --no-color --no-progress
-./target/release/bonsai-ninja security <workspace> taint-analysis --profile production --context 16k --no-color --no-progress
+./target/release/bonsai-ninja security <workspace> source-analysis --context 16k --no-color --no-progress
+./target/release/bonsai-ninja security <workspace> taint-analysis --context 16k --no-color --no-progress
 ```
 
-The bundled rulepack's `--profile production` sets remote-trust defaults,
+The bundled rulepack defaults these commands to `--profile production`, which sets remote-trust defaults,
 `severity high` for taint findings, `context 16k`, and excludes common
 non-production paths:
 tests, specs, fixtures, mocks, samples, examples, demos, e2e/integration
 harnesses, vendored deps, package caches, build outputs, generated code,
-docs, scripts, deploy files, migrations, and language-specific test
-layouts. These values and test conventions come from
+docs, scripts, deploy files, migrations, and language-specific test layouts.
+These values and test conventions come from
 `security-patterns/metadata.yml`. Use `--exclude-tests` alone when you want only the narrower
 test-path filter. Security file and profile filters are workspace-relative:
 an ancestor directory outside the selected workspace does not make the
 workspace generated, vendored, or test code.
-An unfiltered taint analysis preserves exact local-trust flows and caps their
-emitted severity at medium. Use the production profile for the remote/high
-deployment boundary; do not interpret an intentionally filtered local flow as
-missing compiler or taint evidence.
+
+Compiler-backed commands exclude adapter-classified minified
+JavaScript/TypeScript by default before parsing, graph construction, security,
+and export. This is one global compiler-input policy, not a rulepack path
+filter; `tree` remains a direct filesystem walk. Use global `--minified-js`
+when bundle internals are intentionally in scope. Use `--profile all
+--minified-js` together for an unfiltered security audit over every supported
+source representation. Cache manifests record the selected compiler-input
+profile and never reuse a generation produced for the other profile. An
+all-path taint analysis preserves exact local-trust flows and caps their
+emitted severity at medium; do not interpret an intentionally filtered
+production flow as missing compiler or taint evidence.
 
 Inventory when needed:
 

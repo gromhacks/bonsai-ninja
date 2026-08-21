@@ -299,19 +299,6 @@ fn classify_context_path(relative: &Path) -> Option<(WorkspaceContextRootKind, &
             *depth += 1;
         }
     }
-    let name = relative.file_name().and_then(|s| s.to_str())?;
-    let lower = name.to_ascii_lowercase();
-    if lower.contains(".min.") || lower.contains("-min.") {
-        return Some((
-            WorkspaceContextRootKind::Generated,
-            "minified_filename",
-            relative
-                .parent()
-                .filter(|path| !path.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf(),
-        ));
-    }
     None
 }
 

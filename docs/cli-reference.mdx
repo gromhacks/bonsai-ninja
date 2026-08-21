@@ -7,13 +7,23 @@ description: "Command and flag reference for security analysis, flow inspection,
 
 Global options accepted before or after the command include `--no-color`,
 `--theme`, `--no-cache`, `--no-progress`, `--html-output`, `--contains`,
-`--not-contains`, `--parse-timeout`, `--memory-budget`, `--debug`, `--help`,
-and `--version`. `--memory-budget <MIB>` controls exact compiler-work
+`--not-contains`, `--parse-timeout`, `--memory-budget`, `--minified-js`,
+`--debug`, `--help`, and `--version`. `--memory-budget <MIB>` controls exact compiler-work
 scheduling and spill/retention policy; it never caps files, graph depth,
 fixed-point iterations, or results. `--debug <CATEGORIES>` emits selected
 diagnostic categories to stderr and is equivalent to `BONSAI_DEBUG`.
 `--theme` and `BONSAI_THEME` accept exactly `moss`, `earthy-dark`,
 `dracula`, or `retro-amber`; unknown values are errors.
+
+Compiler-backed commands use one input profile. By default, each language
+adapter can classify minified source representations and the JavaScript and
+TypeScript adapters exclude `.min.*` / `-min.*` bundles before parsing. This
+keeps generated distribution code out of index, navigation, callgraph,
+security, and export work. Global `--minified-js` restores those inputs across
+all of those commands; cache manifests record the selection and cannot be
+reused across profiles. `tree` is a direct filesystem walk and remains
+unfiltered. Explicit `read-file` access to a minified source requires the same
+switch.
 
 Workspace roots are positional operands. Query-like values have explicit
 forms—`--query`, `--symbol`, `--file`, `--from`, `--to`, and `--id`—which are
@@ -86,6 +96,7 @@ bonsai-ninja index ./src --watch
 bonsai-ninja index ./src --semantic
 bonsai-ninja index ./src --structural-only
 bonsai-ninja index ./src --prewarm-dataflow
+bonsai-ninja index ./src --semantic --minified-js
 ```
 
 | Flag | Default | Description |
@@ -243,7 +254,9 @@ The taint command surface is `security <workspace> taint-analysis`.
 
 ```bash
 bonsai-ninja security ./src taint-analysis --trust remote --tag command-injection
-bonsai-ninja security ./src taint-analysis --profile production
+bonsai-ninja security ./src taint-analysis
+bonsai-ninja security ./src taint-analysis --minified-js
+bonsai-ninja security ./src taint-analysis --profile all
 bonsai-ninja security ./src taint-analysis --summary --format json
 bonsai-ninja security ./src taint-analysis --flow F:0123456789abcdef
 bonsai-ninja security ./src taint-analysis --group G:0123456789abcdef
@@ -256,11 +269,13 @@ argument propagation, receiver evidence where relevant, and sink operand.
 When one finding needs more than one page-sized flow unit, every unit retains
 the same `FINDING N` number and is labelled `FLOW 1/M`, `FLOW 2/M`, and so on;
 the renderer does not introduce a second “continued” numbering scheme.
-Unfiltered analysis preserves exact local-trust flows and caps their emitted
-severity at `medium`; it does not silently discard them. The bundled
-`production` profile applies `trust: remote` and `severity: high`, keeping
-those operator/environment flows out of the production review without
-changing the underlying graph.
+The bundled `production` profile is the default and applies `trust: remote`,
+`severity: high`, and common non-production path exclusions. `--profile all`
+selects the bundled empty profile; local-trust flows remain exact and their
+emitted severity is capped at `medium`. Minified input is controlled by the
+independent global compiler profile described above. Use `--profile all
+--minified-js` together for an unfiltered security audit over every supported
+source representation.
 JSON and SARIF findings include `analysis_complete` and
 `analysis_incomplete_reasons`; emitted findings are complete semantic
 evidence, so complete findings carry an empty reason list. The command
@@ -286,7 +301,7 @@ redo work.
 | Flag | Default | Description |
 |---|---:|---|
 | `--rules-dir <DIR>` | Bundled | Override the base rulepack directory. |
-| `--profile <PROFILE>` | None | Rulepack-declared preset bundle. The bundled `production` profile applies production excludes, remote trust, high severity, and 16k context unless overridden. |
+| `--profile <PROFILE>` | Rulepack default (`production` when bundled) | Rulepack-declared preset bundle. Use `all` to disable bundled review defaults; combine with global `--minified-js` to admit every supported source representation. Custom packs without `default_profile` remain unprofiled by default. |
 | `--source <REGEX>` | None | Source rule ID regex. |
 | `--finding <S:ID>` | None | Re-render only one stable finding ID. |
 | `--flow <F:ID>` | None | Re-render only one security representative taint-path flow ID. |
@@ -302,7 +317,7 @@ redo work.
 | `--exclude-tests` | false | Drop findings whose source, sink, or proof path is in a workspace-relative test path. |
 | `--show-sanitized` | false | Include sanitizer-cleared source-to-sink paths for audit and rulepack debugging. |
 | `--include-pattern-only` | false | Include exact source-independent local findings in text/JSON. SARIF enables these automatically. |
-| `--context <BUDGET>` | 32k | Token budget. |
+| `--context <BUDGET>` | Profile default (`16k` in production) | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Emit every finding. |
 | `--summary` | false | Emit only aggregate finding counts. Text shows compact tables; JSON emits the summary object without paged rows. |
@@ -605,6 +620,11 @@ Native export never enumerates a capped prefix of call paths. The resolved
 callgraph is the exact linear-space representation of that path language, so
 the default includes the complete `compiled_idg` relation without an
 exponential materialization step.
+The artifact is exact for the selected compiler-input profile. Default export
+omits adapter-classified minified JavaScript/TypeScript; add global
+`--minified-js` to include bundle internals. This selection changes source
+scope, never graph depth, fixed-point work, or path completeness within that
+scope.
 Native JSON schema v7 makes every code location workspace-relative. The
 top-level `workspace_root` is the sole absolute anchor; consumers reconstruct
 an OS path by joining that root with a location. This keeps artifacts portable
@@ -647,7 +667,7 @@ without changing the closure.
 | Flag | Default | Description |
 |---|---:|---|
 | `--rules-dir <DIR>` | Bundled | Override the base rulepack directory. |
-| `--profile <PROFILE>` | None | Rulepack-declared preset bundle. The bundled `production` profile applies production excludes, remote trust, and 16k context unless overridden. |
+| `--profile <PROFILE>` | Rulepack default (`production` when bundled) | Rulepack-declared preset bundle. Use `all` to disable bundled review defaults; combine with global `--minified-js` to admit every supported source representation. Custom packs without `default_profile` remain unprofiled by default. |
 | `--source <REGEX>` | None | Source rule ID regex. |
 | `--trust <TRUST>` | None | Source trust filter. |
 | `--tag <TAG>` | None | Source tag filter. |
@@ -794,8 +814,8 @@ enabled only by `--rules-dir`, `--from`, `--to`, or
 `--max-inlined-bodies`. Once enabled, connected caller/callee bodies are
 uncapped by default; `--max-inlined-bodies <N>` is the explicit body cap and
 `0` is uncapped. `--all` only disables output pagination; it does not enable
-semantic work or change the body scope. Set `BONSAI_INCLUDE_MINIFIED=1` only
-when `read-file` path/symbol resolution should include `.min.*` assets.
+semantic work or change the body scope. Explicit minified source access uses
+the global compiler-input contract: add `--minified-js` to `read-file`.
 After semantic indexing, the default path reuses the selected file's exact
 content-addressed compiler body by its stable full-workspace `FileId`; it does
 not construct a resolved callgraph merely to render local source.

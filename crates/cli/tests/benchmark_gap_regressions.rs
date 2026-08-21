@@ -73,6 +73,8 @@ fn run_taint_json_with_flags(ws: &Path, source: &str, sink: &str, flags: &[&str]
         .arg(ws)
         .args([
             "taint-analysis",
+            "--profile",
+            "all",
             "--rules-dir",
             rules_dir().to_str().expect("rules dir"),
             "--source",

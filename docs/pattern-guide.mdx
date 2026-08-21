@@ -36,7 +36,9 @@ renaming a family therefore changes YAML, validation fixtures, and cache
 fingerprints—not a Rust match statement.
 
 `profiles.<name>` declares optional trust, severity, context, test exclusion,
-and workspace-relative `exclude_paths`. Explicit CLI flags win over profile
+and workspace-relative `exclude_paths`. `default_profile` may name one of
+those profiles for security commands that do not pass `--profile`; omit it to
+leave a custom pack unprofiled by default. Explicit CLI flags win over profile
 defaults. `test_path_patterns` is the single test-file inventory used by
 `--exclude-tests` and finding `from_test` attribution; matching is
 case-normalized and workspace-relative.

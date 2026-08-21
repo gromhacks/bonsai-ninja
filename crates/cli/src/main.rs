@@ -237,6 +237,13 @@ pub(crate) static NO_CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new
 /// `None` lets the parser use `BONSAI_PARSE_TIMEOUT_MS` or its default.
 pub(crate) static PARSE_TIMEOUT_MS: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
 
+/// Compiler-input profile selected by the global `--minified-js` switch.
+pub(crate) static INCLUDE_MINIFIED_SOURCES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+pub(crate) fn include_minified_sources() -> bool {
+    INCLUDE_MINIFIED_SOURCES.get().copied().unwrap_or(false)
+}
+
 /// Read `--theme` / `BONSAI_THEME` from argv + env *before* clap parses, so
 /// clap's own help renderer can use the chosen palette. Falls back to
 /// `moss` (the bonsai-ninja house theme) when no theme is requested.
@@ -365,6 +372,13 @@ fn real_main() -> Result<()> {
         .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
     let _ = NO_CACHE.set(cli.no_cache || no_cache_env);
     let _ = PARSE_TIMEOUT_MS.set(cli.parse_timeout_ms);
+    if cli.minified_js {
+        std::env::set_var("BONSAI_INCLUDE_MINIFIED_JS", "1");
+    }
+    let include_minified_env = std::env::var("BONSAI_INCLUDE_MINIFIED_JS")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"));
+    let _ = INCLUDE_MINIFIED_SOURCES.set(cli.minified_js || include_minified_env);
     // Mirror `--debug <categories>` into `BONSAI_DEBUG` so the
     // diagnostics::debug filter (read on first call) sees the
     // categories the user enabled. CLI flag takes precedence over

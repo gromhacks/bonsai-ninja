@@ -19,20 +19,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod support;
+use support::bin_path;
+
 // ---------------------------------------------------------------------------
 // Test harness.
 // ---------------------------------------------------------------------------
-
-fn repo_root() -> PathBuf {
-    let mut p = std::env::current_dir().expect("cwd");
-    p.push("../..");
-    p.canonicalize().expect("repo root")
-}
-
-fn bin_path() -> Option<PathBuf> {
-    let p = repo_root().join("target/release/bonsai-ninja");
-    p.exists().then_some(p)
-}
 
 fn fresh_tmp(tag: &str) -> PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};

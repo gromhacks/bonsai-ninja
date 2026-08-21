@@ -2445,9 +2445,16 @@ where
         .collect::<Vec<_>>();
     recorded.sort();
     if current != recorded {
-        return Err(invalid_data(
-            "compiler-object sidecar source fingerprint mismatch",
-        ));
+        let first_difference = current
+            .iter()
+            .zip(&recorded)
+            .position(|(left, right)| left != right)
+            .unwrap_or_else(|| current.len().min(recorded.len()));
+        return Err(invalid_data(format!(
+            "compiler-object sidecar source fingerprint mismatch: current_files={} recorded_files={} first_difference={first_difference}",
+            current.len(),
+            recorded.len()
+        )));
     }
     Ok(store)
 }
@@ -2875,8 +2882,8 @@ fn invalid_wire(error: impl std::error::Error + Send + Sync + 'static) -> std::i
     std::io::Error::new(std::io::ErrorKind::InvalidData, error)
 }
 
-fn invalid_data(message: &'static str) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
+fn invalid_data(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message.into())
 }
 
 fn factstore_io(error: FactStoreError) -> std::io::Error {

@@ -15,20 +15,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 
-fn repo_root() -> PathBuf {
-    let mut p = std::env::current_dir().expect("cwd");
-    p.push("../..");
-    p.canonicalize().expect("repo root")
-}
-
-fn bin_path() -> Option<PathBuf> {
-    let release = repo_root().join("target/release/bonsai-ninja");
-    if release.exists() {
-        return Some(release);
-    }
-    let debug = repo_root().join("target/debug/bonsai-ninja");
-    debug.exists().then_some(debug)
-}
+mod support;
+use support::{bin_path, repo_root};
 
 fn run(args: &[&str]) -> Option<String> {
     let bin = bin_path()?;

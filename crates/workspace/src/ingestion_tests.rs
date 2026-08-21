@@ -10,6 +10,13 @@ fn python_registry() -> Arc<LanguageRegistry> {
     registry
 }
 
+fn javascript_registry() -> Arc<LanguageRegistry> {
+    let registry = Arc::new(LanguageRegistry::new());
+    let adapter: AdapterArc = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    registry.register(adapter);
+    registry
+}
+
 fn assert_function_was_parsed(workspace: &Workspace, expected: &str) {
     let files = workspace.vfs().all_files();
     assert_eq!(files.len(), 1, "the supported source file must be ingested");
@@ -74,6 +81,67 @@ fn long_minified_named_source_is_parsed_by_single_file_and_parallel_ingest() {
     let parallel = Workspace::open_query_matching_literal(root.path(), python_registry(), "needle_")
         .expect("parallel literal ingest must accept the same supported source");
     assert_function_was_parsed(&parallel, "long_line");
+}
+
+#[test]
+fn minified_ecmascript_requires_explicit_compiler_input_opt_in() {
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    std::fs::write(root.path().join("app.js"), "function maintained(){return 1;}\n")
+        .expect("write maintained JavaScript");
+    std::fs::write(
+        root.path().join("vendor.min.js"),
+        "function generatedBundle(){return 2;}\n",
+    )
+    .expect("write minified JavaScript");
+
+    let default = Workspace::open_with_options(
+        root.path(),
+        javascript_registry(),
+        WorkspaceOpenOptions::parse_only(),
+    )
+    .expect("open default production input profile");
+    assert_eq!(default.stats().files, 1);
+    assert!(default.lookup_function("maintained").is_some());
+    assert!(default.lookup_function("generatedBundle").is_none());
+    assert!(
+        default
+            .source_file_stamp(&root.path().join("vendor.min.js"))
+            .expect("default source stamp")
+            .is_none(),
+        "watch/refresh discovery must use the same compiler-input profile"
+    );
+    assert!(
+        default
+            .refresh_file_from_disk(&root.path().join("vendor.min.js"))
+            .is_err(),
+        "direct refresh must not bypass the compiler-input profile"
+    );
+    assert_eq!(
+        default
+            .source_file_fingerprints(root.path())
+            .expect("default fingerprints")
+            .len(),
+        1
+    );
+
+    let mut include = WorkspaceOpenOptions::parse_only();
+    include.include_minified_sources = true;
+    let complete = Workspace::open_with_options(root.path(), javascript_registry(), include)
+        .expect("open minified-inclusive compiler profile");
+    assert_eq!(complete.stats().files, 2);
+    assert!(complete.lookup_function("maintained").is_some());
+    assert!(complete.lookup_function("generatedBundle").is_some());
+    assert!(complete
+        .source_file_stamp(&root.path().join("vendor.min.js"))
+        .expect("inclusive source stamp")
+        .is_some());
+    assert_eq!(
+        complete
+            .source_file_fingerprints(root.path())
+            .expect("inclusive fingerprints")
+            .len(),
+        2
+    );
 }
 
 #[test]

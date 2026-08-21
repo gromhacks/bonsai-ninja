@@ -16,9 +16,9 @@ cap.
 
 CI pins this in `crates/cli/tests/security_commands.rs` with two checks:
 every language must expose its declared construct markers in source, and
-`security taint-analysis --format json --all` must match the default
-finding counts listed below. Zero-count rows are valid when the enabled
-default rulepack has no source-to-sink rule firing for that fixture;
+`security taint-analysis --profile all --format json --all` must match the
+all-code finding counts listed below. Zero-count rows are valid when the
+enabled rulepack has no source-to-sink rule firing for that fixture;
 pattern-only and no-path matches are intentionally excluded from default
 taint-analysis text/JSON output. SARIF enables exact source-independent
 API/config misuse findings automatically and omits `codeFlows` for those
@@ -44,7 +44,7 @@ Run one language:
 
 ```
 ./target/release/bonsai-ninja security examples/<lang>/mega_flow \
-    taint-analysis --rules-dir ./security-patterns --all
+    taint-analysis --rules-dir ./security-patterns --profile all --all
 ```
 
 Run the full release gate:
@@ -54,13 +54,13 @@ cargo build --release
 scripts/validate-mega-cli.py --bin ./target/release/bonsai-ninja
 ```
 
-## Current default `security taint-analysis` results
+## Current all-code `security taint-analysis` results
 
 Generated with the release CLI:
 
 ```bash
 ./target/release/bonsai-ninja security examples/<lang>/mega_flow \
-  taint-analysis --rules-dir ./security-patterns --format json --all \
+  taint-analysis --rules-dir ./security-patterns --profile all --format json --all \
   --no-color --no-progress
 ```
 

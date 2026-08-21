@@ -1174,6 +1174,8 @@ fn check_security_flows(ws: &str, lang: &str, min: usize) {
         "security",
         ws,
         "taint-analysis",
+        "--profile",
+        "all",
         "--inferred-sources",
         "--all",
         "--format",
@@ -1220,8 +1222,8 @@ fn check_security_flows(ws: &str, lang: &str, min: usize) {
     }
 }
 
-fn expected_default_mega_flow_findings(lang: &str) -> usize {
-    // Counts for the DEFAULT `taint-analysis --all` run — concrete
+fn expected_all_profile_mega_flow_findings(lang: &str) -> usize {
+    // Counts for the explicit `taint-analysis --profile all --all` run — concrete
     // source-rule matches only, NO `--inferred-sources`. So a language
     // whose mega_flow source is an inferred entry-point parameter (rather
     // than a concrete rule match) legitimately reports 0 here while
@@ -1287,6 +1289,8 @@ fn check_security_sarif_shape(ws: &str, lang: &str) {
         "security",
         ws,
         "taint-analysis",
+        "--profile",
+        "all",
         "--inferred-sources",
         "--format",
         "sarif",
@@ -1348,6 +1352,8 @@ fn check_security_sarif_shape(ws: &str, lang: &str) {
         "security",
         ws,
         "taint-analysis",
+        "--profile",
+        "all",
         "--inferred-sources",
         "--include-pattern-only",
         "--format",
@@ -1561,7 +1567,15 @@ fn check_security_sources(ws: &str, lang: &str, expected_min: usize) {
 /// non-empty languages must produce real source-lineage chains that
 /// mention the fixture entrypoint.
 fn check_security_source_analysis(ws: &str, lang: &str, expected_min: usize, handler: &str) {
-    let Some((out, _, code)) = run(&["security", ws, "source-analysis", "--format", "json"]) else {
+    let Some((out, _, code)) = run(&[
+        "security",
+        ws,
+        "source-analysis",
+        "--profile",
+        "all",
+        "--format",
+        "json",
+    ]) else {
         return;
     };
     assert_eq!(code, 0, "[{lang}] security source-analysis ec={code}");
@@ -1641,7 +1655,15 @@ fn check_security_source_analysis(ws: &str, lang: &str, expected_min: usize, han
 /// Assert `security source-analysis` stays semantic on the construct-heavy
 /// mega_flow fixture, not just the tiny micro fixture.
 fn check_mega_flow_source_analysis(ws: &str, lang: &str) {
-    let Some((out, _, code)) = run(&["security", ws, "source-analysis", "--format", "json"]) else {
+    let Some((out, _, code)) = run(&[
+        "security",
+        ws,
+        "source-analysis",
+        "--profile",
+        "all",
+        "--format",
+        "json",
+    ]) else {
         return;
     };
     assert_eq!(code, 0, "[{lang}] mega_flow source-analysis ec={code}");
@@ -2196,7 +2218,16 @@ macro_rules! lang_matrix_tests {
                 fn mega_flow_security_flows_produces_finding() {
                     let w = ws(EXP.lang, "mega_flow");
                     let Some((out, _, code)) =
-                        run(&["security", &w, "taint-analysis", "--format", "json", "--all"])
+                        run(&[
+                            "security",
+                            &w,
+                            "taint-analysis",
+                            "--profile",
+                            "all",
+                            "--format",
+                            "json",
+                            "--all",
+                        ])
                     else {
                         return;
                     };
@@ -2207,7 +2238,7 @@ macro_rules! lang_matrix_tests {
                     );
                     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
                     let rows = rows_of(&parsed);
-                    let expected = expected_default_mega_flow_findings(EXP.lang);
+                    let expected = expected_all_profile_mega_flow_findings(EXP.lang);
                     assert_eq!(
                         rows.len(),
                         expected,
@@ -2661,7 +2692,15 @@ const FULL_CHAIN_HOPS: &[&str] = &[
 fn mega_flow_full_source_to_sink_chain_exists() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "mega_flow");
-    let Some((out, _, code)) = run(&["security", &w, "taint-analysis", "--format", "json"]) else {
+    let Some((out, _, code)) = run(&[
+        "security",
+        &w,
+        "taint-analysis",
+        "--profile",
+        "all",
+        "--format",
+        "json",
+    ]) else {
         return;
     };
     assert_eq!(code, 0, "mega_flow security taint-analysis ec={code}");
@@ -3121,7 +3160,15 @@ fn security_findings_have_well_formed_ids_and_chains() {
     let Some(_) = bin_path() else { return };
     // Use a language whose complex fixture produces many findings.
     let w = ws("python", "complex");
-    let Some((out, _, _)) = run(&["security", &w, "taint-analysis", "--format", "json"]) else {
+    let Some((out, _, _)) = run(&[
+        "security",
+        &w,
+        "taint-analysis",
+        "--profile",
+        "all",
+        "--format",
+        "json",
+    ]) else {
         return;
     };
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -3189,6 +3236,8 @@ fn severity_flag_accepts_every_valid_level() {
             "security",
             &w,
             "taint-analysis",
+            "--profile",
+            "all",
             "--severity",
             level,
             "--format",
@@ -3559,6 +3608,8 @@ fn security_flows_tag_filter_narrows() {
         "security",
         &w,
         "taint-analysis",
+        "--profile",
+        "all",
         "--tag",
         "command-injection",
         "--format",

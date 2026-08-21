@@ -251,6 +251,21 @@ fn open_security_project_filtered_paths(
 /// rulepack once, merges any project-local overrides, then forwards
 /// to the per-action handler.
 pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<()> {
+    cmd_security_with_profile_default(workspace, action, true)
+}
+
+/// Reopen a stable security id without applying a review profile. Findings
+/// may have been produced under any rulepack-declared profile, so `show` must
+/// query the complete semantic result rather than guess a profile spelling.
+pub(crate) fn cmd_security_unprofiled(workspace: &Path, action: SecurityAction) -> Result<()> {
+    cmd_security_with_profile_default(workspace, action, false)
+}
+
+fn cmd_security_with_profile_default(
+    workspace: &Path,
+    action: SecurityAction,
+    apply_default_profile: bool,
+) -> Result<()> {
     let command_started = std::time::Instant::now();
     // Extract --rules-dir from whichever action variant carries it.
     // Same shape on every variant; clap-derive forces a per-variant
@@ -450,7 +465,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
         } => {
             apply_profile(
                 &pack.metadata,
-                profile.as_deref(),
+                selected_security_profile(&pack.metadata, profile.as_deref(), apply_default_profile),
                 ProfileOverrides {
                     trust: &mut trust,
                     severity: Some(&mut severity),
@@ -506,7 +521,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             let mut exclude_tests = false;
             apply_profile(
                 &pack.metadata,
-                profile.as_deref(),
+                selected_security_profile(&pack.metadata, profile.as_deref(), apply_default_profile),
                 ProfileOverrides {
                     trust: &mut trust,
                     severity: None,
@@ -578,6 +593,18 @@ struct ProfileOverrides<'a> {
     exclude_files: &'a mut Vec<String>,
     exclude_tests: Option<&'a mut bool>,
     context: &'a mut Option<String>,
+}
+
+fn selected_security_profile<'a>(
+    metadata: &'a RulepackMetadata,
+    requested: Option<&'a str>,
+    apply_default: bool,
+) -> Option<&'a str> {
+    if requested.is_some() || !apply_default {
+        requested
+    } else {
+        metadata.default_profile.as_deref()
+    }
 }
 
 fn apply_profile(

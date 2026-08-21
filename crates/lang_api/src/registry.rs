@@ -5,7 +5,7 @@
 //! dispatch-by-extension for now; adapters that need content sniffing should
 //! layer it on top.
 
-use crate::{types::LanguageId, DynAdapter, LanguageAdapter};
+use crate::{types::LanguageId, DynAdapter, LanguageAdapter, SourceFileRepresentation};
 use ahash::AHashMap;
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -70,6 +70,26 @@ impl LanguageRegistry {
             .get(&ext.to_ascii_lowercase())
             .and_then(|candidates| candidates.first())
             .cloned()
+    }
+
+    /// Classify a supported source path through its owning adapter(s).
+    /// Ambiguous extensions are treated as minified only when every candidate
+    /// frontend agrees, so a specialized grammar cannot hide a maintained
+    /// source claimed by another compatible adapter.
+    pub fn source_file_representation(&self, path: &std::path::Path) -> Option<SourceFileRepresentation> {
+        let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+        let inner = self.inner.read();
+        let candidates = inner.by_ext.get(&extension)?;
+        Some(
+            if candidates
+                .iter()
+                .all(|adapter| adapter.source_file_representation(path) == SourceFileRepresentation::Minified)
+            {
+                SourceFileRepresentation::Minified
+            } else {
+                SourceFileRepresentation::Maintained
+            },
+        )
     }
 
     /// Every adapter that claims `ext`, in deterministic registration order.

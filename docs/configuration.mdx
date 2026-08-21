@@ -124,7 +124,13 @@ warm facts. Set `BONSAI_TAINT_GRAPH_PERSIST=0` only when you intentionally
 want to trade repeated-run speed for less cache I/O.
 
 Security `--file`, `--exclude-file`, `--exclude-tests`, and production-profile
-path filters are evaluated against workspace-relative paths. A selected
+path filters are evaluated against workspace-relative paths. The bundled
+production profile is the default for `source-analysis` and `taint-analysis`;
+`--profile all` disables its review-path/trust/severity defaults. Independently,
+the default compiler-input profile excludes adapter-classified minified
+JavaScript/TypeScript for indexing, navigation, graphs, security, and export;
+global `--minified-js` includes those bundles. Use both switches for an
+unfiltered security audit over every supported source representation. A selected
 workspace is not treated as generated, vendored, or test code merely because an
 ancestor directory outside the workspace has a matching name such as `target/`
 or `tests/`. Explicit absolute path filters are still matched against absolute
@@ -157,7 +163,7 @@ settings below.
 | `BONSAI_CONTEXT` | token budget | `32k` for text and JSON | Default paging/context budget. |
 | `BONSAI_NO_CACHE` | boolean-like | unset | Disable in-process caches. |
 | `BONSAI_TAINT_GRAPH_PERSIST` | boolean-like | enabled | Persist exact taint/source graph entries to mode/config-specific `$CACHE_DIR/taint_graph.v*.<mode>.<config>.factstore` files. Set to `0`, `false`, `no`, or `off` to opt out. |
-| `BONSAI_INCLUDE_MINIFIED` | boolean-like | unset | Include `.min.*` assets in `read-file` path and symbol resolution. Minified assets are excluded from that navigation command by default. |
+| `BONSAI_INCLUDE_MINIFIED_JS` | boolean-like | unset | Equivalent to global `--minified-js`. Include adapter-classified minified JavaScript/TypeScript in compiler-backed commands and inherited semantic worker processes. |
 | `BONSAI_RAYON_STACK_BYTES` | integer bytes | internal default | Rayon worker stack size override for very deep syntax trees. |
 | `NO_COLOR` | boolean-like | unset | Disable color output. |
 | `NO_PROGRESS` | boolean-like | unset | Disable progress output. |

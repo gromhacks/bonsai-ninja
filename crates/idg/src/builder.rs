@@ -4485,7 +4485,21 @@ fn stitch_field_argument_forwarding(
             .collect::<Vec<_>>();
         eager_segments.sort_by_key(|segment| segment.0);
         eager_segments.dedup();
-        state.ws.hydrate_segments(eager_segments)?;
+        state.ws.hydrate_segments(eager_segments.iter().copied())?;
+        // Canonical lowering deliberately releases the transient reverse
+        // dictionaries before it spools each segment. Field compatibility
+        // closure is a later compiler mutation pass, so restore those O(1)
+        // interning indexes only for the exact demanded segments. Without
+        // this step every synthetic string/place/node insertion performs a
+        // linear scan of the canonical vectors; dense generated JavaScript
+        // can turn an otherwise sparse exact fixed point into quadratic work.
+        // The indexes are storage only and are dropped again with the
+        // resident segment below.
+        for segment_id in eager_segments {
+            if let Some(segment) = state.ws.segment_mut(segment_id) {
+                segment.rebuild_build_lookups();
+            }
+        }
     }
     let mut processed = 0usize;
     let mut processed_transforms = 0usize;
@@ -5311,6 +5325,12 @@ fn activate_fallback_segment(
         ws.spill_resident_segments()?;
     }
     ws.hydrate_segment(requested)?;
+    if let Some(segment) = ws.segment_mut(requested) {
+        // Spool payloads contain canonical vectors, not the transient reverse
+        // maps. Fallback lowering may intern compiler nodes, so it must never
+        // run against the exact-but-linear lookup representation.
+        segment.rebuild_build_lookups();
+    }
     *active_segment = Some(requested);
     Ok(())
 }

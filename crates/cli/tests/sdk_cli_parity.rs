@@ -203,9 +203,11 @@ fn security_cli_args<'a>(workspace: &'a str, subcommand: &'a str, extra: &'a [&'
         subcommand,
         "--rules-dir",
         "security-patterns",
-        "--format",
-        "json",
     ];
+    if matches!(subcommand, "taint-analysis" | "source-analysis") {
+        args.extend(["--profile", "all"]);
+    }
+    args.extend(["--format", "json"]);
     args.extend_from_slice(extra);
     args
 }

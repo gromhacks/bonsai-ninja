@@ -71,6 +71,54 @@ fn scoped_query_preserves_complete_workspace_file_ids() {
 }
 
 #[test]
+fn scoped_query_rebinds_linkage_to_complete_workspace_symbol_ids() {
+    let root = tempdir("scoped-symbol-identity");
+    std::fs::write(
+        root.join("first.py"),
+        "def first_a():\n    return 1\n\ndef first_b():\n    return first_a()\n",
+    )
+    .expect("write first");
+    std::fs::write(root.join("second.py"), "def selected(value):\n    return value\n")
+        .expect("write selected");
+
+    let complete = Workspace::open_query(&root, registry()).expect("open complete workspace");
+    complete
+        .save_compiler_linkage_sidecar(&root)
+        .expect("persist complete compiler linkage");
+    let complete_symbol = complete
+        .compiler_linkage_index()
+        .find_by_name("selected")
+        .first()
+        .copied()
+        .expect("complete selected symbol");
+
+    let scoped = Workspace::open_query_filtered_paths_with_options(
+        &root,
+        registry(),
+        &["second.py".to_string()],
+        &[],
+        WorkspaceOpenOptions::lazy_query(),
+    )
+    .expect("open scoped workspace");
+    let scoped_linkage = scoped.compiler_linkage_index();
+    let scoped_symbol = scoped_linkage
+        .find_by_name("selected")
+        .first()
+        .copied()
+        .expect("scoped selected symbol");
+
+    assert_eq!(
+        scoped_symbol, complete_symbol,
+        "scoped exact bodies must bind to the persisted full-workspace symbol table"
+    );
+    assert!(
+        scoped_linkage.decl_of(scoped_symbol).is_some(),
+        "the stable symbol must retain its selected declaration header"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn cached_graph_is_shared_arc_across_calls() {
     let ws = ws_with(
         "app.py",

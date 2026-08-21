@@ -3396,6 +3396,34 @@ fn read_file_plain_json_uses_fast_file_local_view() {
 }
 
 #[test]
+fn read_file_keeps_minified_source_available_to_explicit_navigation() {
+    let root = tempdir_for_test("read-file-minified-source");
+    std::fs::write(
+        root.join("bundle.min.js"),
+        "function minifiedEntry(value){return value;}\n",
+    )
+    .expect("write minified JavaScript fixture");
+
+    for selector in [vec!["bundle.min.js"], vec!["--symbol", "minifiedEntry"]] {
+        let mut args = vec!["read-file", root.to_str().unwrap(), "--minified-js"];
+        args.extend(selector);
+        args.extend(["--format", "json"]);
+        let Some(out) = run(&args) else {
+            return;
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&out).expect("minified read-file JSON must parse");
+        assert_eq!(parsed["locator"]["file"], "bundle.min.js", "{out}");
+        assert!(
+            parsed["source"]
+                .as_str()
+                .is_some_and(|source| source.contains("minifiedEntry")),
+            "explicit navigation must not hide compiler-recognized minified source:\n{out}"
+        );
+    }
+}
+
+#[test]
 fn read_file_line_range_keeps_native_json_and_only_intersecting_declarations() {
     let root = tempdir_for_test("read-file-ranged-native-json");
     let source = [

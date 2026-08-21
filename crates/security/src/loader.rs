@@ -69,6 +69,11 @@ pub struct RulepackMetadata {
     /// layouts or deployment assumptions into the binary.
     #[serde(default, skip_serializing_if = "map_is_empty")]
     pub profiles: AHashMap<String, SecurityProfileMetadata>,
+    /// Optional name of the profile applied when a security command does not
+    /// select one explicitly. The value is rulepack policy; shared CLI code
+    /// never assigns meaning to a particular profile spelling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_profile: Option<String>,
     /// Workspace-relative patterns used to classify test findings. The
     /// matcher is generic; language/ecosystem filename conventions live here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -480,6 +485,9 @@ impl Rulepack {
                 .entry(name)
                 .or_default()
                 .merge_overriding(incoming);
+        }
+        if overlay.metadata.default_profile.is_some() {
+            self.metadata.default_profile = overlay.metadata.default_profile;
         }
         if !overlay.metadata.test_path_patterns.is_empty() {
             self.metadata.test_path_patterns = overlay.metadata.test_path_patterns;

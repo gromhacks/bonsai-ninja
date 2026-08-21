@@ -81,7 +81,7 @@ fn unchanged_git_snapshot_reuses_manifest_source_hashes() {
 
     let sentinel = 0xfeed_beef_dead_cafe;
     manifest.workspace_source_files[0].hash = sentinel;
-    let validated = source_file_fingerprints_for_cache_validation(&root, Some(&manifest))
+    let validated = source_file_fingerprints_for_cache_validation(&root, Some(&manifest), false)
         .expect("validate unchanged Git snapshot");
     assert_eq!(validated.len(), 1);
     assert_eq!(
@@ -102,7 +102,7 @@ fn unchanged_git_snapshot_rehashes_without_strong_file_identity() {
     let sentinel = 0xfeed_beef_dead_cafe;
     manifest.workspace_source_files[0].hash = sentinel;
 
-    let validated = source_file_fingerprints_for_cache_validation(&root, Some(&manifest))
+    let validated = source_file_fingerprints_for_cache_validation(&root, Some(&manifest), false)
         .expect("validate unchanged Git snapshot");
     assert_eq!(validated.len(), 1);
     assert_ne!(
@@ -123,7 +123,7 @@ fn dirty_source_identity_invalidates_git_fast_path() {
     manifest.workspace_source_files[0].hash = 0xfeed_beef_dead_cafe;
 
     std::fs::write(root.join("app.py"), "def changed():\n    return 2\n").expect("change tracked source");
-    let validated = source_file_fingerprints_for_cache_validation(&root, Some(&manifest))
+    let validated = source_file_fingerprints_for_cache_validation(&root, Some(&manifest), false)
         .expect("validate changed Git snapshot");
     assert_eq!(validated.len(), 1);
     assert_ne!(validated[0].hash, 0xfeed_beef_dead_cafe);
@@ -136,7 +136,7 @@ fn dirty_source_identity_invalidates_git_fast_path() {
     let dirty_hash = dirty_manifest.workspace_source_files[0].hash;
     std::fs::write(root.join("app.py"), "def changed_again():\n    return 3\n")
         .expect("rewrite already-dirty source");
-    let revalidated = source_file_fingerprints_for_cache_validation(&root, Some(&dirty_manifest))
+    let revalidated = source_file_fingerprints_for_cache_validation(&root, Some(&dirty_manifest), false)
         .expect("validate rewritten dirty source");
     assert_ne!(revalidated[0].hash, dirty_hash);
     let _ = std::fs::remove_dir_all(root);
@@ -151,7 +151,7 @@ fn head_and_untracked_source_changes_invalidate_git_fast_path() {
     let manifest = cache.manifest().expect("build manifest");
 
     std::fs::write(root.join("extra.py"), "def extra():\n    return 2\n").expect("add source");
-    let with_untracked = source_file_fingerprints_for_cache_validation(&root, Some(&manifest))
+    let with_untracked = source_file_fingerprints_for_cache_validation(&root, Some(&manifest), false)
         .expect("validate untracked source");
     assert_eq!(with_untracked.len(), 2);
 
@@ -168,7 +168,7 @@ fn head_and_untracked_source_changes_invalidate_git_fast_path() {
             "add source",
         ],
     ));
-    let after_commit = source_file_fingerprints_for_cache_validation(&root, Some(&manifest))
+    let after_commit = source_file_fingerprints_for_cache_validation(&root, Some(&manifest), false)
         .expect("validate changed index tree");
     assert_eq!(after_commit.len(), 2);
     let _ = std::fs::remove_dir_all(root);
@@ -186,7 +186,7 @@ fn bonsai_cache_directories_are_never_compiler_inputs() {
     )
     .expect("write source-shaped cache payload");
 
-    let fingerprints = source_file_fingerprints_from_disk(&root).expect("fingerprint workspace");
+    let fingerprints = source_file_fingerprints_from_disk(&root, false).expect("fingerprint workspace");
     assert_eq!(fingerprints.len(), 1);
     assert!(fingerprints[0].path.ends_with("app.py"));
     let _ = std::fs::remove_dir_all(root);

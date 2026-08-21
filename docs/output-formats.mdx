@@ -16,7 +16,7 @@ contains no scripts or external assets, and does not change the command's
 analysis scope. `--html-output` and `--output-path` are mutually exclusive.
 
 ```bash
-bonsai-ninja security ./src taint-analysis --profile production \
+bonsai-ninja security ./src taint-analysis \
   --html-output bonsai-security.html
 ```
 
@@ -117,6 +117,10 @@ when the semantic generation is warm. Prefer `--output-path`, keep the exact
 compressed default unless a consumer explicitly requires materialized
 propagation rows, and provision storage and memory from the current measured
 baseline in [Release Readiness](RELEASE_READINESS.md#production-scale-native-export-measurement).
+Native export is exact for its compiler-input profile: minified
+JavaScript/TypeScript bundles are excluded by default, and global
+`--minified-js` includes them. The switch changes the admitted source set, not
+graph/path completeness within that set.
 
 ```bash
 bonsai-ninja export ./src --format networkx --output-path graph.node_link.json

@@ -27,6 +27,7 @@ pub(crate) fn cmd_export(
         let cache_hit = output::with_writer(|writer| {
             bonsai_sdk::WorkspaceCache::new(root)
                 .with_discovered_rulepack_root()
+                .with_minified_sources(crate::include_minified_sources())
                 .stream_default_export_cache_if_fresh(writer)
         })?;
         stage.finish();

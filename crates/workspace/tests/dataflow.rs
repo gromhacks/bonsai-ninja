@@ -503,6 +503,7 @@ fn factstore_sidecar_rejects_dependency_metadata_change() {
         eager_decl_index: true,
         retain_eager_syntax_ir: true,
         parse_timeout_ms: None,
+        include_minified_sources: false,
     };
     let _indexed = Workspace::open_with_options(&root, registry.clone(), options).expect("index workspace");
     let sidecar = DataFlowCache::factstore_sidecar_path(&root);

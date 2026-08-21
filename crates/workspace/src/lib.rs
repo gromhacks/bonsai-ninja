@@ -40,7 +40,7 @@ use bonsai_db::{AnalyzerDb, AnalyzerDbOptions, DbStats};
 use bonsai_diagnostics::Diagnostic;
 use bonsai_hash::Hasher as StableHasher;
 use bonsai_index::{GlobalIndex, ReceiverAncestry};
-use bonsai_lang_api::{Decl, DeclIndex, DeclKind, FlowEvent, LanguageRegistry};
+use bonsai_lang_api::{Decl, DeclIndex, DeclKind, FlowEvent, LanguageRegistry, SourceFileRepresentation};
 use bonsai_taint::{InterTaintCaches, KindedTokens};
 use bonsai_trace::{finalize, FinalizeCtx, TraceQuery, TraceQueryKind, TraceResult};
 use bonsai_vfs::Vfs;
@@ -859,6 +859,8 @@ struct Inner {
     /// command, but must not publish reusable whole-workspace sidecars
     /// under the shared complete-workspace cache directory.
     complete_workspace_index: Mutex<bool>,
+    /// Immutable compiler-input policy for this workspace generation.
+    include_minified_sources: bool,
 }
 
 type SidecarSourceInputs = Arc<Vec<(u32, String, u64)>>;
@@ -866,6 +868,7 @@ type SidecarSourceInputs = Arc<Vec<(u32, String, u64)>>;
 #[derive(Copy, Clone, Debug, Default, Serialize)]
 pub struct WorkspaceStats {
     pub files: usize,
+    pub include_minified_sources: bool,
     pub cached_decl_indexes: usize,
     pub cached_cfgs: usize,
     pub reparsed_files: u64,
@@ -1016,6 +1019,11 @@ pub struct WorkspaceOpenOptions {
     /// `None` uses `BONSAI_PARSE_TIMEOUT_MS` when set and otherwise
     /// parses to completion; `Some(0)` explicitly selects uncapped parsing.
     pub parse_timeout_ms: Option<u64>,
+    /// Admit adapter-classified minified JavaScript/TypeScript compiler
+    /// inputs. The default compiler-input profile excludes those generated
+    /// representations before parsing; callers opt in explicitly when they
+    /// need bundle internals.
+    pub include_minified_sources: bool,
 }
 
 const fn default_load_idg_sidecar() -> bool {
@@ -1056,6 +1064,7 @@ impl WorkspaceOpenOptions {
             eager_decl_index: false,
             retain_eager_syntax_ir: false,
             parse_timeout_ms: None,
+            include_minified_sources: false,
         }
     }
 
@@ -1081,6 +1090,7 @@ impl WorkspaceOpenOptions {
             eager_decl_index: false,
             retain_eager_syntax_ir: false,
             parse_timeout_ms: None,
+            include_minified_sources: false,
         }
     }
 
@@ -1102,6 +1112,7 @@ impl WorkspaceOpenOptions {
             eager_decl_index: true,
             retain_eager_syntax_ir: true,
             parse_timeout_ms: None,
+            include_minified_sources: false,
         }
     }
 
@@ -1135,6 +1146,7 @@ impl WorkspaceOpenOptions {
             eager_decl_index: false,
             retain_eager_syntax_ir: false,
             parse_timeout_ms: None,
+            include_minified_sources: false,
         }
     }
 
@@ -1163,6 +1175,7 @@ impl WorkspaceOpenOptions {
             eager_decl_index: true,
             retain_eager_syntax_ir: true,
             parse_timeout_ms: None,
+            include_minified_sources: false,
         }
     }
 }
@@ -1208,6 +1221,7 @@ impl Workspace {
                 root_label: Mutex::new(String::new()),
                 idg_sidecar_root: Mutex::new(None),
                 complete_workspace_index: Mutex::new(false),
+                include_minified_sources: options.include_minified_sources,
             }),
         }
     }
@@ -1522,6 +1536,41 @@ impl Workspace {
         let mut slot = self.inner.compiler_linkage.write();
         if let Some(linkage) = slot.as_ref() {
             return linkage.clone();
+        }
+        if !self.is_complete_workspace_index() {
+            let files = self.inner.vfs.all_files();
+            if let Some(headers) = self.persisted_compiler_header_index_for_files(&files) {
+                // A path/literal-scoped workspace preserves canonical
+                // FileIds, but a locally assembled GlobalIndex would assign
+                // dense SymbolIds that do not match the persisted callgraph
+                // and IDG. Rebind the selected exact Tree-sitter bodies to
+                // independently decoded full-workspace header partitions,
+                // then retain linkage only for those selected bodies. This
+                // is the compiler-object equivalent of linking object files
+                // against one immutable symbol table; it changes identity
+                // allocation only, never admitted files or graph facts.
+                let mut projected_linkage = Vec::new();
+                for file in &files {
+                    if let Some(index) = self
+                        .inner
+                        .db
+                        .decl_index_remapped_to_headers(headers.as_ref(), *file)
+                    {
+                        projected_linkage.extend(headers.project_linkage_from_remapped_file(&index));
+                    }
+                }
+                let mut headers = Arc::try_unwrap(headers).unwrap_or_else(|shared| shared.as_ref().clone());
+                headers.install_projected_linkage(projected_linkage);
+                let linkage = Arc::new(headers);
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "scoped compiler linkage rebound to persisted identities: files={} decls={}",
+                    files.len(),
+                    linkage.len()
+                );
+                *slot = Some(Arc::clone(&linkage));
+                return linkage;
+            }
         }
         if let Some(root) = self.root_path().filter(|_| self.is_complete_workspace_index()) {
             let path = linkage_sidecar::linkage_sidecar_path(&root);
@@ -2423,7 +2472,9 @@ impl Workspace {
                     target_funcs,
                     max_precision,
                 );
-                if bonsai_idg::workspace_adapter::CallGraphRelation::check_error(service.as_ref()).is_ok() {
+                let relation_status =
+                    bonsai_idg::workspace_adapter::CallGraphRelation::check_error(service.as_ref());
+                if relation_status.is_ok() {
                     bonsai_diagnostics::debug_log!(
                         "compiler-cache",
                         "source-reachable callgraph reused persisted partitions: funcs={} files={} targets={}",
@@ -2435,7 +2486,8 @@ impl Workspace {
                 }
                 bonsai_diagnostics::debug_log!(
                     "compiler-cache",
-                    "source-reachable callgraph partition replay failed; compiling exact bodies"
+                    "source-reachable callgraph partition replay failed: {}; compiling exact bodies",
+                    relation_status.expect_err("failed relation status must contain its integrity error")
                 );
             }
         }
@@ -3611,23 +3663,27 @@ impl Workspace {
                     "scoped workspace has no root for sidecar validation",
                 )
             })?;
-            read_supported_source_file_fingerprints(&canonical_workspace_root(&root), &self.inner.registry)
-                .map_err(|error| std::io::Error::other(error.to_string()))?
-                .into_iter()
-                .enumerate()
-                .map(|(ordinal, source)| {
-                    Ok((
-                        u32::try_from(ordinal).map_err(|_| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                "workspace contains more than u32::MAX supported sources",
-                            )
-                        })?,
-                        source.path.to_string_lossy().into_owned(),
-                        source.hash,
-                    ))
-                })
-                .collect::<std::io::Result<Vec<_>>>()?
+            read_supported_source_file_fingerprints(
+                &canonical_workspace_root(&root),
+                &self.inner.registry,
+                self.inner.include_minified_sources,
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, source)| {
+                Ok((
+                    u32::try_from(ordinal).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "workspace contains more than u32::MAX supported sources",
+                        )
+                    })?,
+                    source.path.to_string_lossy().into_owned(),
+                    source.hash,
+                ))
+            })
+            .collect::<std::io::Result<Vec<_>>>()?
         };
         let inputs = Arc::new(inputs);
         *slot = Some(Arc::clone(&inputs));
@@ -3854,8 +3910,12 @@ impl Workspace {
         *ws.inner.root_label.lock() = root.display().to_string();
         ws.inner.db.set_scoped_workspace_root(canonical_root.clone());
         on_event(WorkspaceOpenEvent::IngestStarted);
-        let files =
-            read_supported_source_files_matching_literal(&canonical_root, &ws.inner.registry, literal)?;
+        let files = read_supported_source_files_matching_literal(
+            &canonical_root,
+            &ws.inner.registry,
+            literal,
+            ws.inner.include_minified_sources,
+        )?;
         let file_count = files.len();
         for source in files {
             let SourceFileContent {
@@ -3906,8 +3966,12 @@ impl Workspace {
         *ws.inner.root_label.lock() = root.display().to_string();
         ws.inner.db.set_scoped_workspace_root(canonical_root.clone());
         on_event(WorkspaceOpenEvent::IngestStarted);
-        let files =
-            read_supported_source_files_matching_literals(&canonical_root, &ws.inner.registry, literals)?;
+        let files = read_supported_source_files_matching_literals(
+            &canonical_root,
+            &ws.inner.registry,
+            literals,
+            ws.inner.include_minified_sources,
+        )?;
         let file_count = files.len();
         for source in files {
             let SourceFileContent {
@@ -3995,6 +4059,7 @@ impl Workspace {
             &ws.inner.registry,
             include_filters,
             exclude_filters,
+            ws.inner.include_minified_sources,
         )?;
         let file_count = files.len();
         for source in files {
@@ -4091,11 +4156,8 @@ impl Workspace {
                         ),
                     )));
                 }
-                let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+                if !source_path_is_admitted(&ws.inner.registry, &path, ws.inner.include_minified_sources) {
                     return Err(WorkspaceError::NoAdapter(path.display().to_string()));
-                };
-                if ws.inner.registry.adapter_for_extension(extension).is_none() {
-                    return Err(WorkspaceError::NoAdapter(extension.to_string()));
                 }
                 let text = std::fs::read_to_string(&path).map_err(WorkspaceError::Io)?;
                 Ok(SourceFileContent {
@@ -4173,7 +4235,12 @@ impl Workspace {
         *ws.inner.root_label.lock() = root.display().to_string();
         ws.inner.db.set_scoped_workspace_root(canonical_root.clone());
         on_event(WorkspaceOpenEvent::IngestStarted);
-        let source = read_supported_source_file_at_path(&canonical_root, &ws.inner.registry, path)?;
+        let source = read_supported_source_file_at_path(
+            &canonical_root,
+            &ws.inner.registry,
+            path,
+            ws.inner.include_minified_sources,
+        )?;
         let stable_file = ws
             .inner
             .db
@@ -4538,17 +4605,22 @@ impl Workspace {
         cache_fingerprint::register_workspace_cache_root(&canonical_root)?;
         self.inner.db.set_workspace_root(canonical_root.clone());
         let mut ingested = Vec::new();
-        stream_supported_source_files(&canonical_root, &self.inner.registry, |source| {
-            let path = &source.path;
-            let old_id = self.inner.vfs.lookup(path);
-            let id = self.inner.vfs.write(path.clone(), Arc::<str>::from(source.text));
-            if let Some(prev) = old_id {
-                self.invalidate_after_file_change_locked(prev);
-            }
-            *self.inner.reparse_counter.lock() += 1;
-            ingested.push(id);
-            Ok(())
-        })?;
+        stream_supported_source_files(
+            &canonical_root,
+            &self.inner.registry,
+            self.inner.include_minified_sources,
+            |source| {
+                let path = &source.path;
+                let old_id = self.inner.vfs.lookup(path);
+                let id = self.inner.vfs.write(path.clone(), Arc::<str>::from(source.text));
+                if let Some(prev) = old_id {
+                    self.invalidate_after_file_change_locked(prev);
+                }
+                *self.inner.reparse_counter.lock() += 1;
+                ingested.push(id);
+                Ok(())
+            },
+        )?;
         Ok(ingested)
     }
 
@@ -4560,14 +4632,22 @@ impl Workspace {
         root: &Path,
     ) -> Result<Vec<SourceFileFingerprint>, WorkspaceError> {
         let canonical_root = canonical_workspace_root(root);
-        read_supported_source_file_fingerprints(&canonical_root, &self.inner.registry)
+        read_supported_source_file_fingerprints(
+            &canonical_root,
+            &self.inner.registry,
+            self.inner.include_minified_sources,
+        )
     }
 
     /// Current supported source files under `root`, using metadata-only
     /// change stamps. This does not open or hash unchanged source contents.
     pub fn source_file_stamps(&self, root: &Path) -> Result<Vec<SourceFileStamp>, WorkspaceError> {
         let canonical_root = canonical_workspace_root(root);
-        read_supported_source_file_stamps(&canonical_root, &self.inner.registry)
+        read_supported_source_file_stamps(
+            &canonical_root,
+            &self.inner.registry,
+            self.inner.include_minified_sources,
+        )
     }
 
     /// Metadata-only stamp for one supported source path. Returns `None`
@@ -4575,10 +4655,7 @@ impl Workspace {
     /// Workspace frontends use this after a source-control change index has
     /// narrowed the candidate set, avoiding a recursive metadata walk.
     pub fn source_file_stamp(&self, path: &Path) -> Result<Option<SourceFileStamp>, WorkspaceError> {
-        let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
-            return Ok(None);
-        };
-        if self.inner.registry.adapter_for_extension(ext).is_none() {
+        if !source_path_is_admitted(&self.inner.registry, path, self.inner.include_minified_sources) {
             return Ok(None);
         }
         match source_file_stamp(path) {
@@ -4615,11 +4692,8 @@ impl Workspace {
     /// and other derived caches are invalidated through the same
     /// workspace-wide edit path used by watch and SDK hot reload.
     pub fn refresh_file_from_disk(&self, path: &Path) -> Result<FileRefresh, WorkspaceError> {
-        let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+        if !source_path_is_admitted(&self.inner.registry, path, self.inner.include_minified_sources) {
             return Err(WorkspaceError::NoAdapter(path.display().to_string()));
-        };
-        if self.inner.registry.adapter_for_extension(ext).is_none() {
-            return Err(WorkspaceError::NoAdapter(ext.to_string()));
         }
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
@@ -4793,6 +4867,7 @@ impl Workspace {
         } = self.inner.db.stats();
         WorkspaceStats {
             files,
+            include_minified_sources: self.inner.include_minified_sources,
             cached_decl_indexes,
             cached_cfgs,
             reparsed_files: *self.inner.reparse_counter.lock(),
@@ -4821,10 +4896,14 @@ impl Workspace {
     /// indexed snapshot.
     pub fn semantic_context_for_root(&self, root: &Path) -> Result<WorkspaceSemanticContext, WorkspaceError> {
         let canonical_root = canonical_workspace_root(root);
-        let files = read_supported_source_file_stamps(&canonical_root, &self.inner.registry)?
-            .into_iter()
-            .map(|stamp| stamp.path)
-            .collect::<Vec<_>>();
+        let files = read_supported_source_file_stamps(
+            &canonical_root,
+            &self.inner.registry,
+            self.inner.include_minified_sources,
+        )?
+        .into_iter()
+        .map(|stamp| stamp.path)
+        .collect::<Vec<_>>();
         Ok(semantic_context::build_workspace_semantic_context(
             Some(&canonical_root),
             &files,
@@ -6090,6 +6169,7 @@ fn canonical_workspace_root(root: &Path) -> std::path::PathBuf {
 fn read_supported_source_file_fingerprints(
     canonical_root: &Path,
     registry: &LanguageRegistry,
+    include_minified_sources: bool,
 ) -> Result<Vec<SourceFileFingerprint>, WorkspaceError> {
     let entries = walk_workspace_entries(canonical_root)?;
 
@@ -6101,10 +6181,7 @@ fn read_supported_source_file_fingerprints(
                 return Ok(None);
             }
             let path = entry.path();
-            let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
-                return Ok(None);
-            };
-            if registry.adapter_for_extension(ext).is_none() {
+            if !source_path_is_admitted(registry, path, include_minified_sources) {
                 return Ok(None);
             }
 
@@ -6145,6 +6222,7 @@ fn read_supported_source_file_fingerprints(
 fn read_supported_source_file_stamps(
     canonical_root: &Path,
     registry: &LanguageRegistry,
+    include_minified_sources: bool,
 ) -> Result<Vec<SourceFileStamp>, WorkspaceError> {
     let entries = walk_workspace_entries(canonical_root)?;
     use rayon::prelude::*;
@@ -6155,10 +6233,7 @@ fn read_supported_source_file_stamps(
                 return Ok(None);
             }
             let path = entry.path();
-            let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
-                return Ok(None);
-            };
-            if registry.adapter_for_extension(ext).is_none() {
+            if !source_path_is_admitted(registry, path, include_minified_sources) {
                 return Ok(None);
             }
             source_file_stamp(path).map(Some)
@@ -6222,26 +6297,31 @@ fn walk_workspace_entries(canonical_root: &Path) -> Result<Vec<ignore::DirEntry>
     Ok(entries)
 }
 
+fn source_path_is_admitted(registry: &LanguageRegistry, path: &Path, include_minified_sources: bool) -> bool {
+    registry
+        .source_file_representation(path)
+        .is_some_and(|representation| {
+            include_minified_sources || representation != SourceFileRepresentation::Minified
+        })
+}
+
 fn stream_supported_source_files<F>(
     canonical_root: &Path,
     registry: &LanguageRegistry,
+    include_minified_sources: bool,
     mut on_file: F,
 ) -> Result<(), WorkspaceError>
 where
     F: FnMut(SourceFileContent) -> Result<(), WorkspaceError>,
 {
-    // Inclusion is structural: explicit ignore rules plus the adapter's
-    // supported extension. File names and source text are compiler input,
-    // never heuristics for dropping otherwise supported programs.
+    // Inclusion is structural: explicit ignore rules, adapter ownership, and
+    // the caller's compiler-input profile. Shared workspace code never
+    // guesses which language owns a generated representation.
     let entries = walk_workspace_entries(canonical_root)?
         .into_iter()
         .filter(|entry| {
             entry.file_type().is_some_and(|file_type| file_type.is_file())
-                && entry
-                    .path()
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| registry.adapter_for_extension(extension).is_some())
+                && source_path_is_admitted(registry, entry.path(), include_minified_sources)
         })
         .collect::<Vec<_>>();
     let source_bytes = entries
@@ -6281,12 +6361,14 @@ fn read_supported_source_files_matching_literal(
     canonical_root: &Path,
     registry: &LanguageRegistry,
     literal: &str,
+    include_minified_sources: bool,
 ) -> Result<Vec<SourceFileContent>, WorkspaceError> {
     read_supported_source_files_impl(
         canonical_root,
         registry,
         Some(std::slice::from_ref(&literal)),
         None,
+        include_minified_sources,
     )
 }
 
@@ -6294,8 +6376,15 @@ fn read_supported_source_files_matching_literals(
     canonical_root: &Path,
     registry: &LanguageRegistry,
     literals: &[&str],
+    include_minified_sources: bool,
 ) -> Result<Vec<SourceFileContent>, WorkspaceError> {
-    read_supported_source_files_impl(canonical_root, registry, Some(literals), None)
+    read_supported_source_files_impl(
+        canonical_root,
+        registry,
+        Some(literals),
+        None,
+        include_minified_sources,
+    )
 }
 
 fn read_supported_source_files_filtered_paths(
@@ -6303,6 +6392,7 @@ fn read_supported_source_files_filtered_paths(
     registry: &LanguageRegistry,
     include_filters: &[String],
     exclude_filters: &[String],
+    include_minified_sources: bool,
 ) -> Result<Vec<SourceFileContent>, WorkspaceError> {
     read_supported_source_files_impl(
         canonical_root,
@@ -6312,6 +6402,7 @@ fn read_supported_source_files_filtered_paths(
             include_filters,
             exclude_filters,
         }),
+        include_minified_sources,
     )
 }
 
@@ -6319,6 +6410,7 @@ fn read_supported_source_file_at_path(
     canonical_root: &Path,
     registry: &LanguageRegistry,
     requested_path: &Path,
+    include_minified_sources: bool,
 ) -> Result<SourceFileContent, WorkspaceError> {
     let direct_path = if requested_path.is_absolute() {
         requested_path.to_path_buf()
@@ -6328,13 +6420,15 @@ fn read_supported_source_file_at_path(
     let path = if direct_path.is_file() || requested_path.is_absolute() {
         direct_path
     } else {
-        resolve_unique_supported_source_path(canonical_root, registry, requested_path)?
+        resolve_unique_supported_source_path(
+            canonical_root,
+            registry,
+            requested_path,
+            include_minified_sources,
+        )?
     };
-    let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+    if !source_path_is_admitted(registry, &path, include_minified_sources) {
         return Err(WorkspaceError::NoAdapter(path.display().to_string()));
-    };
-    if registry.adapter_for_extension(ext).is_none() {
-        return Err(WorkspaceError::NoAdapter(ext.to_string()));
     }
 
     let text = match std::fs::read_to_string(&path) {
@@ -6360,6 +6454,7 @@ fn resolve_unique_supported_source_path(
     canonical_root: &Path,
     registry: &LanguageRegistry,
     requested_path: &Path,
+    include_minified_sources: bool,
 ) -> Result<PathBuf, WorkspaceError> {
     let query = requested_path.to_string_lossy().replace('\\', "/");
     let query = query.trim_start_matches("./");
@@ -6368,8 +6463,7 @@ fn resolve_unique_supported_source_path(
         .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
         .filter_map(|entry| {
             let path = entry.into_path();
-            let ext = path.extension()?.to_str()?;
-            registry.adapter_for_extension(ext)?;
+            source_path_is_admitted(registry, &path, include_minified_sources).then_some(())?;
             let relative = path.strip_prefix(canonical_root).ok()?;
             let normalized = relative.to_string_lossy().replace('\\', "/");
             normalized.contains(query).then_some((normalized, path))
@@ -6404,6 +6498,7 @@ fn read_supported_source_files_impl(
     registry: &LanguageRegistry,
     literal_filters: Option<&[&str]>,
     path_filter: Option<PathFilterSpec<'_>>,
+    include_minified_sources: bool,
 ) -> Result<Vec<SourceFileContent>, WorkspaceError> {
     // Match the streaming path's compiler contract. Literal/path filters are
     // explicit query scopes; no source-shape heuristic may narrow them.
@@ -6441,11 +6536,7 @@ fn read_supported_source_files_impl(
         .into_iter()
         .filter(|entry| {
             entry.file_type().is_some_and(|file_type| file_type.is_file())
-                && entry
-                    .path()
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| registry.adapter_for_extension(extension).is_some())
+                && source_path_is_admitted(registry, entry.path(), include_minified_sources)
         })
         .enumerate()
         .map(|(ordinal, entry)| {

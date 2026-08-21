@@ -1,7 +1,7 @@
 //! Per-language `sanitizer_test` fixture integration tests.
 //!
 //! Every `examples/<lang>/sanitizer_test/` directory pairs
-//! `<name>_raw` / `<name>_safe` handlers. Default taint-analysis must
+//! `<name>_raw` / `<name>_safe` handlers. All-source taint-analysis must
 //! keep the raw source-to-sink findings visible. Safe branches may be
 //! fully removed when the value no longer reaches the sink; when a
 //! safe branch still produces sanitizer evidence, that evidence must
@@ -101,7 +101,7 @@ const LANGS_WITH_DEFAULT_RAW_FINDING: &[&str] = &[
 /// one finding with sanitizer evidence. Other languages still have
 /// sanitizer coverage through `crates/security/tests/sanitizer_credit_audit.rs`;
 /// this legacy fixture only asserts evidence shape where evidence is
-/// actually emitted in default taint-analysis.
+/// actually emitted in explicit all-source taint-analysis.
 ///
 /// `go` is intentionally absent: its sanitizer model is hard-removal
 /// (a sanitizer on the path drops the taint, so a sanitized flow is
@@ -132,6 +132,8 @@ fn every_sanitizer_fixture_produces_a_raw_finding() {
             "security",
             &w,
             "taint-analysis",
+            "--profile",
+            "all",
             "--inferred-sources",
             "--format",
             "json",
@@ -171,6 +173,8 @@ fn sanitized_paths_attach_sanitizer_evidence() {
             "security",
             &w,
             "taint-analysis",
+            "--profile",
+            "all",
             "--inferred-sources",
             "--show-sanitized",
             "--format",
@@ -205,6 +209,8 @@ fn show_sanitized_includes_sanitizer_cleared_findings() {
         "security",
         &w,
         "taint-analysis",
+        "--profile",
+        "all",
         "--inferred-sources",
         "--format",
         "json",
@@ -216,6 +222,8 @@ fn show_sanitized_includes_sanitizer_cleared_findings() {
         "security",
         &w,
         "taint-analysis",
+        "--profile",
+        "all",
         "--inferred-sources",
         "--show-sanitized",
         "--format",
@@ -256,6 +264,8 @@ fn sanitizer_evidence_has_complete_shape() {
             "security",
             &w,
             "taint-analysis",
+            "--profile",
+            "all",
             "--inferred-sources",
             "--format",
             "json",
@@ -297,6 +307,8 @@ fn python_sanitizer_fixture_expected_counts() {
         "security",
         &w,
         "taint-analysis",
+        "--profile",
+        "all",
         "--inferred-sources",
         "--format",
         "json",

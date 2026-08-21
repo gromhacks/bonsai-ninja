@@ -60,6 +60,7 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
             serde_json::to_string_pretty(&json!({
                 "mode": "semantic",
                 "files": manifest.workspace_sources.files,
+                "include_minified_sources": manifest.include_minified_sources,
                 "semantic_cache": if result.rebuilt { "rebuilt" } else { "hit" },
                 "semantic_ready": result.stats.validation.semantic_ready,
                 "manifest_status": result.stats.validation.manifest_status.as_str(),
@@ -95,6 +96,7 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
             "{}",
             serde_json::to_string_pretty(&json!({
                 "files": stats.files,
+                "include_minified_sources": stats.include_minified_sources,
                 "compiler_cache": if compiler_cache_hit { "hit" } else { "rebuilt" },
                 "compiler_objects": stats.files,
                 "parsed_files": if compiler_cache_hit { 0 } else { stats.files },
@@ -290,10 +292,16 @@ fn semantic_phase_command(
 ) -> Command {
     let phase_name = semantic_phase_name(phase);
     let mut command = Command::new(executable);
+    // The parent owns the continuously updating phase spinner. Suppress
+    // nested worker chrome so a child cannot erase or overwrite it.
+    command.arg("--no-progress");
+    // Compiler-input scope is semantic state. Pass the public flag explicitly
+    // across the process-reclamation boundary instead of relying only on an
+    // inherited environment variable.
+    if crate::include_minified_sources() {
+        command.arg("--minified-js");
+    }
     command
-        // The parent owns the continuously updating phase spinner. Suppress
-        // nested worker chrome so a child cannot erase or overwrite it.
-        .arg("--no-progress")
         .arg("index")
         .arg("--semantic")
         .arg("--semantic-worker")
@@ -334,7 +342,11 @@ fn semantic_cache_stats(
     root: &std::path::Path,
 ) -> Result<bonsai_sdk::CacheStats> {
     let stage = progress::ScopedSpinner::new("validating semantic generation");
-    let output = Command::new(executable)
+    let mut command = Command::new(executable);
+    if crate::include_minified_sources() {
+        command.arg("--minified-js");
+    }
+    let output = command
         .arg("cache")
         .arg("stats")
         .arg(root)

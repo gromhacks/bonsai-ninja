@@ -241,7 +241,6 @@ fn collect_supported_source_paths(
         .parents(true)
         .ignore(true)
         .add_custom_ignore_filename(".bonsaiignore");
-    builder.filter_entry(|entry| include_minified_sources() || !path_looks_minified(entry.path()));
 
     let mut candidates = Vec::new();
     for entry in builder.build() {
@@ -334,6 +333,13 @@ fn ensure_supported_source(registry: &bonsai_lang_api::LanguageRegistry, path: &
     if is_supported_source_path(registry, path) {
         return Ok(());
     }
+    if registry.source_file_representation(path) == Some(bonsai_lang_api::SourceFileRepresentation::Minified)
+    {
+        anyhow::bail!(
+            "read-file path `{}` is a minified compiler input; rerun with --minified-js to include it",
+            path.display()
+        );
+    }
     anyhow::bail!(
         "read-file path `{}` is not a supported source file",
         path.display()
@@ -341,11 +347,12 @@ fn ensure_supported_source(registry: &bonsai_lang_api::LanguageRegistry, path: &
 }
 
 fn is_supported_source_path(registry: &bonsai_lang_api::LanguageRegistry, path: &Path) -> bool {
-    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
-        return false;
-    };
-    registry.adapter_for_extension(ext).is_some()
-        && (include_minified_sources() || !path_looks_minified(path))
+    registry
+        .source_file_representation(path)
+        .is_some_and(|representation| {
+            crate::include_minified_sources()
+                || representation != bonsai_lang_api::SourceFileRepresentation::Minified
+        })
 }
 
 fn display_path_relative_to(root: &Path, path: &Path) -> String {
@@ -413,21 +420,6 @@ fn edit_distance(a: &str, b: &str) -> usize {
         std::mem::swap(&mut prev, &mut cur);
     }
     prev[b_chars.len()]
-}
-
-fn include_minified_sources() -> bool {
-    std::env::var("BONSAI_INCLUDE_MINIFIED")
-        .ok()
-        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
-}
-
-fn path_looks_minified(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| {
-            let lower = name.to_ascii_lowercase();
-            lower.contains(".min.") || lower.ends_with(".min.js") || lower.ends_with(".min.css")
-        })
 }
 
 fn ignore_error_is_missing_or_denied(error: &ignore::Error) -> bool {

@@ -151,7 +151,11 @@ sanitizer_tag_semantics:
 
 # Named review profiles are rulepack policy, not CLI source constants. Path
 # filters use the same workspace-relative matcher as explicit --exclude-file.
+default_profile: production
 profiles:
+  # Explicit escape hatch for exhaustive/all-code audits. Production is the
+  # CLI default; choosing this profile disables review-policy filtering.
+  all: {}
   production:
     trust: remote
     severity: high

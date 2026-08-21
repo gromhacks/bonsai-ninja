@@ -502,6 +502,55 @@ fn cache_stats_validation_marks_semantic_sidecars_stale_after_source_change() {
 }
 
 #[test]
+fn semantic_manifest_is_bound_to_the_minified_source_profile() {
+    let root = tempdir("semantic-cache-minified-profile");
+    std::fs::write(root.join("app.js"), "function maintained(){return 1;}\n")
+        .expect("write maintained JavaScript");
+    std::fs::write(
+        root.join("vendor.min.js"),
+        "function generatedBundle(){return 2;}\n",
+    )
+    .expect("write minified JavaScript");
+
+    let default = sdk().index_semantic(&root).expect("default semantic index");
+    let manifest = default
+        .cache()
+        .read_manifest()
+        .expect("read default manifest")
+        .expect("default manifest");
+    assert!(!manifest.include_minified_sources);
+    assert_eq!(manifest.workspace_source_files.len(), 1);
+
+    let inclusive_sdk = sdk().with_minified_sources(true);
+    let stale = inclusive_sdk
+        .cache(&root)
+        .stats()
+        .expect("inclusive cache validation");
+    assert_eq!(
+        stale.validation.manifest_status,
+        bonsai_sdk::CacheFreshnessStatus::Stale
+    );
+    assert!(stale
+        .validation
+        .stale_reasons
+        .iter()
+        .any(|reason| reason.contains("compiler-input profile")));
+
+    let inclusive = inclusive_sdk
+        .index_semantic(&root)
+        .expect("inclusive semantic index");
+    let manifest = inclusive
+        .cache()
+        .read_manifest()
+        .expect("read inclusive manifest")
+        .expect("inclusive manifest");
+    assert!(manifest.include_minified_sources);
+    assert_eq!(manifest.workspace_source_files.len(), 2);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn cache_stats_reuses_independently_versioned_sidecars_when_only_manifest_build_changes() {
     let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
     let root = temp_python_micro("semantic-cache-stale-build-manifest");

@@ -143,12 +143,12 @@ Use qualified `Owner.member` selectors when short method names collide.
 
 ## Run a security scan
 
-The production profile selects remote input, high-severity findings, and
-common non-production path exclusions from rulepack metadata:
+Security analysis uses the bundled production profile by default. It selects
+remote input, high-severity findings, and common non-production path
+exclusions from rulepack metadata:
 
 ```bash
 ./target/release/bonsai-ninja security ./src taint-analysis \
-  --profile production \
   --context 16k \
   --no-color \
   --no-progress
@@ -158,7 +158,6 @@ For a complete machine-readable artifact:
 
 ```bash
 ./target/release/bonsai-ninja security ./src taint-analysis \
-  --profile production \
   --format json \
   --all \
   --output-path bonsai-findings.json \
@@ -174,13 +173,20 @@ Use SARIF for code-scanning platforms:
 
 ```bash
 ./target/release/bonsai-ninja security ./src taint-analysis \
-  --profile production \
   --format sarif \
   --all \
   --output-path bonsai.sarif.json \
   --no-color \
   --no-progress
 ```
+
+Compiler-backed commands exclude adapter-classified minified
+JavaScript/TypeScript before parsing by default, so the same source scope is
+used by indexing, navigation, callgraphs, security, and export. Add the global
+`--minified-js` switch only when bundle internals are intentionally in scope.
+Use `--profile all --minified-js` together for an unfiltered security audit,
+including local trust, non-production paths, and minified source. `tree` is a
+direct filesystem view and still displays those files.
 
 ## Read a finding
 

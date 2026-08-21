@@ -139,9 +139,9 @@ The compiler boundary is enforced by what each layer is allowed to know:
   trust, sink severity, CWE, and sanitizer requirements.
 - `security-patterns/metadata.yml` owns pack-wide taxonomy aliases,
   dependency-manifest patterns, package aliases, security-model exceptions,
-  sanitizer-credit relationships, named review profiles, test-path patterns,
-  adapter-visible package normalization/binding, and tag-level finding/guard
-  semantic defaults.
+  sanitizer-credit relationships, named review profiles and their optional
+  default selection, test-path patterns, adapter-visible package
+  normalization/binding, and tag-level finding/guard semantic defaults.
 - Shared resolver, callgraph, IDG, taint, browse, and security algorithms own
   only language-neutral IR and fixed-point logic. They must not branch on a
   language id, parse rendered source, or maintain a union of API names.

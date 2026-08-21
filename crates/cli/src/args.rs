@@ -310,6 +310,11 @@ pub(crate) struct Cli {
     )]
     pub(crate) memory_budget_mb: Option<u64>,
 
+    /// Include adapter-classified minified JavaScript/TypeScript in
+    /// compiler-backed commands. Excluded by default; tree is unaffected.
+    #[arg(long = "minified-js", global = true, help_heading = "GLOBAL OPTIONS")]
+    pub(crate) minified_js: bool,
+
     /// Enable comma-separated debug categories on stderr, or `*` for all.
     /// Equivalent to `BONSAI_DEBUG`; common categories are `idg-closure`,
     /// `idg-resolve`, `recv-state`, `find-group`, `taint-graph`, and `xcall`.
@@ -3052,8 +3057,11 @@ pub(crate) enum SecurityAction {
                       # Remote HTTP / RPC entrypoints only\n  \
                       $ bonsai-ninja security ./src taint-analysis --trust remote --category http-input\n  \
                       \n  \
-                      # Large production repo review (scoped, bounded)\n  \
-                      $ bonsai-ninja security ./src taint-analysis --profile production\n  \
+                      # Production repo review (the bundled default)\n  \
+                      $ bonsai-ninja security ./src taint-analysis\n  \
+                      \n  \
+                      # Intentionally include generated minified bundles\n  \
+                      $ bonsai-ninja security ./src taint-analysis --minified-js\n  \
                       \n  \
                       # Tag narrowing (CWE / OWASP family)\n  \
                       $ bonsai-ninja security ./src taint-analysis --tag command-injection\n  \
@@ -3066,9 +3074,11 @@ pub(crate) enum SecurityAction {
         /// Also reads `BONSAI_RULES_DIR`.
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
-        /// Review defaults. `production` excludes common non-production
+        /// Review defaults. `production` (the default) excludes common non-production
         /// paths and selects severity `high`, trust `remote`, and context
-        /// `16k`; explicit flags override profile values.
+        /// `16k`; use `--profile all` to disable those review defaults, and
+        /// combine it with global `--minified-js` to admit minified bundles.
+        /// Explicit flags override profile values.
         #[arg(long)]
         profile: Option<String>,
         /// Restrict to source rules whose id matches this regex.
@@ -3208,12 +3218,14 @@ pub(crate) enum SecurityAction {
         /// Also reads `BONSAI_RULES_DIR`.
         #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
         rules_dir: Option<PathBuf>,
-        /// Bundle of defaults for common postures. `production`
-        /// applies the SKILL.md production exclusion set for common
+        /// Bundle of defaults for common postures. `production` is the default and
+        /// applies the rulepack's production exclusion set for common
         /// test, fixture, sample, vendored dependency, build artifact,
         /// generated-code, and language-specific non-production
         /// layouts; trust `remote`; and context `16k`. Per-flag
-        /// overrides take precedence.
+        /// overrides take precedence. Use `--profile all` to disable those
+        /// review defaults, and combine it with global `--minified-js` to
+        /// admit minified bundles.
         #[arg(long)]
         profile: Option<String>,
         /// Restrict to source rules whose id matches this regex.

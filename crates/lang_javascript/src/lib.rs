@@ -9,9 +9,9 @@ use bonsai_lang_api::{
     AdapterContext, AdapterError, CallTargetExtraction, CharacterSubstitutionDomain,
     CharacterSubstitutionFact, ConditionEquality, ConditionExpressionFact, ConditionOperandFact, DeclIndex,
     DynamicKeyFilterFact, FiniteLiteralSelectionFact, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, SameOriginPathConstraintFact, StaticScalarValue,
-    StaticStringMapEntry, StaticStringMapFact, StringCompositionFact, StringCompositionPart,
-    TypeAliasBinding, Visibility, EMPTY_HANDLER,
+    LanguageAdapter, LanguageCapabilities, LanguageId, SameOriginPathConstraintFact,
+    SourceFileRepresentation, StaticScalarValue, StaticStringMapEntry, StaticStringMapFact,
+    StringCompositionFact, StringCompositionPart, TypeAliasBinding, Visibility, EMPTY_HANDLER,
 };
 use bonsai_lang_api::{CallArg, CallKind, DeclKind, FlowEvent};
 use std::collections::{HashMap, HashSet};
@@ -44,6 +44,21 @@ fn javascript_foreach_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
 pub const LANG_ID: LanguageId = LanguageId::new("javascript");
 pub const JS_TS_MODULE_RESOLUTION_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs"];
 const PACK_NAME: &str = "javascript";
+
+/// ECMAScript bundle naming is frontend policy, not a shared-workspace
+/// language guess. Source shape is deliberately irrelevant: a maintained
+/// single-line program remains maintained unless its path declares a
+/// minified artifact.
+#[must_use]
+pub fn ecmascript_source_file_representation(path: &std::path::Path) -> SourceFileRepresentation {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_lowercase)
+        .filter(|name| name.contains(".min.") || name.contains("-min."))
+        .map_or(SourceFileRepresentation::Maintained, |_| {
+            SourceFileRepresentation::Minified
+        })
+}
 const HANDLER: GrammarHandler = GrammarHandler {
     expression_value_kind_extractor: None,
     literal_value_kinds: &["null", "number", "true", "false"],
@@ -258,6 +273,10 @@ impl LanguageAdapter for JavaScriptAdapter {
     }
     fn file_extensions(&self) -> &'static [&'static str] {
         &["js", "mjs", "cjs", "jsx"]
+    }
+
+    fn source_file_representation(&self, path: &std::path::Path) -> SourceFileRepresentation {
+        ecmascript_source_file_representation(path)
     }
     fn tree_sitter_language(&self) -> Result<Language, AdapterError> {
         language_from_pack(PACK_NAME)

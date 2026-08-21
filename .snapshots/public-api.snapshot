@@ -209,6 +209,7 @@ pub use query::{matching_decls, matching_func_ids, matching_func_ids_in_headers,
 === lang_api ===
 pub enum AdapterError {
 pub enum LanguageOwnershipEvidence {
+pub enum SourceFileRepresentation {
 pub mod capabilities;
 pub mod kit;
 pub mod registry;
@@ -267,6 +268,7 @@ pub fn apply_ecmascript_assigned_member_callable_owners(
 pub fn apply_javascript_getter_property_sources(
 pub fn apply_js_ts_commonjs_named_export_aliases(
 pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tree, src: &[u8], file: FileId) {
+pub fn ecmascript_source_file_representation(path: &std::path::Path) -> SourceFileRepresentation {
 pub fn ecmascript_static_subscript_key(node: Node<'_>, src: &[u8]) -> Option<String> {
 pub fn extract_ecmascript_pseudo_call(
 pub fn js_ts_imports(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<ImportSpec> {
@@ -399,7 +401,9 @@ pub enum CacheFreshnessStatus {
 pub enum CacheManifestSidecarStatus {
 pub enum ShowOutcome {
 pub fn workspace_source_fingerprint_for_cache_validation(root: &Path) -> Result<WorkspaceContentFingerprint> {
+pub fn workspace_source_fingerprint_for_cache_validation_with_minified(
 pub fn workspace_source_fingerprint_from_disk(root: &Path) -> Result<WorkspaceContentFingerprint> {
+pub fn workspace_source_fingerprint_from_disk_with_minified(
 pub mod cache {
 pub mod read_file;
 pub mod refs {

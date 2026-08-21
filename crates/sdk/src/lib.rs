@@ -46,7 +46,7 @@ const CACHE_MANIFEST_FILE: &str = "manifest.json";
 // v6 records an exact Git/HEAD/worktree source-state snapshot. Fresh CLI
 // processes can therefore reuse the manifest's complete compiler input table
 // without recursively stat-ing every source in an unchanged repository.
-const CACHE_MANIFEST_SCHEMA_VERSION: u32 = 6;
+const CACHE_MANIFEST_SCHEMA_VERSION: u32 = 7;
 const RETRIEVAL_NO_CANDIDATES_FILTER: &str = "/__bonsai_no_retrieval_candidates__/__none__";
 static EXPORT_CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -215,6 +215,7 @@ pub struct Bonsai {
     rulepack_root: Option<PathBuf>,
     rulepack: Option<Arc<Rulepack>>,
     parse_timeout_ms: Option<u64>,
+    include_minified_sources: bool,
 }
 
 struct RetrievalCandidateScope {
@@ -237,6 +238,7 @@ impl Bonsai {
             rulepack_root: None,
             rulepack: None,
             parse_timeout_ms: None,
+            include_minified_sources: false,
         }
     }
 
@@ -254,6 +256,15 @@ impl Bonsai {
     pub fn with_parse_timeout(mut self, timeout: Duration) -> Self {
         let millis = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
         self.parse_timeout_ms = Some(millis);
+        self
+    }
+
+    /// Include adapter-classified minified JavaScript/TypeScript compiler
+    /// inputs. The default compiler-input profile excludes them; enabling
+    /// this restores their complete compiler and analysis facts.
+    #[must_use]
+    pub fn with_minified_sources(mut self, include: bool) -> Self {
+        self.include_minified_sources = include;
         self
     }
 
@@ -374,7 +385,7 @@ impl Bonsai {
         filters: SearchFilters<'_>,
     ) -> Result<Option<Vec<String>>> {
         let root = root.as_ref();
-        let Some(scope) = Self::retrieval_candidate_scope(root, query, filters)? else {
+        let Some(scope) = self.retrieval_candidate_scope(root, query, filters)? else {
             return Ok(None);
         };
         let mut include_filters = scope
@@ -388,14 +399,16 @@ impl Bonsai {
     }
 
     fn retrieval_candidate_scope(
+        &self,
         root: &Path,
         query: &str,
         filters: SearchFilters<'_>,
     ) -> Result<Option<RetrievalCandidateScope>> {
-        Self::retrieval_candidate_scope_for_queries(root, &[query], filters)
+        self.retrieval_candidate_scope_for_queries(root, &[query], filters)
     }
 
     fn retrieval_candidate_scope_for_queries(
+        &self,
         root: &Path,
         queries: &[&str],
         filters: SearchFilters<'_>,
@@ -406,7 +419,11 @@ impl Bonsai {
         let manifest = fs::read(workspace_bonsai_dir(root).join(CACHE_MANIFEST_FILE))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<CacheManifest>(&bytes).ok());
-        let Ok(fingerprints) = source_file_fingerprints_for_cache_validation(root, manifest.as_ref()) else {
+        let Ok(fingerprints) = source_file_fingerprints_for_cache_validation(
+            root,
+            manifest.as_ref(),
+            self.include_minified_sources,
+        ) else {
             return Ok(None);
         };
         let root_for_pipeline = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
@@ -493,7 +510,7 @@ impl Bonsai {
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
         let root = root.as_ref();
-        let Some(scope) = Self::retrieval_candidate_scope(root, query, filters)? else {
+        let Some(scope) = self.retrieval_candidate_scope(root, query, filters)? else {
             return Ok(None);
         };
         let options = self.apply_workspace_options(WorkspaceOpenOptions::lazy_query());
@@ -525,7 +542,7 @@ impl Bonsai {
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
         let root = root.as_ref();
-        let Some(scope) = Self::retrieval_candidate_scope_for_queries(root, queries, filters)? else {
+        let Some(scope) = self.retrieval_candidate_scope_for_queries(root, queries, filters)? else {
             return Ok(None);
         };
         let options = self.apply_workspace_options(WorkspaceOpenOptions::lazy_query());
@@ -778,7 +795,9 @@ impl Bonsai {
     /// workspace; it only manages SDK-owned persisted analysis cache files.
     #[must_use]
     pub fn cache(&self, root: impl AsRef<Path>) -> WorkspaceCache {
-        let mut cache = WorkspaceCache::new(root).with_registry(self.registry.clone());
+        let mut cache = WorkspaceCache::new(root)
+            .with_registry(self.registry.clone())
+            .with_minified_sources(self.include_minified_sources);
         if let Some(rulepack_root) = self.rulepack_root.as_deref() {
             cache = cache.with_rulepack_root(rulepack_root);
         } else {
@@ -802,7 +821,11 @@ impl Bonsai {
         let manifest = fs::read(workspace_bonsai_dir(root).join(CACHE_MANIFEST_FILE))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<CacheManifest>(&bytes).ok());
-        let fingerprints = source_file_fingerprints_for_cache_validation(root, manifest.as_ref())?;
+        let fingerprints = source_file_fingerprints_for_cache_validation(
+            root,
+            manifest.as_ref(),
+            self.include_minified_sources,
+        )?;
         let source_inputs = fingerprints
             .into_iter()
             .enumerate()
@@ -990,6 +1013,7 @@ impl Bonsai {
         if let Some(ms) = self.parse_timeout_ms {
             options.parse_timeout_ms = Some(ms);
         }
+        options.include_minified_sources = self.include_minified_sources;
         options
     }
 
@@ -1375,10 +1399,13 @@ impl Project {
                 // source requires a complete reconciliation so nested
                 // .gitignore/.ignore/.bonsaiignore rules remain authoritative;
                 // no path spelling heuristic may add compiler input.
-                let supported = path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| self.registry.adapter_for_extension(extension).is_some());
+                let supported =
+                    self.registry
+                        .source_file_representation(&path)
+                        .is_some_and(|representation| {
+                            self.refresh_options.include_minified_sources
+                                || representation != bonsai_lang_api::SourceFileRepresentation::Minified
+                        });
                 if supported
                     && std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_file())
                 {
@@ -1779,6 +1806,10 @@ pub struct CacheManifest {
     pub workspace_root: PathBuf,
     pub cache_dir: PathBuf,
     pub workspace_sources: WorkspaceContentFingerprint,
+    /// Compiler input profile used to produce every source and semantic
+    /// sidecar recorded by this manifest.
+    #[serde(default)]
+    pub include_minified_sources: bool,
     /// Exact content hashes paired with strong filesystem change identities.
     ///
     /// Warm cache checks may reuse a hash only when every stamp field still
@@ -1874,6 +1905,7 @@ pub struct WorkspaceCache {
     root: PathBuf,
     rulepack_root: Option<PathBuf>,
     registry: Arc<LanguageRegistry>,
+    include_minified_sources: bool,
 }
 
 impl WorkspaceCache {
@@ -1888,6 +1920,7 @@ impl WorkspaceCache {
             root: stable_root_path(root.as_ref()),
             rulepack_root: None,
             registry: bonsai_adapters::all_languages_registry(),
+            include_minified_sources: false,
         }
     }
 
@@ -1898,6 +1931,13 @@ impl WorkspaceCache {
     #[must_use]
     pub fn with_registry(mut self, registry: Arc<LanguageRegistry>) -> Self {
         self.registry = registry;
+        self
+    }
+
+    /// Select the compiler-input profile used by the producing workspace.
+    #[must_use]
+    pub fn with_minified_sources(mut self, include: bool) -> Self {
+        self.include_minified_sources = include;
         self
     }
 
@@ -1930,8 +1970,13 @@ impl WorkspaceCache {
 
     pub fn stats(&self) -> std::io::Result<CacheStats> {
         let mut stats = self.raw_stats()?;
-        stats.validation =
-            cache_validation_report(&stats, &self.root, self.rulepack_root.as_deref(), &self.registry);
+        stats.validation = cache_validation_report(
+            &stats,
+            &self.root,
+            self.rulepack_root.as_deref(),
+            &self.registry,
+            self.include_minified_sources,
+        );
         Ok(stats)
     }
 
@@ -2045,7 +2090,11 @@ impl WorkspaceCache {
     /// compiler worker can rebuild it.
     pub fn migrate_legacy_compiler_object_sidecar(&self) -> Result<Option<usize>> {
         let manifest_hint = self.read_manifest()?;
-        let fingerprints = source_file_fingerprints_for_cache_validation(&self.root, manifest_hint.as_ref())?;
+        let fingerprints = source_file_fingerprints_for_cache_validation(
+            &self.root,
+            manifest_hint.as_ref(),
+            self.include_minified_sources,
+        )?;
         let migrated = bonsai_workspace::migrate_legacy_compiler_object_sidecar_v11_with_source_fingerprints(
             &self.root,
             fingerprints.iter().map(|file| (file.path.as_path(), file.hash)),
@@ -2062,9 +2111,10 @@ impl WorkspaceCache {
         // configuration changes during the scan, omit the accelerator. The
         // manifest remains correct and later validation takes the full
         // filesystem path.
-        let git_before = git_source_state_snapshot(&self.root);
-        let (source_files, source_stamps) = source_state_from_disk(&self.root)?;
-        let git_after = git_source_state_snapshot(&self.root);
+        let git_before = git_source_state_snapshot(&self.root, self.include_minified_sources);
+        let (source_files, source_stamps) =
+            source_state_from_disk(&self.root, self.include_minified_sources)?;
+        let git_after = git_source_state_snapshot(&self.root, self.include_minified_sources);
         let git_source_state = match (git_before, git_after) {
             (Some(before), Some(after)) if before == after => Some(after),
             _ => None,
@@ -2096,6 +2146,7 @@ impl WorkspaceCache {
             workspace_root: self.root.clone(),
             cache_dir: stats.bonsai_dir.clone(),
             workspace_sources,
+            include_minified_sources: self.include_minified_sources,
             workspace_source_files,
             git_source_state,
             dependency_metadata: dependency_metadata_fingerprint(&self.root)?,
@@ -2155,7 +2206,12 @@ impl WorkspaceCache {
         let Ok(file) = fs::File::open(&cache) else {
             return Ok(false);
         };
-        export_cache_is_fresh_via_fd(&self.root, self.rulepack_root.as_deref(), &file)
+        export_cache_is_fresh_via_fd(
+            &self.root,
+            self.rulepack_root.as_deref(),
+            self.include_minified_sources,
+            &file,
+        )
     }
 
     pub fn stream_default_export_cache_if_fresh<W: Write + ?Sized>(&self, writer: &mut W) -> Result<bool> {
@@ -2170,7 +2226,12 @@ impl WorkspaceCache {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(err) => return Err(err.into()),
         };
-        if !export_cache_is_fresh_via_fd(&self.root, self.rulepack_root.as_deref(), &input)? {
+        if !export_cache_is_fresh_via_fd(
+            &self.root,
+            self.rulepack_root.as_deref(),
+            self.include_minified_sources,
+            &input,
+        )? {
             return Ok(false);
         }
         io::copy(&mut input, writer)?;
@@ -2181,7 +2242,9 @@ impl WorkspaceCache {
 
 impl Cache<'_> {
     fn workspace_cache(&self) -> WorkspaceCache {
-        let mut cache = WorkspaceCache::new(&self.project.root).with_registry(self.project.registry.clone());
+        let mut cache = WorkspaceCache::new(&self.project.root)
+            .with_registry(self.project.registry.clone())
+            .with_minified_sources(self.project.refresh_options.include_minified_sources);
         if let Some(rulepack_root) = self.project.rulepack_root.as_deref() {
             cache = cache.with_rulepack_root(rulepack_root);
         } else {
@@ -2581,11 +2644,16 @@ fn cache_validation_report(
     root: &Path,
     rulepack_root: Option<&Path>,
     registry: &LanguageRegistry,
+    include_minified_sources: bool,
 ) -> CacheValidationReport {
     let manifest_hint = fs::read(&stats.manifest)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<CacheManifest>(&bytes).ok());
-    let source_files = match source_file_fingerprints_for_cache_validation(root, manifest_hint.as_ref()) {
+    let source_files = match source_file_fingerprints_for_cache_validation(
+        root,
+        manifest_hint.as_ref(),
+        include_minified_sources,
+    ) {
         Ok(fingerprints) => fingerprints,
         Err(err) => {
             return cache_validation_error_report(
@@ -2599,8 +2667,14 @@ fn cache_validation_report(
         source_files.iter().map(|file| (file.path.as_path(), file.hash)),
     );
     let idg_sidecar_applicable = bonsai_workspace::idg_sidecar_enabled_for_file_count(current_sources.files);
-    let export_validation = export_sidecar_validation(stats, root, rulepack_root);
-    let manifest_state = validate_cache_manifest(stats, root, rulepack_root, current_sources);
+    let export_validation = export_sidecar_validation(stats, root, rulepack_root, include_minified_sources);
+    let manifest_state = validate_cache_manifest(
+        stats,
+        root,
+        rulepack_root,
+        current_sources,
+        include_minified_sources,
+    );
 
     let (manifest_status, sidecars, mut stale_reasons) = match manifest_state {
         ManifestValidationState::Fresh(manifest) => {
@@ -2755,6 +2829,7 @@ fn validate_cache_manifest(
     root: &Path,
     rulepack_root: Option<&Path>,
     current_sources: WorkspaceContentFingerprint,
+    include_minified_sources: bool,
 ) -> ManifestValidationState {
     if !stats.manifest_exists {
         return ManifestValidationState::Missing;
@@ -2786,6 +2861,7 @@ fn validate_cache_manifest(
         manifest.workspace_root == current_workspace_root && manifest.cache_dir == stats.bonsai_dir;
     let compiler_inputs_match = manifest.matcher_policy_fingerprint == MATCHER_POLICY_FINGERPRINT
         && workspace_identity_matches
+        && manifest.include_minified_sources == include_minified_sources
         && manifest.workspace_sources == current_sources
         && current_dependency_metadata
             .as_ref()
@@ -2823,6 +2899,9 @@ fn validate_cache_manifest(
             manifest.cache_dir.display(),
             stats.bonsai_dir.display()
         ));
+    }
+    if manifest.include_minified_sources != include_minified_sources {
+        reasons.push("manifest compiler-input profile does not match --minified-js selection".to_string());
     }
     if manifest.workspace_sources != current_sources {
         reasons.push("workspace source content changed since the cache manifest was written".to_string());
@@ -3170,6 +3249,7 @@ fn export_sidecar_validation(
     stats: &CacheStats,
     root: &Path,
     rulepack_root: Option<&Path>,
+    include_minified_sources: bool,
 ) -> CacheSidecarValidation {
     if !stats.export_sidecar_exists {
         return CacheSidecarValidation {
@@ -3204,7 +3284,7 @@ fn export_sidecar_validation(
             }
         }
     };
-    match export_cache_is_fresh_via_fd(root, rulepack_root, &file) {
+    match export_cache_is_fresh_via_fd(root, rulepack_root, include_minified_sources, &file) {
         Ok(true) => CacheSidecarValidation {
             name: "export_default".to_string(),
             path: stats.export_sidecar.clone(),
@@ -3591,7 +3671,12 @@ fn sync_parent_dir(path: &Path) {
 /// export bytes are trusted only when the adjacent metadata sidecar
 /// matches the current source content, dependency metadata, rulepack
 /// content, matcher policy, and cache pipeline version.
-fn export_cache_is_fresh_via_fd(root: &Path, rulepack_root: Option<&Path>, cache: &fs::File) -> Result<bool> {
+fn export_cache_is_fresh_via_fd(
+    root: &Path,
+    rulepack_root: Option<&Path>,
+    include_minified_sources: bool,
+    cache: &fs::File,
+) -> Result<bool> {
     let Ok(cache_metadata) = cache.metadata() else {
         return Ok(false);
     };
@@ -3601,7 +3686,8 @@ fn export_cache_is_fresh_via_fd(root: &Path, rulepack_root: Option<&Path>, cache
     let Ok(Some(saved)) = read_export_cache_metadata(root) else {
         return Ok(false);
     };
-    let workspace_sources = workspace_source_fingerprint_from_disk(root)?;
+    let workspace_sources =
+        workspace_source_fingerprint_from_disk_with_minified(root, include_minified_sources)?;
     let expected = build_export_cache_metadata(root, rulepack_root, workspace_sources, cache_metadata.len())?;
     if saved != expected {
         return Ok(false);
@@ -3660,7 +3746,14 @@ fn current_exe_is_newer_than_cache(cache_metadata: &fs::Metadata) -> bool {
 }
 
 pub fn workspace_source_fingerprint_from_disk(root: &Path) -> Result<WorkspaceContentFingerprint> {
-    let fingerprints = source_file_fingerprints_from_disk(root)?;
+    workspace_source_fingerprint_from_disk_with_minified(root, false)
+}
+
+pub fn workspace_source_fingerprint_from_disk_with_minified(
+    root: &Path,
+    include_minified_sources: bool,
+) -> Result<WorkspaceContentFingerprint> {
+    let fingerprints = source_file_fingerprints_from_disk(root, include_minified_sources)?;
     Ok(source_fingerprint_from_pairs(
         root,
         fingerprints.iter().map(|file| (file.path.as_path(), file.hash)),
@@ -3674,27 +3767,42 @@ pub fn workspace_source_fingerprint_from_disk(root: &Path) -> Result<WorkspaceCo
 /// unsupported platform, missing manifest, or Git failure falls back to the
 /// complete filesystem/content walk. This affects validation cost only.
 pub fn workspace_source_fingerprint_for_cache_validation(root: &Path) -> Result<WorkspaceContentFingerprint> {
+    workspace_source_fingerprint_for_cache_validation_with_minified(root, false)
+}
+
+pub fn workspace_source_fingerprint_for_cache_validation_with_minified(
+    root: &Path,
+    include_minified_sources: bool,
+) -> Result<WorkspaceContentFingerprint> {
     let manifest = fs::read(workspace_bonsai_dir(root).join(CACHE_MANIFEST_FILE))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<CacheManifest>(&bytes).ok());
-    let fingerprints = source_file_fingerprints_for_cache_validation(root, manifest.as_ref())?;
+    let fingerprints =
+        source_file_fingerprints_for_cache_validation(root, manifest.as_ref(), include_minified_sources)?;
     Ok(source_fingerprint_from_pairs(
         root,
         fingerprints.iter().map(|file| (file.path.as_path(), file.hash)),
     ))
 }
 
-fn source_file_fingerprints_from_disk(root: &Path) -> Result<Vec<bonsai_workspace::SourceFileFingerprint>> {
+fn source_file_fingerprints_from_disk(
+    root: &Path,
+    include_minified_sources: bool,
+) -> Result<Vec<bonsai_workspace::SourceFileFingerprint>> {
     let registry = bonsai_adapters::all_languages_registry();
-    let workspace = Workspace::new(registry);
+    let mut options = WorkspaceOpenOptions::lazy_query();
+    options.include_minified_sources = include_minified_sources;
+    let workspace = Workspace::new_with_open_options(registry, options);
     workspace
         .source_file_fingerprints(root)
         .with_context(|| format!("fingerprinting workspace sources under {}", root.display()))
 }
 
-fn source_file_stamps_from_disk(root: &Path) -> Result<Vec<SourceFileStamp>> {
+fn source_file_stamps_from_disk(root: &Path, include_minified_sources: bool) -> Result<Vec<SourceFileStamp>> {
     let registry = bonsai_adapters::all_languages_registry();
-    let workspace = Workspace::new(registry);
+    let mut options = WorkspaceOpenOptions::lazy_query();
+    options.include_minified_sources = include_minified_sources;
+    let workspace = Workspace::new_with_open_options(registry, options);
     workspace
         .source_file_stamps(root)
         .with_context(|| format!("scanning workspace source metadata under {}", root.display()))
@@ -3702,9 +3810,12 @@ fn source_file_stamps_from_disk(root: &Path) -> Result<Vec<SourceFileStamp>> {
 
 fn source_state_from_disk(
     root: &Path,
+    include_minified_sources: bool,
 ) -> Result<(Vec<bonsai_workspace::SourceFileFingerprint>, Vec<SourceFileStamp>)> {
     let registry = bonsai_adapters::all_languages_registry();
-    let workspace = Workspace::new(registry);
+    let mut options = WorkspaceOpenOptions::lazy_query();
+    options.include_minified_sources = include_minified_sources;
+    let workspace = Workspace::new_with_open_options(registry, options);
     loop {
         let before = workspace
             .source_file_stamps(root)
@@ -3732,6 +3843,7 @@ fn source_state_from_disk(
 fn source_file_fingerprints_for_cache_validation(
     root: &Path,
     manifest: Option<&CacheManifest>,
+    include_minified_sources: bool,
 ) -> Result<Vec<bonsai_workspace::SourceFileFingerprint>> {
     match fs::metadata(root) {
         Ok(metadata) if metadata.is_dir() => {}
@@ -3742,22 +3854,23 @@ fn source_file_fingerprints_for_cache_validation(
     let Some(manifest) = manifest.filter(|manifest| {
         manifest.schema_version == CACHE_MANIFEST_SCHEMA_VERSION
             && manifest.workspace_root == stable_root
+            && manifest.include_minified_sources == include_minified_sources
             && !manifest.workspace_source_files.is_empty()
     }) else {
-        return source_file_fingerprints_from_disk(root);
+        return source_file_fingerprints_from_disk(root, include_minified_sources);
     };
     // ctime + device/inode makes stamp reuse exact for ordinary local Unix
     // filesystems, including same-size rewrites and atomic editor replaces.
     // The current non-Unix stamp intentionally carries zeros for those
     // fields, so it falls back to content hashing.
     if !cfg!(unix) {
-        return source_file_fingerprints_from_disk(root);
+        return source_file_fingerprints_from_disk(root, include_minified_sources);
     }
 
     if manifest
         .git_source_state
         .as_ref()
-        .zip(git_source_state_snapshot(root).as_ref())
+        .zip(git_source_state_snapshot(root, include_minified_sources).as_ref())
         .is_some_and(|(recorded, current)| recorded == current)
     {
         let mut fingerprints = manifest
@@ -3785,7 +3898,7 @@ fn source_file_fingerprints_for_cache_validation(
             )
         })
         .collect::<AHashMap<_, _>>();
-    let current_stamps = source_file_stamps_from_disk(root)?;
+    let current_stamps = source_file_stamps_from_disk(root, include_minified_sources)?;
     let changed = current_stamps
         .iter()
         .filter(|stamp| {
@@ -3799,7 +3912,7 @@ fn source_file_fingerprints_for_cache_validation(
     // through the existing parallel streaming hasher than through thousands
     // of one-off file opens here.
     if changed > 64 {
-        return source_file_fingerprints_from_disk(root);
+        return source_file_fingerprints_from_disk(root, include_minified_sources);
     }
 
     current_stamps
@@ -3818,7 +3931,10 @@ fn source_file_fingerprints_for_cache_validation(
         .collect()
 }
 
-fn git_source_state_snapshot(root: &Path) -> Option<CacheManifestGitSourceState> {
+fn git_source_state_snapshot(
+    root: &Path,
+    include_minified_sources: bool,
+) -> Option<CacheManifestGitSourceState> {
     let workspace_root = root.canonicalize().ok()?;
     let repository_root = git_output_path(&workspace_root, &["rev-parse", "--show-toplevel"])?
         .canonicalize()
@@ -3868,6 +3984,7 @@ fn git_source_state_snapshot(root: &Path) -> Option<CacheManifestGitSourceState>
             &mut relevant_worktree_paths,
             path,
             &status,
+            include_minified_sources,
         )?;
         if record[..2].contains(&b'R') || record[..2].contains(&b'C') {
             let origin = records.next()?;
@@ -3878,6 +3995,7 @@ fn git_source_state_snapshot(root: &Path) -> Option<CacheManifestGitSourceState>
                 &mut relevant_worktree_paths,
                 origin,
                 &format!("{status}:origin"),
+                include_minified_sources,
             )?;
         }
     }
@@ -3920,6 +4038,7 @@ fn push_git_relevant_path_state(
     out: &mut Vec<CacheManifestGitPathState>,
     path: PathBuf,
     status: &str,
+    include_minified_sources: bool,
 ) -> Option<()> {
     if !path.starts_with(workspace_root) || path_contains_bonsai_cache_dir(&path, workspace_root) {
         return Some(());
@@ -3932,10 +4051,11 @@ fn push_git_relevant_path_state(
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(bonsai_common::dependency_metadata::is_dependency_metadata_file);
-    let supported_source = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| registry.adapter_for_extension(extension).is_some());
+    let supported_source = registry
+        .source_file_representation(&path)
+        .is_some_and(|representation| {
+            include_minified_sources || representation != bonsai_lang_api::SourceFileRepresentation::Minified
+        });
     if !ignore_control && !dependency_metadata && !supported_source {
         return Some(());
     }
@@ -4847,7 +4967,9 @@ impl Export<'_> {
     }
 
     fn export_workspace_cache(&self) -> WorkspaceCache {
-        let mut cache = WorkspaceCache::new(&self.project.root).with_registry(self.project.registry.clone());
+        let mut cache = WorkspaceCache::new(&self.project.root)
+            .with_registry(self.project.registry.clone())
+            .with_minified_sources(self.project.refresh_options.include_minified_sources);
         if let Some(rulepack_root) = self.project.rulepack_root.as_deref() {
             cache = cache.with_rulepack_root(rulepack_root);
         } else {

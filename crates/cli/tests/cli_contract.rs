@@ -196,6 +196,108 @@ fn compact_global_help_preserves_the_correctness_contract() {
 }
 
 #[test]
+fn security_analysis_help_documents_production_default_and_minified_opt_in() {
+    for action in ["taint-analysis", "source-analysis"] {
+        let help = stdout(&["security", ".", action, "--help"]);
+        for expected in ["--profile", "production", "--profile all", "--minified-js"] {
+            assert!(
+                help.contains(expected),
+                "security {action} help omitted `{expected}`:\n{help}"
+            );
+        }
+    }
+}
+
+#[test]
+fn minified_javascript_opt_in_is_consistent_across_compiler_commands() {
+    let root = temp_path("minified-workspace");
+    std::fs::create_dir_all(&root).expect("create minified policy workspace");
+    std::fs::write(
+        root.join("app.js"),
+        "import { minifiedEntry } from './vendor.min.js';\nfunction maintainedEntry(value) { return minifiedEntry(value); }\n",
+    )
+    .expect("write maintained JavaScript");
+    std::fs::write(
+        root.join("vendor.min.js"),
+        "export function minifiedEntry(value){return value;}\n",
+    )
+    .expect("write minified JavaScript");
+    let root_text = root.to_str().expect("UTF-8 temp workspace");
+
+    let default_index: serde_json::Value =
+        serde_json::from_str(&stdout(&["index", root_text])).expect("default index JSON");
+    assert_eq!(default_index["files"], 1);
+    assert_eq!(default_index["include_minified_sources"], false);
+    let inclusive_index: serde_json::Value =
+        serde_json::from_str(&stdout(&["index", root_text, "--minified-js"])).expect("inclusive index JSON");
+    assert_eq!(inclusive_index["files"], 2);
+    assert_eq!(inclusive_index["include_minified_sources"], true);
+
+    let inclusive_semantic: serde_json::Value =
+        serde_json::from_str(&stdout(&["index", root_text, "--semantic", "--minified-js"]))
+            .expect("inclusive semantic index JSON");
+    assert_eq!(inclusive_semantic["files"], 2);
+    assert_eq!(inclusive_semantic["include_minified_sources"], true);
+    assert_eq!(inclusive_semantic["semantic_ready"], true);
+
+    let tree = stdout(&["tree", root_text, "--all"]);
+    assert!(tree.contains("vendor.min.js"), "{tree}");
+
+    let default_defs = stdout(&["defs", root_text, "--format", "json", "--all"]);
+    assert!(default_defs.contains("maintainedEntry"), "{default_defs}");
+    assert!(!default_defs.contains("minifiedEntry"), "{default_defs}");
+    let inclusive_defs = stdout(&["defs", root_text, "--minified-js", "--format", "json", "--all"]);
+    assert!(inclusive_defs.contains("maintainedEntry"), "{inclusive_defs}");
+    assert!(inclusive_defs.contains("minifiedEntry"), "{inclusive_defs}");
+
+    let default_export = stdout(&["export", root_text, "--format", "json"]);
+    let default_export_json: serde_json::Value =
+        serde_json::from_str(&default_export).expect("default export JSON");
+    let default_files = default_export_json["files"]
+        .as_array()
+        .expect("default export files");
+    assert!(default_files.iter().any(|file| file["path"] == "app.js"));
+    assert!(!default_files.iter().any(|file| file["path"] == "vendor.min.js"));
+    assert!(default_export_json["callgraph"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    let inclusive_export = stdout(&["export", root_text, "--minified-js", "--format", "json"]);
+    let inclusive_export_json: serde_json::Value =
+        serde_json::from_str(&inclusive_export).expect("inclusive export JSON");
+    let inclusive_files = inclusive_export_json["files"]
+        .as_array()
+        .expect("inclusive export files");
+    assert!(inclusive_files.iter().any(|file| file["path"] == "app.js"));
+    assert!(inclusive_files.iter().any(|file| file["path"] == "vendor.min.js"));
+    assert!(inclusive_export_json["callgraph"]
+        .as_array()
+        .is_some_and(|edges| edges
+            .iter()
+            .any(|edge| { edge["caller"] == "maintainedEntry" && edge["callee"] == "minifiedEntry" })));
+
+    let rejected_read = run(&["read-file", root_text, "vendor.min.js"]);
+    assert_eq!(rejected_read.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&rejected_read.stderr).contains("--minified-js"),
+        "{}",
+        String::from_utf8_lossy(&rejected_read.stderr)
+    );
+    let inclusive_read = stdout(&[
+        "read-file",
+        root_text,
+        "vendor.min.js",
+        "--minified-js",
+        "--format",
+        "json",
+    ]);
+    assert!(inclusive_read.contains("minifiedEntry"), "{inclusive_read}");
+
+    let cleared = run(&["cache", "clear", root_text]);
+    assert!(cleared.status.success());
+    std::fs::remove_dir_all(root).expect("remove minified policy workspace");
+}
+
+#[test]
 fn missing_or_duplicate_selectors_are_parse_errors() {
     let workspace = workspace();
     let workspace = workspace.to_str().expect("UTF-8 workspace");

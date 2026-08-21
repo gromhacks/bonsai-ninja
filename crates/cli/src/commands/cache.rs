@@ -18,6 +18,12 @@ use crate::{cli_println, ui};
 use super::export::warm_export_cache_for_project;
 use super::open_project_index_only;
 
+fn workspace_cache(root: &std::path::Path) -> bonsai_sdk::WorkspaceCache {
+    bonsai_sdk::WorkspaceCache::new(root)
+        .with_discovered_rulepack_root()
+        .with_minified_sources(crate::include_minified_sources())
+}
+
 /// Handler for `bonsai-ninja cache <stats|clear|rebuild>`. Operates
 /// on the workspace's content-keyed external OS cache directory.
 /// In-process chain caches are per-run and drop at exit; this handler
@@ -49,7 +55,7 @@ fn print_kv(key: &str, value: &str) {
 fn cache_stats(workspace: Option<std::path::PathBuf>, format: BrowseFormat) -> Result<()> {
     let ui = ui();
     let workspace_root = workspace.unwrap_or(std::env::current_dir()?);
-    let cache = bonsai_sdk::WorkspaceCache::new(&workspace_root).with_discovered_rulepack_root();
+    let cache = workspace_cache(&workspace_root);
     let stage = progress::ScopedSpinner::new("reading cache metadata");
     let stats = cache.stats()?;
     stage.finish();
@@ -249,7 +255,7 @@ fn cache_stats(workspace: Option<std::path::PathBuf>, format: BrowseFormat) -> R
 fn cache_clear(workspace: Option<std::path::PathBuf>, dataflow_only: bool) -> Result<()> {
     let ui = ui();
     let workspace_root = workspace.unwrap_or(std::env::current_dir()?);
-    let cache = bonsai_sdk::WorkspaceCache::new(&workspace_root).with_discovered_rulepack_root();
+    let cache = workspace_cache(&workspace_root);
     let stage = progress::ScopedSpinner::new("reading cache metadata");
     let stats = cache.stats()?;
     stage.finish();
@@ -380,7 +386,7 @@ fn cache_clear(workspace: Option<std::path::PathBuf>, dataflow_only: bool) -> Re
 fn cache_rebuild(workspace: Option<std::path::PathBuf>, warm_export: bool) -> Result<()> {
     let ui = ui();
     let workspace_root = workspace.unwrap_or(std::env::current_dir()?);
-    let cache = bonsai_sdk::WorkspaceCache::new(&workspace_root).with_discovered_rulepack_root();
+    let cache = workspace_cache(&workspace_root);
     let stage = progress::ScopedSpinner::new("reading cache metadata");
     let stats = cache.stats()?;
     stage.finish();
