@@ -7,7 +7,15 @@
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::io::IsTerminal;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+
+const PLAIN_BAR_TEMPLATE: &str =
+    "  {msg:<24} [{bar:20}] {pos}/{len} · {percent:>3}% · {per_sec:1} · ETA {eta} · {elapsed_precise}";
+const COLOR_BAR_TEMPLATE: &str = "  {msg:<24} [{bar:20.cyan/blue}] {pos}/{len} · {percent:>3}% · {per_sec:1} · ETA {eta} · {elapsed_precise}";
+const PLAIN_SPINNER_TEMPLATE: &str = "  {spinner} {msg} · {elapsed_precise}";
+const COLOR_SPINNER_TEMPLATE: &str = "  {spinner:.cyan} {msg} · {elapsed_precise}";
+const PLAIN_COUNTED_SPINNER_TEMPLATE: &str = "  {spinner} {msg} · {pos} completed · {elapsed_precise}";
+const COLOR_COUNTED_SPINNER_TEMPLATE: &str = "  {spinner:.cyan} {msg} · {pos} completed · {elapsed_precise}";
 
 /// Global toggle backing `--no-progress`. Set once at CLI startup
 /// from the flag or the `NO_PROGRESS` env var; every
@@ -81,9 +89,9 @@ pub(crate) fn progress_bar(label: &str, total: u64) -> ProgressBar {
     }
     let bar = ProgressBar::with_draw_target(Some(total), ProgressDrawTarget::stderr());
     let template = if is_color_disabled() {
-        "  {msg:<24} [{bar:30}] {pos}/{len} ({eta})"
+        PLAIN_BAR_TEMPLATE
     } else {
-        "  {msg:<24} [{bar:30.cyan/blue}] {pos}/{len} ({eta})"
+        COLOR_BAR_TEMPLATE
     };
     if let Ok(style) = ProgressStyle::with_template(template) {
         bar.set_style(style.progress_chars("━━╸ "));
@@ -102,9 +110,9 @@ pub(crate) fn spinner(label: &str) -> ProgressBar {
     }
     let spin = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
     let template = if is_color_disabled() {
-        "  {spinner} {msg}"
+        PLAIN_SPINNER_TEMPLATE
     } else {
-        "  {spinner:.cyan} {msg}"
+        COLOR_SPINNER_TEMPLATE
     };
     if let Ok(style) = ProgressStyle::with_template(template) {
         spin.set_style(style.tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "));
@@ -112,6 +120,20 @@ pub(crate) fn spinner(label: &str) -> ProgressBar {
     spin.set_message(label.to_string());
     spin.enable_steady_tick(std::time::Duration::from_millis(120));
     spin
+}
+
+/// Switch an indeterminate phase to an exact completed-unit counter after its
+/// first observable unit. The total remains unknown, so this deliberately
+/// omits percentage and ETA while preserving the spinner's original clock.
+pub(crate) fn show_spinner_count(bar: &ProgressBar) {
+    let template = if is_color_disabled() {
+        PLAIN_COUNTED_SPINNER_TEMPLATE
+    } else {
+        COLOR_COUNTED_SPINNER_TEMPLATE
+    };
+    if let Ok(style) = ProgressStyle::with_template(template) {
+        bar.set_style(style.tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "));
+    }
 }
 
 /// Scoped spinner for command stages whose duration is not known up
@@ -140,6 +162,121 @@ impl Drop for ScopedSpinner {
     fn drop(&mut self) {
         if let Some(bar) = self.bar.take() {
             bar.finish_and_clear();
+        }
+    }
+}
+
+/// Replaceable progress phase for pipelines that discover an exact work-unit
+/// total after a short setup step, or transition from counted compiler work
+/// to an indivisible persistence step.
+pub(crate) struct PhaseProgress {
+    bar: Mutex<Option<ProgressBar>>,
+}
+
+impl PhaseProgress {
+    #[must_use]
+    pub(crate) fn spinner(label: &str) -> Self {
+        Self {
+            bar: Mutex::new(Some(spinner(label))),
+        }
+    }
+
+    pub(crate) fn start_bar(&self, label: &str, total: u64) {
+        self.replace(progress_bar(label, total));
+    }
+
+    pub(crate) fn start_spinner(&self, label: &str) {
+        self.replace(spinner(label));
+    }
+
+    pub(crate) fn inc(&self, delta: u64) {
+        if let Some(bar) = self
+            .bar
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            bar.inc(delta);
+        }
+    }
+
+    pub(crate) fn finish(&self) {
+        if let Some(bar) = self
+            .bar
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            bar.finish_and_clear();
+        }
+    }
+
+    fn replace(&self, next: ProgressBar) {
+        let mut slot = self.bar.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(current) = slot.replace(next) {
+            current.finish_and_clear();
+        }
+    }
+}
+
+impl Drop for PhaseProgress {
+    fn drop(&mut self) {
+        let slot = self
+            .bar
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(bar) = slot.take() {
+            bar.finish_and_clear();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn determinate_progress_exposes_completion_rate_eta_and_elapsed_time() {
+        for template in [PLAIN_BAR_TEMPLATE, COLOR_BAR_TEMPLATE] {
+            for metric in [
+                "{pos}",
+                "{len}",
+                "{percent:>3}",
+                "{per_sec:1}",
+                "{eta}",
+                "{elapsed_precise}",
+            ] {
+                assert!(template.contains(metric), "missing {metric} in {template}");
+            }
+        }
+    }
+
+    #[test]
+    fn indeterminate_progress_never_implies_a_percentage_but_shows_elapsed_time() {
+        for template in [
+            PLAIN_SPINNER_TEMPLATE,
+            COLOR_SPINNER_TEMPLATE,
+            PLAIN_COUNTED_SPINNER_TEMPLATE,
+            COLOR_COUNTED_SPINNER_TEMPLATE,
+        ] {
+            assert!(template.contains("{elapsed_precise}"));
+            assert!(!template.contains("{percent"));
+            assert!(!template.contains("{eta"));
+        }
+    }
+
+    #[test]
+    fn every_progress_template_is_accepted_by_indicatif() {
+        for template in [
+            PLAIN_BAR_TEMPLATE,
+            COLOR_BAR_TEMPLATE,
+            PLAIN_SPINNER_TEMPLATE,
+            COLOR_SPINNER_TEMPLATE,
+            PLAIN_COUNTED_SPINNER_TEMPLATE,
+            COLOR_COUNTED_SPINNER_TEMPLATE,
+        ] {
+            ProgressStyle::with_template(template)
+                .unwrap_or_else(|error| panic!("invalid progress template {template:?}: {error}"));
         }
     }
 }

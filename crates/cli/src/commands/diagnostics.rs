@@ -84,24 +84,56 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
     let _ = options.structural_only;
     if !options.watch && !options.prewarm_dataflow {
         let maintenance = progress::ScopedSpinner::new("maintaining compiler cache");
-        bonsai_for_cli().cache(root).maintain_persisted_sidecars()?;
+        let cache = bonsai_for_cli().cache(root);
+        cache.maintain_persisted_sidecars()?;
         maintenance.finish();
-        let project = open_project_sidecar_validation_only(root)?;
-        let compiler_cache_hit = project.cache().compiler_object_generation_is_current();
-        if !compiler_cache_hit {
-            let compiler = progress::ScopedSpinner::new("compiling Tree-sitter objects");
-            project.cache().warm_compiler_object_sidecar()?;
-            compiler.finish();
+        if let Some(files) = cache.current_compiler_object_count()? {
+            // A warm structural index is a cache-validation operation, not a
+            // request to ingest every source body into a fresh process. Keep
+            // the exact compiler-generation proof root-only and derive the
+            // reported workspace context from filesystem metadata.
+            let include_minified_sources = crate::include_minified_sources();
+            let mut context_options = bonsai_sdk::OpenOptions::lazy_query();
+            context_options.include_minified_sources = include_minified_sources;
+            let workspace = bonsai_sdk::Workspace::new_with_open_options(
+                bonsai_adapters::all_languages_registry(),
+                context_options,
+            );
+            let context = workspace
+                .semantic_context_for_root(root)
+                .map_err(|error| anyhow::anyhow!("collecting context for {}: {error}", root.display()))?;
+            anyhow::ensure!(
+                context.summary.indexed_files == files,
+                "compiler cache/source inventory mismatch: generation has {files} files, metadata scan found {}",
+                context.summary.indexed_files
+            );
+            cli_println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "files": files,
+                    "include_minified_sources": include_minified_sources,
+                    "compiler_cache": "hit",
+                    "compiler_objects": files,
+                    "parsed_files": 0,
+                    "semantic_context": context.summary,
+                }))?
+            );
+            flush_stdout()?;
+            return Ok(());
         }
+        let project = open_project_sidecar_validation_only(root)?;
+        let compiler = progress::ScopedSpinner::new("compiling Tree-sitter objects");
+        project.cache().warm_compiler_object_sidecar()?;
+        compiler.finish();
         let stats = project.stats();
         cli_println!(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "files": stats.files,
                 "include_minified_sources": stats.include_minified_sources,
-                "compiler_cache": if compiler_cache_hit { "hit" } else { "rebuilt" },
+                "compiler_cache": "rebuilt",
                 "compiler_objects": stats.files,
-                "parsed_files": if compiler_cache_hit { 0 } else { stats.files },
+                "parsed_files": stats.files,
                 "semantic_context": stats.semantic_context,
             }))?
         );
@@ -284,7 +316,7 @@ fn semantic_phase_progress_action(phase: SemanticWorkerPhase) -> &'static str {
         SemanticWorkerPhase::Linkage => "building declaration linkage",
         SemanticWorkerPhase::Callgraph => "resolving callgraph",
         SemanticWorkerPhase::Retrieval => "building retrieval index",
-        SemanticWorkerPhase::Idg => "building IDG query accelerator",
+        SemanticWorkerPhase::Idg => "building dataflow graph",
         SemanticWorkerPhase::Manifest => "publishing cache manifest",
     }
 }
@@ -486,20 +518,61 @@ fn run_semantic_worker(root: &std::path::Path, phase: SemanticWorkerPhase) -> Re
             result
         }
         SemanticWorkerPhase::Retrieval => {
-            let stage = progress::ScopedSpinner::new(&label);
-            let result = project.cache().warm_retrieval_sidecar();
+            let stage = progress::PhaseProgress::spinner(&label);
+            let result = project
+                .cache()
+                .warm_retrieval_sidecar_with_progress(|event| match event {
+                    bonsai_sdk::RetrievalBuildProgress::FilesStarted { files } => {
+                        stage.start_bar(&label, files as u64);
+                    }
+                    bonsai_sdk::RetrievalBuildProgress::FileCompleted => stage.inc(1),
+                    bonsai_sdk::RetrievalBuildProgress::Persisting { docs } => {
+                        stage.start_spinner(&format!("{label} · persisting {docs} candidates"));
+                    }
+                });
             stage.finish();
             result
         }
         SemanticWorkerPhase::Linkage => {
-            let stage = progress::ScopedSpinner::new(&label);
-            let result = project.cache().warm_compiler_linkage_sidecar();
+            let stage = progress::PhaseProgress::spinner(&label);
+            let result = project
+                .cache()
+                .warm_compiler_linkage_sidecar_with_progress(|event| match event {
+                    bonsai_sdk::CompilerLinkageProgress::FilesStarted { files } => {
+                        stage.start_bar(&label, files as u64);
+                    }
+                    bonsai_sdk::CompilerLinkageProgress::FileCompleted => stage.inc(1),
+                    bonsai_sdk::CompilerLinkageProgress::Persisting { declarations } => {
+                        stage.start_spinner(&format!("{label} · persisting {declarations} declarations"));
+                    }
+                });
             stage.finish();
             result
         }
         SemanticWorkerPhase::Idg => {
-            let stage = progress::ScopedSpinner::new(&label);
-            let result = project.cache().warm_idg_sidecar_and_manifest();
+            let stage = progress::PhaseProgress::spinner(&label);
+            let result = project
+                .cache()
+                .warm_idg_sidecar_and_manifest_with_progress(|event| match event {
+                    bonsai_sdk::IdgPersistenceProgress::TransferStarted { segments } => {
+                        stage.start_bar(&format!("{label} · lowering IDG segments"), segments as u64);
+                    }
+                    bonsai_sdk::IdgPersistenceProgress::TransferSegmentCompleted => {
+                        stage.inc(1);
+                    }
+                    bonsai_sdk::IdgPersistenceProgress::AcceleratorStarted => {
+                        stage.start_spinner(&format!("{label} · compiling query accelerator"));
+                    }
+                    bonsai_sdk::IdgPersistenceProgress::Persisting { segments } => {
+                        stage.start_spinner(&format!("{label} · persisting {segments} IDG segments"));
+                    }
+                    bonsai_sdk::IdgPersistenceProgress::ResidentFallbackStarted => {
+                        stage.start_spinner(&format!("{label} · building exact resident fallback"));
+                    }
+                    bonsai_sdk::IdgPersistenceProgress::ManifestStarted => {
+                        stage.start_spinner(&format!("{label} · publishing manifest"));
+                    }
+                });
             stage.finish();
             result
         }

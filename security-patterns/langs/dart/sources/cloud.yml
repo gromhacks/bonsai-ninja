@@ -30,7 +30,9 @@
   description: "Disabled - FP-prone. Bare param name 'data' is ubiquitous. Re-enable with context constraint."
 
 - id: dart.cloud.lambda_event_param
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: dart
   trust: service
   tag: cloud-input
@@ -40,19 +42,7 @@
     kind: param
     target:
       name: event
-  match_examples:
-  - name: declared shape
-    code: |
-      import 'package:aws_lambda_dart_runtime/aws_lambda_dart_runtime.dart';
-      import 'package:aws_lambda_dart_runtime/aws_lambda_dart_runtime.dart';
-      import 'package:aws_lambda_dart_runtime/aws_lambda_dart_runtime.dart';
-      import 'package:aws_lambda_dart_runtime/aws_lambda_dart_runtime.dart';
-      import 'package:aws_lambda_dart_runtime/aws_lambda_dart_runtime.dart'; // aws_lambda_dart_runtime
-      void handle(String event) { var seen = event; }
-  description: "AWS Lambda Dart runtime handler(context, event)."
-
-  imports:
-  - aws_lambda_dart_runtime/aws_lambda_dart_runtime.dart
+  description: "Disabled - a bare `event` parameter in a file importing aws_lambda_dart_runtime does not prove it is the registered handler payload. Re-enable with callback-registration or exact runtime event-type evidence."
 - id: dart.cloud.lambda_context_param
   enabled: false
   disabled_reason:

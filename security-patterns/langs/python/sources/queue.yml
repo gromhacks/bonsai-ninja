@@ -1,6 +1,122 @@
-# Celery / queue param sources removed - they required a bare-regex
-# placeholder (kind: param + target.regex: ".*") that fired on every
-# function parameter in the workspace, not just @task / @shared_task
-# / @app.task handlers. Re-add once the adapter exposes
-# decorator-scoped param matching.
-[]
+# Python queue-worker entry parameters. Decorator attachment is compiler
+# evidence; broker/framework names remain rule data.
+- id: python.dramatiq.actor_param
+  enabled: true
+  language: python
+  trust: service
+  tag: queue-input
+  payload_types: [event, json, text, binary]
+  packages: [dramatiq]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+  constraints:
+  - enclosing_decorator_in: [actor]
+  match_examples:
+  - name: dramatiq actor message argument
+    code: |
+      import dramatiq
+      @dramatiq.actor
+      def process(payload):
+          return payload
+    expect_match_text: [payload]
+  - name: ordinary function parameter negative
+    code: |
+      import dramatiq
+      def process(payload):
+          return payload
+    expect_no_match: true
+  description: "Parameter of a Dramatiq @actor function - argument deserialized from a broker message."
+
+- id: python.rq.job_param
+  enabled: true
+  language: python
+  trust: service
+  tag: queue-input
+  payload_types: [event, json, text, binary]
+  packages: [rq]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+  constraints:
+  - enclosing_decorator_in: [job]
+  match_examples:
+  - name: rq job argument
+    code: |
+      from rq.decorators import job
+      @job("default")
+      def process(payload):
+          return payload
+    expect_match_text: [payload]
+  - name: ordinary function parameter negative
+    code: |
+      from rq.decorators import job
+      def process(payload):
+          return payload
+    expect_no_match: true
+  description: "Parameter of an RQ @job function - argument deserialized from a queued job."
+
+- id: python.huey.task_param
+  enabled: true
+  language: python
+  trust: service
+  tag: queue-input
+  payload_types: [event, json, text, binary]
+  packages: [huey]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+  constraints:
+  - enclosing_decorator_in: [task]
+  match_examples:
+  - name: huey task argument
+    code: |
+      from huey import RedisHuey
+      huey = RedisHuey("jobs")
+      @huey.task()
+      def process(payload):
+          return payload
+    expect_match_text: [payload]
+  - name: ordinary function parameter negative
+    code: |
+      from huey import RedisHuey
+      huey = RedisHuey("jobs")
+      def process(payload):
+          return payload
+    expect_no_match: true
+  description: "Parameter of a Huey @task function - argument deserialized from a queued task."
+
+- id: python.celery.shared_task_param
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: python
+  trust: service
+  tag: queue-input
+  packages: [celery]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+  constraints:
+  - enclosing_decorator_in: [shared_task]
+  description: "Disabled - Celery @shared_task may use bind=True, where parameter zero is the worker Task instance rather than message data. Enable when generic decorator keyword facts can exclude the bound receiver without guessing parameter names."
+
+- id: python.celery.app_task_param
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: python
+  trust: service
+  tag: queue-input
+  packages: [celery]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+  constraints:
+  - enclosing_decorator_in: [task]
+  description: "Disabled - Celery @app.task may use bind=True, where parameter zero is the worker Task instance rather than message data. Enable when generic decorator keyword facts can exclude the bound receiver without guessing parameter names."

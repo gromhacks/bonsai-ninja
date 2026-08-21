@@ -21,17 +21,6 @@ fn call_arg(span: Span, place: &str) -> bonsai_lang_api::CallArg {
 }
 
 #[test]
-fn compiler_segment_pair_reuses_the_outer_local_view() {
-    let workspace = IdgWorkspace::new();
-    let local = crate::segment::IdgSegment::new();
-    let missing = SegmentId(u32::MAX);
-    let resolved = with_idg_segment_pair(&workspace, missing, missing, Some(&local), |from, to| {
-        Some(std::ptr::eq(from, to))
-    });
-    assert_eq!(resolved, Some(true));
-}
-
-#[test]
 fn structural_boundary_index_groups_exact_callees_without_hash_buckets() {
     let caller = FuncId::new(10);
     let first_site = span(0, 20, 30);

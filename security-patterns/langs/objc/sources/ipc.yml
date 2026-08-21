@@ -1,6 +1,8 @@
 # Objective-C IPC / cross-app input sources.
 - id: objc.source.notification_userinfo
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: objc
   trust: ipc
   tag: ipc-input
@@ -13,10 +15,12 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; id notification; id result = notification.userInfo; }
-  description: "NSNotification.userInfo - IPC payload from -postNotification: can cross process boundaries via Darwin notifications."
+  description: "Disabled - a bare `userInfo` property does not establish an IPC boundary. Ordinary NSNotificationCenter notifications are process-local, while Darwin notifications do not carry a userInfo payload. APNS input is modeled by the selector-scoped remote source."
 
 - id: objc.source.pasteboard_string
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: objc
   trust: ipc
   tag: ipc-input
@@ -28,4 +32,4 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; [UIPasteboard generalPasteboard:input]; }
-  description: "UIPasteboard.generalPasteboard.string - clipboard contents are user-controlled and may originate from other apps."
+  description: "Disabled - +generalPasteboard returns the pasteboard object, not clipboard content. Typed string/data accessors are modeled by objc.source.uipasteboard_string."

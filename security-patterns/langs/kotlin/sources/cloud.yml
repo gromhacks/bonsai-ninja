@@ -1,100 +1,60 @@
 # Kotlin cloud-function entry points (AWS / GCP / Azure).
 - id: kotlin.source.aws_lambda_handler
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: kotlin
   trust: service
   tag: cloud-event
+  payload_types: [event, json, text, binary]
   packages: ["com.amazonaws:aws-lambda-java-core"]
+  imports: [com.amazonaws.services.lambda.runtime]
   match:
     kind: param
     target:
-      name: handleRequest
-  description: "Disabled - `handleRequest` is the handler method name; `kind: param` only matches parameter identifiers."
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      in_class: [RequestHandler, RequestStreamHandler]
+      in_method: [handleRequest]
+      decl_kind_in: [method]
+      param_index_in: [0]
+  match_examples:
+  - name: aws lambda kotlin handler input
+    code: |
+      import com.amazonaws.services.lambda.runtime.Context
+      import com.amazonaws.services.lambda.runtime.RequestHandler
+      class Function : RequestHandler<Order, String> {
+        override fun handleRequest(event: Order, context: Context): String = "ok"
+      }
+      class Order
+    expect_match_text: [event]
+  - name: same method outside handler negative
+    code: |
+      import com.amazonaws.services.lambda.runtime.RequestHandler
+      class Helper {
+        fun handleRequest(event: String) { }
+      }
+    expect_no_match: true
+  description: "First parameter of an AWS Lambda Kotlin RequestHandler or RequestStreamHandler handleRequest method - invocation event payload proven by interface, method, and position."
 
-- id: kotlin.source.gcloud_function_handle
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: kotlin
-  trust: service
-  tag: cloud-event
-  packages: [com.google.cloud.functions]
-  match:
-    kind: param
-    target:
-      name: service
-  description: "Disabled - `service` is the handler method name; `kind: param` only matches parameter identifiers."
-
-- id: kotlin.source.azure_http_trigger
+- id: kotlin.source.azure_blob_trigger
   enabled: true
   language: kotlin
   trust: service
   tag: cloud-event
-  category: http-input
-  payload_types: [json, text]
-  packages: ["com.microsoft.azure.functions"]
+  payload_types: [event, file, binary]
+  packages: [com.microsoft.azure.functions]
   match:
     kind: param
-    target:
-      annotation: HttpTrigger
+    target: { annotation: BlobTrigger }
   match_examples:
-  - name: azure http trigger request parameter
+  - name: azure blob trigger payload
     code: |
-      import com.microsoft.azure.functions.annotation.HttpTrigger
-      class App {
-        fun run(@HttpTrigger(name = "req") req: Request) {
-        }
+      import com.microsoft.azure.functions.annotation.BlobTrigger
+      class Function {
+        fun run(@BlobTrigger(name = "blob", path = "incoming/{name}") blob: ByteArray) { }
       }
-      class Request
-    expect_match_text: [req]
-  - name: unannotated http trigger name negative
+    expect_match_text: [blob]
+  - name: ordinary blob parameter negative
     code: |
-      import com.microsoft.azure.functions.annotation.HttpTrigger
-      class App {
-        fun run(HttpTrigger: String) {
-        }
-      }
+      import com.microsoft.azure.functions.annotation.BlobTrigger
+      class Function { fun helper(blob: ByteArray) { } }
     expect_no_match: true
-  description: "Azure Functions @HttpTrigger annotated parameter - HTTP request envelope supplied by the remote caller."
-
-- id: kotlin.source.azure_http_request_getbody
-  enabled: true
-  language: kotlin
-  trust: service
-  tag: cloud-event
-  category: http-input
-  payload_types: [json, text]
-  packages: ["com.microsoft.azure.functions"]
-  match:
-    kind: call
-    callee:
-      name: getBody
-  constraints:
-  - receiver_type_in:
-    - Request
-    - HttpRequestMessage
-    - com.microsoft.azure.functions.HttpRequestMessage
-  match_examples:
-  - name: azure http trigger request body
-    code: |
-      import com.microsoft.azure.functions.annotation.HttpTrigger
-      class App {
-        fun run(@HttpTrigger(name = "req") req: Request) {
-          req.getBody()
-        }
-      }
-      class Request { fun getBody(): String = "" }
-    expect_match_text: [req.getBody]
-  - name: unrelated getbody negative
-    code: |
-      import com.microsoft.azure.functions.annotation.HttpTrigger
-      class App {
-        fun run(req: Widget) {
-          req.getBody()
-        }
-      }
-      class Widget { fun getBody(): String = "" }
-    expect_no_match: true
-  description: "Azure Functions request getBody() - HTTP request body supplied by the remote caller."
+  description: "Azure Functions Kotlin @BlobTrigger parameter - object content supplied by the triggering storage blob."

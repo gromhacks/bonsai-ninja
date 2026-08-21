@@ -369,6 +369,43 @@ fn static_member_resolution_accepts_enum_receivers_in_same_module() {
 }
 
 #[test]
+fn module_tree_visibility_allows_descendants_but_not_siblings() {
+    let file = FileId::new(1);
+    let mut item = decl(file, DeclKind::Method, "run", &["crate_a", "owner"], 10);
+    item.visibility = Visibility::ModuleTree;
+
+    let child_module = ModulePath::from_segments(["crate_a", "owner", "child"]);
+    let sibling_module = ModulePath::from_segments(["crate_a", "sibling"]);
+    assert!(visibility_allows(
+        &item,
+        file,
+        &item.module_path,
+        &ResolveContext::new(FileId::new(2), &child_module),
+    ));
+    assert!(!visibility_allows(
+        &item,
+        file,
+        &item.module_path,
+        &ResolveContext::new(FileId::new(3), &sibling_module),
+    ));
+}
+
+#[test]
+fn exact_module_visibility_does_not_expand_to_child_packages() {
+    let file = FileId::new(1);
+    let mut item = decl(file, DeclKind::Method, "run", &["com", "example"], 10);
+    item.visibility = Visibility::Module;
+    let child_package = ModulePath::from_segments(["com", "example", "child"]);
+
+    assert!(!visibility_allows(
+        &item,
+        file,
+        &item.module_path,
+        &ResolveContext::new(FileId::new(2), &child_package),
+    ));
+}
+
+#[test]
 fn unqualified_class_resolution_accepts_wildcard_import_target_only() {
     let mut global = GlobalIndex::new();
     let imported_file = FileId::new(1);

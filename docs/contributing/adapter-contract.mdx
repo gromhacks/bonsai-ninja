@@ -45,6 +45,13 @@ fresh Tree-sitter lowering and a decoded compiler object must be identical.
 Object reuse is validated by relative path/module context, selected adapter,
 frontend ABI, and SHA-256 source content.
 
+Adapters must retain syntactic ownership even when the owner declaration is
+in another file. Rust, for example, records the `impl Type` receiver type on
+each method and workspace-qualifies `crate::`, `self::`, and `super::` paths;
+the shared resolver consumes those facts without a leaf-name fallback. Rust's
+unmodified and `pub(self)` items use `Visibility::ModuleTree`, while
+package-private languages keep the exact-module `Visibility::Module` fact.
+
 An adapter that owns multiple Tree-sitter grammar variants selects the exact
 pack with `LanguageAdapter::grammar_name_for_path`. TypeScript uses the
 `typescript` grammar for `.ts`/`.mts`/`.cts` and the `tsx` grammar for `.tsx`.

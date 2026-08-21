@@ -9,7 +9,10 @@
   match:
     kind: param
     target:
-      name: Event
+      regex: "^[A-Z_][A-Za-z0-9_]*$"
+      in_method: [handle]
+      param_index_in: [0]
+      param_count_in: [1, 2]
   match_examples:
   - name: declared shape
     code: |
@@ -23,7 +26,7 @@
       -module(example).
       -include_lib("erlang_aws_lambda/include/erlang_aws_lambda.hrl").
       -export([handle/1]).
-      handle(Context) ->
+      helper(Context) ->
         Context.
     expect_no_match: true
-  description: "AWS Lambda Erlang custom-runtime handler(Event, Context) - Event is caller-controlled."
+  description: "First parameter of an erlang_aws_lambda handle/1 or handle/2 callback - invocation event payload proven by function name, arity, and position."

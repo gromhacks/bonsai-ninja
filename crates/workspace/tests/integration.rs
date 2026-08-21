@@ -2,7 +2,9 @@
 
 use bonsai_lang_api::LanguageRegistry;
 use bonsai_lang_rust::RustAdapter;
-use bonsai_workspace::{Workspace, WorkspaceError, WorkspaceOpenOptions};
+use bonsai_workspace::{
+    CompilerLinkageProgress, IdgPersistenceProgress, Workspace, WorkspaceError, WorkspaceOpenOptions,
+};
 use std::sync::Arc;
 
 fn make_ws() -> Workspace {
@@ -215,4 +217,75 @@ fn ingest_dir_respects_bonsaiignore() {
     );
 
     std::fs::remove_dir_all(root).expect("remove temp workspace");
+}
+
+#[test]
+fn compiler_linkage_progress_counts_each_source_file_once() {
+    let root = tempfile::tempdir().expect("temp workspace");
+    std::fs::write(root.path().join("a.rs"), "fn a() { b(); }\n").expect("write a");
+    std::fs::write(root.path().join("b.rs"), "fn b() {}\n").expect("write b");
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(RustAdapter::new()));
+    let ws = Workspace::open_with_options(root.path(), registry, WorkspaceOpenOptions::parse_only())
+        .expect("open workspace");
+    let events = std::sync::Mutex::new(Vec::new());
+
+    ws.save_compiler_linkage_sidecar_with_progress(root.path(), |event| {
+        events.lock().expect("events lock").push(event);
+    })
+    .expect("save compiler linkage");
+    let events = events.into_inner().expect("events lock");
+
+    assert_eq!(
+        events.first(),
+        Some(&CompilerLinkageProgress::FilesStarted { files: 2 })
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, CompilerLinkageProgress::FileCompleted))
+            .count(),
+        2
+    );
+    assert!(matches!(
+        events.last(),
+        Some(CompilerLinkageProgress::Persisting { declarations }) if *declarations >= 2
+    ));
+    let _ = std::fs::remove_dir_all(bonsai_common::workspace_bonsai_dir(root.path()));
+}
+
+#[test]
+fn idg_persistence_progress_reports_exact_segments_then_finalization() {
+    let root = tempfile::tempdir().expect("temp workspace");
+    std::fs::write(root.path().join("a.rs"), "fn a() { b(); }\n").expect("write a");
+    std::fs::write(root.path().join("b.rs"), "fn b() {}\n").expect("write b");
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(RustAdapter::new()));
+    let ws = Workspace::open_with_options(root.path(), registry, WorkspaceOpenOptions::parse_only())
+        .expect("open workspace");
+    let events = std::cell::RefCell::new(Vec::new());
+
+    let segments = ws
+        .build_and_persist_idg_sidecar_with_progress(|event| events.borrow_mut().push(event))
+        .expect("persist IDG")
+        .expect("complete workspace IDG");
+    let events = events.into_inner();
+
+    assert_eq!(
+        events.first(),
+        Some(&IdgPersistenceProgress::TransferStarted { segments })
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, IdgPersistenceProgress::TransferSegmentCompleted))
+            .count(),
+        segments
+    );
+    assert!(events.contains(&IdgPersistenceProgress::AcceleratorStarted));
+    assert_eq!(
+        events.last(),
+        Some(&IdgPersistenceProgress::Persisting { segments })
+    );
+    let _ = std::fs::remove_dir_all(bonsai_common::workspace_bonsai_dir(root.path()));
 }

@@ -45,8 +45,17 @@ disable ANSI styling while keeping progress visible.
 `index --semantic` runs its process-isolated workers sequentially and gives
 the active worker one terminal line. It reports validation plus five numbered
 phases: compiler objects, declaration linkage, callgraph, retrieval, and the
-IDG query accelerator. Compiler-object and callgraph phases show completed
-file counters (`N/total`) and an ETA; the remaining phases show live spinners.
+dataflow graph plus its IDG query accelerator. Compiler-object,
+declaration-linkage, callgraph,
+retrieval, and IDG-transfer work show exact completed/total counters, percent,
+throughput, ETA, and elapsed time. The IDG worker then names its accelerator,
+persistence, and manifest subphases. Operations without an honest semantic
+unit count show elapsed time only. Monotone worklists such as a
+source-reachable security callgraph add an exact completed-unit counter as
+compiler files or persisted relation partitions finish, but still omit
+percentage and ETA because the final total is not known up front. The CLI does
+not invent percentages for compression, atomic publication, or other
+indivisible work.
 Plain `index` reports compiler-cache maintenance, workspace ingest, and
 Tree-sitter object compilation. Progress is intentionally absent when stderr
 is captured or redirected because that is a non-interactive stream; use a
@@ -65,7 +74,9 @@ output stays clean while debug runs can show the selected file/rule
 scope, source/sink match counts, taint-graph cache hit/miss state, and
 write-through sidecar persistence. `--no-progress` and `NO_PROGRESS=1`
 mute these notes as well as bars. SDK callers receive the same structured
-events through the progress callback. Taint-graph persistence is enabled
+events through the progress callback. Cold scoped-IDG construction reports
+its exact selected segment count before it transitions to persistence.
+Taint-graph persistence is enabled
 by default for repeated-run reuse; set `BONSAI_TAINT_GRAPH_PERSIST=0` to
 opt out of the sidecar write-through.
 
@@ -123,6 +134,13 @@ from canonical syntax and graph facts. Large/scoped query workspaces fall back
 to canonical syntax-backed collection when the sidecar is absent or stale
 instead of writing partial retrieval state into the complete workspace cache. Use `--semantic` only
 when a workflow deliberately wants to front-load the full semantic sidecar cost.
+
+On a warm default run, `index` validates the compiler generation from its
+root-only source fingerprint ledger and reads workspace context from file
+metadata. It does not reopen every source body merely to print cache counters.
+An absent or stale generation takes the exact cold path: source files are
+ingested, lowered through their Tree-sitter adapters, and republished as one
+complete immutable compiler-object generation.
 
 Semantic prewarm uses ordered process phases: compiler objects, callgraph,
 retrieval, linkage, then IDG/manifest. The first phase lowers each immutable
@@ -319,7 +337,7 @@ redo work.
 | `--exclude-tests` | false | Drop findings whose source, sink, or proof path is in a workspace-relative test path. |
 | `--show-sanitized` | false | Include sanitizer-cleared source-to-sink paths for audit and rulepack debugging. |
 | `--include-pattern-only` | false | Include exact source-independent local findings in text/JSON. SARIF enables these automatically. |
-| `--context <BUDGET>` | Profile default (`16k` in production) | Token budget. |
+| `--context <BUDGET>` | Profile default (`16k` in production) | Token budget. A taint flow remains one continuous numbered block when it fits; only a genuinely oversized flow is divided into explicit page parts. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Emit every finding. |
 | `--summary` | false | Emit only aggregate finding counts. Text shows compact tables; JSON emits the summary object without paged rows. |

@@ -30,6 +30,12 @@ fn ordered_transfer_window_restores_canonical_segment_publication() {
         can_overlap
     };
 
+    let completed_segments = std::cell::Cell::new(0_usize);
+    let report_progress = |event| {
+        if event == PersistenceBuildProgress::TransferSegmentCompleted {
+            completed_segments.set(completed_segments.get() + 1);
+        }
+    };
     let published = std::thread::scope(|scope| {
         let worker_count = usize::from(can_overlap) + 1;
         let (work_tx, work_rx) = std::sync::mpsc::sync_channel(worker_count);
@@ -52,16 +58,24 @@ fn ordered_transfer_window_restores_canonical_segment_publication() {
             }
         });
 
-        OrderedTransferBatches::new(work_tx, result_rx, &source_bytes, &permits, worker_count)
-            .flatten()
-            .map(|(segment, _)| segment)
-            .collect::<Vec<_>>()
+        OrderedTransferBatches::new(
+            work_tx,
+            result_rx,
+            &source_bytes,
+            &permits,
+            worker_count,
+            Some(&report_progress),
+        )
+        .flatten()
+        .map(|(segment, _)| segment)
+        .collect::<Vec<_>>()
     });
 
     assert_eq!(
         published,
         vec![SegmentId(0), SegmentId(1), SegmentId(2), SegmentId(3)]
     );
+    assert_eq!(completed_segments.get(), published.len());
 }
 
 #[test]

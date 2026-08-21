@@ -1,4 +1,110 @@
 # TypeScript remote (HTTP / WS / GraphQL / RPC) input sources.
+- id: typescript.source.aws_lambda_apigw_event
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  payload_types: [event, json, query, path, header]
+  packages: ["aws-lambda", "@types/aws-lambda"]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*$"
+      param_type_in: [APIGatewayEvent, APIGatewayProxyEvent, APIGatewayProxyEventV2]
+  match_examples:
+  - name: typed api gateway event parameter
+    code: |
+      import type { APIGatewayProxyEvent } from "aws-lambda";
+      export async function handler(request: APIGatewayProxyEvent) {
+        return request.body;
+      }
+    expect_match_text: [request]
+  - name: unrelated event type negative
+    code: |
+      import type { APIGatewayProxyEvent } from "aws-lambda";
+      interface LocalEvent { body: string }
+      export async function handler(request: LocalEvent) {
+        return request.body;
+      }
+    expect_no_match: true
+  description: "AWS Lambda API Gateway event parameter - remote request object matched from its declared TypeScript event type rather than the variable name."
+
+- id: typescript.source.aws_lambda_event_body
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event, json]
+  packages: ["aws-lambda"]
+  match:
+    kind: read
+    target: { attribute: [event, body] }
+  match_examples:
+  - name: api gateway event body
+    code: |
+      const _u = require("aws-lambda");
+      function demo() { return event.body; }
+    expect_match_text: [event.body]
+  description: "AWS Lambda API Gateway event.body - remote HTTP request payload."
+
+- id: typescript.source.aws_lambda_event_headers
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event, header]
+  packages: ["aws-lambda"]
+  match:
+    kind: read
+    target: { attribute: [event, headers] }
+  match_examples:
+  - name: api gateway event headers
+    code: |
+      const _u = require("aws-lambda");
+      function demo() { return event.headers; }
+    expect_match_text: [event.headers]
+  description: "AWS Lambda API Gateway event.headers - remote request headers."
+
+- id: typescript.source.aws_lambda_event_query
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event, query]
+  packages: ["aws-lambda"]
+  match:
+    kind: read
+    target: { attribute: [event, queryStringParameters] }
+  match_examples:
+  - name: api gateway event query
+    code: |
+      const _u = require("aws-lambda");
+      function demo() { return event.queryStringParameters; }
+    expect_match_text: [event.queryStringParameters]
+  description: "AWS Lambda API Gateway event.queryStringParameters - remote query input."
+
+- id: typescript.source.aws_lambda_event_path
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event, path]
+  packages: ["aws-lambda"]
+  match:
+    kind: read
+    target: { attribute: [event, pathParameters] }
+  match_examples:
+  - name: api gateway event path
+    code: |
+      const _u = require("aws-lambda");
+      function demo() { return event.pathParameters; }
+    expect_match_text: [event.pathParameters]
+  description: "AWS Lambda API Gateway event.pathParameters - remote route parameters."
+
 - id: typescript.source.express_req_body
   enabled: true
   language: typescript
@@ -747,6 +853,7 @@
     target:
       name: args
       param_index_in: [1]
+      param_count_in: [2, 3, 4]
   match_examples:
   - name: graphql resolver args param
     code: |
@@ -1763,6 +1870,7 @@
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.[A-Za-z_$][A-Za-z0-9_$]*$"
       base_name_in: [args]
       base_param_index_in: [1]
+      param_count_in: [2, 3, 4]
   match_examples:
   - name: graphql args input
     code: |
@@ -1813,6 +1921,7 @@
     target:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.context\\.args(\\.[A-Za-z_$][A-Za-z0-9_$]*)?$"
       base_param_index_in: [3]
+      param_count_in: [4]
   match_examples:
   - name: graphql info context args
     code: |

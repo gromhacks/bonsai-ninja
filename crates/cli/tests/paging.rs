@@ -1087,8 +1087,8 @@ fn paged_footer_reports_command_specific_totals() {
     };
     assert!(
         out.lines()
-            .any(|line| line.contains("total") && line.contains("tainted flow")),
-        "security taint-analysis footer must report total tainted-flow section count, got:\n{out}"
+            .any(|line| line.contains("total") && line.contains("taint flow")),
+        "security taint-analysis footer must report total semantic flow count, got:\n{out}"
     );
 }
 
@@ -1518,12 +1518,7 @@ fn security_replays_requested_page_and_renders_page_turn_on_demand() {
     if !first.contains("page 1 of") || first.contains("page 1 of 1") {
         return;
     }
-    let cache_file = std::fs::read_dir(&cache_dir)
-        .expect("page cache dir should exist")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .expect("page cache file should be written");
+    let cache_file = rendered_page_cache_file(&cache_dir);
     let before = std::fs::read(&cache_file).expect("cache bytes before replay");
     let Some(replayed) = run(&["security", ws_str, "taint-analysis", "--context", "1k"]) else {
         return;
@@ -1566,6 +1561,25 @@ fn security_replays_requested_page_and_renders_page_turn_on_demand() {
     );
 }
 
+fn rendered_page_cache_file(cache_dir: &std::path::Path) -> std::path::PathBuf {
+    std::fs::read_dir(cache_dir)
+        .expect("page cache dir should exist")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .find(|path| {
+            std::fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .is_some_and(|value| {
+                    value.get("pages").is_some()
+                        && value.get("normalized_argv_hash").is_some()
+                        && value.get("kind").is_none()
+                })
+        })
+        .expect("rendered page cache file should be written")
+}
+
 fn rendered_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> Option<bool> {
     let cache_dir = bonsai_common::workspace_bonsai_dir(ws).join("page-cache.v5");
     let _ = std::fs::remove_dir_all(&cache_dir);
@@ -1573,12 +1587,7 @@ fn rendered_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> Option
     if !first.contains("page 1 of") || first.contains("page 1 of 1") {
         return Some(false);
     }
-    let cache_file = std::fs::read_dir(&cache_dir)
-        .expect("page cache dir should exist")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .expect("page cache file should be written");
+    let cache_file = rendered_page_cache_file(&cache_dir);
     let before = std::fs::read(&cache_file).expect("cache bytes before replay");
     let replayed = run(args)?;
     assert_eq!(
@@ -1627,12 +1636,7 @@ fn rendered_json_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> O
     if total_pages <= 1 {
         return Some(false);
     }
-    let cache_file = std::fs::read_dir(&cache_dir)
-        .expect("page cache dir should exist")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .expect("page cache file should be written");
+    let cache_file = rendered_page_cache_file(&cache_dir);
     let before = std::fs::read(&cache_file).expect("cache bytes before JSON replay");
     let replayed = run(args)?;
     assert_eq!(
@@ -1689,12 +1693,7 @@ fn corrupt_rendered_page_cache_is_a_miss_not_a_command_failure() {
     if !first.contains("page 1 of") || first.contains("page 1 of 1") {
         return;
     }
-    let cache_file = std::fs::read_dir(&cache_dir)
-        .expect("page cache dir should exist")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .expect("page cache file should be written");
+    let cache_file = rendered_page_cache_file(&cache_dir);
     std::fs::write(&cache_file, b"{not valid json").expect("corrupt page cache file");
 
     let Some(second) = run(&["calls", ws_str, "--context", "1k", "--page", "2"]) else {

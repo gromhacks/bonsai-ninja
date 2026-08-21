@@ -1,6 +1,8 @@
 # Go cloud-event / serverless handler sources.
 - id: go.aws.lambda_event
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: go
   trust: service
   tag: event-input
@@ -12,20 +14,7 @@
     kind: param
     target:
       name: request
-  match_examples:
-  - name: aws lambda request param
-    code: |
-      package main
-      import "github.com/aws/aws-lambda-go/lambda"
-      func handler(request map[string]any) error {
-        _ = request
-        return nil
-      }
-      func main() {
-        lambda.Start(handler)
-      }
-    expect_match_text: [request]
-  description: "AWS Lambda handler - `request` / `event` param is the attacker-supplied event body."
+  description: "Disabled - `request` plus a workspace Lambda dependency does not prove that the function is passed to lambda.Start. Re-enable when callback-registration facts bind the handler parameter to the runtime call."
 
 - id: go.aws.lambda_event_alt
   enabled: false

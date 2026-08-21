@@ -2483,6 +2483,45 @@ where
     )
 }
 
+/// Exact semantic work units emitted by the streamed persistence builder.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PersistenceBuildProgress {
+    /// The exact transfer schedule has been compiled.
+    TransferStarted {
+        /// Number of canonical source-file segments to lower and stitch.
+        segments: usize,
+    },
+    /// One canonical segment has been lowered and published to the stitcher.
+    TransferSegmentCompleted,
+}
+
+/// Progress-reporting variant of
+/// [`build_for_persistence_streaming_with_callgraph_relation_and_file_semantics_and_options`].
+/// The callback observes canonical segment publication and cannot change
+/// scheduling, ordering, or graph contents.
+pub fn build_for_persistence_streaming_with_callgraph_relation_and_file_semantics_and_options_with_progress<
+    S,
+    D,
+    F,
+>(
+    global: &GlobalIndex,
+    call_graph: &dyn CallGraphRelation,
+    semantics: S,
+    transfer_options: &TransferOptions,
+    sidecar_path: &std::path::Path,
+    body_for_file: D,
+    on_progress: F,
+) -> crate::IdgResult<IdgWorkspace>
+where
+    S: IdgFileSemanticsProvider,
+    D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
+    F: Fn(PersistenceBuildProgress),
+{
+    let mut scope = IdgBuildScope::sidecar(Some(&body_for_file), Some(sidecar_path));
+    scope.progress = Some(&on_progress);
+    build_with_file_info_and_options_scoped(global, call_graph, semantics, transfer_options, scope)
+}
+
 /// Build with per-file aliases, language ids, transfer options, and
 /// a caller-provided file scope. Security production scans use this
 /// to keep excluded files out of the semantic graph before transfer
@@ -2702,7 +2741,43 @@ where
     )
 }
 
+/// Progress-reporting variant of the exact file/function-scoped persistence
+/// builder used by broad security analysis.
+#[allow(clippy::too_many_arguments)]
+pub fn build_for_persistence_streaming_with_file_semantics_and_options_for_files_and_funcs_with_progress<
+    S,
+    D,
+    F,
+>(
+    global: &GlobalIndex,
+    call_graph: &ResolvedCallGraph,
+    semantics: S,
+    transfer_options: &TransferOptions,
+    included_files: &[FileId],
+    included_funcs: &[FuncId],
+    sidecar_path: &std::path::Path,
+    body_for_file: D,
+    on_progress: F,
+) -> crate::IdgResult<IdgWorkspace>
+where
+    S: IdgFileSemanticsProvider,
+    D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
+    F: Fn(PersistenceBuildProgress),
+{
+    let included_files: AHashSet<FileId> = included_files.iter().copied().collect();
+    let included_funcs: AHashSet<FuncId> = included_funcs.iter().copied().collect();
+    let mut scope = IdgBuildScope::sidecar_scoped(
+        Some(&included_files),
+        Some(&included_funcs),
+        Some(&body_for_file),
+        Some(sidecar_path),
+    );
+    scope.progress = Some(&on_progress);
+    build_with_file_info_and_options_scoped(global, call_graph, semantics, transfer_options, scope)
+}
+
 type FileBodyProvider<'a> = dyn Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync + 'a;
+type BuildProgressProvider<'a> = dyn Fn(PersistenceBuildProgress) + 'a;
 
 struct IdgBuildScope<'a> {
     included_files: Option<&'a AHashSet<FileId>>,
@@ -2710,6 +2785,7 @@ struct IdgBuildScope<'a> {
     reverse_lookup_retention: ReverseLookupRetention,
     body_for_file: Option<&'a FileBodyProvider<'a>>,
     spool_path: Option<&'a std::path::Path>,
+    progress: Option<&'a BuildProgressProvider<'a>>,
 }
 
 impl<'a> IdgBuildScope<'a> {
@@ -2724,6 +2800,7 @@ impl<'a> IdgBuildScope<'a> {
             reverse_lookup_retention: ReverseLookupRetention::Queryable,
             body_for_file,
             spool_path: None,
+            progress: None,
         }
     }
 
@@ -2746,6 +2823,7 @@ impl<'a> IdgBuildScope<'a> {
             reverse_lookup_retention: ReverseLookupRetention::SidecarOnly,
             body_for_file,
             spool_path,
+            progress: None,
         }
     }
 }
@@ -2770,6 +2848,7 @@ where
         reverse_lookup_retention,
         body_for_file,
         spool_path,
+        progress,
     } = scope;
     let total_started = Instant::now();
     let phase_started = Instant::now();
@@ -2982,6 +3061,11 @@ where
     let phase_started = Instant::now();
     let transfer_inputs =
         transfer_inputs_by_segment(global, &maps.func_to_seg, included_files, included_funcs);
+    if let Some(progress) = progress {
+        progress(PersistenceBuildProgress::TransferStarted {
+            segments: transfer_inputs.len(),
+        });
+    }
     let function_count = transfer_inputs.iter().map(|(_, _, funcs)| funcs.len()).sum();
     let aggregate_layouts = unambiguous_aggregate_layouts(global);
     let transfer_source_bytes =
@@ -3049,6 +3133,7 @@ where
             &transfer_source_bytes,
             &memory_permits,
             transfer_workers,
+            progress,
         );
         if stream_sidecar_segments {
             stitch_idg_from_spooled_segment_batches(
@@ -4844,6 +4929,7 @@ struct OrderedTransferBatches<'a> {
     worker_count: usize,
     next_to_schedule: usize,
     next_to_yield: usize,
+    progress: Option<&'a BuildProgressProvider<'a>>,
 }
 
 impl<'a> OrderedTransferBatches<'a> {
@@ -4853,6 +4939,7 @@ impl<'a> OrderedTransferBatches<'a> {
         source_bytes: &'a [u64],
         memory_permits: &'a bonsai_common::SyntaxMemoryPermitPool,
         worker_count: usize,
+        progress: Option<&'a BuildProgressProvider<'a>>,
     ) -> Self {
         Self {
             work_tx,
@@ -4863,6 +4950,7 @@ impl<'a> OrderedTransferBatches<'a> {
             worker_count: worker_count.max(1),
             next_to_schedule: 0,
             next_to_yield: 0,
+            progress,
         }
     }
 
@@ -4925,6 +5013,9 @@ impl<'a> Iterator for OrderedTransferBatches<'a> {
             Ok(output) => output,
             Err(payload) => resume_unwind(payload),
         };
+        if let Some(progress) = self.progress {
+            progress(PersistenceBuildProgress::TransferSegmentCompleted);
+        }
         Some(AdmittedTransferBatch {
             output: Some(output),
             _permit: completed.permit,

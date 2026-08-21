@@ -15,16 +15,18 @@
     kind: param
     target:
       name: params
+      param_index_in: [1]
+      param_count_in: [2]
   match_examples:
   - name: declared shape
     code: |
       alias Phoenix
       defmodule App do
-        def handle(params) do
+        def show(conn, params) do
           params
         end
       end
-  description: "Phoenix.Controller action `params` - second arg of every controller `action(conn, params)`; carries merged route/query/body params. Bare-name match: also fires on any other function with a `params` parameter."
+  description: "Second parameter named params on a Phoenix controller action(conn, params) - merged route, query, and body input."
 
   imports:
   - Phoenix
@@ -55,7 +57,7 @@
   match:
     kind: read
     target:
-      name: params
+      attribute: [conn, params]
   match_examples:
   - name: plug conn params read
     code: |
@@ -113,7 +115,7 @@
   match:
     kind: read
     target:
-      name: query_params
+      attribute: [conn, query_params]
   match_examples:
   - name: plug conn query params read
     code: |
@@ -140,7 +142,7 @@
   match:
     kind: read
     target:
-      name: body_params
+      attribute: [conn, body_params]
   match_examples:
   - name: plug conn body params read
     code: |
@@ -167,7 +169,7 @@
   match:
     kind: read
     target:
-      name: cookies
+      attribute: [conn, cookies]
   match_examples:
   - name: plug conn cookies read
     code: |
@@ -194,7 +196,7 @@
   match:
     kind: read
     target:
-      name: req_headers
+      attribute: [conn, req_headers]
   match_examples:
   - name: plug conn req headers read
     code: |
@@ -426,17 +428,20 @@
   match:
     kind: param
     target:
-      name: payload
+      regex: "^[a-z_][A-Za-z0-9_]*$"
+      in_method: [handle_in]
+      param_index_in: [1]
+      param_count_in: [3]
   match_examples:
   - name: declared shape
     code: |
       alias Phoenix
       defmodule App do
-        def handle(payload) do
+        def handle_in(event, payload, socket) do
           payload
         end
       end
-  description: "Phoenix.Channel handle_in/3 `payload` - client-sent message body over a websocket/long-poll transport. Bare-name match: also fires on any other function with a `payload` parameter; treat findings on non-channel modules as audit hints."
+  description: "Second parameter of Phoenix.Channel handle_in/3 - client message payload proven by callback name, arity, and position."
 
   imports:
   - Phoenix

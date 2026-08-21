@@ -3,6 +3,7 @@
 [![CI](https://github.com/gromhacks/bonsai-ninja/actions/workflows/ci.yml/badge.svg)](https://github.com/gromhacks/bonsai-ninja/actions/workflows/ci.yml)
 [![Hardening checks](https://github.com/gromhacks/bonsai-ninja/actions/workflows/hardening-checks.yml/badge.svg)](https://github.com/gromhacks/bonsai-ninja/actions/workflows/hardening-checks.yml)
 [![Rulepack audit](https://github.com/gromhacks/bonsai-ninja/actions/workflows/pack-audit.yml/badge.svg)](https://github.com/gromhacks/bonsai-ninja/actions/workflows/pack-audit.yml)
+[![crates.io](https://img.shields.io/crates/v/bonsai-ninja.svg)](https://crates.io/crates/bonsai-ninja)
 
 > **Project maturity:** bonsai-ninja is an ambitious early-stage project.
 > Compiler-backed analysis and security modeling across 20 languages leave a
@@ -83,13 +84,15 @@ separate the first explicit semantic index from commands run after it exists:
 
 | Cache state and operation | Measured time | Result |
 |---|---:|---|
-| Empty cache: `index --semantic` | 10m 58.8s | 7.11 GB validated reusable cache; 3.53 GiB maximum RSS and zero swaps under the 3 GiB scheduling profile |
-| Empty analysis cache: complete production taint analysis | 32.3s | Requested analysis completed without requiring the whole semantic prewarm |
+| Empty cache: default structural `index` | 1m 04.6s | All 30,055 sources parsed and lowered; the instrumented optimization run used 1.24 GB maximum RSS and zero swaps |
+| After structural index: default `index` | 3.9s | Exact generation validated root-only; the instrumented optimization run used 77 MB maximum RSS and reopened no source bodies |
+| Empty cache: `index --semantic` | 7m 22.8s | Complete validated reusable compiler, linkage, callgraph, retrieval, and IDG generation under the 3 GiB scheduling profile |
+| Empty analysis cache: complete production taint analysis | 14.3s | Requested analysis completed without requiring the whole semantic prewarm |
 | After index: semantic generation reopen | 2.6s | Existing compiler objects, linkage, callgraph, retrieval, and IDG validated and reused |
 | After index: search | 4.1s | Exact requested matches |
-| After index: call lookup | 3.9s | Compiler-resolved call rows |
-| After index: default inspect | 7.2s | Structural evidence for the requested target |
-| After index: complete production taint analysis | 10.9s | Requested fixed point completed without a semantic cap |
+| After index: call lookup | 4.0s | Compiler-resolved call rows |
+| After index: default inspect | 7.4s | Structural evidence for the requested target |
+| After index: complete production taint analysis | 10.8s | Requested fixed point completed without a semantic cap |
 | After index: default native export | 4m 05s | 4.54 GB compiler, callgraph, flow, and compiled-IDG facts |
 | After index: `--full-propagations` export | 7m 36s | 6.42 GB with the same exact propagation relation materialized as individual rows |
 
@@ -97,7 +100,9 @@ The measured cold operation is specifically `index --semantic`, which users
 request when they want every reusable semantic sidecar prepared up front.
 Ordinary `index` is the lighter syntax/declaration warm-up and does not force a
 whole-workspace callgraph or IDG build; ordinary commands can also compute
-their requested facts on demand.
+their requested facts on demand. The structural rows use a separate empty
+cache on the same 30,055-source checkout; warm validation checks the exact
+source fingerprint ledger without reopening every source body.
 
 The cold row is an intentional one-time whole-workspace prewarm, not normal
 command startup. The 3 GiB setting schedules semantic workers rather than
@@ -164,6 +169,9 @@ Install the published Rust package from crates.io:
 cargo install bonsai-ninja --locked
 bonsai-ninja --version
 ```
+
+Cargo installs the newest published stable release. Use `--version <VERSION>`
+when a deployment needs to pin an exact bonsai-ninja release.
 
 To replace an older Cargo-installed release with the current one:
 

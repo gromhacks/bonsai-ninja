@@ -8,17 +8,20 @@
   match:
     kind: param
     target:
-      name: message
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [RemoteMessage]
   match_examples:
-  - name: declared shape
+  - name: firebase remote message parameter
     code: |
       import 'package:firebase_messaging/firebase_messaging.dart';
+      void handle(RemoteMessage message) { print(message.data); }
+    expect_match_text: [message]
+  - name: same name wrong type negative
+    code: |
       import 'package:firebase_messaging/firebase_messaging.dart';
-      import 'package:firebase_messaging/firebase_messaging.dart';
-      import 'package:firebase_messaging/firebase_messaging.dart';
-      import 'package:firebase_messaging/firebase_messaging.dart'; // firebase_messaging
-      void handle(String message) { var seen = message; }
-  description: "FirebaseMessaging.onMessage handler message parameter."
+      void handle(String message) { print(message); }
+    expect_no_match: true
+  description: "Firebase Messaging RemoteMessage callback parameter - push payload proven by its declared runtime type."
 
   imports:
   - firebase_messaging/firebase_messaging.dart

@@ -6,24 +6,28 @@
   tag: event-input
   payload_types: [event]
   frameworks: [alpakka-kafka]
-  packages: ["com.typesafe.akka.alpakka-kafka"]
+  packages: ["com.typesafe.akka:akka-stream-kafka", akka.kafka, org.apache.kafka]
   match:
     kind: param
     target:
-      name: record
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [ConsumerRecord, org.apache.kafka.clients.consumer.ConsumerRecord]
   match_examples:
-  - name: generated shape example
+  - name: alpakka kafka consumer record
     code: |
-      import com.typesafe.akka.alpakkakafka._
+      import akka.kafka._
+      import org.apache.kafka.clients.consumer.ConsumerRecord
       object App {
-        def handle(record: String): Unit = {
-        }
+        def handle(record: ConsumerRecord[String, String]): Unit = ()
       }
-  description: "Alpakka Kafka ConsumerRecord - attacker-controlled message payload."
-
-  imports:
-  - com
-  - com.typesafe.akka.alpakkakafka
+    expect_match_text: [record]
+  - name: same name wrong type negative
+    code: |
+      import akka.kafka._
+      object App { def handle(record: String): Unit = () }
+    expect_no_match: true
+  imports: [akka.kafka, org.apache.kafka]
+  description: "Alpakka Kafka ConsumerRecord parameter - broker message proven by its declared Kafka record type."
 - id: scala.queue.akka_amqp_message
   enabled: true
   language: scala
@@ -31,21 +35,33 @@
   tag: event-input
   payload_types: [event]
   frameworks: [akka-amqp]
+  packages: ["com.lightbend.akka:akka-stream-alpakka-amqp", akka.stream.alpakka.amqp]
   match:
     kind: param
     target:
-      name: delivery
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [ReadResult, CommittableReadResult]
   match_examples:
-  - name: generated shape example
+  - name: alpakka amqp read result
     code: |
+      import akka.stream.alpakka.amqp._
       object App {
-        def handle(delivery: String): Unit = {
-        }
+        def handle(delivery: ReadResult): Unit = ()
       }
-  description: "Akka / RabbitMQ delivery message param."
+    expect_match_text: [delivery]
+  - name: same name wrong type negative
+    code: |
+      import akka.stream.alpakka.amqp._
+      object App { def handle(delivery: String): Unit = () }
+    expect_no_match: true
+  imports: [akka.stream.alpakka.amqp]
+  description: "Alpakka AMQP ReadResult parameter - RabbitMQ delivery proven by its declared stream result type."
 
 - id: scala.queue.aws_sqs_message
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: scala.aws.lambda_event
   language: scala
   trust: service
   tag: event-input
@@ -55,11 +71,4 @@
     kind: param
     target:
       name: sqsEvent
-  match_examples:
-  - name: generated shape example
-    code: |
-      object App {
-        def handle(sqsEvent: String): Unit = {
-        }
-      }
-  description: "AWS Lambda SQSEvent trigger parameter."
+  description: "Subsumed by scala.aws.lambda_event, which matches the first RequestHandler input regardless of its concrete AWS event type or variable name."

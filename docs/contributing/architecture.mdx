@@ -186,6 +186,21 @@ and validates its key index, and generation metadata is assembled by the
 canonical file ordinal before publication. Do not reintroduce batch barriers
 or an in-memory canonical reorder buffer here.
 
+Tree-to-fact enrichment resolves an existing byte span with Tree-sitter's
+range-directed descendant lookup and inspects only its ancestor chain for
+same-span wrappers. Rewalking the complete CST for every emitted flow or
+binding fact is quadratic frontend behavior and is forbidden. The optimized
+lookup preserves the exact expected-kind, exact-span, and smallest-container
+ordering of the reference tree walk; it changes lookup cost, not syntax
+evidence.
+
+A warm default `index` validates the compiler generation against the exact
+root-only source fingerprint ledger before opening any source-backed
+workspace. Its context summary comes from metadata-only source discovery. A
+cache miss still opens the complete immutable source snapshot and rebuilds all
+objects; warm validation must never become permission to accept partial or
+stale coverage.
+
 Declaration linkage headers also retain exact direct-call receiver-field
 initializer facts. An adapter proves only that construction executes an
 assignment such as `self.client = lower()` and records the parsed call shape;
@@ -199,6 +214,14 @@ Type and receiver identities are exact, case-sensitive compiler facts.
 Identifier capitalization is never promoted into type evidence. A language
 adapter may use case only when its grammar defines case semantically (for
 example Go export visibility or Erlang variable syntax).
+
+Ownership does not stop at file boundaries. An adapter records the enclosing
+type even when a language permits implementations to be split across files or
+modules. Rust methods retain their AST `impl Type` receiver fact and normalize
+rooted crate/self/super paths into the workspace module identity; default Rust
+privacy is a lexical `ModuleTree`, distinct from Java/Go exact-package
+`Module`. Shared callgraph and IDG construction consume those typed facts and
+never substitute a same-spelled workspace method.
 
 The same contract applies to values. Each adapter uses one expression-value
 classifier for assignments, returns, and complete call arguments; argument
@@ -564,11 +587,12 @@ callee summary grows. Recursive and mutually recursive components therefore
 reach their least fixed point without a depth, iteration, or graph-size cap.
 The bounded page cache changes I/O locality only: evicted pages are reread from
 the complete spool, never omitted. The contextual query runtime reuses the
-outer decoded segment for same-segment receiver-state projection and the
-numeric address pages for cross-segment projection; it must not reopen and
-MessagePack-decode a segment once per projected edge. It stores matched call
-and return boundaries in sorted sparse source rows and does not retain a
-second workspace-sized endpoint relation.
+outer decoded segment for same-segment receiver-state projection. It groups
+cross-segment projected edges by the exact `(from_segment, to_segment)` pair
+and opens each pair once; it must not reopen and MessagePack-decode both
+segments once per projected edge. It stores matched call and return boundaries
+in sorted sparse source rows and does not retain a second workspace-sized
+endpoint relation.
 
 Symbolic field flow is compiled into numeric access-path facts and algebraic
 transforms emitted from the adapter-lowered AST. Query setup streams the

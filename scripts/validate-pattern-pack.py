@@ -4,7 +4,7 @@
 The validator performs:
 
 * `pack --validate` (schema + structural rule checks from bonsai-ninja),
-* duplicate/collision audit via `pack_audit.py --duplicates`,
+* strict YAML-key and duplicate/collision audit via `pack_audit.py --duplicates`,
 * match-example presence audit via `rule_example_coverage.py`,
 * match-example collision audit via `audit_match_example_collisions.py`.
 

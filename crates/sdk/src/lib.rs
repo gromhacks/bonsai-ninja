@@ -85,6 +85,7 @@ pub use bonsai_inspect::{
     matching_decls, matching_func_ids, name_token_match, CallEdgeResolver, ChainCache, FactKindFilter,
     FilterHit, InspectFilters, Matcher, PrecisionFilter, TaintFlowIdentityStep,
 };
+pub use bonsai_retrieval::RetrievalBuildProgress;
 pub use bonsai_security::{
     build_flow_bodies, drain_runtime_disabled_rules, filter_rules_to_workspace_languages, load_rulepack,
     load_workspace_local_rules, parse_severity, rule_family, security_match_rows, select_rules,
@@ -206,7 +207,9 @@ fn string_vec(items: &[&str]) -> Vec<String> {
 /// sidecar/cache checks emitted during open. Earlier the SDK had a
 /// private copy plus a hand-rolled prewarm pipeline; both have been
 /// collapsed onto the workspace's canonical implementation.
-pub use bonsai_workspace::{WorkspaceCacheStatus, WorkspaceOpenEvent};
+pub use bonsai_workspace::{
+    CompilerLinkageProgress, IdgPersistenceProgress, WorkspaceCacheStatus, WorkspaceOpenEvent,
+};
 
 /// SDK configuration and workspace factory.
 #[derive(Clone)]
@@ -1980,6 +1983,32 @@ impl WorkspaceCache {
         Ok(stats)
     }
 
+    /// Return the exact number of current compiler objects without opening a
+    /// source-backed [`Project`].
+    ///
+    /// This is the warm structural-index planning path. It validates the
+    /// generation against the current source fingerprint ledger, but leaves
+    /// source contents and object payloads unopened. `None` means the caller
+    /// must rebuild; it never means that any source file may be skipped.
+    pub fn current_compiler_object_count(&self) -> Result<Option<usize>> {
+        if !bonsai_workspace::compiler_object_sidecar_path(&self.root).is_file() {
+            return Ok(None);
+        }
+        let manifest = self.read_manifest()?;
+        let fingerprints = source_file_fingerprints_for_cache_validation(
+            &self.root,
+            manifest.as_ref(),
+            self.include_minified_sources,
+        )?;
+        Ok(
+            bonsai_workspace::validate_compiler_object_sidecar_metadata_with_source_fingerprints(
+                &self.root,
+                fingerprints.iter().map(|file| (file.path.as_path(), file.hash)),
+            )
+            .ok(),
+        )
+    }
+
     fn raw_stats(&self) -> std::io::Result<CacheStats> {
         let bonsai_dir = workspace_bonsai_dir(&self.root);
         let manifest = self.manifest_path();
@@ -2397,8 +2426,17 @@ impl Cache<'_> {
 
     /// Warm the complete grammar-derived retrieval candidate artifact.
     pub fn warm_retrieval_sidecar(&self) -> Result<()> {
+        self.warm_retrieval_sidecar_with_progress(|_| {})
+    }
+
+    /// Warm retrieval candidates while reporting exact compiler-file
+    /// completion and the final persistence phase.
+    pub fn warm_retrieval_sidecar_with_progress<F>(&self, on_progress: F) -> Result<()>
+    where
+        F: Fn(bonsai_retrieval::RetrievalBuildProgress) + Sync,
+    {
         let workspace = &self.project.workspace;
-        let _ = bonsai_retrieval::ensure_sidecar(workspace, &self.project.root)?;
+        let _ = bonsai_retrieval::ensure_sidecar_with_progress(workspace, &self.project.root, on_progress)?;
         Ok(())
     }
 
@@ -2414,10 +2452,18 @@ impl Cache<'_> {
 
     /// Warm the canonical declaration/type/linkage compiler artifact.
     pub fn warm_compiler_linkage_sidecar(&self) -> Result<()> {
+        self.warm_compiler_linkage_sidecar_with_progress(|_| {})
+    }
+
+    /// Warm declaration linkage while reporting exact compiler-file
+    /// completion and sidecar persistence.
+    pub fn warm_compiler_linkage_sidecar_with_progress<F>(&self, on_progress: F) -> Result<()>
+    where
+        F: Fn(bonsai_workspace::CompilerLinkageProgress) + Sync,
+    {
         let workspace = &self.project.workspace;
         if !workspace.compiler_linkage_sidecar_is_current(&self.project.root) {
-            let _ = workspace.compiler_linkage_index();
-            workspace.save_compiler_linkage_sidecar(&self.project.root)?;
+            workspace.save_compiler_linkage_sidecar_with_progress(&self.project.root, on_progress)?;
         }
         Ok(())
     }
@@ -2430,6 +2476,15 @@ impl Cache<'_> {
     /// it in a fresh worker process so released frontend arenas cannot inflate
     /// the graph phase's resident set on constrained machines.
     pub fn warm_idg_sidecar_and_manifest(&self) -> Result<()> {
+        self.warm_idg_sidecar_and_manifest_with_progress(|_| {})
+    }
+
+    /// Warm the exact IDG and manifest while reporting canonical transfer
+    /// segments plus the accelerator/persistence phase boundaries.
+    pub fn warm_idg_sidecar_and_manifest_with_progress<F>(&self, on_progress: F) -> Result<()>
+    where
+        F: Fn(bonsai_workspace::IdgPersistenceProgress),
+    {
         let workspace = &self.project.workspace;
         if !workspace.compiler_object_generation_matches_current_snapshot() {
             let _ = workspace.save_compiler_object_sidecar(&self.project.root)?;
@@ -2455,9 +2510,10 @@ impl Cache<'_> {
                     let _ = workspace.compiler_linkage_index();
                     workspace.save_compiler_linkage_sidecar(&self.project.root)?;
                 }
-                let _ = workspace.build_and_persist_idg_sidecar()?;
+                let _ = workspace.build_and_persist_idg_sidecar_with_progress(&on_progress)?;
             }
         }
+        on_progress(bonsai_workspace::IdgPersistenceProgress::ManifestStarted);
         let _ = self.write_manifest()?;
         Ok(())
     }

@@ -190,6 +190,13 @@ metadata remains in canonical file order; physical payload order is not a
 semantic contract. Do not add batch barriers or a workspace-growing reorder
 buffer to make internal payload bytes appear canonically ordered.
 
+Adapter post-processing must resolve emitted byte spans through Tree-sitter's
+range-directed descendant lookup plus the same-span ancestor chain. Never walk
+the complete CST once per flow/binding fact. A warm default `index` validates
+the immutable compiler generation from exact root-only source fingerprints and
+builds its context summary from metadata; it opens and lowers source bodies
+only on a cache miss.
+
 Performance gates measure completed exact work; they never terminate, skip, or
 cap analysis. When query/cache/engine code changes, build release and run
 `cargo test --release -p bonsai-ninja --test elasticsearch_large_repo

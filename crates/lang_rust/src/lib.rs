@@ -8,8 +8,8 @@ use bonsai_lang_api::{
     },
     AdapterContext, AdapterError, ArgumentPassingMode, CallKind, CallTargetExtraction, CapabilityLevel,
     DeclIndex, DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, PatternBindingSite, TypeAliasVocabulary, Visibility,
-    NO_CONSTRUCTOR_METHOD_NAMES,
+    LanguageAdapter, LanguageCapabilities, LanguageId, PatternBindingSite, TypeAliasBinding,
+    TypeAliasVocabulary, Visibility, NO_CONSTRUCTOR_METHOD_NAMES,
 };
 
 const RUST_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
@@ -378,14 +378,18 @@ impl LanguageAdapter for RustAdapter {
         // Rust module_path: relative file path under workspace root,
         // dropping `src/` and `lib.rs`/`mod.rs`/`<name>.rs` to produce
         // a `crate::mod::sub`-shaped path. Falls back to file-stem.
-        let segments = ctx
+        let semantic_path = ctx
             .workspace_relative_path(file)
-            .map(|path| rust_module_segments(&path))
+            .or_else(|| ctx.vfs.path(file).ok().map(|path| (*path).clone()));
+        let segments = semantic_path
+            .as_deref()
+            .map(rust_module_segments)
             .unwrap_or_default();
-        if !segments.is_empty() {
-            bonsai_lang_api::apply_module_path_semantic_identity(&mut idx, segments);
-        } else {
-            bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
+        if let Some(path) = semantic_path.as_deref() {
+            let crate_root = rust_crate_root_segments(path);
+            for decl in &mut idx.defs {
+                normalize_rust_rooted_calls(&mut decl.flow_events, &segments, crate_root.as_deref());
+            }
         }
         // Rust visibility from `pub`, `pub(crate)`, `pub(super)`,
         // `pub(in path)`. Absence = private (file/mod-scoped).
@@ -434,10 +438,45 @@ impl LanguageAdapter for RustAdapter {
                         decl.parent = Some(parent_symbol);
                     }
                 }
+                // Every Rust `self` parameter has the exact type named by
+                // its enclosing `impl Type` syntax, even when the type
+                // declaration lives in another module/file. Retain that
+                // compiler fact independently from the file-local parent
+                // symbol: global resolution can then combine it with this
+                // file's `use` bindings to resolve `self.method()` across
+                // split impl blocks without a bare-name fallback.
+                if let Some(owner_type) = impl_method_parents
+                    .iter()
+                    .find_map(|(span, owner_type)| (*span == decl.span).then_some(owner_type))
+                {
+                    if let Some(receiver_name) = decl
+                        .receiver_param_index
+                        .and_then(|index| decl.params.get(index))
+                        .filter(|name| !name.is_empty())
+                    {
+                        let receiver_is_typed =
+                            decl.type_aliases.iter().any(|alias| alias.name == *receiver_name);
+                        if !receiver_is_typed {
+                            decl.type_aliases.push(TypeAliasBinding {
+                                name: receiver_name.clone(),
+                                type_name: owner_type.clone(),
+                            });
+                        }
+                    }
+                }
             }
             apply_rust_struct_field_aliases(&mut idx, &struct_field_aliases);
             enrich_rust_self_tuple_constructor_returns(&mut idx);
             classify_rust_declared_constructor_calls(&mut idx);
+        }
+        // Parent symbols come from `impl Type` syntax and must be installed
+        // before qualified member identities are derived. Applying module
+        // identity first leaves methods as `module.method` instead of
+        // `module.Type.method`, weakening navigation and split-impl linkage.
+        if !segments.is_empty() {
+            bonsai_lang_api::apply_module_path_semantic_identity(&mut idx, segments);
+        } else {
+            bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
         }
         for decl in &mut idx.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
@@ -466,10 +505,19 @@ impl LanguageAdapter for RustAdapter {
             .as_ref()
             .map_or(raw_src, |(source, _)| source.as_slice());
         let tree = compiler_view.as_ref().map_or(raw_tree.as_ref(), |(_, tree)| tree);
-        ImportIndex {
-            file,
-            imports: parse_imports(tree, src, file),
+        let mut imports = parse_imports(tree, src, file);
+        if let Some(path) = ctx
+            .workspace_relative_path(file)
+            .or_else(|| ctx.vfs.path(file).ok().map(|path| (*path).clone()))
+        {
+            let current_module = rust_module_segments(&path);
+            let crate_root = rust_crate_root_segments(&path);
+            for import in &mut imports {
+                import.module =
+                    normalize_rust_rooted_path(&import.module, &current_module, crate_root.as_deref());
+            }
         }
+        ImportIndex { file, imports }
     }
 }
 
@@ -495,7 +543,7 @@ fn collect_rust_exported_import_aliases(
     let mut out = Vec::new();
     for node in collect_kinds(tree, &["use_declaration"]) {
         let visibility = rust_node_visibility(&node, src);
-        if matches!(visibility, Visibility::Private) {
+        if matches!(visibility, Visibility::Private | Visibility::ModuleTree) {
             continue;
         }
         let Some(argument) = node.child_by_field_name("argument") else {
@@ -1873,8 +1921,8 @@ fn collect_rust_match_arm_spans(tree: &Tree, _src: &[u8], file: FileId) -> Vec<V
 /// - `pub` → Public
 /// - `pub(crate)` → Crate
 /// - `pub(super)` / `pub(in path)` → Module (treated as parent-scoped)
-/// - no `pub` modifier → Private (mod-private; with empty
-///   module_path treated as file-private by the resolver)
+/// - no `pub` modifier / `pub(self)` → ModuleTree (the declaring module and
+///   its lexical descendants)
 fn collect_rust_visibility(
     root: Node<'_>,
     file: FileId,
@@ -1921,11 +1969,11 @@ fn rust_node_visibility(node: &Node<'_>, src: &[u8]) -> Visibility {
         if text.starts_with("pub(super") || text.starts_with("pub(in") {
             return Visibility::Module;
         }
-        // `pub(self)` is private to the current module — same as no
-        // modifier in practice.
-        return Visibility::Private;
+        // `pub(self)` is visible in the current module and its descendants,
+        // exactly like an item without a visibility modifier.
+        return Visibility::ModuleTree;
     }
-    Visibility::Private
+    Visibility::ModuleTree
 }
 
 fn collect_rust_tuple_struct_bases(
@@ -2386,6 +2434,97 @@ fn rust_module_segments(path: &std::path::Path) -> Vec<String> {
     }
     segs.retain(|s| s != "src" && !s.is_empty());
     segs
+}
+
+/// Workspace-qualified module prefix for Rust's `crate::` root.
+///
+/// A workspace can contain many Cargo packages (`crates/a/src`,
+/// `crates/b/src`). Keeping the path before the adapter-owned `src` root lets
+/// rooted imports and calls identify the right crate without a workspace-wide
+/// leaf-name fallback. When no conventional source root is present we retain
+/// the source spelling and let the normal module resolver handle it.
+fn rust_crate_root_segments(path: &std::path::Path) -> Option<Vec<String>> {
+    let segments = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(segment) => Some(segment.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    // Cargo source roots are the final `src` component before the source
+    // module. A workspace itself may legitimately live below an ancestor
+    // directory also named `src`; choosing the first such component would
+    // collapse unrelated package identities.
+    let source_root = segments.iter().rposition(|segment| segment == "src")?;
+    Some(segments[..source_root].to_vec())
+}
+
+fn normalize_rust_rooted_path(raw: &str, current_module: &[String], crate_root: Option<&[String]>) -> String {
+    let trimmed = raw.trim();
+    let mut remainder = trimmed;
+    let mut prefix = Vec::new();
+    if let Some(rest) = remainder.strip_prefix("crate::") {
+        let Some(crate_root) = crate_root else {
+            return trimmed.to_string();
+        };
+        prefix.extend(crate_root.iter().cloned());
+        remainder = rest;
+    } else if let Some(rest) = remainder.strip_prefix("self::") {
+        prefix.extend(current_module.iter().cloned());
+        remainder = rest;
+    } else if remainder.starts_with("super::") {
+        prefix.extend(current_module.iter().cloned());
+        while let Some(rest) = remainder.strip_prefix("super::") {
+            prefix.pop();
+            remainder = rest;
+        }
+    } else {
+        return trimmed.to_string();
+    }
+    prefix.extend(
+        remainder
+            .split("::")
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_string),
+    );
+    prefix.join("::")
+}
+
+fn normalize_rust_rooted_calls(
+    events: &mut [FlowEvent],
+    current_module: &[String],
+    crate_root: Option<&[String]>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call { name, .. } => {
+                *name = normalize_rust_rooted_path(name, current_module, crate_root);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                normalize_rust_rooted_calls(then_events, current_module, crate_root);
+                normalize_rust_rooted_calls(else_events, current_module, crate_root);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                normalize_rust_rooted_calls(body, current_module, crate_root);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                normalize_rust_rooted_calls(body, current_module, crate_root);
+                normalize_rust_rooted_calls(catch_events, current_module, crate_root);
+                normalize_rust_rooted_calls(finally_events, current_module, crate_root);
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]

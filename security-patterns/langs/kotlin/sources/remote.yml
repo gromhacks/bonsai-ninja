@@ -31,6 +31,96 @@
 # Below this header: enabled annotation/read sources and package/import-scoped
 # callable-shape sources that work today.
 
+- id: kotlin.source.gcloud_function_handle
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event, json, query, path, header]
+  packages: [com.google.cloud.functions]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      in_class: [HttpFunction]
+      in_method: [service]
+      param_index_in: [0]
+      param_type_in: [HttpRequest, com.google.cloud.functions.HttpRequest]
+  match_examples:
+  - name: google cloud kotlin http request
+    code: |
+      import com.google.cloud.functions.HttpFunction
+      import com.google.cloud.functions.HttpRequest
+      import com.google.cloud.functions.HttpResponse
+      class Function : HttpFunction {
+        override fun service(request: HttpRequest, response: HttpResponse) { }
+      }
+    expect_match_text: [request]
+  - name: helper request negative
+    code: |
+      import com.google.cloud.functions.HttpRequest
+      class Function { fun helper(request: HttpRequest) { } }
+    expect_no_match: true
+  description: "Google Cloud Kotlin HttpFunction.service request parameter - remote HTTP request proven by interface, method, position, and declared type."
+
+- id: kotlin.source.azure_http_trigger
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json, text]
+  packages: ["com.microsoft.azure.functions"]
+  match:
+    kind: param
+    target: { annotation: HttpTrigger }
+  match_examples:
+  - name: azure http trigger request parameter
+    code: |
+      import com.microsoft.azure.functions.annotation.HttpTrigger
+      class App {
+        fun run(@HttpTrigger(name = "req") req: Request) { }
+      }
+      class Request
+    expect_match_text: [req]
+  - name: unannotated http trigger name negative
+    code: |
+      import com.microsoft.azure.functions.annotation.HttpTrigger
+      class App { fun run(HttpTrigger: String) { } }
+    expect_no_match: true
+  description: "Azure Functions @HttpTrigger annotated parameter - HTTP request envelope supplied by the remote caller."
+
+- id: kotlin.source.azure_http_request_getbody
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json, text]
+  packages: ["com.microsoft.azure.functions"]
+  match:
+    kind: call
+    callee: { name: getBody }
+  constraints:
+  - receiver_type_in: [Request, HttpRequestMessage, com.microsoft.azure.functions.HttpRequestMessage]
+  match_examples:
+  - name: azure http trigger request body
+    code: |
+      import com.microsoft.azure.functions.annotation.HttpTrigger
+      class App {
+        fun run(@HttpTrigger(name = "req") req: Request) { req.getBody() }
+      }
+      class Request { fun getBody(): String = "" }
+    expect_match_text: [req.getBody]
+  - name: unrelated getbody negative
+    code: |
+      import com.microsoft.azure.functions.annotation.HttpTrigger
+      class App { fun run(req: Widget) { req.getBody() } }
+      class Widget { fun getBody(): String = "" }
+    expect_no_match: true
+  description: "Azure Functions request getBody() - remote HTTP request body supplied by the caller."
+
 - id: kotlin.source.spring_request_param
   enabled: true
   language: kotlin

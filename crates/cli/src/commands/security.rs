@@ -1619,14 +1619,16 @@ fn build_taint_text_pages(
     filters_hash: u64,
 ) -> Result<(Vec<page_cache::CachedPage>, u64)> {
     let budget = paging_cfg.effective_budget();
-    let unit_target_bytes = budget
-        .map(|tokens| tokens.saturating_mul(paging::BYTES_PER_TOKEN).saturating_mul(25) / 100)
-        .unwrap_or(u64::MAX / 8)
-        .max(2_048);
     let page_payload_budget_bytes = budget
         .map(|tokens| tokens.saturating_mul(paging::BYTES_PER_TOKEN).saturating_mul(65) / 100)
         .unwrap_or(u64::MAX / 8)
-        .max(unit_target_bytes);
+        .max(2_048);
+
+    // A security flow is one semantic row. Keep all of its numbered steps in
+    // one display block whenever that row fits the page payload. Fragment only
+    // genuinely oversized rows so context pagination remains exact without
+    // turning an ordinary flow into artificial `FLOW 1/2` sections.
+    let unit_target_bytes = page_payload_budget_bytes;
 
     let units = build_taint_text_units(render_workspace, report, unit_target_bytes)?;
     let page_bounds = taint_text_page_bounds(&units, page_payload_budget_bytes);
@@ -1645,12 +1647,17 @@ fn build_taint_text_pages(
             paging::cursor_id("security/taint-analysis", filters_hash, *next_start as u64)
         });
         let estimated_payload_bytes: u64 = units[start..end].iter().map(|unit| unit.estimated_bytes).sum();
+        let shown_flows = units[start..end]
+            .iter()
+            .map(|unit| unit.finding_idx)
+            .collect::<ahash::AHashSet<_>>()
+            .len() as u64;
         let mut info = paging::PageInfo {
             page_number,
             total_pages: page_bounds.len() as u64,
-            page_size: (end - start) as u64,
-            shown_rows: (end - start) as u64,
-            total_rows: units.len() as u64,
+            page_size: shown_flows,
+            shown_rows: shown_flows,
+            total_rows: report.findings.len() as u64,
             budget,
             tokens_used: paging::bytes_to_tokens(estimated_payload_bytes),
             cursor: cursor.clone(),
@@ -1894,7 +1901,7 @@ fn render_finding_flow_part_header(
     cli_println!("{}", u.ruler('═', 70));
     cli_println!(
         "{} · {} · {}  {}",
-        u.annotation(&format!("FINDING {idx} · FLOW {chunk}/{total_chunks}")),
+        u.annotation(&format!("FINDING {idx} · TAINT FLOW PART {chunk}/{total_chunks}")),
         u.name(vuln_class),
         severity_cell(u, &sev),
         u.dim(&f.finding_id),

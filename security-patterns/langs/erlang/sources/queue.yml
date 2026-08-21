@@ -1,6 +1,8 @@
 # Erlang queue/broker message sources (trust: service).
 - id: erlang.source.amqp_basic_deliver
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: erlang
   trust: service
   tag: queue-message
@@ -25,7 +27,7 @@
       test(Input) ->
         amqp_channel:close(Input).
     expect_no_match: true
-  description: "RabbitMQ amqp_channel:call - Delivery.payload contents flow from broker."
+  description: "Disabled - amqp_channel:call is a generic client RPC and its result is not necessarily a broker-delivered payload. Model the consumer callback parameter once record-pattern facts can prove a #'basic.deliver'/#amqp_msg delivery."
 
 - id: erlang.source.brod_consume
   enabled: true
@@ -36,7 +38,7 @@
   match:
     kind: call
     callee:
-      regex: "^brod:(fetch|subscribe|consume_ack)$"
+      regex: "^brod:fetch$"
   match_examples:
   - name: declared shape
     code: |
@@ -53,10 +55,43 @@
       test(Input) ->
         brod:produce(Input).
     expect_no_match: true
-  description: "Kafka brod fetch/subscribe - consumer payload originates off-box."
+  description: "brod:fetch - returned Kafka message set originates from the broker. subscribe and consume_ack are control operations and are intentionally excluded."
+
+- id: erlang.source.brod_handle_message
+  enabled: true
+  language: erlang
+  trust: service
+  tag: queue-message
+  packages: [brod]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Z_][A-Za-z0-9_]*$"
+      in_method: [handle_message]
+      param_index_in: [2]
+      param_count_in: [4]
+  match_examples:
+  - name: brod group subscriber message
+    code: |
+      -module(example).
+      -behaviour(brod_group_subscriber_v2).
+      -include_lib("brod/include/brod.hrl").
+      -export([handle_message/4]).
+      handle_message(Topic, Partition, Message, State) ->
+        {ok, ack, State}.
+  - name: ordinary helper negative
+    code: |
+      -module(example).
+      -include_lib("brod/include/brod.hrl").
+      helper(Topic, Partition, Message, State) ->
+        Message.
+    expect_no_match: true
+  description: "Third parameter of brod_group_subscriber_v2 handle_message/4 - Kafka message payload proven by callback name, arity, position, and brod package evidence."
 
 - id: erlang.source.amqp_basic_get
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: erlang
   trust: service
   tag: queue-message
@@ -81,17 +116,60 @@
       test(Input) ->
         amqp_channel:close(Input).
     expect_no_match: true
-  description: "RabbitMQ amqp_channel:cast - Basic.Get / publish flow; payload originates off-box."
+  description: "Disabled - amqp_channel:cast sends a command or publication and does not return broker input. Consumer delivery must be modeled at the receiving callback."
 
 - id: erlang.source.gen_server_handle_call
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: erlang
   trust: local
   tag: ipc-message
   match:
-    kind: call
-    callee:
-      regex: "^gen_server:call$"
-  description: "Disabled - gen_server:call return value is the *response*, not the inbound message; handle_call/handle_cast payload is param-shaped and not yet field-accessible. Re-enable when adapter exposes the Request param."
+    kind: param
+    target:
+      regex: "^[A-Z_][A-Za-z0-9_]*$"
+      in_method: [handle_call]
+      param_index_in: [0]
+      param_count_in: [3]
+  match_examples:
+  - name: gen server request
+    code: |
+      -module(example).
+      -behaviour(gen_server).
+      -export([handle_call/3]).
+      handle_call(Request, From, State) ->
+        {reply, Request, State}.
+  - name: ordinary helper negative
+    code: |
+      -module(example).
+      helper(Request, From, State) ->
+        Request.
+    expect_no_match: true
+  description: "First parameter of OTP gen_server handle_call/3 - message sent by another local process, proven by callback name, arity, and position."
+
+- id: erlang.source.gen_server_handle_cast
+  enabled: true
+  language: erlang
+  trust: local
+  tag: ipc-message
+  match:
+    kind: param
+    target:
+      regex: "^[A-Z_][A-Za-z0-9_]*$"
+      in_method: [handle_cast]
+      param_index_in: [0]
+      param_count_in: [2]
+  match_examples:
+  - name: gen server cast request
+    code: |
+      -module(example).
+      -behaviour(gen_server).
+      -export([handle_cast/2]).
+      handle_cast(Request, State) ->
+        {noreply, State}.
+  - name: wrong arity negative
+    code: |
+      -module(example).
+      handle_cast(Request, From, State) ->
+        Request.
+    expect_no_match: true
+  description: "First parameter of OTP gen_server handle_cast/2 - asynchronous message sent by another local process, proven by callback name, arity, and position."

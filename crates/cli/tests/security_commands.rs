@@ -2309,7 +2309,7 @@ def handle():
         "full text render should include source-backed taint flow code:\n{out}"
     );
     assert!(
-        !out.contains("total   0 tainted flow sections"),
+        !out.contains("total   0 taint flows"),
         "summary cache must not poison full text pagination:\n{out}"
     );
 }
@@ -2396,12 +2396,47 @@ def handle():
     let rendered = format!("{first}\n{second}");
 
     assert!(
-        rendered.contains("FINDING 1 · FLOW 2/"),
+        rendered.contains("FINDING 1 · TAINT FLOW PART 2/"),
         "split flow parts must retain the finding number and use an explicit numeric part:\n{rendered}"
     );
     assert!(
         !rendered.contains("FINDING 1 continued") && !rendered.contains("continued long source line"),
         "taint output must not use ambiguous continuation labels:\n{rendered}"
+    );
+}
+
+#[test]
+fn taint_analysis_keeps_a_fitting_flow_in_one_continuous_block() {
+    let ws = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/python/mega_flow");
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--context",
+        "16k",
+    ])
+    .unwrap();
+
+    assert_eq!(
+        out.lines()
+            .filter(|line| line.starts_with("TAINT FLOW 1 "))
+            .count(),
+        1,
+        "one semantic flow that fits the page must have one heading:\n{out}"
+    );
+    assert!(
+        !out.contains("FINDING 1 · FLOW 2/") && !out.contains("FLOW 1/2"),
+        "a fitting flow must not be split into artificial display parts:\n{out}"
+    );
+    assert!(
+        out.contains("handle_request → run_pipeline → orchestrate → persist → perform → execute"),
+        "the continuous block must retain the complete compiler-resolved chain:\n{out}"
+    );
+    assert!(
+        out.contains("total   1 taint flow"),
+        "the footer must count semantic flows rather than internal fragments:\n{out}"
     );
 }
 

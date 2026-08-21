@@ -66,6 +66,16 @@ pub fn validate_pack(
         let Some(reason) = &rule.disabled_reason else {
             continue;
         };
+        if reason.code == crate::rule::DisabledReasonCode::Subsumed && reason.subsumed_by.is_none() {
+            push_validation_issue(
+                &mut issues,
+                "error",
+                "subsumed-by-target-required",
+                Some(rule),
+                "`disabled_reason.code: subsumed` requires `subsumed_by` to name the enabled canonical rule that covers this surface.",
+            );
+            continue;
+        }
         let Some(target) = reason.subsumed_by.as_deref() else {
             continue;
         };

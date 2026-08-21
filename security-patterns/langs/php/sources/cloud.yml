@@ -15,27 +15,43 @@
   description: "Disabled - too broad; enable per-project via a narrower rule."
 
 - id: php.source.bref_handler_handle
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: php
   tag: cloud-event
   trust: service
   packages: [bref/bref]
   match:
-    kind: call
-    callee:
-      name: handle
-  constraints:
-  - receiver_type_in: [Handler]
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      in_method: [handle]
+      in_class: [Handler]
+      param_index_in: [0]
+      param_count_in: [2]
   match_examples:
-  - name: bref handler handle
+  - name: bref handler event parameter
     code: |
       <?php
       use Bref\Event\Handler;
-      function run(Handler $handler, $event) {
-        $r = $handler->handle($event, $event);
-        return $r;
+      use Bref\Context\Context;
+      final class FunctionHandler implements Handler {
+        public function handle($event, Context $context): mixed {
+          return $event;
+        }
       }
-  description: "Bref Handler.handle() - Lambda event payload processed by a typed Bref Handler receiver."
+  - name: ordinary handle method negative
+    code: |
+      <?php
+      use Bref\Event\Handler;
+      final class LocalHandler {
+        public function handle($event, $context): mixed {
+          return $event;
+        }
+      }
+    expect_no_match: true
+  description: "Disabled - Bref supplies parameter zero of Handler.handle(event, context), but the PHP adapter does not yet retain enough implemented-interface ancestry to prove that an arbitrary handle/2 method implements Bref\\Event\\Handler. The old call-result rule was wrong-direction because handle() returns the application response."
 
   imports:
   - Bref

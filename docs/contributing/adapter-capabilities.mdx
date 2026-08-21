@@ -45,7 +45,7 @@ in `COVERAGE_BASELINE.md`.
 
 | Field | What it enables | If empty |
 |---|---|---|
-| `Visibility` | Resolver filters out private callees from foreign modules. | All decls treated as `Public` — wider candidate set, more `OverApproximate` edges. |
+| `Visibility` | Resolver distinguishes file-private, exact-module/package, lexical module-tree, crate, and public access. | All decls treated as `Public` — wider candidate set, more `OverApproximate` edges. |
 | `type_aliases` | Resolver matches `MyTypedef` to the underlying class for receiver dispatch. | Calls through typedefs may not resolve to receiver-typed rules. |
 | `receiver_types` | Shared DB/index pass copies semantic receiver type facts onto `FlowEvent::Call` so callgraph, taint, rules, inspect, browse, and export consume the same evidence. | `[Type, method]` rules require another semantic fact or do not match. |
 | `bases` | Cross-class virtual dispatch narrows when the receiver type is known. | Parent/interface rules and inherited dispatch may not match. |

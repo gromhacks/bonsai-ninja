@@ -304,6 +304,8 @@ will receive repeated queries:
 Do not use semantic prewarm for `tree`, `context`, or a single narrow syntax
 query. Analysis sidecars live in an OS cache keyed by the canonical workspace,
 not in the repository. `<workspace>/.bonsai/rules/` is only a rule overlay.
+Repeated default `index` runs validate the compiler generation root-only and
+do not reopen source bodies; a stale generation is rebuilt exactly.
 
 ## Export
 

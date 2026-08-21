@@ -26,6 +26,15 @@ Positive examples contain the exact callee or target shape the rule claims.
 Negative examples cover the closest safe form, usually a literal argument,
 disabled option, wrong receiver type, or unrelated package.
 
+An enabled `kind: param` source must have compiler context beyond a parameter
+name and a workspace dependency. Use a declared type, annotation/default
+binder, enclosing class or method, parameter position plus arity, declaration
+visibility/kind, or an attached decorator/modifier. Package evidence narrows
+ownership, but it does not prove that an arbitrary same-named function is a
+framework entry point. HTTP-triggered cloud functions use `trust: remote` and
+live in `sources/remote.yml`; broker, storage, and non-HTTP cloud events use
+`trust: service` and live in `queue.yml` or `cloud.yml`.
+
 ```yaml
 match_examples:
   - name: tainted arg 0
@@ -170,8 +179,9 @@ no workspace file-count ceiling.
 
 The current Elasticsearch measurements are recorded only in
 [Release Readiness](RELEASE_READINESS.md). The exact large-workspace suite
-covers fresh-cache planning, warm reuse, navigation, inspect, inventory, and
-production taint under a 3 GiB scheduling budget. The gate requires production
+covers fresh/warm structural indexing, fresh-cache planning, warm semantic
+reuse, navigation, inspect, inventory, and production taint under a 3 GiB
+scheduling budget. The gate requires production
 security to finish complete and keeps every measured query and analysis
 command below its reviewed SLO.
 
@@ -195,6 +205,11 @@ Use this stricter pass when reviewing the checked-in rulepack end to end:
 python3 scripts/pack_audit.py --duplicates --fail-on-family-file-mismatch
 python3 scripts/pack_audit.py --json > /tmp/bonsai-pack-audit.json
 ```
+
+`pack_audit.py` uses a strict safe YAML loader: duplicate mapping keys fail
+the gate instead of silently letting the later value overwrite the earlier
+one. A `disabled_reason.code: subsumed` entry must also name an existing,
+enabled canonical rule through `subsumed_by`.
 
 Do not enable generic print, log, join, or parse patterns without a real
 security boundary and constraints that keep common safe usage quiet.

@@ -7,7 +7,7 @@ use super::{
     extract_assignment_value_facts, extract_call_receiver_facts, extract_direct_call_info,
     extract_return_value_name, extract_rhs_expr_operands, extract_runtime_type_narrowing_facts,
     extract_string_literals, language_from_pack, lower_local_closure_captures, mark_namespace_call_receivers,
-    node_text, normalize_call_name_whitespace, normalize_call_result_assignment_sources,
+    node_at_span, node_text, normalize_call_name_whitespace, normalize_call_result_assignment_sources,
     package_module_segments_with_workspace_prefix, receiver_projected_alias_matches, same_identifier_name,
     span_of, walk_flow_events, GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
 };
@@ -24,6 +24,80 @@ fn parse_language(pack: &str, src: &[u8]) -> tree_sitter::Tree {
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&language).expect("set language grammar");
     parser.parse(src, None).expect("parse source")
+}
+
+fn legacy_node_at_span<'a>(root: Node<'a>, span: Span, expected_kinds: &[&str]) -> Option<Node<'a>> {
+    let mut exact_typed = None;
+    let mut exact_any = None;
+    let mut tightest_container = None;
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let node_start = u64::try_from(node.start_byte()).unwrap_or(u64::MAX);
+        let node_end = u64::try_from(node.end_byte()).unwrap_or(u64::MAX);
+        if node_start == span.start && node_end == span.end {
+            if expected_kinds.iter().any(|kind| *kind == node.kind()) {
+                exact_typed.get_or_insert(node);
+            } else {
+                exact_any.get_or_insert(node);
+            }
+        }
+        if node_start <= span.start && node_end >= span.end {
+            let width = node_end - node_start;
+            let previous = tightest_container.map(|candidate: Node<'_>| {
+                u64::try_from(candidate.end_byte() - candidate.start_byte()).unwrap_or(u64::MAX)
+            });
+            if previous.is_none_or(|previous| width < previous) {
+                tightest_container = Some(node);
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    exact_typed.or(exact_any).or(tightest_container)
+}
+
+#[test]
+fn indexed_node_at_span_preserves_exact_tree_walk_results() {
+    let source = r#"
+        package demo;
+        final class Worker<T> {
+            @Deprecated
+            T run(T value) {
+                try {
+                    return transform(value, item -> item);
+                } catch (RuntimeException error) {
+                    throw error;
+                }
+            }
+        }
+    "#;
+    let tree = parse_language("java", source.as_bytes());
+    let root = tree.root_node();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let span = span_of(FileId::new(0), &node);
+        for expected in [&[node.kind()][..], &[][..]] {
+            let legacy = legacy_node_at_span(root, span, expected).expect("legacy exact node");
+            let indexed = node_at_span(root, span, expected).expect("indexed exact node");
+            assert_eq!(indexed.id(), legacy.id(), "span={span:?}, expected={expected:?}");
+        }
+
+        if span.end.saturating_sub(span.start) > 2 {
+            let interior = Span::new(span.file, span.start + 1, span.end - 1);
+            let legacy = legacy_node_at_span(root, interior, &[]).expect("legacy enclosing node");
+            let indexed = node_at_span(root, interior, &[]).expect("indexed enclosing node");
+            assert_eq!(indexed.id(), legacy.id(), "interior={interior:?}");
+        }
+
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+
+    assert!(node_at_span(root, Span::new(FileId::new(0), 0, u64::MAX), &[]).is_none());
 }
 
 fn fielded_comprehension_binding(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
@@ -738,6 +812,53 @@ fn receiver_projected_alias_matches_tuple_field_chains_only() {
     assert!(!receiver_projected_alias_matches("r", "r"));
     assert!(!receiver_projected_alias_matches("other.r", "r"));
     assert!(!receiver_projected_alias_matches("r.Header()", "r"));
+}
+
+#[test]
+fn exact_projected_receiver_type_overrides_the_base_object_type() {
+    let file = FileId::new(0);
+    let mut repository = m9_func_decl(0, "Repository", None, Vec::new());
+    repository.kind = DeclKind::Struct;
+    let mut audited = m9_func_decl(1, "AuditedRepository", None, Vec::new());
+    audited.kind = DeclKind::Struct;
+    let mut run = m9_func_decl(
+        2,
+        "run",
+        None,
+        vec![FlowEvent::Call {
+            span: Span::new(file, 10, 20),
+            name: "self.0.run".to_string(),
+            receiver: Some("self.0".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        }],
+    );
+    run.parent = Some(audited.symbol);
+    run.params = vec!["self".to_string()];
+    run.receiver_param_index = Some(0);
+    run.type_aliases = vec![
+        crate::TypeAliasBinding {
+            name: "self".to_string(),
+            type_name: "AuditedRepository".to_string(),
+        },
+        crate::TypeAliasBinding {
+            name: "self.0".to_string(),
+            type_name: "Repository".to_string(),
+        },
+    ];
+    let mut idx = DeclIndex {
+        file,
+        defs: vec![repository, audited, run],
+        ..DeclIndex::default()
+    };
+
+    apply_call_receiver_types(&mut idx);
+
+    assert!(matches!(
+        &idx.defs[2].flow_events[0],
+        FlowEvent::Call { receiver_types, .. } if receiver_types == &["Repository"]
+    ));
 }
 
 #[test]

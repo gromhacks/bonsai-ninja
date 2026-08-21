@@ -171,6 +171,18 @@ pub fn visibility_allows(
                 decl_module.matches(ctx.caller_module)
             }
         }
+        Visibility::ModuleTree => {
+            // Lexical module-tree visibility. The declaring module can see
+            // the item, as can any nested module whose compiler identity has
+            // the complete declaring-module prefix. This is distinct from
+            // package-private `Module`, where a child package is not a
+            // descendant visibility scope (for example Java).
+            if decl_module.is_empty() || ctx.caller_module.is_empty() {
+                decl_file == ctx.caller_file
+            } else {
+                ctx.caller_module.segments.starts_with(&decl_module.segments)
+            }
+        }
         Visibility::Crate => {
             // Crate-private. Reuse the top-level segment as the
             // crate boundary (Rust `pub(crate)`, Kotlin

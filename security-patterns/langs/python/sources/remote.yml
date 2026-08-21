@@ -1,3 +1,132 @@
+- id: python.gcp.http_function_param
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event, json, query, path, header]
+  frameworks: [google-cloud-functions]
+  packages: [functions-framework, functions_framework]
+  imports: [functions_framework]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_index_in: [0]
+      param_count_in: [1]
+  constraints:
+  - enclosing_decorator_in: [http]
+  match_examples:
+  - name: google functions framework http request
+    code: |
+      import functions_framework
+      @functions_framework.http
+      def handler(request):
+          return request
+    expect_match_text: [request]
+  - name: ordinary request helper negative
+    code: |
+      import functions_framework
+      def helper(request):
+          return request
+    expect_no_match: true
+  description: "First parameter of a Python Functions Framework @http handler - remote request proven by registration decorator, arity, and position."
+
+- id: python.azure.function_req_param
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event, json, query, path, header]
+  frameworks: [azure-functions]
+  packages: [azure.functions]
+  imports: [azure.functions]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [HttpRequest, azure.functions.HttpRequest]
+  match_examples:
+  - name: typed azure function request
+    code: |
+      import azure.functions as func
+      def main(request: func.HttpRequest):
+          return request
+    expect_match_text: [request]
+  - name: local request type negative
+    code: |
+      import azure.functions as func
+      class LocalRequest: pass
+      def helper(request: LocalRequest):
+          return request
+    expect_no_match: true
+  description: "Azure Functions HttpRequest parameter - remote HTTP request proven by its declared runtime type rather than the variable name."
+
+- id: python.azure.function_req_get_json
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event, json]
+  frameworks: [azure-functions]
+  packages: [azure.functions]
+  imports: [azure.functions]
+  match:
+    kind: call
+    callee: { name: get_json }
+  constraints:
+  - receiver_type_in: [HttpRequest, azure.functions.HttpRequest]
+  - max_args: 0
+  match_examples:
+  - name: typed azure request json
+    code: |
+      import azure.functions as func
+      def main(request: func.HttpRequest):
+          return request.get_json()
+    expect_match_text: [request.get_json]
+  - name: unrelated get json negative
+    code: |
+      import azure.functions as func
+      class Widget:
+          def get_json(self): return {}
+      def helper(widget: Widget): return widget.get_json()
+    expect_no_match: true
+  description: "Azure Functions HttpRequest.get_json() - remote request JSON, narrowed by the compiler-declared receiver type."
+
+- id: python.azure.function_req_get_body
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event, binary]
+  frameworks: [azure-functions]
+  packages: [azure.functions]
+  imports: [azure.functions]
+  match:
+    kind: call
+    callee: { name: get_body }
+  constraints:
+  - receiver_type_in: [HttpRequest, azure.functions.HttpRequest]
+  - max_args: 0
+  match_examples:
+  - name: typed azure request body
+    code: |
+      import azure.functions as func
+      def main(request: func.HttpRequest):
+          return request.get_body()
+    expect_match_text: [request.get_body]
+  - name: unrelated get body negative
+    code: |
+      import azure.functions as func
+      class Widget:
+          def get_body(self): return b""
+      def helper(widget: Widget): return widget.get_body()
+    expect_no_match: true
+  description: "Azure Functions HttpRequest.get_body() - remote request bytes, narrowed by the compiler-declared receiver type."
+
 - id: python.aiohttp.request_query
   enabled: true
   language: python
@@ -821,6 +950,8 @@
     kind: param
     target:
       name: kwargs
+      in_method: [resolve, resolver]
+      in_method_prefix: [resolve_]
   match_examples:
   - name: graphene resolver kwargs
     code: |
@@ -828,7 +959,13 @@
       def resolve_user(parent, info, **kwargs):
           return kwargs
     expect_match_text: [kwargs]
-  description: "Graphene/Ariadne resolver **kwargs - client-supplied GraphQL field arguments. This is the representable resolver-argument shape in v1 matching; the sink flow is the second gate."
+  - name: ordinary kwargs helper negative
+    code: |
+      import graphene
+      def helper(**kwargs):
+          return kwargs
+    expect_no_match: true
+  description: "Graphene resolver resolve_* **kwargs - client-supplied GraphQL field arguments, narrowed by the compiler-declared resolver method name."
 
 - id: python.graphql.graphene_resolver_field_arg
   enabled: true

@@ -13,58 +13,58 @@
       name: FunctionHandler
   description: "Disabled - `FunctionHandler` is the delegate/type name; `kind: param` only matches parameter identifiers."
 
-- id: csharp.source.azure_function_http_trigger
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  tag: cloud-event
-  trust: service
-  packages: [Microsoft.Azure.WebJobs]
-  match:
-    kind: param
-    target:
-      name: HttpTrigger
-  description: "Disabled - matcher only sees parameter identifiers, not Azure [HttpTrigger] attributes."
-
 - id: csharp.source.azure_function_blob_trigger
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   tag: cloud-event
   trust: service
-  packages: [Microsoft.Azure.WebJobs]
+  payload_types: [event, file, binary]
+  packages: [Microsoft.Azure.WebJobs, Microsoft.Azure.Functions.Worker.Extensions.Storage.Blobs]
   match:
     kind: param
     target:
-      name: BlobTrigger
-  description: "Disabled - matcher only sees parameter identifiers, not Azure [BlobTrigger] attributes."
+      annotation: BlobTrigger
+  match_examples:
+  - name: azure blob trigger payload
+    code: |
+      using Microsoft.Azure.WebJobs;
+      class Functions {
+        void Run([BlobTrigger("incoming/{name}")] byte[] blob) { }
+      }
+    expect_match_text: [blob]
+  - name: blob output binding negative
+    code: |
+      using Microsoft.Azure.WebJobs;
+      class Functions {
+        void Run([Blob("outgoing/{name}")] byte[] blob) { }
+      }
+    expect_no_match: true
+  description: "Azure Functions [BlobTrigger] parameter - storage object bytes supplied by the triggering blob event."
 
 - id: csharp.source.azure_function_eventhub_trigger
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   tag: cloud-event
   trust: service
-  packages: [Microsoft.Azure.WebJobs]
+  payload_types: [event, text, binary, json]
+  packages: [Microsoft.Azure.WebJobs, Microsoft.Azure.Functions.Worker.Extensions.EventHubs]
   match:
     kind: param
     target:
-      name: EventHubTrigger
-  description: "Disabled - matcher only sees parameter identifiers, not Azure [EventHubTrigger] attributes."
-
-- id: csharp.source.gcf_function
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: csharp
-  tag: cloud-event
-  trust: service
-  packages: [Google.Cloud.Functions.Framework]
-  match:
-    kind: param
-    target:
-      name: IHttpFunction
-  description: "Disabled - `IHttpFunction` is an interface name; `kind: param` only matches parameter identifiers."
+      annotation: EventHubTrigger
+  match_examples:
+  - name: azure event hub trigger payload
+    code: |
+      using Microsoft.Azure.WebJobs;
+      class Functions {
+        void Run([EventHubTrigger("events")] string message) { }
+      }
+    expect_match_text: [message]
+  - name: ordinary event parameter negative
+    code: |
+      using Microsoft.Azure.WebJobs;
+      class Functions {
+        void Helper(string message) { }
+      }
+    expect_no_match: true
+  description: "Azure Functions [EventHubTrigger] parameter - event payload supplied by Event Hubs."

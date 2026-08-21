@@ -666,6 +666,41 @@ description: Disabled placeholder rule waiting on an argument-shape constraint.
 }
 
 #[test]
+fn validator_requires_a_target_for_subsumed_rules() {
+    let rule = validation_rule_from_yaml(
+        r"
+id: python.sqli.disabled_as_subsumed_without_target
+enabled: false
+disabled_reason:
+  code: subsumed
+language: python
+tag: sql-injection
+severity: high
+cwe: [CWE-89]
+match:
+  kind: call
+  callee:
+    name: execute
+description: Disabled duplicate that must identify its enabled canonical rule.
+",
+    );
+    let pack = single_rule_pack(rule);
+    let report = validate_pack(
+        &pack,
+        &PackInventoryOptions::default(),
+        bonsai_adapters::all_languages_registry(),
+    );
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "subsumed-by-target-required"),
+        "expected missing subsumed_by target error, got {:#?}",
+        report.issues
+    );
+}
+
+#[test]
 fn path_filter_directory_entries_match_components_only() {
     assert!(path_filter_matches("repo/tests/test_app.py", "tests/"));
     assert!(path_filter_matches("tests/test_app.py", "tests/"));

@@ -592,7 +592,9 @@
   imports:
   - shelf_multipart/shelf_multipart.dart
 - id: dart.input.comment_param
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: dart
   trust: remote
   tag: http-input
@@ -601,8 +603,4 @@
     kind: param
     target:
       name: comment
-  match_examples:
-  - name: declared shape
-    code: |
-      void handle(String comment) { var seen = comment; }
-  description: "Handler `comment` parameter - user-supplied content from a blog/forum/CMS POST. Engine taint flow gates findings; broad name means non-handler usage will surface as audit hints."
+  description: "Disabled - a parameter named comment has no HTTP framework, route, type, annotation, or registration evidence and must not be treated as remote input."

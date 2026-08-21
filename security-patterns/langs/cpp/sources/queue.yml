@@ -48,19 +48,21 @@
   match:
     kind: param
     target:
-      name: message
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Message, AMQP::Message]
   match_examples:
-  - name: generated direct match
+  - name: amqp cpp received message
     code: |
       #include <amqpcpp.h>
-      void example(const char *message) {
+      void received(const AMQP::Message& message, uint64_t tag, bool redelivered) {
+        auto body = message.body();
+      }
+    expect_match_text: [message]
+  - name: same name wrong type negative
+    code: |
+      #include <amqpcpp.h>
+      void helper(const char *message) {
         (void)message;
       }
-  - name: unrelated param name is not the message
-    code: |
-      #include <amqpcpp.h>
-      void example(const char *channel) {
-        (void)channel;
-      }
     expect_no_match: true
-  description: "AMQP-CPP onReceived message parameter."
+  description: "AMQP-CPP AMQP::Message callback parameter - broker delivery proven by its declared message type."

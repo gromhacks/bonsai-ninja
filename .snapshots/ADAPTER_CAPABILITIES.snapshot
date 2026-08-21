@@ -15,7 +15,7 @@ lang_perl            2   15      1     4   0     0         0
 lang_php             6   6       1     4   0     0         0
 lang_python          2   9       1     2   0     7         0
 lang_ruby            12  4       1     1   2     0         0
-lang_rust            8   9       1     6   1     0         1
+lang_rust            8   11      1     6   1     0         1
 lang_scala           9   10      1     5   2     0         0
 lang_swift           7   26      1     5   8     0         0
 lang_typescript      7   13      1     2   0     0         1

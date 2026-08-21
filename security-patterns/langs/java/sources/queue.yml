@@ -1,19 +1,109 @@
 # Java message-queue input sources (Kafka, JMS, RabbitMQ, AMQP, SQS, Camel, Pub/Sub).
 #
-# -- Adapter gap (audited 2026-04) --------------------------------------------
-# Spring's queue listeners bind payloads via annotations on handler methods
-# (@KafkaListener, @RabbitListener, @JmsListener, @SqsListener, AMQP
-# `handleDelivery`). The Java adapter currently surfaces parameter
-# identifiers but not their annotation decorators, so `kind: param` rules
-# on annotation names cannot fire (see remote.yml for the same gap).
-#
-# Likewise, typed receiver matching (e.g. `attribute: [ConsumerRecord, value]`)
-# under-fires because adapters key call sites by the local receiver
-# identifier, not by its declared type.
-#
-# Per docs/pattern-guide.mdx the fix lives in the adapter, not in YAML.
-# Below this header: callable-shape rules that stay package/import-scoped until
-# adapters surface receiver-type facts for local queue message objects.
+# Listener methods and their parameters are compiler-visible. These rules use
+# enclosing method annotations plus declared parameter types, or an exact
+# @Payload parameter annotation. They do not infer a queue boundary from a
+# conventional parameter name.
+
+- id: java.source.azure_queue_trigger
+  enabled: true
+  language: java
+  trust: service
+  tag: queue-input
+  payload_types: [event, text, binary, json]
+  packages: [com.microsoft.azure.functions]
+  match:
+    kind: param
+    target: { annotation: QueueTrigger }
+  match_examples:
+  - name: azure storage queue trigger payload
+    code: |
+      import com.microsoft.azure.functions.annotation.QueueTrigger;
+      class Function {
+        void run(@QueueTrigger(name = "message", queueName = "orders") String message) { }
+      }
+    expect_match_text: [message]
+  - name: ordinary queue parameter negative
+    code: |
+      import com.microsoft.azure.functions.annotation.QueueTrigger;
+      class Function { void helper(String message) { } }
+    expect_no_match: true
+  description: "Azure Functions Java @QueueTrigger parameter - message supplied by Azure Queue Storage."
+
+- id: java.source.azure_servicebus_queue_trigger
+  enabled: true
+  language: java
+  trust: service
+  tag: queue-input
+  payload_types: [event, text, binary, json]
+  packages: [com.microsoft.azure.functions]
+  match:
+    kind: param
+    target: { annotation: ServiceBusQueueTrigger }
+  match_examples:
+  - name: azure service bus queue payload
+    code: |
+      import com.microsoft.azure.functions.annotation.ServiceBusQueueTrigger;
+      class Function {
+        void run(@ServiceBusQueueTrigger(name = "message", queueName = "orders") String message) { }
+      }
+    expect_match_text: [message]
+  - name: ordinary service bus parameter negative
+    code: |
+      import com.microsoft.azure.functions.annotation.ServiceBusQueueTrigger;
+      class Function { void helper(String message) { } }
+    expect_no_match: true
+  description: "Azure Functions Java @ServiceBusQueueTrigger parameter - queue message supplied by Azure Service Bus."
+
+- id: java.source.azure_servicebus_topic_trigger
+  enabled: true
+  language: java
+  trust: service
+  tag: queue-input
+  payload_types: [event, text, binary, json]
+  packages: [com.microsoft.azure.functions]
+  match:
+    kind: param
+    target: { annotation: ServiceBusTopicTrigger }
+  match_examples:
+  - name: azure service bus topic payload
+    code: |
+      import com.microsoft.azure.functions.annotation.ServiceBusTopicTrigger;
+      class Function {
+        void run(@ServiceBusTopicTrigger(name = "message", topicName = "orders", subscriptionName = "worker") String message) { }
+      }
+    expect_match_text: [message]
+  - name: ordinary topic parameter negative
+    code: |
+      import com.microsoft.azure.functions.annotation.ServiceBusTopicTrigger;
+      class Function { void helper(String message) { } }
+    expect_no_match: true
+  description: "Azure Functions Java @ServiceBusTopicTrigger parameter - topic message supplied by Azure Service Bus."
+
+- id: java.source.azure_eventhub_trigger
+  enabled: true
+  language: java
+  trust: service
+  tag: queue-input
+  payload_types: [event, text, binary, json]
+  packages: [com.microsoft.azure.functions]
+  match:
+    kind: param
+    target: { annotation: EventHubTrigger }
+  match_examples:
+  - name: azure event hub payload
+    code: |
+      import com.microsoft.azure.functions.annotation.EventHubTrigger;
+      class Function {
+        void run(@EventHubTrigger(name = "events", eventHubName = "orders") String event) { }
+      }
+    expect_match_text: [event]
+  - name: ordinary event parameter negative
+    code: |
+      import com.microsoft.azure.functions.annotation.EventHubTrigger;
+      class Function { void helper(String event) { } }
+    expect_no_match: true
+  description: "Azure Functions Java @EventHubTrigger parameter - event supplied by Azure Event Hubs."
 
 - id: java.source.kafka_consumer_record
   enabled: false
@@ -31,65 +121,167 @@
   description: "Subsumed by java.source.kafka_record_value, which already matches `attribute: [ConsumerRecord, value]` via receiver-type resolution."
 
 - id: java.source.kafka_listener_annot
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: java
   trust: service
   tag: queue-input
+  payload_types: [text]
   packages: [org.springframework.kafka.annotation]
   match:
     kind: param
     target:
-      name: KafkaListener
-  description: "Disabled - matcher only sees parameter identifiers, not Spring @KafkaListener annotations."
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*$"
+      param_type_in: [String, java.lang.String]
+  constraints:
+  - enclosing_decorator_in: [KafkaListener]
+  match_examples:
+  - name: spring kafka string payload
+    code: |
+      import org.springframework.kafka.annotation.KafkaListener;
+      class Consumer {
+        @KafkaListener(topics = "orders")
+        void receive(String payload) { }
+      }
+    expect_match_text: [payload]
+  - name: ordinary string parameter negative
+    code: |
+      import org.springframework.kafka.annotation.KafkaListener;
+      class Consumer {
+        void helper(String payload) { }
+      }
+    expect_no_match: true
+  description: "String parameter on a Spring @KafkaListener method - converted Kafka message payload."
 
 - id: java.source.rabbit_listener_annot
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: java
   trust: service
   tag: queue-input
+  payload_types: [text]
   packages: [org.springframework.amqp.rabbit.annotation]
   match:
     kind: param
     target:
-      name: RabbitListener
-  description: "Disabled - matcher only sees parameter identifiers, not Spring @RabbitListener annotations."
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*$"
+      param_type_in: [String, java.lang.String]
+  constraints:
+  - enclosing_decorator_in: [RabbitListener]
+  match_examples:
+  - name: spring rabbit string payload
+    code: |
+      import org.springframework.amqp.rabbit.annotation.RabbitListener;
+      class Consumer {
+        @RabbitListener(queues = "orders")
+        void receive(String body) { }
+      }
+    expect_match_text: [body]
+  - name: ordinary string parameter negative
+    code: |
+      import org.springframework.amqp.rabbit.annotation.RabbitListener;
+      class Consumer {
+        void helper(String body) { }
+      }
+    expect_no_match: true
+  description: "String parameter on a Spring @RabbitListener method - converted AMQP message payload."
 
 - id: java.source.jms_listener_annot
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: java
   trust: service
   tag: queue-input
+  payload_types: [text]
   packages: [org.springframework.jms.annotation]
   match:
     kind: param
     target:
-      name: JmsListener
-  description: "Disabled - matcher only sees parameter identifiers, not Spring @JmsListener annotations."
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*$"
+      param_type_in: [String, java.lang.String]
+  constraints:
+  - enclosing_decorator_in: [JmsListener]
+  match_examples:
+  - name: spring jms string payload
+    code: |
+      import org.springframework.jms.annotation.JmsListener;
+      class Consumer {
+        @JmsListener(destination = "orders")
+        void receive(String body) { }
+      }
+    expect_match_text: [body]
+  - name: ordinary string parameter negative
+    code: |
+      import org.springframework.jms.annotation.JmsListener;
+      class Consumer {
+        void helper(String body) { }
+      }
+    expect_no_match: true
+  description: "String parameter on a Spring @JmsListener method - converted JMS message payload."
 
 - id: java.source.sqs_listener_annot
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: java
   trust: service
   tag: queue-input
+  payload_types: [text]
   packages: [io.awspring.cloud.sqs.annotation]
   match:
     kind: param
     target:
-      name: SqsListener
-  description: "Disabled - matcher only sees parameter identifiers, not Spring Cloud AWS @SqsListener annotations."
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*$"
+      param_type_in: [String, java.lang.String]
+  constraints:
+  - enclosing_decorator_in: [SqsListener]
+  match_examples:
+  - name: spring sqs string payload
+    code: |
+      import io.awspring.cloud.sqs.annotation.SqsListener;
+      class Consumer {
+        @SqsListener("orders")
+        void receive(String body) { }
+      }
+    expect_match_text: [body]
+  - name: ordinary string parameter negative
+    code: |
+      import io.awspring.cloud.sqs.annotation.SqsListener;
+      class Consumer {
+        void helper(String body) { }
+      }
+    expect_no_match: true
+  description: "String parameter on a Spring Cloud AWS @SqsListener method - converted SQS message payload."
+
+- id: java.source.spring_messaging_payload
+  enabled: true
+  language: java
+  trust: service
+  tag: queue-input
+  payload_types: [event, text, binary, json]
+  packages: [org.springframework.messaging]
+  match:
+    kind: param
+    target:
+      annotation: Payload
+  match_examples:
+  - name: explicit spring messaging payload
+    code: |
+      import org.springframework.messaging.handler.annotation.Payload;
+      class Consumer {
+        void receive(@Payload Order order) { }
+      }
+      class Order { }
+    expect_match_text: [order]
+  - name: spring header is not payload
+    code: |
+      import org.springframework.messaging.handler.annotation.Header;
+      class Consumer {
+        void receive(@Header("trace") String trace) { }
+      }
+    expect_no_match: true
+  description: "Spring Messaging @Payload parameter - explicit broker or messaging payload boundary shared by Kafka, AMQP, JMS, and related listener adapters."
 
 - id: java.source.jms_textmessage_gettext
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: java.source.jms_message_gettext_local
   language: java
   trust: service
   tag: queue-input
@@ -104,6 +296,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: java.source.jms_bytesmessage_readbytes_local
   language: java
   trust: service
   tag: queue-input
@@ -118,6 +311,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: java.source.jms_message_getbody_local
   language: java
   trust: service
   tag: queue-input
@@ -129,23 +323,45 @@
   description: "Subsumed by java.source.jms_message_getbody_local."
 
 - id: java.source.rabbitmq_basicdeliver_body
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: java
   trust: service
   tag: queue-input
+  payload_types: [event, binary]
   packages: [com.rabbitmq.client]
   match:
     kind: param
     target:
-      name: handleDelivery
-  description: "Disabled - `handleDelivery` is the consumer method name; `kind: param` only matches parameter identifiers."
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*$"
+      in_class: [DefaultConsumer]
+      in_method: [handleDelivery]
+      param_index_in: [3]
+      param_type_in: [byte]
+  match_examples:
+  - name: rabbitmq default consumer delivery body
+    code: |
+      import com.rabbitmq.client.AMQP;
+      import com.rabbitmq.client.DefaultConsumer;
+      import com.rabbitmq.client.Envelope;
+      class Consumer extends DefaultConsumer {
+        public void handleDelivery(String tag, Envelope envelope,
+            AMQP.BasicProperties properties, byte[] body) { }
+      }
+    expect_match_text: [body]
+  - name: same method wrong position negative
+    code: |
+      import com.rabbitmq.client.DefaultConsumer;
+      class Consumer extends DefaultConsumer {
+        public void handleDelivery(byte[] body) { }
+      }
+    expect_no_match: true
+  description: "RabbitMQ DefaultConsumer.handleDelivery body parameter - broker-delivered message bytes at the callback's fixed fourth parameter."
 
 - id: java.source.pubsub_message_getdata
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: java.source.pubsub_message_getdata_local
   language: java
   trust: service
   tag: queue-input

@@ -7,6 +7,90 @@
 # (`body`, `query`, `params`, `headers`, `data`, `message`, `req`, ...) are off
 # by default - flip them on only in an audit profile that accepts the FP cost.
 
+- id: javascript.cloud.aws_lambda_event_body
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event, json]
+  frameworks: [aws-lambda]
+  packages: ["aws-lambda"]
+  match:
+    kind: read
+    target: { attribute: [event, body] }
+  match_examples:
+  - name: api gateway event body
+    code: |
+      const _u = require("aws-lambda");
+      function demo() { return event.body; }
+    expect_match_text: [event.body]
+  - name: unrelated event property negative
+    code: |
+      const _u = require("aws-lambda");
+      function demo() { return event.httpMethod; }
+    expect_no_match: true
+  description: "AWS Lambda API Gateway event.body - remote HTTP request payload."
+
+- id: javascript.cloud.aws_lambda_event_headers
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event, header]
+  frameworks: [aws-lambda]
+  packages: ["aws-lambda"]
+  match:
+    kind: read
+    target: { attribute: [event, headers] }
+  match_examples:
+  - name: api gateway event headers
+    code: |
+      const _u = require("aws-lambda");
+      function demo() { return event.headers; }
+    expect_match_text: [event.headers]
+  description: "AWS Lambda API Gateway event.headers - remote request headers."
+
+- id: javascript.cloud.aws_lambda_event_query
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event, query]
+  frameworks: [aws-lambda]
+  packages: ["aws-lambda"]
+  match:
+    kind: read
+    target: { attribute: [event, queryStringParameters] }
+  match_examples:
+  - name: api gateway event query
+    code: |
+      const _u = require("aws-lambda");
+      function demo() { return event.queryStringParameters; }
+    expect_match_text: [event.queryStringParameters]
+  description: "AWS Lambda API Gateway event.queryStringParameters - remote query input."
+
+- id: javascript.cloud.aws_lambda_event_path
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event, path]
+  frameworks: [aws-lambda]
+  packages: ["aws-lambda"]
+  match:
+    kind: read
+    target: { attribute: [event, pathParameters] }
+  match_examples:
+  - name: api gateway event path
+    code: |
+      const _u = require("aws-lambda");
+      function demo() { return event.pathParameters; }
+    expect_match_text: [event.pathParameters]
+  description: "AWS Lambda API Gateway event.pathParameters - remote route parameters."
 # -- Express (attribute chains on `req`) -------------------------------------
 - id: javascript.source.express_req_body
   enabled: true
@@ -1178,6 +1262,7 @@
     target:
       name: args
       param_index_in: [1]
+      param_count_in: [2, 3, 4]
   match_examples:
   - name: graphql resolver args param
     code: |
@@ -1208,6 +1293,7 @@
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.[A-Za-z_$][A-Za-z0-9_$]*$"
       base_name_in: [args]
       base_param_index_in: [1]
+      param_count_in: [2, 3, 4]
   match_examples:
   - name: graphql args input
     code: |
@@ -1258,6 +1344,7 @@
     target:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.context\\.args(\\.[A-Za-z_$][A-Za-z0-9_$]*)?$"
       base_param_index_in: [3]
+      param_count_in: [4]
   match_examples:
   - name: graphql info context args
     code: |

@@ -297,6 +297,7 @@ fn source_reachable_call_graph_from_relation(
     source_funcs: &[FuncId],
     target_funcs: &[FuncId],
     max_precision: Option<Precision>,
+    on_relation_unit: &dyn Fn(),
 ) -> SourceReachableCallGraph {
     let target_set: AHashSet<FuncId> = target_funcs.iter().copied().collect();
     let mut reached_funcs: AHashSet<FuncId> = source_funcs.iter().copied().collect();
@@ -319,7 +320,9 @@ fn source_reachable_call_graph_from_relation(
             if !processed_reached.insert(caller) {
                 continue;
             }
-            for edge in relation_callees(relation, caller, max_precision) {
+            let edges = relation_callees(relation, caller, max_precision);
+            on_relation_unit();
+            for edge in edges {
                 if reached_funcs.insert(edge.to) {
                     pending_reached.push(edge.to);
                 }
@@ -330,7 +333,9 @@ fn source_reachable_call_graph_from_relation(
             if !processed_reverse_output.insert(callee) {
                 continue;
             }
-            for edge in relation_callers(relation, callee, max_precision) {
+            let edges = relation_callers(relation, callee, max_precision);
+            on_relation_unit();
+            for edge in edges {
                 if !has_summary_output(global.as_ref(), edge.from) {
                     continue;
                 }
@@ -350,7 +355,9 @@ fn source_reachable_call_graph_from_relation(
     // of declaration order, matching the cold compiler worklist.
     let mut target_callers_by_callee: AHashMap<FuncId, Vec<bonsai_callgraph::CallEdge>> = AHashMap::new();
     for &target in &target_set {
-        for edge in relation_callees(relation, target, max_precision) {
+        let edges = relation_callees(relation, target, max_precision);
+        on_relation_unit();
+        for edge in edges {
             target_callers_by_callee.entry(edge.to).or_default().push(edge);
         }
     }
@@ -947,6 +954,47 @@ pub enum WorkspaceOpenEvent {
         status: WorkspaceCacheStatus,
         entries: usize,
     },
+}
+
+/// Exact progress for a cold compiler-linkage sidecar build.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CompilerLinkageProgress {
+    /// The exact compiler-file schedule is known.
+    FilesStarted {
+        /// Number of source files whose linkage headers will be lowered.
+        files: usize,
+    },
+    /// One source file's exact linkage header has finished lowering.
+    FileCompleted,
+    /// Linkage lowering is complete and the sidecar is being encoded.
+    Persisting {
+        /// Number of declarations represented by the canonical linkage table.
+        declarations: usize,
+    },
+}
+
+/// Exact phase boundaries for a cold persisted IDG/semantic generation.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum IdgPersistenceProgress {
+    /// The exact selected transfer-segment schedule is known.
+    TransferStarted {
+        /// Number of canonical source-file segments to lower.
+        segments: usize,
+    },
+    /// One transfer segment has completed in canonical publication order.
+    TransferSegmentCompleted,
+    /// The canonical graph is complete and its query accelerator is compiling.
+    AcceleratorStarted,
+    /// The completed graph is being encoded and atomically published.
+    Persisting {
+        /// Number of canonical segments in the completed graph.
+        segments: usize,
+    },
+    /// Exact persisted compilation could not be published and the same scoped
+    /// graph is being built in resident memory without reducing work.
+    ResidentFallbackStarted,
+    /// The semantic generation manifest is being committed.
+    ManifestStarted,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1550,6 +1598,20 @@ impl Workspace {
     /// never part of this artifact; later IDG transfer streams them from exact
     /// adapter-lowered compiler objects one compilation unit at a time.
     pub fn save_compiler_linkage_sidecar(&self, root: &Path) -> std::io::Result<()> {
+        self.save_compiler_linkage_sidecar_with_progress(root, |_| {})
+    }
+
+    /// Persist the complete linkage table while reporting exact compiler-file
+    /// completion. Sidecar encoding is a separate indeterminate phase because
+    /// compressed pages are storage units, not semantic work units.
+    pub fn save_compiler_linkage_sidecar_with_progress<F>(
+        &self,
+        root: &Path,
+        on_progress: F,
+    ) -> std::io::Result<()>
+    where
+        F: Fn(CompilerLinkageProgress) + Sync,
+    {
         if !self.is_complete_workspace_index() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -1557,10 +1619,16 @@ impl Workspace {
             ));
         }
         let path = linkage_sidecar::linkage_sidecar_path(root);
-        let linkage = self.compiler_linkage_index();
         if linkage_sidecar::validate_linkage_sidecar_for_db(&path, &self.inner.db).is_ok() {
             return Ok(());
         }
+        let linkage = self.compiler_linkage_index_with_progress(&on_progress);
+        if linkage_sidecar::validate_linkage_sidecar_for_db(&path, &self.inner.db).is_ok() {
+            return Ok(());
+        }
+        on_progress(CompilerLinkageProgress::Persisting {
+            declarations: linkage.len(),
+        });
         linkage_sidecar::save_linkage_sidecar(&path, &self.inner.db, linkage)
     }
 
@@ -1574,6 +1642,17 @@ impl Workspace {
     /// AST call-linkage row beside the IDG.
     #[must_use]
     pub fn compiler_linkage_index(&self) -> Arc<GlobalIndex> {
+        self.compiler_linkage_index_with_progress(|_| {})
+    }
+
+    /// Build the canonical compiler linkage while reporting completed source
+    /// units. Cache hits intentionally emit no callbacks because no compiler
+    /// files were rebuilt.
+    #[must_use]
+    pub fn compiler_linkage_index_with_progress<F>(&self, on_progress: F) -> Arc<GlobalIndex>
+    where
+        F: Fn(CompilerLinkageProgress) + Sync,
+    {
         // Once the canonical IDG is open, it already owns the exact compact
         // linkage generation used to build or validate that graph. Reuse it
         // rather than decoding/building a second workspace symbol table
@@ -1632,11 +1711,19 @@ impl Workspace {
             }
             self.ensure_complete_compiler_object_generation(&root);
         }
-        let linkage = self.inner.db.build_global_linkage_index();
+        on_progress(CompilerLinkageProgress::FilesStarted {
+            files: self.inner.vfs.all_files().len(),
+        });
+        let linkage = self.inner.db.build_global_linkage_index_with_progress(|| {
+            on_progress(CompilerLinkageProgress::FileCompleted);
+        });
         *slot = Some(linkage.clone());
         drop(slot);
         if let Some(root) = self.root_path().filter(|_| self.is_complete_workspace_index()) {
             let path = linkage_sidecar::linkage_sidecar_path(&root);
+            on_progress(CompilerLinkageProgress::Persisting {
+                declarations: linkage.len(),
+            });
             if let Err(error) = linkage_sidecar::save_linkage_sidecar(&path, &self.inner.db, linkage.clone())
             {
                 bonsai_diagnostics::debug_log!(
@@ -2454,6 +2541,33 @@ impl Workspace {
             max_precision,
             false,
             false,
+            &|| {},
+        )
+    }
+
+    /// Progress-reporting variant of
+    /// [`Self::source_reachable_resolved_call_graph`]. The callback runs once
+    /// after each compiler file or persisted relation partition has been
+    /// processed. Reachability discovers that exact worklist monotonically,
+    /// so callers should render this as a completed-unit counter rather than
+    /// claiming a total or ETA.
+    pub fn source_reachable_resolved_call_graph_with_progress<F>(
+        &self,
+        source_funcs: &[FuncId],
+        target_funcs: &[FuncId],
+        max_precision: Option<Precision>,
+        on_compiled_file: F,
+    ) -> SourceReachableCallGraph
+    where
+        F: Fn(),
+    {
+        self.source_reachable_resolved_call_graph_with_scope(
+            source_funcs,
+            target_funcs,
+            max_precision,
+            false,
+            false,
+            &on_compiled_file,
         )
     }
 
@@ -2476,6 +2590,7 @@ impl Workspace {
             max_precision,
             false,
             true,
+            &|| {},
         )
     }
 
@@ -2502,6 +2617,7 @@ impl Workspace {
             max_precision,
             true,
             true,
+            &|| {},
         )
     }
 
@@ -2512,6 +2628,7 @@ impl Workspace {
         max_precision: Option<Precision>,
         target_emissions_only: bool,
         function_scoped: bool,
+        on_compiler_unit: &dyn Fn(),
     ) -> SourceReachableCallGraph {
         if !target_emissions_only && !function_scoped {
             if let Some(service) = self.callgraph_query_service() {
@@ -2522,6 +2639,7 @@ impl Workspace {
                     source_funcs,
                     target_funcs,
                     max_precision,
+                    on_compiler_unit,
                 );
                 let relation_status =
                     bonsai_idg::workspace_adapter::CallGraphRelation::check_error(service.as_ref());
@@ -2800,8 +2918,14 @@ impl Workspace {
                     }
                 }
                 if function_scoped {
+                    for _ in &funcs {
+                        on_compiler_unit();
+                    }
                     built_funcs.extend(funcs);
                 } else {
+                    for _ in files {
+                        on_compiler_unit();
+                    }
                     built_files.extend(files.iter().copied());
                 }
             }
@@ -3166,6 +3290,18 @@ impl Workspace {
     /// Query paths continue to use [`Self::build_and_seed_persisted_idg_service`]
     /// and load the exact same sidecar when they need an in-process service.
     pub fn build_and_persist_idg_sidecar(&self) -> bonsai_idg::IdgResult<Option<usize>> {
+        self.build_and_persist_idg_sidecar_with_progress(|_| {})
+    }
+
+    /// Build the exact persisted IDG while exposing semantic segment
+    /// completion and the two representation-only finalization phases.
+    pub fn build_and_persist_idg_sidecar_with_progress<F>(
+        &self,
+        on_progress: F,
+    ) -> bonsai_idg::IdgResult<Option<usize>>
+    where
+        F: Fn(IdgPersistenceProgress),
+    {
         if !self.is_complete_workspace_index() {
             tracing::debug!("skipping workspace IDG persistence because the workspace index is scoped");
             return Ok(None);
@@ -3213,7 +3349,7 @@ impl Workspace {
         let transfer_options = default_workspace_idg_transfer_options(&self.inner.db);
         let semantics = bonsai_taint::compiler_idg_file_semantics(&self.inner.db);
         let workspace =
-            bonsai_idg::workspace_adapter::build_for_persistence_streaming_with_callgraph_relation_and_file_semantics_and_options(
+            bonsai_idg::workspace_adapter::build_for_persistence_streaming_with_callgraph_relation_and_file_semantics_and_options_with_progress(
                 global.as_ref(),
                 call_graph,
                 semantics,
@@ -3223,6 +3359,14 @@ impl Workspace {
                     self.inner
                         .db
                         .decl_index_remapped_to_headers(global.as_ref(), file)
+                },
+                |event| match event {
+                    bonsai_idg::workspace_adapter::PersistenceBuildProgress::TransferStarted {
+                        segments,
+                    } => on_progress(IdgPersistenceProgress::TransferStarted { segments }),
+                    bonsai_idg::workspace_adapter::PersistenceBuildProgress::TransferSegmentCompleted => {
+                        on_progress(IdgPersistenceProgress::TransferSegmentCompleted);
+                    }
                 },
             )?;
         let segment_count = workspace.segment_count();
@@ -3248,11 +3392,15 @@ impl Workspace {
         // rebuilding the same workspace-wide CSR on first use.
         let workspace = Arc::new(workspace);
         let service = bonsai_idg::IdgQueryService::new(Arc::clone(&workspace), global);
+        on_progress(IdgPersistenceProgress::AcceleratorStarted);
         let accelerator = service.compile_default_query_accelerator()?;
         let Ok(mut workspace) = Arc::try_unwrap(workspace) else {
             unreachable!("query-accelerator compiler retained an IDG workspace owner")
         };
         workspace.install_query_accelerator(accelerator);
+        on_progress(IdgPersistenceProgress::Persisting {
+            segments: segment_count,
+        });
         workspace.save_into_disk(&sidecar, pipeline_hash)?;
         Ok(Some(segment_count))
     }
@@ -3509,6 +3657,31 @@ impl Workspace {
         included_funcs: &[FuncId],
         call_graph: &bonsai_callgraph::ResolvedCallGraph,
     ) -> Arc<bonsai_idg::IdgQueryService> {
+        self.build_and_seed_persisted_idg_service_with_transfer_options_for_files_and_call_graph_with_progress(
+            transfer_options,
+            included_files,
+            included_funcs,
+            call_graph,
+            |_| {},
+        )
+    }
+
+    /// Progress-reporting variant used by security analysis. Segment events
+    /// describe exact selected compiler units and remain observational.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_and_seed_persisted_idg_service_with_transfer_options_for_files_and_call_graph_with_progress<
+        F,
+    >(
+        &self,
+        transfer_options: &bonsai_idg::TransferOptions,
+        included_files: &[FileId],
+        included_funcs: &[FuncId],
+        call_graph: &bonsai_callgraph::ResolvedCallGraph,
+        on_progress: F,
+    ) -> Arc<bonsai_idg::IdgQueryService>
+    where
+        F: Fn(IdgPersistenceProgress),
+    {
         let transfer_options = transfer_options.clone().canonicalized();
         let transfer_hash = idg_transfer_options_fingerprint(&transfer_options);
         let file_scope_hash = idg_file_scope_fingerprint(included_files);
@@ -3531,6 +3704,7 @@ impl Workspace {
 
         let global = self.compiler_linkage_index();
         let Some(root) = self.root_path() else {
+            on_progress(IdgPersistenceProgress::ResidentFallbackStarted);
             let service = self.build_idg_service_with_transfer_options_for_files_and_call_graph(
                 &transfer_options,
                 included_files,
@@ -3557,6 +3731,7 @@ impl Workspace {
                     error = %error,
                     "scoped transfer IDG writer lock unavailable; falling back to an exact resident graph"
                 );
+                on_progress(IdgPersistenceProgress::ResidentFallbackStarted);
                 let service = self.build_idg_service_with_transfer_options_for_files_and_call_graph(
                     &transfer_options,
                     included_files,
@@ -3579,7 +3754,7 @@ impl Workspace {
 
         let semantics = bonsai_taint::compiler_idg_file_semantics(&self.inner.db);
         let persisted = bonsai_idg::workspace_adapter::
-            build_for_persistence_streaming_with_file_semantics_and_options_for_files_and_funcs(
+            build_for_persistence_streaming_with_file_semantics_and_options_for_files_and_funcs_with_progress(
                 global.as_ref(),
                 call_graph,
                 semantics,
@@ -3592,8 +3767,20 @@ impl Workspace {
                         .db
                         .decl_index_remapped_to_headers(global.as_ref(), file)
                 },
+                |event| match event {
+                    bonsai_idg::workspace_adapter::PersistenceBuildProgress::TransferStarted {
+                        segments,
+                    } => on_progress(IdgPersistenceProgress::TransferStarted { segments }),
+                    bonsai_idg::workspace_adapter::PersistenceBuildProgress::TransferSegmentCompleted => {
+                        on_progress(IdgPersistenceProgress::TransferSegmentCompleted);
+                    }
+                },
             )
-            .and_then(|workspace| workspace.save_into_disk(&sidecar, pipeline_hash))
+            .and_then(|workspace| {
+                let segments = workspace.segment_count();
+                on_progress(IdgPersistenceProgress::Persisting { segments });
+                workspace.save_into_disk(&sidecar, pipeline_hash)
+            })
             .and_then(|()| {
                 bonsai_idg::IdgQueryService::load_from_disk(
                     &sidecar,
@@ -3611,6 +3798,7 @@ impl Workspace {
                     path = %sidecar.display(),
                     "scoped transfer IDG sidecar did not reopen; falling back to an exact resident graph"
                 );
+                on_progress(IdgPersistenceProgress::ResidentFallbackStarted);
                 let service = self.build_idg_service_with_transfer_options_for_files_and_call_graph(
                     &transfer_options,
                     included_files,
@@ -3625,6 +3813,7 @@ impl Workspace {
                     error = %error,
                     "scoped transfer IDG persistence failed; falling back to an exact resident graph"
                 );
+                on_progress(IdgPersistenceProgress::ResidentFallbackStarted);
                 let service = self.build_idg_service_with_transfer_options_for_files_and_call_graph(
                     &transfer_options,
                     included_files,

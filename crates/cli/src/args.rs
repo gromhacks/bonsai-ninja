@@ -3149,8 +3149,10 @@ pub(crate) enum SecurityAction {
         /// on unsanitized findings.
         #[arg(long = "show-sanitized", default_value_t = false)]
         show_sanitized: bool,
-        /// Token-budget ceiling for rendered output. Shorthand `4k` /
-        /// `32k` / `128k` / `1m`; `0` / `all` / `uncapped` disables.
+        /// Token-budget ceiling for rendered output. A taint flow stays one
+        /// continuous numbered block whenever it fits; only an oversized
+        /// flow is split into explicit page parts. Shorthand `4k` / `32k` /
+        /// `128k` / `1m`; `0` / `all` / `uncapped` disables.
         #[arg(long)]
         context: Option<String>,
         /// Page to render — 1-based number, `P:xxxxxxxx` cursor, or

@@ -182,10 +182,18 @@ Structural indexing reports compiler-cache maintenance, workspace ingest, and
 Tree-sitter object compilation. `index --semantic` additionally reports
 validation and the numbered compiler-object, declaration-linkage, callgraph,
 retrieval, and IDG-query-accelerator phases. The active worker owns that phase
-line; compiler-object and callgraph work show completed-file counters and an
-ETA, while non-counted phases show a spinner. Workers are sequential, so their
-displays cannot interleave and exiting a worker still reclaims the phase's
-memory.
+line. Compiler-object, declaration-linkage, callgraph, retrieval, and IDG
+transfer work show exact completed/total counts, percentage, throughput, ETA,
+and elapsed time. A monotone worklist whose final scope is discovered during
+compilation shows its exact completed-unit count and elapsed time without
+claiming a percentage or ETA; source-reachable callgraph work counts either
+finished compiler files or finished persisted relation partitions, depending
+on the exact reusable artifact available. Accelerator compilation, compression,
+validation, and atomic publication show their named phase plus elapsed time
+because byte/page counts are representation details, not comparable semantic
+work units. The CLI never turns those steps into guessed percentages. Workers
+are sequential, so their displays cannot interleave and exiting a worker still
+reclaims the phase's memory.
 
 Use `--no-progress` or `NO_PROGRESS=1` to suppress progress bars. Bars are
 also hidden automatically when stderr is not a TTY. `--no-color` and

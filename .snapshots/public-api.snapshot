@@ -372,10 +372,12 @@ pub type PeerClassIndex = AHashMap<(String, ModulePath), Vec<SymbolId>>;
 === retrieval ===
 pub const RETRIEVAL_SCHEMA_VERSION: u32 = 16;
 pub const RETRIEVAL_TABLE_ID: u32 = 0x5254_5631;
+pub enum RetrievalBuildProgress {
 pub enum RetrievalSidecarStatus {
 pub fn build_fact_docs(ws: &Workspace) -> Vec<FactDoc> {
 pub fn build_fact_index(ws: &Workspace) -> FactIndex {
 pub fn ensure_sidecar(ws: &Workspace, workspace_root: &Path) -> std::io::Result<RetrievalSidecarStatus> {
+pub fn ensure_sidecar_with_progress<F>(
 pub fn fact_id_for_parts(kind: &str, file: &str, line: u32, column: u32, name: &str) -> String {
 pub fn load_or_build_sidecar(ws: &Workspace) -> std::io::Result<FactIndex> {
 pub fn load_sidecar(ws: &Workspace, workspace_root: &Path) -> std::io::Result<FactIndex> {
@@ -385,6 +387,7 @@ pub fn pipeline_hash_for_workspace(ws: &Workspace) -> u64 {
 pub fn query_sidecar_file_paths_with_pipeline(
 pub fn retrieval_sidecar_path(workspace_root: &Path) -> PathBuf {
 pub fn save_sidecar(ws: &Workspace, workspace_root: &Path) -> std::io::Result<usize> {
+pub fn save_sidecar_with_progress<F>(
 pub fn validate_sidecar_file(path: &Path) -> std::io::Result<usize> {
 pub fn validate_sidecar_file_with_pipeline(path: &Path, pipeline: u64) -> std::io::Result<usize> {
 pub struct Candidate {
@@ -449,12 +452,13 @@ pub struct WorkspaceRefreshReport {
 pub use bonsai_browse::decl_decorator_names;
 pub use bonsai_browse::{
 pub use bonsai_inspect::{
+pub use bonsai_retrieval::RetrievalBuildProgress;
 pub use bonsai_security::{
 pub use bonsai_trace::{
 pub use bonsai_workspace::flow_ids::compute_structural_flow_id;
 pub use bonsai_workspace::value_flow::{
 pub use bonsai_workspace::{
-pub use bonsai_workspace::{WorkspaceCacheStatus, WorkspaceOpenEvent};
+pub use bonsai_workspace::{
 pub use read_file::{
 pub use tree::{
 
@@ -520,7 +524,9 @@ pub struct Vfs {
 
 === workspace ===
 pub const fn idg_sidecar_enabled_for_file_count(_file_count: usize) -> bool {
+pub enum CompilerLinkageProgress {
 pub enum FileRefreshKind {
+pub enum IdgPersistenceProgress {
 pub enum WorkspaceCacheStatus {
 pub enum WorkspaceError {
 pub enum WorkspaceOpenEvent {

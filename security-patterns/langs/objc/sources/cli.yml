@@ -206,7 +206,9 @@
   description: "UIPasteboard/NSPasteboard typed accessors - clipboard contents originate from any other app or user paste action; treat as untrusted IPC input. The method-name allowlist excludes mutators/metadata methods (setPersistent:, numberOfItems) that do not return clipboard payload."
 
 - id: objc.source.nspasteboard_string
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: objc
   trust: ipc
   tag: clipboard-input
@@ -219,4 +221,4 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; [NSPasteboard generalPasteboard:input]; }
-  description: "NSPasteboard +generalPasteboard (AppKit) - macOS clipboard accessor; subsequent -stringForType: returns cross-app input."
+  description: "Disabled - +generalPasteboard returns the pasteboard object rather than clipboard data. objc.source.uipasteboard_string models the typed string/data accessors that actually return cross-app input."

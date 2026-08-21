@@ -193,6 +193,28 @@ pub enum RetrievalSidecarStatus {
     Rebuilt { docs: usize },
 }
 
+/// Exact progress emitted while rebuilding the persisted candidate index.
+///
+/// File totals come from the canonical compiler/callgraph file inventory;
+/// they are never estimates. Persistence is intentionally reported as an
+/// indeterminate phase because compressed byte/page counts are representation
+/// details rather than semantic work units.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RetrievalBuildProgress {
+    /// The exact compiler/callgraph file inventory is known.
+    FilesStarted {
+        /// Number of files whose candidate projection will be built.
+        files: usize,
+    },
+    /// One file's canonical candidate projection has been accepted.
+    FileCompleted,
+    /// Candidate construction is complete and the sidecar is being encoded.
+    Persisting {
+        /// Number of candidate documents in the completed projection.
+        docs: usize,
+    },
+}
+
 /// Candidate returned by a retrieval/ranking provider.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Candidate {
@@ -918,7 +940,10 @@ fn retrieval_file_batch_width() -> usize {
 /// candidate strings are derived and interned one bounded file batch at a
 /// time instead of materializing a second whole-workspace graph. The batch
 /// width is a scheduling choice only and never limits files or facts.
-fn build_persisted_candidate_snapshot(ws: &Workspace) -> CompactFactSnapshot {
+fn build_persisted_candidate_snapshot_with_progress<F>(ws: &Workspace, on_progress: &F) -> CompactFactSnapshot
+where
+    F: Fn(RetrievalBuildProgress) + Sync,
+{
     let debug_build = bonsai_diagnostics::debug::is_enabled("retrieval-build");
     let started = Instant::now();
     let pipeline = pipeline_hash_for_workspace(ws);
@@ -946,6 +971,7 @@ fn build_persisted_candidate_snapshot(ws: &Workspace) -> CompactFactSnapshot {
         .collect();
     files.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     let files_ready = Instant::now();
+    on_progress(RetrievalBuildProgress::FilesStarted { files: files.len() });
 
     let mut builder = CompactFactSnapshotBuilder::new(RETRIEVAL_SCHEMA_VERSION, pipeline);
     let batch_width = retrieval_file_batch_width();
@@ -1015,6 +1041,7 @@ fn build_persisted_candidate_snapshot(ws: &Workspace) -> CompactFactSnapshot {
             for doc in docs {
                 builder.push(doc);
             }
+            on_progress(RetrievalBuildProgress::FileCompleted);
         }
         if debug_build {
             compact_push_nanos = compact_push_nanos
@@ -1047,13 +1074,42 @@ fn build_persisted_candidate_snapshot(ws: &Workspace) -> CompactFactSnapshot {
 
 /// Save a retrieval sidecar for `ws` under `workspace_root`.
 pub fn save_sidecar(ws: &Workspace, workspace_root: &Path) -> std::io::Result<usize> {
+    save_sidecar_with_progress(ws, workspace_root, |_| {})
+}
+
+/// Save a retrieval sidecar while reporting exact completed compiler files.
+pub fn save_sidecar_with_progress<F>(
+    ws: &Workspace,
+    workspace_root: &Path,
+    on_progress: F,
+) -> std::io::Result<usize>
+where
+    F: Fn(RetrievalBuildProgress) + Sync,
+{
     require_complete_workspace(ws)?;
     let path = retrieval_sidecar_path(workspace_root);
-    save_compact_snapshot(build_persisted_candidate_snapshot(ws), &path)
+    let snapshot = build_persisted_candidate_snapshot_with_progress(ws, &on_progress);
+    on_progress(RetrievalBuildProgress::Persisting {
+        docs: snapshot.docs.len(),
+    });
+    save_compact_snapshot(snapshot, &path)
 }
 
 /// Validate an existing retrieval sidecar or build it when stale/missing.
 pub fn ensure_sidecar(ws: &Workspace, workspace_root: &Path) -> std::io::Result<RetrievalSidecarStatus> {
+    ensure_sidecar_with_progress(ws, workspace_root, |_| {})
+}
+
+/// Validate or rebuild the retrieval sidecar while reporting exact rebuild
+/// progress. A fresh sidecar returns without emitting rebuild events.
+pub fn ensure_sidecar_with_progress<F>(
+    ws: &Workspace,
+    workspace_root: &Path,
+    on_progress: F,
+) -> std::io::Result<RetrievalSidecarStatus>
+where
+    F: Fn(RetrievalBuildProgress) + Sync,
+{
     require_complete_workspace(ws)?;
     let pipeline = pipeline_hash_for_workspace(ws);
     match validate_sidecar_file_with_pipeline(&retrieval_sidecar_path(workspace_root), pipeline) {
@@ -1066,7 +1122,8 @@ pub fn ensure_sidecar(ws: &Workspace, workspace_root: &Path) -> std::io::Result<
             // even when its sidecar is current. A miss remains exact because
             // `cached_resolved_call_graph` rebuilds from syntax below.
             let _ = ws.load_callgraph_sidecar(workspace_root);
-            save_sidecar(ws, workspace_root).map(|docs| RetrievalSidecarStatus::Rebuilt { docs })
+            save_sidecar_with_progress(ws, workspace_root, on_progress)
+                .map(|docs| RetrievalSidecarStatus::Rebuilt { docs })
         }
     }
 }
@@ -2913,6 +2970,36 @@ mod tests {
             1,
             "file docs must be queryable as retrieval candidates"
         );
+    }
+
+    #[test]
+    fn persisted_candidate_progress_counts_every_compiler_file_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("app.py"), "def entry():\n    return helper()\n").expect("write app");
+        std::fs::write(dir.path().join("helper.py"), "def helper():\n    return 1\n").expect("write helper");
+        let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+        ws.ingest_dir(dir.path()).expect("ingest");
+        let events = std::sync::Mutex::new(Vec::new());
+
+        let docs = save_sidecar_with_progress(&ws, dir.path(), |event| {
+            events.lock().expect("events lock").push(event);
+        })
+        .expect("save retrieval sidecar");
+        let events = events.into_inner().expect("events lock");
+
+        assert_eq!(
+            events.first(),
+            Some(&RetrievalBuildProgress::FilesStarted { files: 2 })
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, RetrievalBuildProgress::FileCompleted))
+                .count(),
+            2
+        );
+        assert_eq!(events.last(), Some(&RetrievalBuildProgress::Persisting { docs }));
+        let _ = std::fs::remove_dir_all(workspace_bonsai_dir(dir.path()));
     }
 
     #[test]

@@ -1,4 +1,36 @@
 # Scala HTTP-input sources (Play, akka-http, http4s, sttp server, servlet).
+- id: scala.gcp.functions_request
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event, json, query, path, header]
+  frameworks: [gcp-functions]
+  packages: [com.google.cloud.functions]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      in_class: [HttpFunction]
+      in_method: [service]
+      param_index_in: [0]
+      param_type_in: [HttpRequest, com.google.cloud.functions.HttpRequest]
+  match_examples:
+  - name: google cloud scala http request
+    code: |
+      import com.google.cloud.functions.{HttpFunction, HttpRequest, HttpResponse}
+      class Function extends HttpFunction {
+        override def service(request: HttpRequest, response: HttpResponse): Unit = ()
+      }
+    expect_match_text: [request]
+  - name: helper request negative
+    code: |
+      import com.google.cloud.functions.HttpRequest
+      class Function { def helper(request: HttpRequest): Unit = () }
+    expect_no_match: true
+  description: "Google Cloud Scala HttpFunction.service request parameter - remote HTTP request proven by interface, method, position, and declared type."
+
 - id: scala.servlet.get_parameter
   enabled: true
   language: scala
@@ -469,21 +501,28 @@
   tag: http-input
   payload_types: [json, query]
   frameworks: [play, akka-http, http4s]
-  packages: [com.typesafe.play, com.typesafe.akka, http4s]
+  packages: [play.api, com.typesafe.play, com.typesafe.akka, http4s]
+  imports: [play.api.mvc]
   manifests: [build.sbt]
   match:
     kind: param
     target:
-      name: request
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Request, RequestHeader, play.api.mvc.Request, play.api.mvc.RequestHeader]
   match_examples:
-  - name: generated shape example
+  - name: typed play request parameter
     code: |
-      import com.typesafe.play._
+      import play.api.mvc.Request
       object App {
-        def handle(request: String): Unit = {
-        }
+        def handle(request: Request[Any]): Unit = ()
       }
-  description: "Play / akka-http / http4s request parameter (def action(request: Request[...]))."
+    expect_match_text: [request]
+  - name: same name wrong type negative
+    code: |
+      import play.api.mvc.Request
+      object App { def handle(request: String): Unit = () }
+    expect_no_match: true
+  description: "Play Request or RequestHeader parameter - remote request proven by its declared framework type rather than the name request."
 
 - id: scala.play.req_param
   enabled: false

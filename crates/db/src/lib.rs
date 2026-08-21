@@ -771,7 +771,7 @@ impl AnalyzerDb {
     /// content-addressed compiler-object generation.
     #[must_use]
     pub fn build_global_header_index(&self) -> Arc<GlobalIndex> {
-        self.build_streaming_global_index(GlobalIndex::insert_header_preprocessed)
+        self.build_streaming_global_index(GlobalIndex::insert_header_preprocessed, || {})
     }
 
     /// Build declaration headers plus compact AST-derived linkage facts used
@@ -779,10 +779,29 @@ impl AnalyzerDb {
     /// are still lowered one file at a time and never accumulated here.
     #[must_use]
     pub fn build_global_linkage_index(&self) -> Arc<GlobalIndex> {
-        self.build_streaming_global_index(GlobalIndex::insert_linkage_header_preprocessed)
+        self.build_global_linkage_index_with_progress(|| {})
     }
 
-    fn build_streaming_global_index(&self, insert: fn(&mut GlobalIndex, DeclIndex)) -> Arc<GlobalIndex> {
+    /// Build the complete linkage table while reporting each compiler file
+    /// after its exact adapter-lowered header is ready. The callback is
+    /// observational and does not affect batching, ordering, or admitted
+    /// syntax facts.
+    #[must_use]
+    pub fn build_global_linkage_index_with_progress<F>(&self, on_file: F) -> Arc<GlobalIndex>
+    where
+        F: Fn() + Sync,
+    {
+        self.build_streaming_global_index(GlobalIndex::insert_linkage_header_preprocessed, on_file)
+    }
+
+    fn build_streaming_global_index<F>(
+        &self,
+        insert: fn(&mut GlobalIndex, DeclIndex),
+        on_file: F,
+    ) -> Arc<GlobalIndex>
+    where
+        F: Fn() + Sync,
+    {
         let files = self.inner.vfs.all_files();
         let mut global = GlobalIndex::new();
         let source_bytes = files
@@ -803,6 +822,7 @@ impl AnalyzerDb {
                 if let Some(index) = self.decl_index_uncached(file) {
                     insert(&mut global, index);
                 }
+                on_file();
             }
         } else {
             match rayon::ThreadPoolBuilder::new()
@@ -816,7 +836,11 @@ impl AnalyzerDb {
                             use rayon::prelude::*;
                             files[range]
                                 .par_iter()
-                                .map(|&file| self.decl_index_uncached(file))
+                                .map(|&file| {
+                                    let index = self.decl_index_uncached(file);
+                                    on_file();
+                                    index
+                                })
                                 .collect::<Vec<_>>()
                         });
                         for index in indexes.into_iter().flatten() {
@@ -829,6 +853,7 @@ impl AnalyzerDb {
                         if let Some(index) = self.decl_index_uncached(file) {
                             insert(&mut global, index);
                         }
+                        on_file();
                     }
                 }
             }

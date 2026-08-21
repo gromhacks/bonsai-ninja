@@ -530,12 +530,15 @@ pub const LANGS: &[LangExp] = &[
         cmdi_sink: "system",
         sqli_sink: "db.execute",
         min_findings_micro: 0,
-        // Receiver-name-gating the Ruby SQL execute rule drops two
-        // unrelated `.execute(...)` complex-fixture matches while
-        // preserving the real `db.execute(...)` SQL sink. The floor is
-        // 25 after dedup: 21 command-injection, 2 eval, 1 file-read,
-        // and 1 ERB template finding.
-        min_findings_complex: 25,
+        // Receiver-name-gating the Ruby SQL execute rule drops unrelated
+        // `.execute(...)` matches while preserving the real `db.execute(...)`
+        // sink. Exact source-boundary cleanup then removed two flows sourced
+        // from a local `build(req)` parameter merely because the file used a
+        // variable named `req`, plus a duplicate Marshal.load report sourced
+        // from a generic `data` parameter. The remaining 23 findings retain
+        // all represented sink families: 17 command-injection, 3 eval, 1
+        // deserialization, 1 file-read, and 1 ERB template finding.
+        min_findings_complex: 23,
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: true,

@@ -210,6 +210,34 @@ fn source_reachable_target_return_corridor_reaches_order_independent_fixed_point
 }
 
 #[test]
+fn source_reachable_progress_counts_each_compiled_caller_file_once() {
+    let ws = ws_with(
+        "app.py",
+        "def source(value):\n    return sink(value)\n\ndef sink(value):\n    return value\n",
+    );
+    let global = ws.compiler_linkage_index();
+    let func = |name: &str| {
+        let symbol = global
+            .find_by_name(name)
+            .first()
+            .copied()
+            .unwrap_or_else(|| panic!("missing {name}"));
+        bonsai_common::FuncId::new(symbol.raw())
+    };
+    let completed = std::cell::Cell::new(0_u64);
+    let reachable = ws.source_reachable_resolved_call_graph_with_progress(
+        &[func("source")],
+        &[func("sink")],
+        Some(bonsai_common::Precision::Narrowed),
+        || completed.set(completed.get() + 1),
+    );
+
+    assert_eq!(completed.get(), 1);
+    assert_eq!(reachable.files.len(), 1);
+    assert_eq!(reachable.reached_targets, 1);
+}
+
+#[test]
 fn source_reachable_target_return_corridor_compiles_cross_file_callers() {
     let ws = Workspace::new(registry());
     ws.vfs().write(
@@ -326,10 +354,12 @@ fn persisted_source_reachable_scope_matches_cold_compiler_fixed_point() {
             .unwrap_or_else(|| panic!("missing {name}"));
         bonsai_common::FuncId::new(symbol.raw())
     };
-    let warm_scope = warm.source_reachable_resolved_call_graph(
+    let warm_completed = std::cell::Cell::new(0_u64);
+    let warm_scope = warm.source_reachable_resolved_call_graph_with_progress(
         &[warm_func("source")],
         &[warm_func("target1"), warm_func("target2")],
         Some(bonsai_common::Precision::Narrowed),
+        || warm_completed.set(warm_completed.get() + 1),
     );
     let warm_edges = warm_scope
         .graph
@@ -359,6 +389,10 @@ fn persisted_source_reachable_scope_matches_cold_compiler_fixed_point() {
     );
     assert_eq!(warm_edges, cold_edges);
     assert_eq!(warm_scope.reached_targets, cold_reached_targets);
+    assert!(
+        warm_completed.get() > 0,
+        "persisted relation replay must expose its completed planning units"
+    );
 
     std::fs::remove_dir_all(&root).ok();
 }

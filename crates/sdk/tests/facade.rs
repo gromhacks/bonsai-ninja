@@ -1473,6 +1473,41 @@ fn facade_index_is_structural_by_default() {
 }
 
 #[test]
+fn root_cache_validates_compiler_generation_without_opening_project() {
+    let root = temp_python_micro("root-compiler-generation");
+    let sdk = sdk();
+    let cache = sdk.cache(&root);
+    assert_eq!(
+        cache
+            .current_compiler_object_count()
+            .expect("missing generation status"),
+        None
+    );
+
+    let project = sdk.index(&root).expect("structural workspace");
+    project
+        .cache()
+        .warm_compiler_object_sidecar()
+        .expect("persist compiler generation");
+    assert_eq!(
+        cache
+            .current_compiler_object_count()
+            .expect("fresh generation status"),
+        Some(project.stats().files)
+    );
+
+    std::fs::write(root.join("app.py"), "def changed():\n    return 2\n").expect("modify compiler input");
+    assert_eq!(
+        cache
+            .current_compiler_object_count()
+            .expect("stale generation status"),
+        None,
+        "an edited source must invalidate the complete compiler generation"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn bonsai_builder_accepts_preloaded_rulepack_before_opening_project() {
     let root = temp_python_micro("builder-preloaded-rulepack");
     let rulepack_root = repo_root().join("security-patterns");

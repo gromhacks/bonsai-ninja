@@ -1,7 +1,9 @@
 # Ruby cloud serverless sources. Handlers take attacker-controlled event
 # payloads. trust: service - upstream gateway brokered.
 - id: ruby.source.aws_lambda_event
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: ruby
   tag: cloud-event
   trust: service
@@ -10,24 +12,12 @@
     kind: param
     target:
       name: event
-  match_examples:
-  - name: ruby.source.aws_lambda_event example
-    code: |
-      require "aws_lambda_ric"
-      def handler(event)
-        event
-      end
-  - name: ruby.source.aws_lambda_event no event param negative
-    code: |
-      require "aws_lambda_ric"
-      def handler(context)
-        context
-      end
-    expect_no_match: true
-  description: "AWS Lambda Ruby handler `event:` parameter (aws_lambda_ric)."
+  description: "Disabled - Ruby Lambda handlers are configured externally, so a bare `event` parameter plus aws_lambda_ric does not prove a runtime entry boundary."
 
 - id: ruby.source.gcf_request
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: ruby
   tag: cloud-event
   trust: service
@@ -36,24 +26,12 @@
     kind: param
     target:
       name: request
-  match_examples:
-  - name: ruby.source.gcf_request example
-    code: |
-      require "functions_framework"
-      def handler(request)
-        request
-      end
-  - name: ruby.source.gcf_request no request param negative
-    code: |
-      require "functions_framework"
-      def handler(context)
-        context
-      end
-    expect_no_match: true
-  description: "Google Cloud Functions functions_framework http(request) handler."
+  description: "Disabled - Ruby Functions Framework HTTP handlers are registered through a DSL block; a bare `request` method parameter does not prove registration. Re-enable when callback-block parameters retain their registration call target."
 
 - id: ruby.source.azure_function_req
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: ruby
   tag: cloud-event
   trust: service
@@ -61,16 +39,4 @@
     kind: param
     target:
       name: req
-  match_examples:
-  - name: ruby.source.azure_function_req example
-    code: |
-      def handler(req)
-        req
-      end
-  - name: ruby.source.azure_function_req no req param negative
-    code: |
-      def handler(context)
-        context
-      end
-    expect_no_match: true
-  description: "Azure Functions HTTP trigger handler req parameter."
+  description: "Disabled - bare `req` has no Azure runtime, custom-handler, type, or registration evidence and matches ordinary Ruby methods."

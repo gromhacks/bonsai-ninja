@@ -55,7 +55,8 @@ cannot silently accumulate here.
 - `category_audit.py` — renders per-language security-category coverage into
   ignored `build/` artifacts.
 - `fp_audit.py` — scores rule shapes for likely false-positive risk.
-- `pack_audit.py` — reports rulepack coverage, precision, duplicates, and family consistency.
+- `pack_audit.py` — reports rulepack coverage, precision, duplicate YAML keys,
+  duplicate rules, and family consistency.
 - `pattern_variants_na.yml` — records reviewed language/category variants that are not applicable.
 - `rule_example_coverage.py` — verifies that rule definitions carry required match examples.
 - `sanitizer_credit_audit.py` — checks sanitizer credit metadata and tag alignment.

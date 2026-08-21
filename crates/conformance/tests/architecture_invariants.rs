@@ -3731,7 +3731,7 @@ fn retrieval_streams_callgraph_candidates_by_compiler_unit() {
     let retrieval = read(&root.join("crates/retrieval/src/lib.rs"));
     let index = function_body(&retrieval, "index_semantic_edges_by_file");
     let collect = function_body(&retrieval, "collect_edge_candidate_terms");
-    let build = function_body(&retrieval, "build_persisted_candidate_snapshot");
+    let build = function_body(&retrieval, "build_persisted_candidate_snapshot_with_progress");
     let batch_width = function_body(&retrieval, "retrieval_file_batch_width");
 
     assert!(
@@ -3770,6 +3770,8 @@ fn compiler_objects_are_exact_single_frontend_inputs() {
     let root = repo_root();
     let db = read(&root.join("crates/db/src/lib.rs"));
     let compiler_object = read(&root.join("crates/db/src/compiler_object.rs"));
+    let language_kit = read(&root.join("crates/lang_api/src/kit/mod.rs"));
+    let python_adapter = read(&root.join("crates/lang_python/src/lib.rs"));
     let sdk = read(&root.join("crates/sdk/src/lib.rs"));
     let service = read(&root.join("crates/idg/src/service.rs"));
     let csr = read(&root.join("crates/idg/src/csr.rs"));
@@ -3819,6 +3821,34 @@ fn compiler_objects_are_exact_single_frontend_inputs() {
             && !write_generation.contains(".truncate("),
         "compiler objects must be atomic, strongly content-identified, continuously scheduled without physical head-of-line blocking, canonically indexed, relocatable by relative path, and complete"
     );
+    let span_lookup = function_body(&language_kit, "node_at_span");
+    assert!(
+        span_lookup.contains("named_descendant_for_byte_range")
+            && span_lookup.contains("node.parent()")
+            && !span_lookup.contains("Vec")
+            && !span_lookup.contains("named_children"),
+        "adapter span enrichment must follow Tree-sitter's indexed range/ancestor path, never rescan the complete CST per fact"
+    );
+    for function in [
+        "python_finite_literal_selections",
+        "python_character_substitutions",
+    ] {
+        let body = function_body(&python_adapter, function);
+        let inventory = body
+            .find("collect_kinds(tree, &[\"assignment\", \"augmented_assignment\", \"call\"])")
+            .unwrap_or_else(|| panic!("{function} must build one reusable syntax inventory"));
+        let per_assignment = body
+            .find("for assignment in &assignments")
+            .unwrap_or_else(|| panic!("{function} assignment pass missing"));
+        assert!(
+            inventory < per_assignment
+                && body
+                    .matches("collect_kinds(tree, &[\"assignment\", \"augmented_assignment\", \"call\"])")
+                    .count()
+                    == 1,
+            "{function} must not rescan the complete Python CST once per candidate assignment"
+        );
+    }
     assert!(
         function_body(&db, "decl_index_uncached").contains("compiler_file_object_uncached")
             && function_body(&db, "syntax_indexes_uncached").contains("compiler_file_object_uncached")
@@ -4125,22 +4155,18 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && !source_reachable.contains(".truncate("),
         "source/callback/return corridors must converge through exact indexed compiler worklists and memory-weighted file batches"
     );
+    let idg_persist = function_body(&workspace, "build_and_persist_idg_sidecar_with_progress");
     assert!(
-        function_body(&workspace, "build_and_persist_idg_sidecar").contains("compiler_linkage_index()")
-            && function_body(&workspace, "build_and_persist_idg_sidecar")
-                .contains("build_for_persistence_streaming_with_callgraph_relation_and_file_semantics_and_options")
-            && function_body(&workspace, "build_and_persist_idg_sidecar")
-                .contains("CallgraphQueryService::open_checked")
-            && function_body(&workspace, "build_and_persist_idg_sidecar")
-                .contains("compile_default_query_accelerator")
-            && function_body(&workspace, "build_and_persist_idg_sidecar")
-                .contains("install_query_accelerator")
-            && function_body(&workspace, "build_and_persist_idg_sidecar")
+        function_body(&workspace, "build_and_persist_idg_sidecar")
+            .contains("build_and_persist_idg_sidecar_with_progress")
+            && idg_persist.contains("compiler_linkage_index()")
+            && idg_persist.contains("build_for_persistence_streaming_with_callgraph_relation_and_file_semantics_and_options_with_progress")
+            && idg_persist.contains("CallgraphQueryService::open_checked")
+            && idg_persist.contains("compile_default_query_accelerator")
+            && idg_persist.contains("install_query_accelerator")
+            && idg_persist
                 .find("install_query_accelerator")
-                .zip(
-                    function_body(&workspace, "build_and_persist_idg_sidecar")
-                        .find("save_into_disk")
-                )
+                .zip(idg_persist.find("save_into_disk"))
                 .is_some_and(|(install, save)| install < save)
             && function_body(&idg_service, "load_from_disk")
                 .contains("PersistedQueryAccelerator::decode")
@@ -4571,6 +4597,7 @@ fn default_index_path_stays_structural_with_explicit_warm_modes() {
     let main = read(&root.join("crates/cli/src/main.rs"));
     let diagnostics = read(&root.join("crates/cli/src/commands/diagnostics.rs"));
     let commands_mod = read(&root.join("crates/cli/src/commands/mod.rs"));
+    let sdk = read(&root.join("crates/sdk/src/lib.rs"));
     let workspace = read(&root.join("crates/workspace/src/lib.rs"));
     let cache_cmd = read(&root.join("crates/cli/src/commands/cache.rs"));
 
@@ -4584,6 +4611,12 @@ fn default_index_path_stays_structural_with_explicit_warm_modes() {
     );
 
     let index_body = function_body(&diagnostics, "cmd_index");
+    let root_only_compiler_validation = index_body
+        .find("current_compiler_object_count()?")
+        .expect("index must validate a warm compiler generation root-only");
+    let source_backed_open = index_body
+        .find("open_project_sidecar_validation_only(root)?")
+        .expect("index must retain an exact cold rebuild path");
     assert!(
         diagnostics.contains("struct IndexCommandOptions")
             && diagnostics.contains("structural_only: bool")
@@ -4606,6 +4639,20 @@ fn default_index_path_stays_structural_with_explicit_warm_modes() {
                 .contains("SemanticWorkerPhase::Linkage")
             && function_body(&diagnostics, "semantic_phase_plan").contains("SemanticWorkerPhase::Idg"),
         "cmd_index must keep default/structural-only runs parse-only and isolate exact semantic phases in worker processes"
+    );
+    assert!(
+        root_only_compiler_validation < source_backed_open
+            && index_body.contains("semantic_context_for_root(root)"),
+        "warm structural index must validate compiler metadata before any source-backed workspace open"
+    );
+    let root_only_validation = function_body(&sdk, "current_compiler_object_count");
+    assert!(
+        root_only_validation.contains("source_file_fingerprints_for_cache_validation")
+            && root_only_validation
+                .contains("validate_compiler_object_sidecar_metadata_with_source_fingerprints")
+            && !root_only_validation.contains("open")
+            && !root_only_validation.contains("Workspace::new"),
+        "warm compiler generation validation must remain root-only and must not hydrate source bodies"
     );
     assert!(
         function_body(&commands_mod, "open_project_sidecar_validation_only")
@@ -4685,24 +4732,30 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
     );
     let frontend = function_body(&sdk, "warm_retrieval_and_callgraph_sidecars");
     let compiler = function_body(&sdk, "warm_compiler_object_sidecar");
-    let retrieval = function_body(&sdk, "warm_retrieval_sidecar");
+    let retrieval_wrapper = function_body(&sdk, "warm_retrieval_sidecar");
+    let retrieval = function_body(&sdk, "warm_retrieval_sidecar_with_progress");
     let callgraph = function_body(&sdk, "warm_callgraph_sidecar");
-    let linkage = function_body(&sdk, "warm_compiler_linkage_sidecar");
-    let idg = function_body(&sdk, "warm_idg_sidecar_and_manifest");
+    let linkage_wrapper = function_body(&sdk, "warm_compiler_linkage_sidecar");
+    let linkage = function_body(&sdk, "warm_compiler_linkage_sidecar_with_progress");
+    let idg_wrapper = function_body(&sdk, "warm_idg_sidecar_and_manifest");
+    let idg = function_body(&sdk, "warm_idg_sidecar_and_manifest_with_progress");
     assert!(
         compiler.contains("save_compiler_object_sidecar")
             && frontend.contains("warm_retrieval_sidecar()?")
             && frontend.contains("warm_callgraph_sidecar()?")
             && frontend.contains("warm_compiler_linkage_sidecar()")
-            && retrieval.contains("bonsai_retrieval::ensure_sidecar")
+            && retrieval_wrapper.contains("warm_retrieval_sidecar_with_progress")
+            && retrieval.contains("bonsai_retrieval::ensure_sidecar_with_progress")
             && callgraph.contains("save_callgraph_sidecar")
-            && linkage.contains("save_compiler_linkage_sidecar")
+            && linkage_wrapper.contains("warm_compiler_linkage_sidecar_with_progress")
+            && linkage.contains("save_compiler_linkage_sidecar_with_progress")
             && !frontend.contains("build_and_persist_idg_sidecar")
+            && idg_wrapper.contains("warm_idg_sidecar_and_manifest_with_progress")
             && idg.contains("validate_idg_sidecar_layout")
             && idg.contains("callgraph_sidecar_is_current")
             && idg.contains("save_callgraph_sidecar")
             && idg.contains("load_compiler_linkage_sidecar_checked")
-            && idg.contains("build_and_persist_idg_sidecar")
+            && idg.contains("build_and_persist_idg_sidecar_with_progress")
             && idg.contains("write_manifest"),
         "compiler objects, retrieval, callgraph, linkage, and IDG persistence must be independently executable exact phases"
     );
@@ -4749,6 +4802,8 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
                 .zip(phase_plan.find("SemanticWorkerPhase::Retrieval"))
                 .is_some_and(|(callgraph, retrieval)| callgraph < retrieval)
             && function_body(&retrieval_crate, "ensure_sidecar")
+                .contains("ensure_sidecar_with_progress")
+            && function_body(&retrieval_crate, "ensure_sidecar_with_progress")
                 .contains("ws.load_callgraph_sidecar(workspace_root)"),
         "retrieval compilation must reuse the exact callgraph phase artifact instead of recompiling its dependency"
     );
@@ -4918,9 +4973,11 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
         headers.contains("compiler_header_index()") && !headers.contains("compiler_linkage_index()"),
         "broad rule matching must load only the independent compiler symbol payload, not call linkage or workspace bodies"
     );
-    let compiler_linkage = function_body(&workspace, "compiler_linkage_index");
+    let compiler_linkage_wrapper = function_body(&workspace, "compiler_linkage_index");
+    let compiler_linkage = function_body(&workspace, "compiler_linkage_index_with_progress");
     assert!(
-        compiler_linkage.contains("idg_service()")
+        compiler_linkage_wrapper.contains("compiler_linkage_index_with_progress")
+            && compiler_linkage.contains("idg_service()")
             && compiler_linkage.contains("global_linkage_index()")
             && compiler_linkage.contains("compiler_linkage.read()")
             && compiler_linkage.contains("compiler_linkage.write()")
@@ -4928,7 +4985,7 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
             && compiler_linkage.contains("decl_index_remapped_to_headers")
             && compiler_linkage.contains("project_linkage_from_remapped_file")
             && compiler_linkage.contains("install_projected_linkage")
-            && compiler_linkage.contains("build_global_linkage_index()"),
+            && compiler_linkage.contains("build_global_linkage_index_with_progress"),
         "Workspace must own the compact compiler linkage lifetime shared by IDG and streamed exact-body consumers, while scoped workspaces rebind selected bodies to persisted full-workspace symbol identities"
     );
     let guarded_invalidation = function_body(&workspace, "invalidate_after_file_change");
@@ -5128,12 +5185,19 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
             && source_analysis.contains("release_exact_body_cache()"),
         "source analysis must release endpoint-phase allocations before opening its persisted scoped IDG"
     );
-    let persisted_scope = function_body(
+    let persisted_scope_wrapper = function_body(
         &workspace,
         "build_and_seed_persisted_idg_service_with_transfer_options_for_files_and_call_graph",
     );
+    let persisted_scope = function_body(
+        &workspace,
+        "build_and_seed_persisted_idg_service_with_transfer_options_for_files_and_call_graph_with_progress",
+    );
     assert!(
-        persisted_scope.contains("idg_file_scope_fingerprint(included_files)")
+        persisted_scope_wrapper.contains(
+            "build_and_seed_persisted_idg_service_with_transfer_options_for_files_and_call_graph_with_progress"
+        )
+            && persisted_scope.contains("idg_file_scope_fingerprint(included_files)")
             && persisted_scope.contains("idg_func_scope_fingerprint(included_funcs)")
             && persisted_scope.contains("idg_call_graph_fingerprint(call_graph)")
             && persisted_scope.contains("idg_scoped_semantics_fingerprint(")
@@ -6363,5 +6427,28 @@ fn external_callback_signatures_are_rulepack_owned() {
             && typing.contains("ServerRequest")
             && typing.contains("DataFetchingEnvironment"),
         "external callback signatures must flow from typing YAML through the generic matcher"
+    );
+}
+
+/// Rust permits one type's inherent impl blocks to be split across modules.
+/// The adapter must retain the AST owner and rooted module identity so shared
+/// resolution never compensates with a workspace-wide leaf-name search.
+#[test]
+fn rust_split_impl_resolution_is_compiler_fact_driven() {
+    let root = repo_root();
+    let rust = live_code(&read(&root.join("crates/lang_rust/src/lib.rs")));
+    let resolver = live_code(&read(&root.join("crates/resolve/src/lib.rs")));
+    assert!(
+        rust.contains("collect_rust_impl_method_parents")
+            && rust.contains("TypeAliasBinding")
+            && rust.contains("normalize_rust_rooted_path")
+            && rust.contains("normalize_rust_rooted_calls"),
+        "Rust split impls must retain AST owner types and normalized crate/self/super paths"
+    );
+    assert!(
+        rust.contains("Visibility::ModuleTree")
+            && resolver.contains("Visibility::ModuleTree")
+            && resolver.contains("starts_with(&decl_module.segments)"),
+        "Rust module-tree privacy must be a typed visibility fact, not a file-local approximation"
     );
 }

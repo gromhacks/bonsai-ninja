@@ -1294,6 +1294,8 @@ fn taint_analysis_schedules_only_source_groups_that_can_reach_sinks() {
     let mut current_phase: Option<&'static str> = None;
     let mut taint_chain_total = None;
     let mut taint_chain_ticks = 0u64;
+    let mut reachable_callgraph_total = None;
+    let mut reachable_callgraph_ticks = 0u64;
     let mut notes: Vec<(&'static str, String)> = Vec::new();
     let report = bonsai_security::run_taint_analysis_with_phase_progress(
         &ws,
@@ -1305,10 +1307,16 @@ fn taint_analysis_schedules_only_source_groups_that_can_reach_sinks() {
                 if label == "building taint chains" {
                     taint_chain_total = Some(total);
                 }
+                if label == "building source-reachable callgraph" {
+                    reachable_callgraph_total = Some(total);
+                }
             }
             bonsai_security::AnalysisProgress::PhaseTicked => {
                 if current_phase == Some("building taint chains") {
                     taint_chain_ticks += 1;
+                }
+                if current_phase == Some("building source-reachable callgraph") {
+                    reachable_callgraph_ticks += 1;
                 }
             }
             bonsai_security::AnalysisProgress::PhaseFinished => {
@@ -1323,6 +1331,11 @@ fn taint_analysis_schedules_only_source_groups_that_can_reach_sinks() {
 
     assert_eq!(taint_chain_total, Some(1));
     assert_eq!(taint_chain_ticks, 1);
+    assert_eq!(reachable_callgraph_total, Some(0));
+    assert!(
+        reachable_callgraph_ticks > 0,
+        "source-reachable callgraph should report exact dynamic compiler units"
+    );
     assert!(
         notes
             .iter()

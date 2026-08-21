@@ -13,17 +13,20 @@
   match:
     kind: param
     target:
-      name: message
+      regex: "^[a-z_][A-Za-z0-9_]*$"
+      in_method: [handle_message]
+      param_index_in: [1]
+      param_count_in: [3]
   match_examples:
   - name: declared shape
     code: |
       alias Broadway
       defmodule App do
-        def handle(message) do
+        def handle_message(_processor, message, context) do
           message
         end
       end
-  description: "Broadway handle_message/3 `message` - payload from SQS/Kafka/RabbitMQ/GCPubSub; .data byte-blob is attacker-reachable."
+  description: "Second parameter of Broadway handle_message/3 - queue message proven by callback name, arity, and position."
 
   imports:
   - Broadway
@@ -38,17 +41,20 @@
   match:
     kind: param
     target:
-      name: messages
+      regex: "^[a-z_][A-Za-z0-9_]*$"
+      in_method: [handle_batch]
+      param_index_in: [1]
+      param_count_in: [4]
   match_examples:
   - name: declared shape
     code: |
       alias Broadway
       defmodule App do
-        def handle(messages) do
+        def handle_batch(_batcher, messages, _info, context) do
           messages
         end
       end
-  description: "Broadway handle_batch/4 `messages` list - batch of payloads from the queue; each element is attacker-reachable."
+  description: "Second parameter of Broadway handle_batch/4 - batch of queue messages proven by callback name, arity, and position."
 
   imports:
   - Broadway
@@ -62,7 +68,7 @@
   match:
     kind: read
     target:
-      name: args
+      attribute: [job, args]
   match_examples:
   - name: oban job args read
     code: |
@@ -88,17 +94,20 @@
   match:
     kind: param
     target:
-      name: job
+      regex: "^[a-z_][A-Za-z0-9_]*$"
+      in_method: [perform]
+      param_index_in: [0]
+      param_count_in: [1]
   match_examples:
   - name: declared shape
     code: |
       alias Oban
       defmodule App do
-        def handle(job) do
+        def perform(job) do
           job
         end
       end
-  description: "Oban.Worker perform/1 `%Oban.Job{}` parameter - .args/.meta carries enqueue-time payload."
+  description: "First parameter of Oban.Worker perform/1 - job payload proven by callback name, arity, and position."
 
   imports:
   - Oban
@@ -112,17 +121,20 @@
   match:
     kind: param
     target:
-      name: events
+      regex: "^[a-z_][A-Za-z0-9_]*$"
+      in_method: [handle_events]
+      param_index_in: [0]
+      param_count_in: [3]
   match_examples:
   - name: declared shape
     code: |
       alias Gen_stage
       defmodule App do
-        def handle(events) do
+        def handle_events(events, _from, state) do
           events
         end
       end
-  description: "GenStage handle_events/3 `events` list - upstream producer payload."
+  description: "First parameter of GenStage handle_events/3 - upstream event batch proven by callback name, arity, and position."
 
   imports:
   - Gen_stage
@@ -162,16 +174,19 @@
   match:
     kind: param
     target:
-      name: data
+      regex: "^[a-z_][A-Za-z0-9_]*$"
+      in_method: [handle_data]
+      param_index_in: [0]
+      param_count_in: [2]
   match_examples:
   - name: declared shape
     code: |
       alias Bandit
       defmodule App do
-        def handle(data) do
+        def handle_data(data, state) do
           data
         end
       end
-  description: "Bandit/Cowboy raw socket handler - `handle_data/handle_info` `data` parameter carries unparsed bytes from the peer. Bare-name match on `data`."
+  description: "First parameter of Bandit/WebSock handle_data/2 - peer bytes proven by callback name, arity, and position."
   imports:
   - Bandit

@@ -1658,13 +1658,16 @@ where
         detail: cache_report.detail(),
     });
     let idg = seed_idg_service_for_rulepack_for_files(
-        context.ws,
-        context.pack,
-        context.transfer_languages,
-        &context.graph_config.receiver_state_propagations,
-        &scoped_files,
-        &scoped_funcs,
-        source_call_graph.as_ref(),
+        ScopedIdgSeedRequest {
+            ws: context.ws,
+            pack: context.pack,
+            languages: context.transfer_languages,
+            receiver_state_propagations: &context.graph_config.receiver_state_propagations,
+            included_files: &scoped_files,
+            included_funcs: &scoped_funcs,
+            call_graph: source_call_graph.as_ref(),
+        },
+        |_| {},
     );
     on_progress(AnalysisProgress::PhaseTicked);
     on_progress(AnalysisProgress::PhaseFinished);
@@ -7863,15 +7866,32 @@ pub fn seed_idg_service_for_rulepack(ws: &Workspace, pack: &Rulepack) -> Arc<bon
     ws.build_and_seed_idg_service_with_transfer_options(&options)
 }
 
-fn seed_idg_service_for_rulepack_for_files(
-    ws: &Workspace,
-    pack: &Rulepack,
-    languages: &AHashSet<String>,
-    receiver_state_propagations: &[ReceiverStatePropagation],
-    included_files: &[FileId],
-    included_funcs: &[FuncId],
-    call_graph: &bonsai_callgraph::ResolvedCallGraph,
-) -> Arc<bonsai_idg::IdgQueryService> {
+struct ScopedIdgSeedRequest<'a> {
+    ws: &'a Workspace,
+    pack: &'a Rulepack,
+    languages: &'a AHashSet<String>,
+    receiver_state_propagations: &'a [ReceiverStatePropagation],
+    included_files: &'a [FileId],
+    included_funcs: &'a [FuncId],
+    call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
+}
+
+fn seed_idg_service_for_rulepack_for_files<P>(
+    request: ScopedIdgSeedRequest<'_>,
+    on_progress: P,
+) -> Arc<bonsai_idg::IdgQueryService>
+where
+    P: Fn(bonsai_workspace::IdgPersistenceProgress),
+{
+    let ScopedIdgSeedRequest {
+        ws,
+        pack,
+        languages,
+        receiver_state_propagations,
+        included_files,
+        included_funcs,
+        call_graph,
+    } = request;
     let overwrites = clean_output_overwrites_from_rulepack_for_languages(pack, languages);
     let source_outputs = source_output_args_from_rulepack_for_languages(pack, languages);
     let source_callbacks = source_callback_args_from_rulepack_for_languages(pack, languages);
@@ -7897,11 +7917,12 @@ fn seed_idg_service_for_rulepack_for_files(
         options.include_field_argument_forwarding,
         options.symbolic_field_languages.len()
     );
-    ws.build_and_seed_persisted_idg_service_with_transfer_options_for_files_and_call_graph(
+    ws.build_and_seed_persisted_idg_service_with_transfer_options_for_files_and_call_graph_with_progress(
         &options,
         included_files,
         included_funcs,
         call_graph,
+        on_progress,
     )
 }
 

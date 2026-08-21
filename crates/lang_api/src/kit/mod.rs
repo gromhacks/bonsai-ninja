@@ -857,42 +857,48 @@ pub fn synthesize_record_members(index: &mut crate::DeclIndex, tree: &Tree, src:
 /// surface in the event itself.
 #[must_use]
 pub fn node_at_span<'a>(root: Node<'a>, span: Span, expected_kinds: &[&str]) -> Option<Node<'a>> {
-    // Three candidates collected during the walk; preference is the
-    // typed exact match, then any exact match, then the smallest
-    // enclosing node (used as a last resort when the kit's emitted
-    // span has been adjusted away from a real grammar node boundary).
-    let mut exact_typed: Option<Node<'a>> = None;
-    let mut exact_any: Option<Node<'a>> = None;
-    let mut tightest_container: Option<Node<'a>> = None;
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        let node_start = u64::try_from(node.start_byte()).unwrap_or(u64::MAX);
-        let node_end = u64::try_from(node.end_byte()).unwrap_or(u64::MAX);
-        // An exact byte-range match wins outright if the kind matches.
-        // If only the range matches, hold it as a fallback.
-        if node_start == span.start && node_end == span.end {
-            if expected_kinds.iter().any(|k| *k == node.kind()) {
-                exact_typed.get_or_insert(node);
-            } else {
-                exact_any.get_or_insert(node);
-            }
-        }
-        // Track the tightest containing node so we can return *something*
-        // even if no node spans the requested range exactly.
-        let node_contains_span = node_start <= span.start && node_end >= span.end;
-        if node_contains_span {
-            let node_width = node_end - node_start;
-            let prev_width = tightest_container.map(|prev| (prev.end_byte() - prev.start_byte()) as u64);
-            if prev_width.is_none_or(|prev| node_width < prev) {
-                tightest_container = Some(node);
-            }
-        }
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            stack.push(child);
-        }
+    let start = usize::try_from(span.start).ok()?;
+    let end = usize::try_from(span.end).ok()?;
+    if start > end || start < root.start_byte() || end > root.end_byte() {
+        return None;
     }
-    exact_typed.or(exact_any).or(tightest_container)
+
+    // Tree-sitter already owns a byte-range index over the concrete syntax
+    // tree. Ask it for the tightest named container, then inspect only that
+    // node's ancestor chain for same-span wrappers. The previous
+    // implementation walked the complete tree for every FlowEvent/fact that
+    // needed structural enrichment. A file with N such facts therefore paid
+    // O(N * AST nodes), which dominated cold Java indexing on production
+    // repositories. This lookup is still exact Tree-sitter evidence and
+    // preserves the original preference order; it merely uses the parser's
+    // range index instead of rediscovering it with a full traversal.
+    let tightest = root.named_descendant_for_byte_range(start, end)?;
+    let mut exact_typed = None;
+    let mut exact_any = None;
+    let mut tightest_outer = tightest;
+    let mut current = Some(tightest);
+    while let Some(node) = current {
+        if node.start_byte() == start && node.end_byte() == end {
+            if expected_kinds.iter().any(|kind| *kind == node.kind()) {
+                // Keep walking so same-span wrapper ordering remains
+                // identical to the former root-first traversal.
+                exact_typed = Some(node);
+            } else {
+                exact_any = Some(node);
+            }
+        }
+        if node.start_byte() == tightest.start_byte() && node.end_byte() == tightest.end_byte() {
+            // The old tightest-container rule kept the outer wrapper when
+            // equal-width named nodes existed. Preserve that observable
+            // choice without visiting unrelated subtrees.
+            tightest_outer = node;
+        }
+        if node.id() == root.id() {
+            break;
+        }
+        current = node.parent();
+    }
+    exact_typed.or(exact_any).or(Some(tightest_outer))
 }
 
 /// Relate an adapter-proven finite selection expression to its enclosing
@@ -8921,16 +8927,27 @@ fn receiver_types_for_expr(
     // the projection base is an implicit receiver (`this.field`/`self.field`)
     // where the tail genuinely names a field the alias map can resolve.
     let allow_bare_tail = !has_member_projection || base_is_implicit;
+    let mut has_direct_alias = false;
     for alias in aliases {
         let normalized_alias = normalize_receiver_type_expr(&alias.name);
         if normalized_alias == normalized || (allow_bare_tail && normalized_alias == tail) {
+            has_direct_alias = true;
             push_receiver_type_and_bases(&mut out, alias.type_name.clone(), class_facts);
         }
     }
-    for alias in aliases {
-        let normalized_alias = normalize_receiver_type_expr(&alias.name);
-        if receiver_projected_alias_matches(&normalized, &normalized_alias) {
-            push_receiver_type_and_bases(&mut out, alias.type_name.clone(), class_facts);
+    // An exact compiler binding for a projected expression is more specific
+    // than the type of its base object. For example, `self.0: Repository`
+    // must dispatch as `Repository`; also appending `self:
+    // AuditedRepository` turns the field call into a false self-recursion.
+    // The projected-base relation remains the conservative fallback for
+    // adapters that can prove the tuple/positional projection but cannot
+    // name its field type.
+    if !has_direct_alias {
+        for alias in aliases {
+            let normalized_alias = normalize_receiver_type_expr(&alias.name);
+            if receiver_projected_alias_matches(&normalized, &normalized_alias) {
+                push_receiver_type_and_bases(&mut out, alias.type_name.clone(), class_facts);
+            }
         }
     }
     if receiver_matches_syntax_token(tail, syntax.implicit_receiver_tokens)

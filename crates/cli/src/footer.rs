@@ -311,7 +311,7 @@ fn paging_total_label(cmd_line_hint: &str, total: u64) -> &'static str {
     let singular = total == 1;
     let pluralize = |one: &'static str, many: &'static str| if singular { one } else { many };
     if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" taint-analysis") {
-        pluralize("tainted flow section", "tainted flow sections")
+        pluralize("taint flow", "taint flows")
     } else if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" source-analysis") {
         pluralize("source flow", "source flows")
     } else if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" sources") {

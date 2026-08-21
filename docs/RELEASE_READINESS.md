@@ -6,13 +6,14 @@ not duplicate dated performance history.
 
 ## Status
 
-The full local release pass completed on 2026-08-20. Documentation claims,
+The v0.2.6 local release pass completed on 2026-08-21. Documentation claims,
 links, command examples, current repository counts, and the rulepack validator
-were rechecked on that date. The release candidate also passed 227
-release security unit tests, 34 release rulepack conformance tests, 87
-architecture invariants, 1,320 command/switch checks, standalone execution,
-and the complete Elasticsearch gate on that date. Local `main` has no known
-failing release gate.
+were rechecked on that date. The release candidate also passed 228
+release security unit tests, 36 release rulepack conformance tests, 88
+architecture invariants, 1,320 release-binary command/switch checks, 443
+focused CLI integration tests, standalone execution, and the complete
+Elasticsearch gate on that date. Local `main` has no known failing release
+gate.
 Publishing still requires the tag workflow because signing, packaging, and
 platform-specific execution happen there.
 
@@ -20,8 +21,8 @@ The validated product contains:
 
 - 20 registered Tree-sitter language adapters;
 - one adapter-lowered compiler IR and one production sparse IDG taint engine;
-- 7,130 bundled rules, of which 5,987 are enabled;
-- 10,040 enabled positive/negative rule examples;
+- 7,151 bundled rules, of which 6,012 are enabled;
+- 10,126 enabled positive/negative rule examples;
 - native CLI, Rust SDK, SARIF 2.1.0, JSON, HTML, and graph-export surfaces.
 
 ## Correctness and architecture gates
@@ -37,11 +38,11 @@ The final local pass completed these checks with zero failures:
 | 20 adapter/parser conformance suites | Passed |
 | Adapter `FlowEvent` behavioral audit | Passed |
 | Cross-language taint target | 1,386 tests passed, including 1,233 applicable scenario/language cells |
-| IDG, taint, resolver, callgraph, workspace, and 87 architecture invariants | Passed |
+| IDG, taint, resolver, callgraph, workspace, and 88 architecture invariants | Passed |
 | Full optimized security package | Passed |
 | Rulepack taint replay | 0 errors, 0 warnings, 0 misses |
 | Release CLI command/language matrix | 1,320 combinations passed |
-| CLI end-to-end suite | 117 tests passed |
+| Focused CLI integration suites | 443 tests passed |
 | Layering and public API snapshots | Passed |
 | Hardcoded-knowledge boundary | 0 production violations |
 | Corpus-independence audit | 0 violations |
@@ -53,12 +54,12 @@ The final local pass completed these checks with zero failures:
 | Release binary build-path privacy | Passed |
 | Documentation structure, links, navigation, binary help claims, and skill copies | Passed |
 | Native archive checksum and fresh-profile relocation smoke | Passed on macOS arm64 |
-| Build-artifact size gate | 2.91 GiB / 32 GiB combined limit (workspace and privacy-safe release targets) |
+| Build-artifact size gate | 28.36 GiB / 32 GiB combined limit (workspace and privacy-safe release targets) |
 
-The full debug test matrix and release rustdoc passed before accumulated Cargo
-generations were cleaned. The reported artifact measurement is the final
-privacy-remapped optimized CLI build retained for deployment. Generated
-analysis caches and test outputs are not release inputs.
+The artifact measurement includes the retained workspace test generations and
+the privacy-remapped optimized CLI build. It remains below the enforced local
+and CI budget; generated analysis caches and test outputs are not release
+inputs.
 
 The rulepack replay command was:
 
@@ -72,11 +73,11 @@ The rulepack replay command was:
 
 | Rulepack measure | Result |
 |---|---:|
-| Rules | 7,130 |
-| Enabled rules | 5,987 |
-| Disabled rules | 1,143 |
-| Examples | 10,483 |
-| Enabled examples | 10,040 |
+| Rules | 7,151 |
+| Enabled rules | 6,012 |
+| Disabled rules | 1,139 |
+| Examples | 10,587 |
+| Enabled examples | 10,126 |
 | Errors | 0 |
 | Warnings | 0 |
 
@@ -167,34 +168,37 @@ and their generated workspace caches are not retained after the gate.
 ## Large-workspace scale gate
 
 The required release test uses the sibling 30,055-source Elasticsearch
-checkout pinned by the release workflow at `e9741368da0`. On August 20, the
-controlled empty-cache semantic prewarm completed in 658.84 seconds. It
-recorded 3,788,292,096 bytes maximum RSS and zero swaps; a fresh process
-validated and reopened that generation in 2.62 seconds at 99,287,040 bytes
-maximum RSS. The same release candidate completed the five-scenario SLO gate
-in 197.09 seconds under the 3 GiB scheduler.
+checkout pinned by the release workflow at `e9741368da0`. On August 21, the
+current release candidate completed the six-test exact gate in 685.87 seconds
+under the 3 GiB scheduler, including a deliberately empty-cache semantic
+generation. That generation took 442.84 seconds and a fresh process validated
+and reopened it in 2.59 seconds. For memory context, the prior instrumented
+August 20 empty-cache semantic run recorded 3,788,292,096 bytes maximum RSS
+and zero swaps; its fresh-process reopen used 99,287,040 bytes maximum RSS.
 
 | Operation | Time | Enforced SLO |
 |---|---:|---:|
-| Cold semantic generation | 658.84 s | completion required |
-| Fresh-process semantic reuse | 2.62 s | 15 s |
-| Default inspect | 7.22 s | 30 s |
-| Exact raw-taint inspect | 27.24 s | 30 s |
-| Fresh-cache production taint | 32.27 s | 45 s |
-| Warm production taint | 10.90 s | 30 s |
+| Fresh-cache structural index | 64.63 s | 90 s |
+| Warm structural index | 3.88 s | 10 s |
+| Cold semantic generation | 442.84 s | completion required |
+| Fresh-process semantic reuse | 2.59 s | 15 s |
+| Default inspect | 7.44 s | 30 s |
+| Exact raw-taint inspect | 28.73 s | 30 s |
+| Fresh-cache production taint | 14.29 s | 45 s |
+| Warm production taint | 10.82 s | 30 s |
 | `tree --max-depth 1` | 0.02 s | 30 s |
-| Search | 4.14 s | 30 s |
-| Definitions | 8.43 s | 30 s |
-| Imports | 7.71 s | 30 s |
-| Classes | 8.47 s | 30 s |
-| Entry points | 12.28 s | 30 s |
-| Calls | 3.85 s | 30 s |
-| Arguments | 5.82 s | 30 s |
-| Scoped `read-file` | 1.79 s | 30 s |
-| Source inventory | 3.70 s | 30 s |
-| High-severity sink inventory | 21.15 s | 30 s |
-| Sanitizer inventory | 15.76 s | 30 s |
-| Dependency inventory | 11.34 s | 30 s |
+| Search | 4.11 s | 30 s |
+| Definitions | 8.83 s | 30 s |
+| Imports | 7.94 s | 30 s |
+| Classes | 8.65 s | 30 s |
+| Entry points | 13.13 s | 30 s |
+| Calls | 3.97 s | 30 s |
+| Arguments | 6.17 s | 30 s |
+| Scoped `read-file` | 2.00 s | 30 s |
+| Source inventory | 4.44 s | 30 s |
+| High-severity sink inventory | 23.28 s | 30 s |
+| Sanitizer inventory | 16.61 s | 30 s |
+| Dependency inventory | 11.45 s | 30 s |
 
 Command:
 
@@ -220,6 +224,21 @@ sink inventory). Hardware calibration changes only the post-completion latency
 assertion; analysis inputs, memory schedule, completeness checks, and results
 remain identical.
 
+The August 21 structural-index profile used an independently empty cache. A
+full-CST lookup nested under per-fact Java enrichment made the original cold
+run take 254.04 seconds and 2,106.10 CPU-seconds. Replacing that shared
+adapter-kit lookup with Tree-sitter's range-directed descendant/ancestor path
+reduced the same exact 30,055-file generation to 66.20 seconds and 449.58
+CPU-seconds (3.84x wall-clock, 4.69x CPU), at 1,243,004,928 bytes maximum RSS
+and zero swaps. The fix is shared by every adapter that maps emitted spans
+back to its CST. Root-only warm generation validation reduced default `index`
+from 8.41 to 4.05 seconds and maximum RSS from roughly 690 MB to 77,070,336
+bytes; it still rebuilds on any source-ledger mismatch.
+
+The current release gate subsequently measured the same exact structural work
+at 64.63 seconds cold and 3.88 seconds warm. The earlier figures above remain
+the instrumented CPU/RSS run; the current figures are the release SLO run.
+
 The cold semantic row is a deliberate one-time whole-workspace build, not a
 normal command startup cost. It rebuilt exact compiler objects, linkage,
 callgraph, retrieval, and IDG sidecars for all 30,055 sources after the cache
@@ -228,8 +247,8 @@ was explicitly cleared. The validated cache directory was 7,114,762,932 bytes
 callgraph, 1,505,969,092 bytes of linkage, 224,742,044 bytes of retrieval, and
 4,161,426,830 bytes of IDG, plus the manifest. Ordinary commands compute exact
 requested facts on demand; users only pay this full prewarm when they
-explicitly run `index --semantic`. A fresh process reused the completed
-semantic generation in 2.62 seconds.
+explicitly run `index --semantic`. A fresh process in the current gate reused
+the completed semantic generation in 2.59 seconds.
 
 The August 17 security-planning correction restored immutable compiler-object
 attachment for path-filtered workspaces that retain deterministic
@@ -268,8 +287,17 @@ bounded page caching changes only locality. On the same current compiler ABI
 and cache schema, the isolated IDG phase fell from 220.17 to 187.06 seconds
 (15.0%), and complete cold generation fell from 637.62 to 601.99 seconds
 (5.6%). The resulting sidecar sizes and semantic scope are unchanged, and the
-386-test IDG suite covers recursion, scope, page eviction, and outer-segment
-reuse.
+IDG suite covers recursion, scope, page eviction, and outer-segment reuse.
+
+The August 21 follow-up applied that same representation invariant to
+cross-file projected edges in the contextual accelerator. Those rows were
+still reopening both compiler-spooled segments once per edge. They are now
+grouped by exact source/target segment pair, and each pair is decoded once
+without changing edge admission, ordering, precision, or fixed-point scope.
+On the same 627-file local release workload, contextual accelerator compilation
+fell from 57.42 to 2.70 seconds (21.3x); the complete accelerator fell from
+58.59 to 4.22 seconds. This local regression measurement supplements rather
+than replaces the named Elasticsearch release gate.
 
 ## Production-scale native export measurement
 

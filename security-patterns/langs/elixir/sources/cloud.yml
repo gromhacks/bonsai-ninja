@@ -2,7 +2,9 @@
 # are `trust: service` - a cloud service forwards data that frequently
 # originated from an attacker (API Gateway -> Lambda, SNS -> Lambda).
 - id: elixir.aws_lambda.handler_event
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: elixir
   trust: service
   tag: cloud-input
@@ -11,15 +13,7 @@
     kind: param
     target:
       name: event
-  match_examples:
-    - name: declared shape
-      code: |
-        defmodule App do
-          def handle(event) do
-            event
-          end
-        end
-  description: "AWS Lambda Elixir runtime handler(event, context) - invocation payload (API GW requests, S3 notifications, SQS batches)."
+  description: "Disabled - `handle(event)` is ordinary Elixir syntax and the rule has no runtime package, behavior, or callback-registration evidence tying it to Lambda."
 
 - id: elixir.aws_lambda.handler_event_alt
   enabled: false
@@ -33,4 +27,4 @@
     kind: param
     target:
       name: payload
-  description: "Disabled duplicate - bare `param name: payload` is covered by elixir.phoenix.channel_handle_in; Lambda `event` remains enabled."
+  description: "Disabled - a bare `payload` parameter has no Lambda runtime, behavior, or callback-registration evidence. Phoenix channel payloads are modeled separately by their exact handle_in/3 signature."

@@ -38,15 +38,16 @@
   tag: http-input
   category: http-input
   payload_types: [query, json, form, path, header, cookie]
-  frameworks: [nethttp, gin, echo, fiber, chi, gorilla]
-  packages: ["net/http", "github.com/gin-gonic/gin", "github.com/labstack/echo", "github.com/gofiber/fiber", "github.com/go-chi/chi", "github.com/gorilla/mux"]
+  frameworks: [nethttp, chi, gorilla]
+  packages: ["net/http"]
   manifests: [go.mod]
   lockfiles: [go.sum]
   match:
     kind: param
     target:
-      name: r
-  description: "Disabled - bare `r` parameter matches non-request helpers; needs type-aware `*http.Request` parameter matching."
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Request, http.Request]
+  description: "Disabled - Go parameter type facts currently retain the short type name but not imported type ownership, so a workspace-defined Request can collide with net/http.Request. Precise request accessor rules remain enabled until qualified type provenance can fail closed."
 - id: go.nethttp.request_named
   enabled: false
   disabled_reason:
@@ -60,7 +61,7 @@
     kind: param
     target:
       name: req
-  description: "Disabled - bare `req` parameter matches non-request helpers; needs type-aware `*http.Request` parameter matching."
+  description: "Disabled - bare `req` parameter matches non-request helpers; it shares the qualified type-provenance requirement documented on go.nethttp.request_param."
 - id: go.nethttp.form_value
   enabled: true
   language: go
@@ -351,7 +352,8 @@
   match:
     kind: read
     target:
-      name: Filename
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.Filename$"
+      receiver_type_in: [FileHeader, multipart.FileHeader]
   match_examples:
   - name: multipart filename read
     code: |
@@ -361,6 +363,13 @@
         return fh.Filename
       }
     expect_match_text: [fh.Filename]
+  - name: local filename field negative
+    code: |
+      package main
+      import "mime/multipart"
+      type LocalHeader struct { Filename string }
+      func helper(fh *LocalHeader) string { return fh.Filename }
+    expect_no_match: true
   description: "multipart.FileHeader.Filename - client-supplied upload filename; treat as tainted path/name input."
 - id: go.nethttp.body_read
   enabled: false

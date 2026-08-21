@@ -857,7 +857,10 @@
   description: "JAX-RS / Quarkus @BeanParam annotated parameter - request parameters bound into a bean."
 
 - id: java.source.jaxrs_quarkus_body_param
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: java.source.jaxrs_entity_body_param_decorated
   language: java
   trust: remote
   tag: http-input
@@ -868,33 +871,7 @@
     kind: param
     target:
       regex: "^(entity|requestBody)$"
-  match_examples:
-  - name: jax-rs string entity parameter
-    code: |
-      import jakarta.ws.rs.*;
-      class App {
-        void post(String entity) {
-        }
-      }
-    expect_match_text: [entity]
-  - name: quarkus map request body parameter
-    code: |
-      import jakarta.ws.rs.*;
-      class App {
-        void post(Map requestBody) {
-        }
-      }
-      class Map {}
-    expect_match_text: [requestBody]
-  - name: unrelated parameter name negative
-    code: |
-      import jakarta.ws.rs.*;
-      class App {
-        void post(String name) {
-        }
-      }
-    expect_no_match: true
-  description: "JAX-RS / Quarkus entity body parameter convention - unannotated String or Map body supplied by the HTTP request."
+  description: "Subsumed by java.source.jaxrs_entity_body_param_decorated, which requires an HTTP method or @Consumes annotation instead of trusting a conventional parameter name."
 
 - id: java.source.jaxrs_entity_body_param_decorated
   enabled: true
@@ -1008,33 +985,88 @@
   description: "Azure Functions request getBody() - HTTP request body supplied by the remote caller."
 
 - id: java.source.gcf_http_function_service
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: java
-  trust: remote
-  tag: cloud-event
-  packages: ["com.google.cloud.functions"]
-  match:
-    kind: param
-    target:
-      name: service
-  description: "Disabled - `service` is the handler method name; `kind: param` only matches parameter identifiers."
-
-- id: java.source.websocket_onmessage
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: java
   trust: remote
   tag: http-input
   category: http-input
+  payload_types: [event, json, query, path, header]
+  packages: ["com.google.cloud.functions"]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*$"
+      in_class: [HttpFunction]
+      in_method: [service]
+      param_index_in: [0]
+      param_type_in: [HttpRequest, com.google.cloud.functions.HttpRequest]
+  match_examples:
+  - name: google cloud http function request
+    code: |
+      import com.google.cloud.functions.HttpFunction;
+      import com.google.cloud.functions.HttpRequest;
+      import com.google.cloud.functions.HttpResponse;
+      class Function implements HttpFunction {
+        public void service(HttpRequest request, HttpResponse response) { }
+      }
+    expect_match_text: [request]
+  - name: response parameter negative
+    code: |
+      import com.google.cloud.functions.HttpFunction;
+      import com.google.cloud.functions.HttpResponse;
+      class Function implements HttpFunction {
+        public void service(HttpResponse response) { }
+      }
+    expect_no_match: true
+  - name: helper request negative
+    code: |
+      import com.google.cloud.functions.HttpRequest;
+      class Function {
+        public void helper(HttpRequest request) { }
+      }
+    expect_no_match: true
+  description: "Google Cloud Java HttpFunction.service request parameter - remote HTTP request proven by interface, method, position, and declared type."
+
+- id: java.source.websocket_onmessage
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event, text]
   packages: ["javax.websocket", "jakarta.websocket"]
   match:
     kind: param
     target:
-      name: OnMessage
-  description: "Disabled - matcher only sees parameter identifiers, not @OnMessage annotations."
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*$"
+      param_type_in: [String, java.lang.String]
+  constraints:
+  - enclosing_decorator_in: [OnMessage]
+  match_examples:
+  - name: websocket text message parameter
+    code: |
+      import jakarta.websocket.OnMessage;
+      class Endpoint {
+        @OnMessage
+        public void receive(String message) { }
+      }
+    expect_match_text: [message]
+  - name: websocket session metadata negative
+    code: |
+      import jakarta.websocket.OnMessage;
+      import jakarta.websocket.Session;
+      class Endpoint {
+        @OnMessage public void opened(Session session) { }
+      }
+    expect_no_match: true
+  - name: ordinary string parameter negative
+    code: |
+      import jakarta.websocket.OnMessage;
+      class Endpoint {
+        public void helper(String message) { }
+      }
+    expect_no_match: true
+  description: "String parameter of a Jakarta/Javax WebSocket @OnMessage method - decoded remote text message; session and control parameters remain untainted."
 
 - id: java.source.android_intent_getdata
   enabled: true

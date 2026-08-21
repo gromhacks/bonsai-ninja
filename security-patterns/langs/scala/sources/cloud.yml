@@ -4,23 +4,41 @@
   language: scala
   trust: service
   tag: event-input
-  payload_types: [event, json]
+  payload_types: [event, json, text, binary]
   frameworks: [aws-lambda]
+  packages: [com.amazonaws:aws-lambda-java-core]
+  imports: [com.amazonaws.services.lambda.runtime]
   match:
     kind: param
     target:
-      name: event
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      in_class: [RequestHandler, RequestStreamHandler]
+      in_method: [handleRequest]
+      decl_kind_in: [method]
+      param_index_in: [0]
   match_examples:
-    - name: generated shape example
-      code: |
-        object App {
-          def handle(event: String): Unit = {
-          }
-        }
-  description: "AWS Lambda Scala handler `def handleRequest(event: APIGatewayProxyRequestEvent, ...)`."
+  - name: aws lambda scala handler input
+    code: |
+      import com.amazonaws.services.lambda.runtime.{Context, RequestHandler}
+      class Function extends RequestHandler[Order, String] {
+        override def handleRequest(event: Order, context: Context): String = "ok"
+      }
+      class Order
+    expect_match_text: [event]
+  - name: same method outside handler negative
+    code: |
+      import com.amazonaws.services.lambda.runtime.RequestHandler
+      class Helper {
+        def handleRequest(event: String): Unit = ()
+      }
+    expect_no_match: true
+  description: "First parameter of an AWS Lambda Scala RequestHandler or RequestStreamHandler handleRequest method - invocation event payload proven by interface, method, and position."
 
 - id: scala.aws.lambda_input
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: scala.aws.lambda_event
   language: scala
   trust: service
   tag: event-input
@@ -28,33 +46,5 @@
   frameworks: [aws-lambda]
   match:
     kind: param
-    target:
-      name: input
-  match_examples:
-    - name: generated shape example
-      code: |
-        object App {
-          def handle(input: String): Unit = {
-          }
-        }
-  description: "AWS Lambda handler input parameter (alternative idiom)."
-
-- id: scala.gcp.functions_request
-  enabled: true
-  language: scala
-  trust: service
-  tag: event-input
-  payload_types: [event, json]
-  frameworks: [gcp-functions]
-  match:
-    kind: param
-    target:
-      name: httpRequest
-  match_examples:
-    - name: generated shape example
-      code: |
-        object App {
-          def handle(httpRequest: String): Unit = {
-          }
-        }
-  description: "GCP Cloud Functions HttpFunction service(HttpRequest, HttpResponse)."
+    target: { name: input }
+  description: "Subsumed by scala.aws.lambda_event, which does not depend on whether the Lambda payload parameter is named event or input."

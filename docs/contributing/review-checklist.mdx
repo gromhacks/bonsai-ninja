@@ -121,6 +121,12 @@ class and verify each box.
 - [ ] **No nested lazy construction.** A Rayon file loop does not initialize a
       workspace-wide header, linkage, graph, or body cache. Initialize the
       immutable product before the loop or stream independent file objects.
+- [ ] **Warm index stays root-only.** A current compiler-object generation is
+      validated from exact source fingerprints and metadata context before any
+      source-backed workspace open; only a miss ingests and lowers bodies.
+- [ ] **AST span lookup is range-directed.** Adapter post-processing uses the
+      Tree-sitter descendant/ancestor path for an emitted span and never walks
+      the complete CST once per flow or binding fact.
 - [ ] **Text rendering stays out of JSON cost.** JSON pagination does not read
       source-line previews or build flow annotations absent from JSON rows.
 - [ ] **Browse tests pass.** `cargo test -p bonsai-ninja-workspace --test
@@ -297,7 +303,8 @@ class and verify each box.
       run `BONSAI_REQUIRE_ELASTICSEARCH_GATE=1 cargo test --release --locked -p bonsai-ninja --test
       elasticsearch_large_repo -- --nocapture` with
       `../elasticsearch` or `BONSAI_ELASTICSEARCH_ROOT`. The gate waits for
-      completed exact work and checks warm index, navigation, inspect,
+      completed exact work and checks fresh/warm structural index, warm
+      semantic index, navigation, inspect,
       inventory, and production taint latency under the default 3 GiB
       scheduling budget; it never times out or truncates analysis. Keep its
       shared scenario lock: measured commands must not compete with one another

@@ -36,6 +36,11 @@ pub enum Visibility {
     Private,
     Crate,
     Module,
+    /// Visible in the declaring module and its lexical descendants.
+    /// Rust's unmodified / `pub(self)` items use this scope; package-private
+    /// languages continue to use [`Visibility::Module`] for exact-module
+    /// access.
+    ModuleTree,
     Protected,
     Internal,
 }

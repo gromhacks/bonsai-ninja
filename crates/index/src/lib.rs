@@ -1407,10 +1407,11 @@ fn visibility_rank(visibility: Visibility) -> u8 {
     match visibility {
         Visibility::Private => 0,
         Visibility::Module => 1,
-        Visibility::Crate => 2,
-        Visibility::Protected => 3,
-        Visibility::Internal => 4,
-        Visibility::Public => 5,
+        Visibility::ModuleTree => 2,
+        Visibility::Crate => 3,
+        Visibility::Protected => 4,
+        Visibility::Internal => 5,
+        Visibility::Public => 6,
     }
 }
 

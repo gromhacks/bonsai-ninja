@@ -7487,44 +7487,42 @@ impl IdgQueryService {
         // demand proportional to the whole workspace call relation.
         let mut structural_boundary_demand = AHashSet::default();
         {
-            let mut record_non_call_relation =
-                |from_segment: SegmentId,
-                 to_segment: SegmentId,
-                 edge: &IdgEdge,
-                 local_segment: Option<&crate::segment::IdgSegment>| {
-                    let projected_heap_relation = edge.meta.kind.is_inter()
-                        && (Self::node_is_projected_storage(&unified, from_segment, edge.from)
-                            || Self::node_is_projected_storage(&unified, to_segment, edge.to));
-                    if max_precision.is_some_and(|max| edge.meta.precision > max) {
-                        return;
-                    }
-                    let Some(from) = Self::ws_node_for(&unified, from_segment, edge.from) else {
-                        return;
-                    };
-                    let Some(to) = Self::ws_node_for(&unified, to_segment, edge.to) else {
-                        return;
-                    };
-                    if !node_pair_is_allowed(from, to) {
-                        return;
-                    }
-                    if edge.meta.kind.is_inter() && !projected_heap_relation {
-                        if !Self::contextual_endpoint_is_structural(&unified, edge.meta.kind, from, to) {
-                            if let Some((key, _)) =
-                                Self::contextual_boundary_identity(&unified, edge, from, to)
-                            {
-                                structural_boundary_demand.insert((key.caller, key.span));
-                            }
+            let mut record_non_call_relation = |from_segment: SegmentId,
+                                                to_segment: SegmentId,
+                                                edge: &IdgEdge,
+                                                segment_pair: Option<(
+                &crate::segment::IdgSegment,
+                &crate::segment::IdgSegment,
+            )>| {
+                let projected_heap_relation = edge.meta.kind.is_inter()
+                    && (Self::node_is_projected_storage(&unified, from_segment, edge.from)
+                        || Self::node_is_projected_storage(&unified, to_segment, edge.to));
+                if max_precision.is_some_and(|max| edge.meta.precision > max) {
+                    return;
+                }
+                let Some(from) = Self::ws_node_for(&unified, from_segment, edge.from) else {
+                    return;
+                };
+                let Some(to) = Self::ws_node_for(&unified, to_segment, edge.to) else {
+                    return;
+                };
+                if !node_pair_is_allowed(from, to) {
+                    return;
+                }
+                if edge.meta.kind.is_inter() && !projected_heap_relation {
+                    if !Self::contextual_endpoint_is_structural(&unified, edge.meta.kind, from, to) {
+                        if let Some((key, _)) = Self::contextual_boundary_identity(&unified, edge, from, to) {
+                            structural_boundary_demand.insert((key.caller, key.span));
                         }
-                        return;
                     }
-                    if projected_heap_relation {
-                        let from_func = Self::ws_node_func(&unified, NodeId(from.0));
-                        let to_func = Self::ws_node_func(&unified, NodeId(to.0));
-                        let cross_call = match (edge.meta.kind, from_func, to_func) {
-                            (IdgEdgeKind::InterFieldCallArg, Some(caller), Some(callee))
-                                if caller != callee =>
-                            {
-                                let mut resolve_indices =
+                    return;
+                }
+                if projected_heap_relation {
+                    let from_func = Self::ws_node_func(&unified, NodeId(from.0));
+                    let to_func = Self::ws_node_func(&unified, NodeId(to.0));
+                    let cross_call = match (edge.meta.kind, from_func, to_func) {
+                        (IdgEdgeKind::InterFieldCallArg, Some(caller), Some(callee)) if caller != callee => {
+                            let mut resolve_indices =
                                     |from_segment_view: &crate::segment::IdgSegment,
                                      to_segment_view: &crate::segment::IdgSegment| {
                                         let from_node = from_segment_view.nodes.get(edge.from)?;
@@ -7544,73 +7542,98 @@ impl IdgQueryService {
                                             to_place,
                                         )
                                     };
-                                // Compiler-side IDG segments are spooled to
-                                // bound RSS. The outer loop already decoded
-                                // this complete local segment, so reuse that
-                                // view for both endpoints. Reopening it once
-                                // per projected field edge used to deserialize
-                                // the same body twice for every edge and made
-                                // query-accelerator compilation scale with
-                                // `projected_edges * segment_size`.
-                                let indices = with_idg_segment_pair(
-                                    &self.workspace,
-                                    from_segment,
-                                    to_segment,
-                                    local_segment,
-                                    &mut resolve_indices,
-                                );
-                                let (arg_idx, param_idx) = indices.unwrap_or((u32::MAX, u32::MAX));
-                                Some(CrossCallEdge {
-                                    caller,
-                                    callee,
-                                    call_span: edge.meta.via_span,
-                                    arg_idx,
-                                    param_idx,
-                                    precision: edge.meta.precision,
-                                    call_kind: edge.meta.call_kind,
-                                    relation: CrossCallRelation::Argument,
-                                })
-                            }
-                            (IdgEdgeKind::InterFieldReturn, Some(returning), Some(caller))
-                                if returning != caller =>
-                            {
-                                Some(CrossCallEdge {
-                                    caller: returning,
-                                    callee: caller,
-                                    call_span: edge.meta.via_span,
-                                    arg_idx: u32::MAX,
-                                    param_idx: u32::MAX,
-                                    precision: edge.meta.precision,
-                                    call_kind: edge.meta.call_kind,
-                                    relation: CrossCallRelation::Return,
-                                })
-                            }
-                            _ => None,
-                        };
-                        heap_rows.push((
-                            NodeId(from.0),
-                            HeapBoundaryEdge {
-                                target: to,
-                                cross_call,
-                            },
-                        ));
-                    }
-                };
+                            // Compiler-side IDG segments are spooled to
+                            // bound RSS. Local scans already own one
+                            // decoded segment; cross-file projected edges
+                            // are grouped by segment pair below. Reuse
+                            // those views so compilation scales with
+                            // `segment_pairs + projected_edges`, never
+                            // `projected_edges * segment_decode`.
+                            let indices = segment_pair.and_then(|(from_segment_view, to_segment_view)| {
+                                resolve_indices(from_segment_view, to_segment_view)
+                            });
+                            let (arg_idx, param_idx) = indices.unwrap_or((u32::MAX, u32::MAX));
+                            Some(CrossCallEdge {
+                                caller,
+                                callee,
+                                call_span: edge.meta.via_span,
+                                arg_idx,
+                                param_idx,
+                                precision: edge.meta.precision,
+                                call_kind: edge.meta.call_kind,
+                                relation: CrossCallRelation::Argument,
+                            })
+                        }
+                        (IdgEdgeKind::InterFieldReturn, Some(returning), Some(caller))
+                            if returning != caller =>
+                        {
+                            Some(CrossCallEdge {
+                                caller: returning,
+                                callee: caller,
+                                call_span: edge.meta.via_span,
+                                arg_idx: u32::MAX,
+                                param_idx: u32::MAX,
+                                precision: edge.meta.precision,
+                                call_kind: edge.meta.call_kind,
+                                relation: CrossCallRelation::Return,
+                            })
+                        }
+                        _ => None,
+                    };
+                    heap_rows.push((
+                        NodeId(from.0),
+                        HeapBoundaryEdge {
+                            target: to,
+                            cross_call,
+                        },
+                    ));
+                }
+            };
             for &segment_id in &segments {
                 let Some(segment) = self.workspace.segment_view(segment_id) else {
                     continue;
                 };
                 for edge in &segment.edges {
-                    record_non_call_relation(segment_id, segment_id, edge, Some(&segment));
+                    record_non_call_relation(segment_id, segment_id, edge, Some((&segment, &segment)));
                 }
             }
+            let mut projected_cross_file: AHashMap<
+                (SegmentId, SegmentId),
+                Vec<crate::workspace::CrossFileEdge>,
+            > = AHashMap::new();
             self.workspace
                 .visit_cross_file_edges(|edges| {
                     for edge in edges {
-                        record_non_call_relation(edge.from_segment, edge.to_segment, &edge.edge, None);
+                        let projected_heap_relation = edge.edge.meta.kind.is_inter()
+                            && (Self::node_is_projected_storage(&unified, edge.from_segment, edge.edge.from)
+                                || Self::node_is_projected_storage(&unified, edge.to_segment, edge.edge.to));
+                        if projected_heap_relation {
+                            projected_cross_file
+                                .entry((edge.from_segment, edge.to_segment))
+                                .or_default()
+                                .push(*edge);
+                        } else {
+                            record_non_call_relation(edge.from_segment, edge.to_segment, &edge.edge, None);
+                        }
                     }
                 })
                 .expect("validated IDG cross-file relation remains readable");
+            let mut projected_pairs: Vec<_> = projected_cross_file.keys().copied().collect();
+            projected_pairs.sort_unstable_by_key(|(from, to)| (from.0, to.0));
+            for pair in projected_pairs {
+                let Some(from_segment) = self.workspace.segment_view(pair.0) else {
+                    continue;
+                };
+                let Some(to_segment) = self.workspace.segment_view(pair.1) else {
+                    continue;
+                };
+                let Some(edges) = projected_cross_file.remove(&pair) else {
+                    continue;
+                };
+                for edge in edges {
+                    record_non_call_relation(pair.0, pair.1, &edge.edge, Some((&from_segment, &to_segment)));
+                }
+            }
         }
         let reverse_heap_rows = if include_reverse {
             heap_rows
@@ -9793,31 +9816,6 @@ fn lift_call_arg_edge(
 struct FieldCrossCallIndex {
     call_arg: AHashMap<(SegmentId, FuncId, Span, String), Option<u32>>,
     param: AHashMap<(SegmentId, FuncId, String), Option<u32>>,
-}
-
-/// Resolve one edge against its two segment dictionaries without reopening a
-/// compiler-spooled segment that the caller already has in hand. Same-segment
-/// fallback lookups likewise decode once and borrow the one view twice.
-fn with_idg_segment_pair<R>(
-    workspace: &IdgWorkspace,
-    from_segment: SegmentId,
-    to_segment: SegmentId,
-    local_segment: Option<&crate::segment::IdgSegment>,
-    resolve: impl FnOnce(&crate::segment::IdgSegment, &crate::segment::IdgSegment) -> Option<R>,
-) -> Option<R> {
-    if let Some(segment) = local_segment {
-        debug_assert_eq!(
-            from_segment, to_segment,
-            "a local segment hint must cover both endpoints"
-        );
-        return resolve(segment, segment);
-    }
-    let from_view = workspace.segment_view(from_segment)?;
-    if from_segment == to_segment {
-        return resolve(&from_view, &from_view);
-    }
-    let to_view = workspace.segment_view(to_segment)?;
-    resolve(&from_view, &to_view)
 }
 
 impl FieldCrossCallIndex {

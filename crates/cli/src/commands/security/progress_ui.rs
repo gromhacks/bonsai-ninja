@@ -87,6 +87,9 @@ impl SecurityAnalysisProgress {
             bonsai_sdk::AnalysisProgress::PhaseTicked => {
                 self.phase_ticks = self.phase_ticks.saturating_add(1);
                 if let Some(bar) = &self.bar {
+                    if self.phase_ticks == 1 && bar.length().is_none() {
+                        progress::show_spinner_count(bar);
+                    }
                     bar.inc(1);
                 }
             }

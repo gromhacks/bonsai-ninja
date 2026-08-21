@@ -8,13 +8,16 @@
   match:
     kind: param
     target:
-      name: argv
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
       in_method: [main]
+      param_index_in: [1]
+      param_type_in: [char]
+      param_count_in: [2, 3]
   match_examples:
   - name: main argv
     code: |
-      int main(int argc, char **argv) {
-        return argc;
+      int main(int count, char **values) {
+        return count;
       }
   - name: helper argv is not process argv
     code: |
@@ -22,7 +25,7 @@
         (void)argv;
       }
     expect_no_match: true
-  description: "main(int argc, char** argv) parameter."
+  description: "The char** parameter at argv's runtime position in C++ main(...) - matched from compiler signature facts, independent of the binding name."
 - id: cpp.input.cin_read
   enabled: true
   language: cpp

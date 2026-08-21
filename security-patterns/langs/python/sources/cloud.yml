@@ -1,5 +1,7 @@
 - id: python.aws.lambda_event_param
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: python
   trust: service
   tag: event-input
@@ -11,15 +13,11 @@
     kind: param
     target:
       name: event
-  match_examples:
-  - name: aws lambda event param
-    code: |
-      import boto3
-      def handler(event):
-          return event
-  description: AWS Lambda handler event parameter.
+  description: "Disabled - Python Lambda handlers are configured externally and boto3 is a client SDK, so a bare `event` parameter plus that import does not prove a runtime entry boundary."
 - id: python.aws.lambda_event_body
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: python
   trust: service
   tag: event-input
@@ -37,10 +35,12 @@
       def example():
           value = event.body
           return value
-  description: "AWS Lambda/APIGateway event['body'] / event.body - cloud-delivered request payload."
+  description: "Disabled - event.body alone does not prove a Lambda/API Gateway handler, and boto3 is a client SDK rather than runtime registration evidence."
 
 - id: python.aws.lambda_event_headers
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: python
   trust: service
   tag: event-input
@@ -58,10 +58,12 @@
       def example():
           value = event.headers
           return value
-  description: "AWS Lambda/APIGateway event['headers'] / event.headers - attacker-controlled request headers."
+  description: "Disabled - event.headers alone does not prove a Lambda/API Gateway handler, and boto3 is a client SDK rather than runtime registration evidence."
 
 - id: python.aws.lambda_event_query
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: python
   trust: service
   tag: event-input
@@ -79,10 +81,12 @@
       def example():
           value = event.queryStringParameters
           return value
-  description: "AWS Lambda/APIGateway event['queryStringParameters'] - cloud-delivered query input."
+  description: "Disabled - event.queryStringParameters alone does not prove a Lambda/API Gateway handler, and boto3 is a client SDK rather than runtime registration evidence."
 
 - id: python.aws.lambda_event_path
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: python
   trust: service
   tag: event-input
@@ -100,7 +104,7 @@
       def example():
           value = event.pathParameters
           return value
-  description: "AWS Lambda/APIGateway event['pathParameters'] - cloud-delivered route parameters."
+  description: "Disabled - event.pathParameters alone does not prove a Lambda/API Gateway handler, and boto3 is a client SDK rather than runtime registration evidence."
 
 - id: python.gcp.function_request_json
   enabled: false
@@ -126,65 +130,3 @@
           return request.get_json(user_input)
     expect_match_text: [request.get_json]
   description: "Disabled duplicate - same `request.get_json(...)` shape as python.flask.request_get_json; canonical rule carries Flask and Google Cloud Functions metadata."
-
-- id: python.azure.function_req_get_json
-  enabled: true
-  language: python
-  trust: service
-  tag: event-input
-  payload_types: [event, json]
-  frameworks: [azure-functions]
-  packages: [azure.functions]
-  imports: [azure.functions]
-  match:
-    kind: call
-    callee:
-      attribute: [req, get_json]
-  constraints:
-  - max_args: 0
-  match_examples:
-  - name: azure function req get json
-    code: |
-      import azure.functions
-      def example(user_input):
-          return req.get_json()
-  description: "Azure Functions HttpRequest.get_json() - cloud-delivered request body. `get_json()` takes 0 args; `max_args: 0` rejects unrelated overloads."
-
-- id: python.azure.function_req_get_body
-  enabled: true
-  language: python
-  trust: service
-  tag: event-input
-  payload_types: [event, binary]
-  frameworks: [azure-functions]
-  packages: [azure.functions]
-  imports: [azure.functions]
-  match:
-    kind: call
-    callee:
-      attribute: [req, get_body]
-  constraints:
-  - max_args: 0
-  match_examples:
-  - name: azure function req get body
-    code: |
-      import azure.functions
-      def example(user_input):
-          return req.get_body()
-  description: "Azure Functions HttpRequest.get_body() - raw cloud-delivered request body. `get_body()` takes 0 args; `max_args: 0` rejects unrelated overloads."
-- id: python.azure.function_req_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: python
-  trust: service
-  tag: event-input
-  payload_types: [event, json]
-  frameworks: [azure-functions]
-  packages: [azure.functions]
-  imports: [azure.functions]
-  match:
-    kind: param
-    target:
-      name: req
-  description: "Disabled - bare `req` parameter collides with Falcon request handlers; Azure get_json/get_body accessors remain enabled for concrete HttpRequest input."

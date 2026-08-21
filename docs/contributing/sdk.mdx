@@ -163,6 +163,14 @@ an embedding caller explicitly sets `prewarm_value_flow=true`; canonical
 `full_prewarm()` builds the shared IDG and leaves the per-function
 `ValueFlowGraph` compatibility projection on demand.
 
+Cold semantic sidecar APIs also expose native progress streams:
+`warm_retrieval_sidecar_with_progress` reports exact compiler files before
+candidate persistence, `warm_compiler_linkage_sidecar_with_progress` reports
+exact compiler files before linkage persistence, and
+`warm_idg_sidecar_and_manifest_with_progress` reports exact transfer segments
+plus accelerator, persistence, and manifest phase boundaries. Storage-only
+phases intentionally carry no synthetic percentage.
+
 ---
 
 ## Analysis surfaces

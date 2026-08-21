@@ -228,6 +228,137 @@ impl Repository {
 
     assert_eq!(run.params, ["self", "data"]);
     assert_eq!(run.receiver_param_index, Some(0));
+    assert_eq!(run.visibility, Visibility::ModuleTree);
+    assert!(run
+        .qualified_name
+        .as_deref()
+        .is_some_and(|name| name.ends_with("Repository.run")));
+}
+
+#[test]
+fn external_impl_owner_types_the_self_receiver_from_ast() {
+    let ws = workspace_with(
+        vec![Arc::new(RustAdapter::new())],
+        &[
+            (
+                "src/lib.rs",
+                r#"
+pub struct Repository;
+mod operations;
+"#,
+            ),
+            (
+                "src/operations.rs",
+                r#"
+use crate::Repository;
+impl Repository {
+    pub fn persist(&self, value: &str) {
+        self.write(value);
+    }
+}
+"#,
+            ),
+        ],
+    );
+    let file = ws
+        .vfs()
+        .all_files()
+        .iter()
+        .copied()
+        .find(|file| {
+            ws.vfs()
+                .path(*file)
+                .is_ok_and(|path| path.ends_with("operations.rs"))
+        })
+        .expect("operations file");
+    let idx = ws.db().decl_index(file).unwrap();
+    let persist = idx.defs.iter().find(|decl| decl.name == "persist").unwrap();
+
+    assert_eq!(persist.receiver_param_index, Some(0));
+    assert!(persist
+        .type_aliases
+        .iter()
+        .any(|alias| alias.name == "self" && alias.type_name == "Repository"));
+}
+
+#[test]
+fn split_impl_self_call_resolves_across_rust_modules() {
+    let ws = workspace_with(
+        vec![Arc::new(RustAdapter::new())],
+        &[
+            (
+                "src/lib.rs",
+                r#"
+pub struct Repository;
+impl Repository {
+    pub fn write(&self, _value: &str) {}
+}
+mod operations;
+"#,
+            ),
+            (
+                "src/operations.rs",
+                r#"
+use crate::Repository;
+impl Repository {
+    pub fn persist(&self, value: &str) {
+        self.write(value);
+    }
+}
+"#,
+            ),
+        ],
+    );
+    let global = ws.db().global_index();
+    let persist = global
+        .find_by_name("persist")
+        .iter()
+        .find_map(|symbol| {
+            global
+                .decl_of(*symbol)
+                .map(|_| bonsai_common::FuncId::new(symbol.raw()))
+        })
+        .expect("persist method");
+    let write = global
+        .find_by_name("write")
+        .iter()
+        .find_map(|symbol| {
+            global
+                .decl_of(*symbol)
+                .map(|_| bonsai_common::FuncId::new(symbol.raw()))
+        })
+        .expect("write method");
+    let graph = ws.resolved_call_graph();
+
+    assert!(
+        graph.callees_of(persist).any(|edge| edge.to == write),
+        "compiler-resolved graph must connect split-impl self.write; persist={:?}; write={:?}; imports={:?}; unresolved={:?}",
+        global.decl_of(bonsai_common::SymbolId::new(persist.raw())),
+        global.decl_of(bonsai_common::SymbolId::new(write.raw())),
+        ws.db().imports_for(
+            global
+                .declaring_file(bonsai_common::SymbolId::new(persist.raw()))
+                .expect("persist file")
+        ),
+        graph.unresolved_workspace_site_records(),
+    );
+}
+
+#[test]
+fn crate_root_uses_the_package_source_root_not_an_ancestor_named_src() {
+    let root = rust_crate_root_segments(std::path::Path::new(
+        "src/workspaces/crates/db/src/compiler_object.rs",
+    ));
+
+    assert_eq!(
+        root,
+        Some(vec![
+            "src".to_string(),
+            "workspaces".to_string(),
+            "crates".to_string(),
+            "db".to_string(),
+        ])
+    );
 }
 
 #[test]

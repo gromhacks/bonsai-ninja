@@ -232,6 +232,12 @@ fn minified_javascript_opt_in_is_consistent_across_compiler_commands() {
         serde_json::from_str(&stdout(&["index", root_text, "--minified-js"])).expect("inclusive index JSON");
     assert_eq!(inclusive_index["files"], 2);
     assert_eq!(inclusive_index["include_minified_sources"], true);
+    let inclusive_warm: serde_json::Value =
+        serde_json::from_str(&stdout(&["index", root_text, "--minified-js"]))
+            .expect("warm inclusive index JSON");
+    assert_eq!(inclusive_warm["compiler_cache"], "hit");
+    assert_eq!(inclusive_warm["files"], 2);
+    assert_eq!(inclusive_warm["include_minified_sources"], true);
 
     let inclusive_semantic: serde_json::Value =
         serde_json::from_str(&stdout(&["index", root_text, "--semantic", "--minified-js"]))

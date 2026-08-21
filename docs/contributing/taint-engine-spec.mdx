@@ -487,9 +487,12 @@ invalidates each one when a file edit lands.
 is the single semantic entry point. It applies, in order:
 
 1. `Visibility::Private` filter — keep only same-file decls.
-2. `Visibility::Module` / `Visibility::Crate` — module-path /
-   top-segment match against the caller's `ModulePath`.
-3. Receiver-type narrowing when `ctx.receiver_type` is `Some` —
+2. `Visibility::Module` — exact module/package match.
+3. `Visibility::ModuleTree` — declaring module plus lexical descendants
+   (Rust's default and `pub(self)` scope).
+4. `Visibility::Crate` — top-segment match against the caller's
+   `ModulePath`.
+5. Receiver-type narrowing when `ctx.receiver_type` is `Some` —
    `Decl.parent` must be the receiver type or in its base chain.
 
 Unqualified same-directory top-level fallbacks are enabled only when the

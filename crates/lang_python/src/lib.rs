@@ -1165,6 +1165,7 @@ fn python_finite_literal_selections(
     }
 
     let assignments = collect_kinds(tree, &["assignment"]);
+    let aliases_or_mutation_candidates = collect_kinds(tree, &["assignment", "augmented_assignment", "call"]);
     let binding_resolver = PythonLexicalBindingResolver::new(index, tree, file, src, &assignments);
     let mut finite_maps = Vec::new();
     for assignment in &assignments {
@@ -1196,13 +1197,11 @@ fn python_finite_literal_selections(
                     })
             }) && binding_resolver.owner_for_use(span_of(file, candidate), &name) == owner
         });
-        let aliases_or_mutations = collect_kinds(tree, &["assignment", "augmented_assignment", "call"])
-            .into_iter()
-            .any(|candidate| {
+        let aliases_or_mutations =
+            aliases_or_mutation_candidates.iter().copied().any(|candidate| {
                 binding_resolver.owner_for_use(span_of(file, &candidate), &name) == owner
                     && python_map_binding_may_escape_or_mutate(candidate, &name, assignment.id(), src)
-            })
-            || python_map_binding_has_unsafe_use(&binding_resolver, &name, assignment.id(), owner);
+            }) || python_map_binding_has_unsafe_use(&binding_resolver, &name, assignment.id(), owner);
         if writes == 1 && !projected_write && !aliases_or_mutations {
             finite_maps.push(FiniteMapBinding {
                 name,
@@ -1357,6 +1356,7 @@ fn python_character_substitutions(
     src: &[u8],
 ) -> Vec<CharacterSubstitutionFact> {
     let assignments = collect_kinds(tree, &["assignment"]);
+    let aliases_or_mutation_candidates = collect_kinds(tree, &["assignment", "augmented_assignment", "call"]);
     let binding_resolver = PythonLexicalBindingResolver::new(index, tree, file, src, &assignments);
     let mut tables = Vec::new();
     for assignment in &assignments {
@@ -1391,13 +1391,11 @@ fn python_character_substitutions(
                     })
             }) && binding_resolver.owner_for_use(span_of(file, candidate), &name) == owner
         });
-        let aliases_or_mutations = collect_kinds(tree, &["assignment", "augmented_assignment", "call"])
-            .into_iter()
-            .any(|candidate| {
+        let aliases_or_mutations =
+            aliases_or_mutation_candidates.iter().copied().any(|candidate| {
                 binding_resolver.owner_for_use(span_of(file, &candidate), &name) == owner
                     && python_map_binding_may_escape_or_mutate(candidate, &name, assignment.id(), src)
-            })
-            || python_map_binding_has_unsafe_use(&binding_resolver, &name, assignment.id(), owner);
+            }) || python_map_binding_has_unsafe_use(&binding_resolver, &name, assignment.id(), owner);
         if writes == 1 && !projected_write && !aliases_or_mutations {
             tables.push((name, assignment.end_byte(), owner, entries));
         }

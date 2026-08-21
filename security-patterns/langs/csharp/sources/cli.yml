@@ -61,14 +61,20 @@
   match:
     kind: param
     target:
-      name: args
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
       in_method: [Main]
+      param_index_in: [0]
+      param_type_in: [string, String]
+      param_count_in: [1]
+  constraints:
+    - enclosing_modifier_in: [static]
   match_examples:
     - name: main args parameter
       code: |
-        class App { static void Main(string[] args) { } }
+        class App { static void Main(string[] commandLine) { } }
+      expect_match_text: [commandLine]
     - name: helper args parameter negative
       code: |
         class App { void Helper(string[] args) { } }
       expect_no_match: true
-  description: "Main(string[] args) - CLI arguments supplied by the process launcher; scoped to the entrypoint method so ordinary helper parameters named args stay quiet."
+  description: "The string[] parameter of static C# Main(...) - command-line arguments matched from signature position/type, independent of the parameter name."

@@ -1,59 +1,119 @@
 # C# queue / broker sources. Service Bus, SQS, MassTransit, RabbitMQ, Kafka.
 - id: csharp.source.azure_servicebus_queue_trigger
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   tag: queue-input
   trust: service
-  packages: [Microsoft.Azure.WebJobs]
+  payload_types: [event, text, binary, json]
+  packages: [Microsoft.Azure.WebJobs, Microsoft.Azure.Functions.Worker.Extensions.Storage.Queues]
   match:
     kind: param
     target:
-      name: QueueTrigger
-  description: "Disabled - matcher only sees parameter identifiers, not Azure [QueueTrigger] attributes."
+      annotation: QueueTrigger
+  match_examples:
+  - name: azure queue trigger payload
+    code: |
+      using Microsoft.Azure.WebJobs;
+      class Functions {
+        void Run([QueueTrigger("orders")] string message) { }
+      }
+    expect_match_text: [message]
+  - name: output binding is not a queue trigger
+    code: |
+      using Microsoft.Azure.WebJobs;
+      class Functions {
+        void Run([Queue("orders")] string message) { }
+      }
+    expect_no_match: true
+  description: "Azure Functions [QueueTrigger] parameter - decoded queue message supplied by the configured queue."
 
 - id: csharp.source.azure_servicebus_trigger
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   tag: queue-input
   trust: service
-  packages: [Microsoft.Azure.ServiceBus]
+  payload_types: [event, text, binary, json]
+  packages: [Microsoft.Azure.WebJobs, Microsoft.Azure.WebJobs.Extensions.ServiceBus, Microsoft.Azure.Functions.Worker, Microsoft.Azure.Functions.Worker.Extensions.ServiceBus, Microsoft.Azure.ServiceBus]
   match:
     kind: param
     target:
-      name: ServiceBusTrigger
-  description: "Disabled - matcher only sees parameter identifiers, not Azure [ServiceBusTrigger] attributes."
+      annotation: ServiceBusTrigger
+  match_examples:
+  - name: azure service bus trigger payload
+    code: |
+      using Microsoft.Azure.WebJobs;
+      class Functions {
+        void Run([ServiceBusTrigger("orders")] string message) { }
+      }
+    expect_match_text: [message]
+  - name: ordinary service bus parameter negative
+    code: |
+      using Microsoft.Azure.WebJobs;
+      class Functions {
+        void Helper(string message) { }
+      }
+    expect_no_match: true
+  description: "Azure Functions [ServiceBusTrigger] parameter - queue or topic message supplied by Service Bus."
 
 - id: csharp.source.masstransit_consume
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   tag: queue-input
   trust: service
+  payload_types: [event, json]
   packages: [MassTransit]
   match:
     kind: param
     target:
-      name: ConsumeContext
-  description: "Disabled - `ConsumeContext` is a type name; `kind: param` only matches parameter identifiers."
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [ConsumeContext, MassTransit.ConsumeContext]
+  match_examples:
+  - name: masstransit consume context
+    code: |
+      using MassTransit;
+      class Consumer {
+        void Consume(ConsumeContext<Order> context) { }
+      }
+      class Order { }
+    expect_match_text: [context]
+  - name: unrelated context type negative
+    code: |
+      using MassTransit;
+      class Consumer {
+        void Consume(LocalContext context) { }
+      }
+      class LocalContext { }
+    expect_no_match: true
+  description: "MassTransit ConsumeContext<T> parameter - broker-delivered message and headers supplied to a consumer."
 
 - id: csharp.source.rabbitmq_received
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   tag: queue-input
   trust: service
+  payload_types: [event, binary]
   packages: [RabbitMQ.Client]
   match:
     kind: param
     target:
-      name: BasicDeliverEventArgs
-  description: "Disabled - `BasicDeliverEventArgs` is a type name; `kind: param` only matches parameter identifiers."
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [BasicDeliverEventArgs, RabbitMQ.Client.Events.BasicDeliverEventArgs]
+  match_examples:
+  - name: rabbitmq delivery event
+    code: |
+      using RabbitMQ.Client.Events;
+      class Consumer {
+        void Received(object sender, BasicDeliverEventArgs delivery) { }
+      }
+    expect_match_text: [delivery]
+  - name: unrelated event args negative
+    code: |
+      using RabbitMQ.Client.Events;
+      class Consumer {
+        void Received(object sender, EventArgs delivery) { }
+      }
+    expect_no_match: true
+  description: "RabbitMQ BasicDeliverEventArgs parameter - broker-supplied body, routing key, and message properties."
 
 - id: csharp.source.kafka_consume
   enabled: true

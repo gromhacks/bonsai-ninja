@@ -3,7 +3,7 @@
 
 use bonsai_security::{
     load_rulepack, match_rule_against_facts,
-    rule::{MatchKind, RuleKind, Severity},
+    rule::{ConstraintKind, MatchKind, RuleKind, Severity, TrustClass},
     run_taint_analysis, Rule, TaintAnalysisOptions,
 };
 use rayon::prelude::*;
@@ -341,6 +341,73 @@ fn every_source_rule_declares_trust() {
         missing.is_empty(),
         "source rules must declare trust regardless of enabled state:\n{}",
         missing.join("\n")
+    );
+}
+
+#[test]
+fn enabled_param_sources_require_compiler_context() {
+    let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
+    let mut violations = Vec::new();
+    for rule in pack.all_rules() {
+        if rule.kind != RuleKind::Source || !rule.enabled || rule.match_spec.kind != MatchKind::Param {
+            continue;
+        }
+        let Some(target) = rule.match_spec.target.as_ref() else {
+            violations.push(format!("{} has no parameter target", rule.id));
+            continue;
+        };
+        let target_has_context = target.attribute.is_some()
+            || target.annotation.is_some()
+            || target.default_call.is_some()
+            || !target.in_class.is_empty()
+            || !target.in_method.is_empty()
+            || !target.in_method_prefix.is_empty()
+            || !target.param_type_in.is_empty()
+            || !target.receiver_type_in.is_empty()
+            || !target.decl_kind_in.is_empty()
+            || !target.visibility_in.is_empty();
+        let target_has_signature_position = (!target.param_index_in.is_empty()
+            || !target.base_param_index_in.is_empty())
+            && !target.param_count_in.is_empty();
+        let constraint_has_context = rule.constraints.0.iter().any(|constraint| {
+            matches!(
+                constraint,
+                ConstraintKind::EnclosingDecoratorIn { .. } | ConstraintKind::EnclosingModifierIn { .. }
+            )
+        });
+        if !target_has_context && !target_has_signature_position && !constraint_has_context {
+            violations.push(format!(
+                "{} enables a parameter source from spelling/package evidence only",
+                rule.id
+            ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "enabled parameter sources require adapter-emitted signature, type, annotation, or declaration context:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn enabled_http_sources_are_remote_trust() {
+    let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
+    let violations: Vec<String> = pack
+        .all_rules()
+        .into_iter()
+        .filter(|rule| {
+            rule.kind == RuleKind::Source
+                && rule.enabled
+                && (rule.tag.as_deref() == Some("http-input")
+                    || rule.category.as_deref() == Some("http-input"))
+                && rule.trust != Some(TrustClass::Remote)
+        })
+        .map(|rule| format!("{} has trust {:?}", rule.id, rule.trust))
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "enabled HTTP input sources must remain on the remote trust boundary:\n{}",
+        violations.join("\n")
     );
 }
 

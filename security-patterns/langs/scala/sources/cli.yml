@@ -8,16 +8,27 @@
   match:
     kind: param
     target:
-      name: args
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
       in_method: [main]
+      param_index_in: [0]
+      param_type_in: [Array]
+      param_count_in: [1]
   match_examples:
-    - name: generated shape example
+    - name: Scala main parameter can use any binding name
       code: |
         object App {
-          def main(args: Array[String]): Unit = {
+          def main(commandLine: Array[String]): Unit = {
           }
         }
-  description: "Scala `def main(args: Array[String])` - CLI args."
+      expect_match_text: [commandLine]
+    - name: ordinary Array parameter is not process input
+      code: |
+        object App {
+          def helper(commandLine: Array[String]): Unit = {
+          }
+        }
+      expect_no_match: true
+  description: "The Array[String] parameter of Scala main(...) - matched from compiler signature facts, independent of the binding name."
 
 - id: scala.cli.stdin_readline
   enabled: true

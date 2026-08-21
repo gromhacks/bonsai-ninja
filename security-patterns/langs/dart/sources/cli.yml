@@ -8,15 +8,27 @@
   match:
     kind: param
     target:
-      name: arguments
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      in_method: [main]
+      param_index_in: [0]
+      param_count_in: [1]
+      param_type_in: [List]
   match_examples:
-  - name: declared shape
+  - name: dart main arguments
     code: |
-      void handle(String arguments) { var seen = arguments; }
-  description: "main(List<String> arguments) - argv."
+      void main(List<String> arguments) { print(arguments); }
+    expect_match_text: [arguments]
+  - name: helper list parameter negative
+    code: |
+      void handle(List<String> arguments) { print(arguments); }
+    expect_no_match: true
+  description: "First and only List parameter of Dart main - local command-line arguments, independent of the parameter name."
 
 - id: dart.cli.args_param
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: dart.cli.main_arguments
   language: dart
   trust: local
   tag: local-input
@@ -25,11 +37,7 @@
     kind: param
     target:
       name: args
-  match_examples:
-  - name: declared shape
-    code: |
-      void handle(String args) { var seen = args; }
-  description: "main(List<String> args) - argv (short form)."
+  description: "Subsumed by dart.cli.main_arguments, which matches Dart main(List<String>) by compiler signature instead of the name args."
 
 - id: dart.cli.stdin_readline_sync
   enabled: true

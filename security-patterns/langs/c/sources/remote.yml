@@ -244,7 +244,9 @@
 # the heartbeat request reaches memcpy and reads server memory back.
 # Param-name regex covers the OpenSSL / GnuTLS / mbedTLS conventions.
 - id: c.input.tls_record_payload_len
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: c
   trust: remote
   tag: network-input
@@ -254,14 +256,7 @@
     kind: param
     target:
       regex: "^(payload_length|payload_len|hbtype|hblen|record_length|frag_len)$"
-  match_examples:
-  - name: generated direct match
-    code: |
-      #include <openssl/evp.h>
-      int example(int argc, char **payload_length) {
-        return argc;
-      }
-  description: "TLS / DTLS record-header length / type fields parsed from a peer-controlled record (Heartbleed CVE-2014-0160 shape - `payload_length` flows from heartbeat request to memcpy). Scoped by openssl/libssl/gnutls/mbedtls package context."
+  description: "Disabled - a length-like parameter in a project using TLS does not prove it was parsed from a peer record. Socket/read sources and compiler propagation must establish that flow instead."
 
 # Generic untrusted-input parameter for shell-handling / path-handling
 # C entry points. Names are deliberately narrow (the more aggressive

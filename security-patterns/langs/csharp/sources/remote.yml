@@ -3,21 +3,81 @@
 # -- Adapter coverage notes (audited 2026-04) ---------------------------------
 # ASP.NET request property reads are now represented as `kind: read`
 # attribute-chain facts, so the Request.Query/Form/Body/Header/etc rules
-# below are enabled. ASP.NET Core MVC parameter binding via attributes
-# ([FromBody]/[FromQuery]/[FromForm]/[FromRoute]/[FromHeader]) is still kept
-# off until C# parameter-attribute metadata is emitted precisely enough for
-# rule matching. Per docs/pattern-guide.mdx the fix for unsupported shapes is
-# in the C# adapter, not here:
+# below are enabled. The C# adapter also emits exact parameter-attribute
+# metadata, so ASP.NET Core MVC binder attributes
+# ([FromBody]/[FromQuery]/[FromForm]/[FromRoute]/[FromHeader]) are matched at
+# the bound parameter rather than by parameter spelling. Per
+# docs/pattern-guide.mdx the fix for unsupported shapes is in the C# adapter,
+# not here:
 #
 #   > If a source-visible value flow is missing, fix adapter extraction or
 #   > the semantic graph. Do not encode the missing edge in YAML.
 #
-# Tracking task: surface C# parameter-attribute metadata so the matcher can
-# pivot on attribute name. Once that ships, flip the remaining
-# `enabled: false` attribute rules below to true and re-run the audit.
-#
-# Below this header: callable-shape sources plus enabled ASP.NET
-# attribute-read sources that work today.
+# Below this header: callable-shape sources, ASP.NET attribute-read sources,
+# and compiler-proven parameter binder sources.
+
+- id: csharp.source.azure_function_http_trigger
+  enabled: true
+  language: csharp
+  tag: http-input
+  trust: remote
+  payload_types: [event, json]
+  packages: [Microsoft.Azure.WebJobs, Microsoft.Azure.Functions.Worker]
+  match:
+    kind: param
+    target:
+      annotation: HttpTrigger
+  match_examples:
+  - name: azure http trigger request
+    code: |
+      using Microsoft.Azure.WebJobs;
+      class Functions {
+        void Run([HttpTrigger("get", "post")] HttpRequest request) { }
+      }
+      class HttpRequest { }
+    expect_match_text: [request]
+  - name: ordinary request parameter negative
+    code: |
+      using Microsoft.Azure.WebJobs;
+      class Functions {
+        void Helper(HttpRequest request) { }
+      }
+      class HttpRequest { }
+    expect_no_match: true
+  description: "Azure Functions [HttpTrigger] parameter - request data supplied by the remote HTTP caller."
+
+- id: csharp.source.gcf_function
+  enabled: true
+  language: csharp
+  tag: http-input
+  trust: remote
+  payload_types: [event, json]
+  packages: [Google.Cloud.Functions.Framework]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      in_class: [IHttpFunction]
+      in_method: [HandleAsync]
+      param_type_in: [HttpContext, Microsoft.AspNetCore.Http.HttpContext]
+  match_examples:
+  - name: google cloud http function request context
+    code: |
+      using Google.Cloud.Functions.Framework;
+      using Microsoft.AspNetCore.Http;
+      class Function : IHttpFunction {
+        public Task HandleAsync(HttpContext context) { return Task.CompletedTask; }
+      }
+    expect_match_text: [context]
+  - name: helper http context negative
+    code: |
+      using Google.Cloud.Functions.Framework;
+      using Microsoft.AspNetCore.Http;
+      class Function : IHttpFunction {
+        public Task Helper(HttpContext context) { return Task.CompletedTask; }
+      }
+    expect_no_match: true
+  description: "Google Cloud Functions IHttpFunction.HandleAsync(HttpContext) request context supplied by the remote caller."
 
 - id: csharp.source.httputility_parsequerystring
   enabled: true
@@ -57,18 +117,42 @@
   description: "Disabled - StreamReader.ReadToEnd is generic file/stream IO; enable in audits where Request.Body wrapping is the primary surface."
 
 - id: csharp.source.signalr_hub_method_arg
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   trust: remote
   tag: rpc-input
+  payload_types: [event, text, binary, json]
   packages: [Microsoft.AspNetCore.SignalR]
   match:
     kind: param
     target:
-      name: message
-  description: "Disabled - SignalR Hub method parameters are attacker-controlled, but bare param names overmatch. Enable narrowed."
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      in_class: [Hub]
+      decl_kind_in: [method]
+      visibility_in: [public]
+  match_examples:
+  - name: public signalr hub argument
+    code: |
+      using Microsoft.AspNetCore.SignalR;
+      public class ChatHub : Hub {
+        public void Send(string payload) { }
+      }
+    expect_match_text: [payload]
+  - name: private hub helper negative
+    code: |
+      using Microsoft.AspNetCore.SignalR;
+      public class ChatHub : Hub {
+        private void Normalize(string payload) { }
+      }
+    expect_no_match: true
+  - name: ordinary public method negative
+    code: |
+      using Microsoft.AspNetCore.SignalR;
+      public class Helper {
+        public void Send(string payload) { }
+      }
+    expect_no_match: true
+  description: "Parameter of a public method on an ASP.NET Core SignalR Hub - client-supplied RPC invocation argument, proven from declaration visibility and Hub inheritance."
 
 - id: csharp.source.grpc_request_param
   enabled: false
@@ -295,93 +379,185 @@
   description: "Disabled - `target.name: action` does not map to a concrete attribute; [FromBody]/[FromQuery]/[FromForm]/[FromRoute]/[FromHeader] attribute rules cover bound action parameters precisely."
 
 - id: csharp.source.frombody_attr
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   trust: remote
   tag: http-input
+  category: http-input
+  payload_types: [json]
   packages: [Microsoft.AspNetCore.Mvc]
   match:
     kind: param
     target:
-      name: FromBody
-  description: "Disabled - matcher only sees parameter identifiers, not ASP.NET [FromBody] attributes."
+      annotation: FromBody
+  match_examples:
+  - name: aspnet from body parameter
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class Controller {
+        void Create([FromBody] string payload) { }
+      }
+    expect_match_text: [payload]
+  - name: unannotated body parameter negative
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class Controller {
+        void Helper(string payload) { }
+      }
+    expect_no_match: true
+  description: "ASP.NET Core [FromBody] parameter - request-body data bound by the MVC runtime."
 
 - id: csharp.source.fromquery_attr
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   trust: remote
   tag: http-input
+  category: http-input
+  payload_types: [query]
   packages: [Microsoft.AspNetCore.Mvc]
   match:
     kind: param
     target:
-      name: FromQuery
-  description: "Disabled - matcher only sees parameter identifiers, not ASP.NET [FromQuery] attributes."
+      annotation: FromQuery
+  match_examples:
+  - name: aspnet from query parameter
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class Controller {
+        void Search([FromQuery] string query) { }
+      }
+    expect_match_text: [query]
+  - name: from body is not from query
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class Controller {
+        void Search([FromBody] string query) { }
+      }
+    expect_no_match: true
+  description: "ASP.NET Core [FromQuery] parameter - query-string data bound by the MVC runtime."
 
 - id: csharp.source.fromform_attr
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   trust: remote
   tag: http-input
+  category: http-input
+  payload_types: [form, multipart]
   packages: [Microsoft.AspNetCore.Mvc]
   match:
     kind: param
     target:
-      name: FromForm
-  description: "Disabled - matcher only sees parameter identifiers, not ASP.NET [FromForm] attributes."
+      annotation: FromForm
+  match_examples:
+  - name: aspnet from form parameter
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class Controller {
+        void Submit([FromForm] string field) { }
+      }
+    expect_match_text: [field]
+  - name: from query is not from form
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class Controller {
+        void Submit([FromQuery] string field) { }
+      }
+    expect_no_match: true
+  description: "ASP.NET Core [FromForm] parameter - form or multipart data bound by the MVC runtime."
 
 - id: csharp.source.fromroute_attr
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   trust: remote
   tag: http-input
+  category: http-input
+  payload_types: [path]
   packages: [Microsoft.AspNetCore.Mvc]
   match:
     kind: param
     target:
-      name: FromRoute
-  description: "Disabled - matcher only sees parameter identifiers, not ASP.NET [FromRoute] attributes."
+      annotation: FromRoute
+  match_examples:
+  - name: aspnet from route parameter
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class Controller {
+        void Get([FromRoute] string id) { }
+      }
+    expect_match_text: [id]
+  - name: unannotated route parameter negative
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class Controller {
+        void Helper(string id) { }
+      }
+    expect_no_match: true
+  description: "ASP.NET Core [FromRoute] parameter - URL path data bound by the MVC runtime."
 
 - id: csharp.source.fromheader_attr
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   trust: remote
   tag: http-input
+  category: http-input
+  payload_types: [header]
   packages: [Microsoft.AspNetCore.Mvc]
   match:
     kind: param
     target:
-      name: FromHeader
-  description: "Disabled - matcher only sees parameter identifiers, not ASP.NET [FromHeader] attributes."
+      annotation: FromHeader
+  match_examples:
+  - name: aspnet from header parameter
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class Controller {
+        void Get([FromHeader] string value) { }
+      }
+    expect_match_text: [value]
+  - name: from route is not from header
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class Controller {
+        void Get([FromRoute] string value) { }
+      }
+    expect_no_match: true
+  description: "ASP.NET Core [FromHeader] parameter - client-supplied header data bound by the MVC runtime."
 
 - id: csharp.source.iformfile_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   trust: remote
   tag: http-input
+  category: http-input
+  payload_types: [file, multipart]
   packages: [Microsoft.AspNetCore.Http]
   match:
     kind: param
     target:
-      name: IFormFile
-  description: "Disabled - `IFormFile` is a type name; `kind: param` only matches parameter identifiers."
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [IFormFile, Microsoft.AspNetCore.Http.IFormFile]
+  match_examples:
+  - name: aspnet uploaded file parameter
+    code: |
+      using Microsoft.AspNetCore.Http;
+      class Controller {
+        void Upload(IFormFile upload) { }
+      }
+    expect_match_text: [upload]
+  - name: unrelated parameter type negative
+    code: |
+      using Microsoft.AspNetCore.Http;
+      class Controller {
+        void Upload(string upload) { }
+      }
+    expect_no_match: true
+  description: "ASP.NET Core IFormFile parameter - uploaded file content and client filename supplied by the request."
 
 - id: csharp.source.signalr_hub_method
   enabled: false
   disabled_reason:
-    code: over-broad
+    code: subsumed
+    subsumed_by: csharp.source.signalr_hub_method_arg
   language: csharp
   trust: remote
   tag: rpc-input
@@ -390,7 +566,7 @@
     kind: param
     target:
       name: Hub
-  description: "Disabled - `Hub` is a type name; `kind: param` only matches parameter identifiers."
+  description: "Subsumed by csharp.source.signalr_hub_method_arg, which matches public Hub method parameters using compiler declaration and inheritance facts."
 
 - id: csharp.source.aspnet_iformfile_filename
   enabled: true

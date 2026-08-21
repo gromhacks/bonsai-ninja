@@ -142,6 +142,57 @@ fn elasticsearch_root() -> Option<PathBuf> {
     }
 }
 
+#[test]
+fn elasticsearch_fresh_and_warm_structural_index_do_not_regress() {
+    let _guard = elasticsearch_test_lock();
+    let (Some(bin), Some(es)) = (release_bin(), elasticsearch_root()) else {
+        return;
+    };
+    let cache = temp_output_path("structural-index-cache");
+    std::fs::create_dir_all(&cache).expect("create isolated structural cache");
+    let args = es_args(&es, &["index", "{es}"]);
+
+    let cold_started = Instant::now();
+    let cold_output = bonsai_command(&bin, &args)
+        .env("BONSAI_WORKSPACE_DIR", &cache)
+        .output()
+        .unwrap_or_else(|error| panic!("run cold Elasticsearch structural index: {error}"));
+    let cold = assert_success_output(&args, cold_output);
+    let cold_elapsed = cold_started.elapsed();
+    assert_performance(
+        "Elasticsearch fresh-cache structural index",
+        cold_elapsed,
+        "BONSAI_ES_COLD_STRUCTURAL_INDEX_MAX_SECS",
+        90,
+    );
+    let cold: serde_json::Value = serde_json::from_str(&cold).expect("cold structural index JSON");
+    assert_eq!(cold["compiler_cache"], "rebuilt", "{cold}");
+    assert!(
+        cold["files"].as_u64().is_some_and(|files| files >= 30_000) && cold["parsed_files"] == cold["files"],
+        "cold structural index must compile the complete Elasticsearch source set: {cold}"
+    );
+
+    let warm_started = Instant::now();
+    let warm_output = bonsai_command(&bin, &args)
+        .env("BONSAI_WORKSPACE_DIR", &cache)
+        .output()
+        .unwrap_or_else(|error| panic!("run warm Elasticsearch structural index: {error}"));
+    let warm = assert_success_output(&args, warm_output);
+    let warm_elapsed = warm_started.elapsed();
+    assert_performance(
+        "Elasticsearch warm structural index",
+        warm_elapsed,
+        "BONSAI_ES_WARM_STRUCTURAL_INDEX_MAX_SECS",
+        10,
+    );
+    let warm: serde_json::Value = serde_json::from_str(&warm).expect("warm structural index JSON");
+    assert_eq!(warm["compiler_cache"], "hit", "{warm}");
+    assert_eq!(warm["files"], cold["files"], "{warm}");
+    assert_eq!(warm["parsed_files"], 0, "{warm}");
+
+    let _ = std::fs::remove_dir_all(cache);
+}
+
 fn rules_dir() -> PathBuf {
     repo_root().join("security-patterns")
 }

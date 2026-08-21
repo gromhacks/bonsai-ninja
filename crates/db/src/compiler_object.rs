@@ -36,6 +36,14 @@ use std::sync::{
 /// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
 /// or the object validation contract changes in a way that can alter compiler
 /// facts.
+// v93: exact projected receiver aliases take precedence over their containing
+// object type, and Rust module-private items retain lexical ModuleTree scope.
+// Cached v92 objects can dispatch a tuple/newtype field back to its wrapper or
+// reject a valid descendant-module call.
+// v92: Rust retains the AST-proven `impl Type` receiver type on methods even
+// when the type declaration is in another module, and workspace-qualifies
+// rooted crate/self/super imports and calls. Cached v91 objects can omit exact
+// split-impl call edges or reuse a rooted path from the wrong Cargo package.
 // v91: tree-sitter-language-pack v1.15.0 refreshes the pinned grammars. Swift
 // accepts additional concurrency syntax directly, and Scala corrects operator
 // precedence and associativity. Cached v90 objects were lowered by the v1.8.0
@@ -247,7 +255,7 @@ use std::sync::{
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 91;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 93;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;

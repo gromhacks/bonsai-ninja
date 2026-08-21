@@ -26,19 +26,23 @@
   match:
     kind: param
     target:
-      name: invocationRequest
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [invocation_request, aws::lambda_runtime::invocation_request]
   match_examples:
-  - name: generated direct match
+  - name: typed lambda invocation request
     code: |
-      #include <aws-lambda-cpp.h>
-      void example(const char *invocationRequest) {
-        (void)invocationRequest;
+      #include <aws/lambda-runtime/runtime.h>
+      using namespace aws::lambda_runtime;
+      invocation_response handler(const invocation_request& request) {
+        return invocation_response::success(request.payload, "application/json");
       }
-  - name: unrelated param name is not the invocation request
+    expect_match_text: [request]
+  - name: same name wrong type negative
     code: |
-      #include <aws-lambda-cpp.h>
-      void example(const char *invocationResponse) {
-        (void)invocationResponse;
+      #include <aws/lambda-runtime/runtime.h>
+      void helper(const char *request) {
+        (void)request;
       }
     expect_no_match: true
-  description: "AWS Lambda C++ runtime invocation_request parameter."
+  imports: [aws/lambda-runtime/runtime.h]
+  description: "AWS Lambda C++ runtime invocation_request parameter - invocation payload proven by its declared runtime type rather than the variable name."

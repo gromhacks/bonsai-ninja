@@ -8,13 +8,13 @@ defmodule App do
   def wrap(x), do: "wrapped:" <> x
   def combine(acc, item), do: acc <> ":" <> item
 
-  def chain_simple(params) do
+  def chain_simple(_conn, params) do
     # POSITIVE
     tmp = params["c1"]
     System.cmd("sh", ["-c", tmp])
   end
 
-  def chain_multi_hop(params) do
+  def chain_multi_hop(_conn, params) do
     # POSITIVE
     t1 = params["c2"]
     t2 = passthrough(t1)
@@ -23,8 +23,9 @@ defmodule App do
     System.cmd("sh", ["-c", t4])
   end
 
-  def chain_branch_join(params, cond) do
+  def chain_branch_join(_conn, params) do
     # POSITIVE
+    cond = params["branch"]
     t =
       if cond do
         params["c3"]
@@ -35,27 +36,28 @@ defmodule App do
     System.cmd("sh", ["-c", t])
   end
 
-  def chain_loop_carried(params, items) do
+  def chain_loop_carried(_conn, params) do
     # POSITIVE
+    items = ["one", "two"]
     acc = params["c4"]
     final = Enum.reduce(items, acc, fn item, a -> combine(a, item) end)
     System.cmd("sh", ["-c", final])
   end
 
-  def chain_subscript_write(params) do
+  def chain_subscript_write(_conn, params) do
     # POSITIVE
     cmds = %{}
     cmds = Map.put(cmds, "x", params["c6"])
     System.cmd("sh", ["-c", cmds["x"]])
   end
 
-  def chain_clean_constant(params) do
+  def chain_clean_constant(_conn, params) do
     # NEGATIVE
     _unused = params["ignored"]
     System.cmd("sh", ["-c", @const_ok])
   end
 
-  def chain_cross_file(params) do
+  def chain_cross_file(_conn, params) do
     # POSITIVE
     t = params["c9"]
     Executor.run_in_other_file(t)

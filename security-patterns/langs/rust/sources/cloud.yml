@@ -24,15 +24,25 @@
   frameworks: [aws-lambda]
   packages: [lambda_runtime]
   match:
-    kind: call
-    callee:
-      attribute: [LambdaEvent, payload]
+    kind: read
+    target:
+      name: payload
+      receiver_type_in: [LambdaEvent, lambda_runtime::LambdaEvent]
   match_examples:
-  - name: lambda event payload
+  - name: lambda event payload field
     code: |
       use lambda_runtime::LambdaEvent;
-      fn example() {
-          LambdaEvent::payload();
+      use serde_json::Value;
+      fn handler(event: LambdaEvent<Value>) {
+          let payload = event.payload;
       }
-    expect_match_text: ["LambdaEvent::payload"]
-  description: "lambda_runtime LambdaEvent::payload - AWS Lambda event payload; local receiver calls require semantic LambdaEvent receiver-type facts."
+    expect_match_text: ["event.payload"]
+  - name: local payload field negative
+    code: |
+      use lambda_runtime::LambdaEvent;
+      struct LocalEvent { payload: String }
+      fn helper(event: LocalEvent) {
+          let payload = event.payload;
+      }
+    expect_no_match: true
+  description: "lambda_runtime LambdaEvent<T>.payload field - AWS Lambda event payload, narrowed by the compiler-declared receiver type so invocation context remains separate."

@@ -188,7 +188,7 @@
 - id: java.crypto.random_next
   enabled: false
   disabled_reason:
-    code: subsumed
+    code: over-broad
   language: java
   tag: weak-randomness
   category: source-independent
@@ -228,7 +228,7 @@
         }
       }
     expect_no_match: true
-  description: "java.util.Random next* output - non-cryptographic PRNG used where unpredictable values are required."
+  description: "Disabled - a java.util.Random next* call is not inherently security-sensitive without evidence that the value is used as a token, secret, nonce, or other unpredictable value. The enabled constructor rule retains the explicit weak-PRNG inventory signal without reporting every ordinary random draw."
 
 - id: java.crypto.random_ctor
   enabled: true

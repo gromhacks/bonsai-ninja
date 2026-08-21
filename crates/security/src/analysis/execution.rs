@@ -12,7 +12,7 @@ use super::{
     taint_cache, AHashMap, AHashSet, AnalysisProgress, Arc, CleanOverwritePolicy, DeclKind, Duration, FileId,
     FindingWithChain, FlowEvent, FuncId, GlobalIndex, IdgSeedRequest, InterTaintCaches, InterTaintConfig,
     MatchKind, MatchOrigin, OnceLock, Precision, ResolutionCoverage, RuleMatch, Rulepack,
-    SourceMatchDedupeKey, SourceMatchDedupeValue, Span, SymbolId, TokenSet, Workspace,
+    ScopedIdgSeedRequest, SourceMatchDedupeKey, SourceMatchDedupeValue, Span, SymbolId, TokenSet, Workspace,
 };
 
 /// Build chain-aware findings: source rule matches → propagated taint
@@ -309,15 +309,63 @@ where
         label: "building persisted scoped semantic graph",
         total: 0,
     });
-    let service = seed_idg_service_for_rulepack_for_files(
-        request.ws,
-        request.pack,
-        request.transfer_languages,
-        &request.config.receiver_state_propagations,
-        request.files,
-        request.funcs,
-        request.call_graph,
-    );
+    let service = {
+        let progress_sink = std::cell::RefCell::new(&mut *on_progress);
+        seed_idg_service_for_rulepack_for_files(
+            ScopedIdgSeedRequest {
+                ws: request.ws,
+                pack: request.pack,
+                languages: request.transfer_languages,
+                receiver_state_propagations: &request.config.receiver_state_propagations,
+                included_files: request.files,
+                included_funcs: request.funcs,
+                call_graph: request.call_graph,
+            },
+            |event| {
+                let mut sink = progress_sink.borrow_mut();
+                match event {
+                    bonsai_workspace::IdgPersistenceProgress::TransferStarted { segments } => {
+                        (**sink)(AnalysisProgress::PhaseFinished);
+                        (**sink)(AnalysisProgress::PhaseStarted {
+                            label: "lowering scoped semantic segments",
+                            total: segments as u64,
+                        });
+                    }
+                    bonsai_workspace::IdgPersistenceProgress::TransferSegmentCompleted => {
+                        (**sink)(AnalysisProgress::PhaseTicked);
+                    }
+                    bonsai_workspace::IdgPersistenceProgress::AcceleratorStarted => {
+                        (**sink)(AnalysisProgress::PhaseFinished);
+                        (**sink)(AnalysisProgress::PhaseStarted {
+                            label: "compiling scoped query accelerator",
+                            total: 0,
+                        });
+                    }
+                    bonsai_workspace::IdgPersistenceProgress::Persisting { .. } => {
+                        (**sink)(AnalysisProgress::PhaseFinished);
+                        (**sink)(AnalysisProgress::PhaseStarted {
+                            label: "persisting scoped semantic graph",
+                            total: 0,
+                        });
+                    }
+                    bonsai_workspace::IdgPersistenceProgress::ResidentFallbackStarted => {
+                        (**sink)(AnalysisProgress::PhaseFinished);
+                        (**sink)(AnalysisProgress::PhaseStarted {
+                            label: "building exact resident semantic fallback",
+                            total: 0,
+                        });
+                    }
+                    bonsai_workspace::IdgPersistenceProgress::ManifestStarted => {
+                        (**sink)(AnalysisProgress::PhaseFinished);
+                        (**sink)(AnalysisProgress::PhaseStarted {
+                            label: "publishing scoped semantic manifest",
+                            total: 0,
+                        });
+                    }
+                }
+            },
+        )
+    };
     on_progress(AnalysisProgress::PhaseFinished);
     CompiledSemanticGraph {
         service,
@@ -361,11 +409,17 @@ where
         label: "building source-reachable callgraph",
         total: 0,
     });
-    let call_graph = request.ws.source_reachable_resolved_call_graph(
-        &source_funcs,
-        &sink_func_list,
-        request.max_precision,
-    );
+    let call_graph = {
+        let progress_sink = std::cell::RefCell::new(&mut *on_progress);
+        request.ws.source_reachable_resolved_call_graph_with_progress(
+            &source_funcs,
+            &sink_func_list,
+            request.max_precision,
+            || {
+                (**progress_sink.borrow_mut())(AnalysisProgress::PhaseTicked);
+            },
+        )
+    };
     // The source-reachable compiler graph starts with every source function,
     // so its exact indirect edges already include every configured callback
     // that can participate in a source-to-sink corridor. Derive callback
