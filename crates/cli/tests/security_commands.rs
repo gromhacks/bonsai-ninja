@@ -986,7 +986,7 @@ fn security_progress_notes_stay_off_json_stdout_when_disabled() {
         return;
     }
     let rules = rules_dir();
-    for subcommand in ["taint-analysis", "source-analysis"] {
+    for subcommand in ["taint-analysis", "source-analysis", "sink-analysis"] {
         let out = Command::new(&bin)
             .args([
                 "security",
@@ -2020,6 +2020,117 @@ fn source_analysis_maps_python_entrypoint_paths() {
 }
 
 #[test]
+fn sink_analysis_maps_python_endpoints_and_exact_upstream_paths() {
+    let ws = micro_path("python");
+    if !ws.exists() {
+        return;
+    }
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "sink-analysis",
+        "--profile",
+        "all",
+        "--sink",
+        "^python\\.cmdi\\.",
+        "--format",
+        "json",
+        "--all",
+    ])
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("sink-analysis JSON");
+    let rows = json_rows(&parsed);
+    assert!(!rows.is_empty(), "expected matched command sinks:\n{out}");
+    assert!(
+        rows.iter().all(|row| {
+            row.pointer("/sink/rule_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|rule| rule.starts_with("python.cmdi."))
+        }),
+        "sink filter must constrain every endpoint:\n{out}"
+    );
+    let upstream = rows
+        .iter()
+        .flat_map(|row| row["upstream_flows"].as_array().into_iter().flatten())
+        .collect::<Vec<_>>();
+    assert!(
+        !upstream.is_empty(),
+        "expected at least one exact upstream proof:\n{out}"
+    );
+    assert!(
+        upstream.iter().all(|flow| {
+            matches!(flow["precision"].as_str(), Some("exact" | "narrowed"))
+                && flow["origin_function"]
+                    .as_str()
+                    .is_some_and(|name| !name.is_empty())
+                && flow["chain_names"]
+                    .as_array()
+                    .is_some_and(|chain| !chain.is_empty())
+        }),
+        "sink-analysis must expose typed source-independent compiler lineage:\n{out}"
+    );
+    assert!(
+        rows.iter().any(|row| {
+            row["security_source_flows"]
+                .as_array()
+                .is_some_and(|proofs| !proofs.is_empty())
+        }),
+        "expected at least one separately attributed security-source proof:\n{out}"
+    );
+}
+
+#[test]
+fn sink_analysis_keeps_endpoints_when_the_selected_source_matches_nothing() {
+    let ws = micro_path("python");
+    if !ws.exists() {
+        return;
+    }
+    let rules = rules_dir();
+    let common = [
+        "security",
+        ws.to_str().unwrap(),
+        "sink-analysis",
+        "--rules-dir",
+        rules.as_str(),
+        "--profile",
+        "all",
+        "--source",
+        "^does\\.not\\.exist$",
+        "--sink",
+        "^python\\.cmdi\\.",
+        "--all",
+    ];
+    let mut json_args = common.to_vec();
+    json_args.extend(["--format", "json"]);
+    let out = run(&json_args).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("sink-analysis JSON");
+    let rows = json_rows(&parsed);
+    assert!(
+        !rows.is_empty(),
+        "unreached sink endpoints must remain visible:\n{out}"
+    );
+    assert!(
+        rows.iter().all(|row| row["upstream_flows"]
+            .as_array()
+            .is_some_and(|flows| !flows.is_empty())),
+        "source filters must not erase source-independent upstream compiler lineage:\n{out}"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| { row["security_source_flows"].as_array().is_some_and(Vec::is_empty) }),
+        "an unmatched source selector must not invent security-source proofs:\n{out}"
+    );
+
+    let text = run(&common).unwrap();
+    assert!(
+        text.contains("upstream compiler lineage remains shown above"),
+        "the text view must distinguish compiler lineage from source attribution:\n{text}"
+    );
+}
+
+#[test]
 fn security_text_locations_preserve_complete_workspace_relative_paths() {
     let ws = temp_workspace("complete-relative-locations");
     let nested = ws.join("examples/tutorial/flaskr");
@@ -2101,6 +2212,37 @@ fn source_analysis_parser_rejects_sarif_format() {
 }
 
 #[test]
+fn sink_analysis_parser_rejects_sarif_format() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let ws = micro_path("python");
+    if !ws.exists() {
+        return;
+    }
+    let out = Command::new(&bin)
+        .args([
+            "security",
+            ws.to_str().unwrap(),
+            "sink-analysis",
+            "--rules-dir",
+            &rules_dir(),
+            "--format",
+            "sarif",
+            "--all",
+            "--no-color",
+        ])
+        .output()
+        .expect("run bonsai-ninja");
+    assert!(!out.status.success(), "sink-analysis must reject SARIF output");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("invalid value") && stderr.contains("json") && stderr.contains("text"),
+        "clap should list sink-analysis's complete format surface, got:\n{stderr}"
+    );
+}
+
+#[test]
 fn source_analysis_paged_json_exposes_top_level_completeness() {
     let ws = micro_path("python");
     if !ws.exists() {
@@ -2142,6 +2284,44 @@ fn source_analysis_paged_json_exposes_top_level_completeness() {
                 .is_some_and(|reason| reason.contains("paged security/source-analysis result incomplete"))
         }),
         "paged source-analysis JSON must explain incomplete row coverage:\n{out}"
+    );
+}
+
+#[test]
+fn sink_analysis_paged_json_exposes_top_level_completeness() {
+    let ws = micro_path("python");
+    if !ws.exists() {
+        return;
+    }
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "sink-analysis",
+        "--rules-dir",
+        &rules_dir(),
+        "--profile",
+        "all",
+        "--format",
+        "json",
+        "--context",
+        "1",
+    ])
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("sink-analysis JSON");
+    assert!(
+        parsed["rows"].as_array().is_some(),
+        "paged JSON must use rows wrapper:\n{out}"
+    );
+    assert_eq!(parsed["analysis_complete"].as_bool(), Some(false));
+    assert!(
+        parsed["analysis_incomplete_reasons"]
+            .as_array()
+            .is_some_and(
+                |reasons| reasons.iter().any(|reason| reason.as_str().is_some_and(|reason| {
+                    reason.contains("paged security/sink-analysis result incomplete")
+                }))
+            ),
+        "paged sink-analysis must explain incomplete row coverage:\n{out}"
     );
 }
 

@@ -10,6 +10,8 @@
 //!   inspect-style finding report, paginated one finding per block.
 //! - `source-analysis` renders downstream source-driven paths without
 //!   requiring a sink rule, for entrypoint / attack-surface mapping.
+//! - `sink-analysis` renders the inverse view: every selected taint-relevant
+//!   sink plus its source-independent upstream compiler value paths.
 
 mod progress_ui;
 
@@ -32,8 +34,9 @@ use bonsai_sdk::{
     CombinedFindingWithChain, CombinedSourceAnalysisCandidate, DependencyInventoryOptions, DependencyRow,
     Finding, FindingMatch, FindingStatus, PackAuditReport, PackInventoryOptions, PackRuleRow, Rule, RuleKind,
     RuleMatch, Rulepack, RulepackMetadata, RuntimeDisabledRule, SecurityInventoryOptions, SecurityMatchRow,
-    SecurityReport, Severity, SourceAnalysisOptions, SourceLineageStatus, SourceLineageSummary,
-    TaintAnalysisOptions, TaintAnalysisReport, TaintPropagationArg, TaintPropagationStep, TrustClass,
+    SecurityReport, Severity, SinkAnalysisCandidate, SinkAnalysisFlow, SinkAnalysisOptions,
+    SourceAnalysisOptions, SourceLineageStatus, SourceLineageSummary, TaintAnalysisOptions,
+    TaintAnalysisReport, TaintPropagationArg, TaintPropagationStep, TrustClass,
 };
 use comfy_table::Cell;
 use serde::{Deserialize, Serialize};
@@ -279,6 +282,7 @@ fn cmd_security_with_profile_default(
         | SecurityAction::Deps { rules_dir, .. }
         | SecurityAction::TaintAnalysis { rules_dir, .. }
         | SecurityAction::SourceAnalysis { rules_dir, .. }
+        | SecurityAction::SinkAnalysis { rules_dir, .. }
         | SecurityAction::Pack { rules_dir, .. } => rules_dir.as_deref(),
     };
     let rules_dir = resolve_rules_dir(workspace, action_rules_dir)?;
@@ -539,6 +543,56 @@ fn cmd_security_with_profile_default(
                 trust,
                 tag,
                 category,
+                files,
+                exclude_files,
+                exclude_tests,
+                inferred_sources,
+                paging_cfg,
+                format,
+            )
+        }
+        SecurityAction::SinkAnalysis {
+            rules_dir: _,
+            profile,
+            source,
+            mut trust,
+            category,
+            sink,
+            mut severity,
+            tag,
+            files,
+            mut exclude_files,
+            inferred_sources,
+            mut context,
+            page,
+            all,
+            format,
+            output: _,
+        } => {
+            let mut exclude_tests = false;
+            apply_profile(
+                &pack.metadata,
+                selected_security_profile(&pack.metadata, profile.as_deref(), apply_default_profile),
+                ProfileOverrides {
+                    trust: &mut trust,
+                    severity: Some(&mut severity),
+                    exclude_files: &mut exclude_files,
+                    exclude_tests: Some(&mut exclude_tests),
+                    context: &mut context,
+                },
+            )?;
+            let severity = parse_severity_flag(severity.as_deref())?;
+            let paging_cfg = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
+            cmd_sink_analysis(
+                workspace,
+                &pack,
+                &rules_dir,
+                source,
+                trust,
+                category,
+                sink,
+                severity,
+                tag,
                 files,
                 exclude_files,
                 exclude_tests,
@@ -2531,6 +2585,49 @@ fn flow_from_finding_hops(
     Some(flow)
 }
 
+fn flow_from_sink_lineage_hops(
+    lineage: &SinkAnalysisFlow,
+    sink: &FindingMatch,
+    hops: Vec<bonsai_sdk::FlowFunctionBody>,
+    idx: usize,
+) -> Option<crate::commands::InspectFlowRendered> {
+    if hops.is_empty() {
+        return None;
+    }
+    let functions = hops
+        .into_iter()
+        .map(|hop| crate::commands::inspect::InspectFunctionRendered {
+            module_path: hop.file,
+            owners: Vec::new(),
+            name: hop.function.clone(),
+            signature: hop.function,
+            start_line: hop.start_line,
+            end_line: hop.lines.last().map_or(hop.start_line, |line| line.n),
+            lines: hop
+                .lines
+                .into_iter()
+                .map(|line| crate::commands::inspect::InspectLine {
+                    line_no: line.n,
+                    text: line.text,
+                    step: None,
+                    annotation: None,
+                })
+                .collect(),
+        })
+        .collect();
+    let mut rendered = crate::commands::InspectFlowRendered {
+        flow_number: u32::try_from(idx + 1).unwrap_or(u32::MAX),
+        flow_label: (idx + 1).to_string(),
+        flow_id: lineage.flow_id.clone(),
+        chain: lineage.chain_names.clone(),
+        chain_display: lineage.chain_names.join(" -> "),
+        precision: lineage.precision,
+        functions,
+    };
+    annotate_sink_lineage_flow(&mut rendered, &lineage.taint_path, sink);
+    Some(rendered)
+}
+
 fn render_taint_summary_text(summary: &TaintAnalysisSummary) {
     let u = ui();
     cli_println!(
@@ -2688,6 +2785,279 @@ fn finding_shallow_cost_bytes(f: &CombinedFindingWithChain) -> u64 {
             .map(|s| s.rule_id.len() + s.file.len() + s.text.len().min(120))
             .sum::<usize>()
         + 512) as u64
+}
+
+// ---- sink-analysis — backward lineage into every selected sink ----
+
+#[allow(clippy::too_many_arguments)] // Mirrors the explicit CLI/SDK option surface.
+fn cmd_sink_analysis(
+    workspace: &Path,
+    pack: &Rulepack,
+    rules_dir: &Path,
+    source: Option<String>,
+    trust: Option<String>,
+    category: Option<String>,
+    sink: Option<String>,
+    severity: Option<Severity>,
+    tag: Option<String>,
+    files: Vec<String>,
+    exclude_files: Vec<String>,
+    exclude_tests: bool,
+    inferred_sources: bool,
+    paging_cfg: paging::PagingConfig,
+    format: BrowseFormat,
+) -> Result<()> {
+    let (project, _footer) = if !files.is_empty() || !exclude_files.is_empty() {
+        open_security_project_filtered_paths(workspace, pack, rules_dir, &files, &exclude_files)?
+    } else {
+        open_security_project(workspace, pack, rules_dir)?
+    };
+    let ws = project.workspace();
+    let mut analysis_progress = SecurityAnalysisProgress::new();
+    let report = project.security().sink_analysis_with_phase_progress(
+        SinkAnalysisOptions {
+            source: source.clone(),
+            trust: trust.clone(),
+            category: category.clone(),
+            sink: sink.clone(),
+            severity,
+            tag: tag.clone(),
+            files: files.clone(),
+            exclude_files: exclude_files.clone(),
+            exclude_tests,
+            include_inferred_sources: inferred_sources,
+        },
+        |event| analysis_progress.handle(event),
+    )?;
+    let total_candidates = report.candidates.len();
+    let total_upstream_flows = report
+        .candidates
+        .iter()
+        .flat_map(|candidate| candidate.upstream_flows.iter())
+        .count();
+    let total_security_source_flows = report
+        .candidates
+        .iter()
+        .flat_map(|candidate| candidate.security_source_flows.iter())
+        .map(|flow| 1usize.saturating_add(flow.finding.alternate_flows.len()))
+        .sum::<usize>();
+    let source_rule_count = report.source_rule_count;
+    let sink_rule_count = report.sink_rule_count;
+    let sanitizer_rule_count = report.sanitizer_rule_count;
+    let report_analysis_complete = report.analysis_complete;
+    let report_analysis_incomplete_reasons = report.analysis_incomplete_reasons;
+    let runtime_disabled_rules = report.runtime_disabled_rules;
+    let candidates = report.candidates;
+    let filters_hash = filter_signature(&[
+        ("kind", "sink-analysis"),
+        ("source", source.as_deref().unwrap_or("")),
+        ("trust", trust.as_deref().unwrap_or("")),
+        ("category", category.as_deref().unwrap_or("")),
+        ("sink", sink.as_deref().unwrap_or("")),
+        ("severity", severity.map(Severity::as_str).unwrap_or("")),
+        ("tag", tag.as_deref().unwrap_or("")),
+    ]);
+    let cost = |candidate: &SinkAnalysisCandidate| {
+        serde_json::to_vec(candidate)
+            .map(|bytes| bytes.len() as u64)
+            .unwrap_or(2_048)
+            .saturating_add(1_024)
+    };
+
+    page_cache::emit_paged_text(
+        workspace,
+        &candidates,
+        &paging_cfg,
+        "security/sink-analysis",
+        filters_hash,
+        cost,
+        |paged, info, _cfg| match format {
+            BrowseFormat::Json => {
+                let mut reasons = report_analysis_incomplete_reasons.clone();
+                reasons.extend(paged_json_incomplete_reasons("security/sink-analysis", info));
+                reasons.sort();
+                reasons.dedup();
+                let wrapped = serde_json::json!({
+                    "analysis_complete": report_analysis_complete && reasons.is_empty(),
+                    "analysis_incomplete_reasons": reasons,
+                    "runtime_disabled_rules": &runtime_disabled_rules,
+                    "rows": paged,
+                    "summary": {
+                        "sink_count": total_candidates,
+                        "upstream_flow_count": total_upstream_flows,
+                        "security_source_flow_count": total_security_source_flows,
+                        "source_rule_count": source_rule_count,
+                        "sink_rule_count": sink_rule_count,
+                        "sanitizer_rule_count": sanitizer_rule_count,
+                    },
+                    "page": page_info_to_json(info),
+                });
+                cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
+                Ok(())
+            }
+            BrowseFormat::Text => render_sink_analysis_text_page(
+                workspace,
+                ws,
+                pack,
+                paged,
+                info,
+                total_candidates,
+                total_upstream_flows,
+                total_security_source_flows,
+                source_rule_count,
+                sink_rule_count,
+                sanitizer_rule_count,
+                report_analysis_complete,
+                &report_analysis_incomplete_reasons,
+                &runtime_disabled_rules,
+            ),
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Render context stays explicit for completeness metadata.
+fn render_sink_analysis_text_page(
+    workspace: &Path,
+    ws: &bonsai_sdk::Workspace,
+    pack: &Rulepack,
+    candidates: &[SinkAnalysisCandidate],
+    info: &paging::PageInfo,
+    total_candidates: usize,
+    total_upstream_flows: usize,
+    total_security_source_flows: usize,
+    source_rule_count: usize,
+    sink_rule_count: usize,
+    sanitizer_rule_count: usize,
+    report_analysis_complete: bool,
+    report_analysis_incomplete_reasons: &[String],
+    runtime_disabled_rules: &[RuntimeDisabledRule],
+) -> Result<()> {
+    let u = ui();
+    cli_println!(
+        "{}",
+        u.dim(&format!(
+            "security sink-analysis — {total_candidates} sink(s) · {total_upstream_flows} upstream flow(s) · \
+             {total_security_source_flows} security-source proof(s) · \
+             {source_rule_count} source rule(s) · {sink_rule_count} sink rule(s) · \
+             {sanitizer_rule_count} sanitizer rule(s) loaded"
+        ))
+    );
+    if report_analysis_complete {
+        cli_println!("{}", u.dim("analysis: complete"));
+    } else {
+        let reason = if report_analysis_incomplete_reasons.is_empty() {
+            "unknown semantic coverage gap".to_string()
+        } else {
+            report_analysis_incomplete_reasons.join(", ")
+        };
+        cli_println!("{}", u.warn(&format!("analysis incomplete — {reason}")));
+    }
+    for disabled in runtime_disabled_rules {
+        cli_println!(
+            "{}",
+            u.warn(&format!(
+                "runtime-disabled rule {} — {}",
+                disabled.rule_id, disabled.reason
+            ))
+        );
+    }
+
+    let mut body_cache = bonsai_sdk::FlowBodyCache::new(ws);
+    for (candidate_index, candidate) in candidates.iter().enumerate() {
+        let severity = candidate
+            .sink
+            .severity
+            .map_or_else(|| "-".to_string(), |value| value.as_str().to_string());
+        cli_println!();
+        cli_println!("{}", u.ruler('═', 70));
+        cli_println!(
+            "{} · {} · {}  {}",
+            u.annotation(&format!("SINK {}", candidate_index + 1)),
+            u.name(candidate.sink.tag.as_deref().unwrap_or("sink")),
+            severity_cell(u, &severity),
+            u.dim(&candidate.sink.rule_id),
+        );
+        render_finding_side(u, workspace, FindingSide::Sink, &candidate.sink, pack);
+        for (flow_index, flow) in candidate.upstream_flows.iter().enumerate() {
+            cli_println!();
+            cli_println!("{}", u.ruler('─', 70));
+            let reverse_chain = flow
+                .chain_names
+                .iter()
+                .rev()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ← ");
+            cli_println!(
+                "  {} {}  {}",
+                u.annotation(&format!("UPSTREAM FLOW {}", flow_index + 1)),
+                u.dim(&flow.flow_id),
+                u.dim(&reverse_chain),
+            );
+            cli_println!(
+                "  {} {} at {}:{}{}",
+                u.kind("ORIGIN:"),
+                u.name(&flow.origin_function),
+                flow.origin_file,
+                flow.origin_line,
+                if flow.endpoint_only {
+                    u.dim(" · no additional upstream compiler lineage resolved")
+                } else {
+                    String::new()
+                }
+            );
+            let hops = body_cache.build_lineage_bodies(
+                &flow.chain_funcs,
+                None,
+                &flow.taint_path,
+                bonsai_sdk::SecurityFlowRole::Sink,
+            );
+            if let Some(rendered) = flow_from_sink_lineage_hops(flow, &candidate.sink, hops, flow_index) {
+                let render_opts = crate::commands::InspectRenderOptions::default();
+                let mut local_seen: crate::commands::BodySet = ahash::AHashSet::new();
+                crate::commands::render_flow_block_with_heading(
+                    u,
+                    &render_opts,
+                    &rendered,
+                    &candidate.sink.rule_id,
+                    &mut local_seen,
+                    "UPSTREAM FLOW",
+                );
+            }
+        }
+
+        cli_println!();
+        if candidate.security_source_flows.is_empty() {
+            cli_println!(
+                "  {} {}",
+                u.kind("SECURITY SOURCE:"),
+                u.dim("no selected security source reaches this sink; upstream compiler lineage remains shown above")
+            );
+        } else {
+            cli_println!(
+                "  {} {} proven selected-source flow(s)",
+                u.kind("SECURITY SOURCES:"),
+                candidate.security_source_flows.len()
+            );
+            for proof in &candidate.security_source_flows {
+                let finding = &proof.finding;
+                let status = match finding.status {
+                    FindingStatus::Unsanitized => u.warn("unsanitized"),
+                    FindingStatus::Sanitized => u.dim("sanitized · review for bypass"),
+                    FindingStatus::WrongContext => u.warn("wrong-context sanitizer"),
+                };
+                cli_println!(
+                    "    {} {} · {} · {}",
+                    u.name(&finding.source.rule_id),
+                    u.dim(finding.representative_flow_id.as_deref().unwrap_or("-")),
+                    status,
+                    u.dim(&finding.chain_display.join(" → "))
+                );
+            }
+        }
+    }
+    render_paging_footer(info, "bonsai-ninja security <workspace> sink-analysis");
+    Ok(())
 }
 
 // ---- source-analysis — downstream taint/call map from all source seeds ----
@@ -3103,6 +3473,7 @@ fn byte_offset_for_line_col(text: &str, line: u32, column: u32) -> Option<u64> {
 enum SecurityFlowKind {
     Taint,
     Source,
+    Sink,
 }
 
 impl SecurityFlowKind {
@@ -3110,6 +3481,7 @@ impl SecurityFlowKind {
         match self {
             Self::Taint => "TAINT FLOW",
             Self::Source => "SOURCE FLOW",
+            Self::Sink => "UPSTREAM FLOW",
         }
     }
 }
@@ -3197,6 +3569,56 @@ fn annotate_taint_flow(
                 &mut step_counter,
             );
         }
+    }
+}
+
+fn annotate_sink_lineage_flow(
+    flow: &mut crate::commands::InspectFlowRendered,
+    taint_path: &[TaintPropagationStep],
+    sink: &FindingMatch,
+) {
+    for func in &mut flow.functions {
+        for line in &mut func.lines {
+            line.step = None;
+            line.annotation = None;
+        }
+    }
+    let label = flow.flow_label.clone();
+    let mut step_counter = 0u32;
+    let mut sink_annotated = false;
+    for step in taint_path {
+        let is_sink = same_rendered_file(&step.file, &sink.file) && step.line == sink.line;
+        sink_annotated |= is_sink;
+        let marker = if is_sink {
+            format!("SINK: {} {}", sink.rule_id, format_taint_args(&step.tainted_args))
+        } else {
+            format!(
+                "UPSTREAM: {} -> {} {}",
+                step.caller,
+                step.callee,
+                format_taint_args(&step.tainted_args)
+            )
+        };
+        add_flow_line_annotation(
+            flow,
+            &step.file,
+            step.line,
+            &label,
+            marker,
+            SecurityFlowKind::Sink,
+            &mut step_counter,
+        );
+    }
+    if !sink_annotated {
+        add_flow_line_annotation(
+            flow,
+            &sink.file,
+            sink.line,
+            &label,
+            format!("SINK: {} {}", sink.rule_id, format_sink_args(sink)),
+            SecurityFlowKind::Sink,
+            &mut step_counter,
+        );
     }
 }
 

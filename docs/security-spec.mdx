@@ -504,6 +504,22 @@ and `lineage`. If representative lineage rendering hits its hop or path
 budget, the row is explicitly marked incomplete instead of being presented
 as complete evidence.
 
+## Sink-analysis mode
+
+`security sink-analysis` is the sink-centric counterpart to source-analysis.
+It retains every selected taint-relevant sink endpoint and maps exact
+source-independent compiler value lineage into that endpoint. Selected source
+rules are separate security-boundary evidence under `security_source_flows`.
+Source filters narrow only those proofs; they do not remove a matched sink or
+its `upstream_flows`.
+
+Sink-analysis shares the taint-analysis endpoint matcher, compiler-resolved
+call graph, typed transfer facts, and sparse IDG fixed point. It compiles one
+sink-relevant scope and validates each candidate compiler origin forward to
+the exact sink node; reverse relevance is pruning evidence, never the public
+proof. Pagination affects only which sink rows and bodies are rendered; it
+does not cap matching or propagation.
+
 ## Text flow labels
 
 Text output uses distinct labels for different evidence surfaces:
@@ -512,6 +528,7 @@ Text output uses distinct labels for different evidence surfaces:
 |---|---|---|
 | `FLOW` | `inspect` and navigation views | Stable bounded structural evidence; endpoint reachability remains a compressed compiler corridor. |
 | `SOURCE FLOW` | `security source-analysis` | Taint propagation from a source rule without sink attribution. |
+| `UPSTREAM FLOW` | `security sink-analysis` | Exact source-independent compiler lineage attached to a matched sink and presented sink-first. |
 | `TAINT FLOW` | `security taint-analysis` | Source-to-sink propagation with tainted args, receiver evidence, sanitizer context, and sink attribution. |
 
 JSON and SARIF expose the same underlying propagation as structured

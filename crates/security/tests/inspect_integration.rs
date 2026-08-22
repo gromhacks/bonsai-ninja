@@ -200,6 +200,7 @@ fn sdk_taint_analysis_uses_same_exact_source_seed_overlay_as_cli() {
 fn sdk_source_analysis_returns_structured_paths_without_cli_rendering() {
     let root = fresh_tmp("bonsai-sdk-security-source");
     let rules = write_sdk_rules(&root);
+    std::fs::remove_dir_all(rules.join("langs/python/sinks")).expect("remove sink rules");
     std::fs::write(
         root.join("app.py"),
         "import os\n\ndef handle(user, safe):\n    run(user)\n    clean(safe)\n\ndef run(cmd):\n    os.system(cmd)\n\ndef clean(cmd):\n    os.system(cmd)\n",
@@ -208,6 +209,13 @@ fn sdk_source_analysis_returns_structured_paths_without_cli_rendering() {
 
     let ws = bonsai_workspace::Workspace::index(&root, sdk_python_registry()).expect("workspace index");
     let pack = bonsai_security::load_rulepack(&rules).expect("rulepack");
+    assert!(
+        !pack
+            .all_rules()
+            .iter()
+            .any(|rule| rule.kind == bonsai_security::rule::RuleKind::Sink),
+        "source-analysis fixture must contain no sink rules"
+    );
     let report = bonsai_security::run_source_analysis(
         &ws,
         &pack,
@@ -241,6 +249,79 @@ fn sdk_source_analysis_returns_structured_paths_without_cli_rendering() {
             .iter()
             .map(|c| &c.chain_names)
             .collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn sdk_sink_analysis_keeps_unreached_endpoints_and_exact_upstream_paths() {
+    let root = fresh_tmp("bonsai-sdk-security-sink");
+    let rules = write_sdk_rules(&root);
+    std::fs::write(
+        root.join("app.py"),
+        "import os\n\ndef handle(user, safe):\n    run(user)\n    clean(safe)\n\ndef run(cmd):\n    os.system(cmd)\n\ndef clean(cmd):\n    os.system(cmd)\n",
+    )
+    .expect("fixture");
+
+    let ws = bonsai_workspace::Workspace::index(&root, sdk_python_registry()).expect("workspace index");
+    let pack = bonsai_security::load_rulepack(&rules).expect("rulepack");
+    let report = bonsai_security::run_sink_analysis(
+        &ws,
+        &pack,
+        bonsai_security::SinkAnalysisOptions {
+            source: Some("^python\\.test\\.user_param$".to_string()),
+            sink: Some("^python\\.test\\.os_system$".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("sdk sink analysis");
+
+    assert_eq!(
+        report.candidates.len(),
+        2,
+        "both sink endpoints must remain visible"
+    );
+    let reached = report
+        .candidates
+        .iter()
+        .find(|candidate| candidate.sink.enclosing_fn.as_deref() == Some("run"))
+        .expect("reached sink");
+    assert_eq!(
+        reached.upstream_flows.len(),
+        1,
+        "the tainted branch needs one exact proof"
+    );
+    assert!(
+        reached.upstream_flows[0]
+            .chain_names
+            .iter()
+            .any(|name| name == "run"),
+        "upstream compiler lineage should preserve the resolved route"
+    );
+    assert!(
+        matches!(
+            reached.upstream_flows[0].precision,
+            bonsai_common::Precision::Exact | bonsai_common::Precision::Narrowed
+        ),
+        "sink-analysis must not surface guessed upstream evidence"
+    );
+    assert_eq!(
+        reached.security_source_flows.len(),
+        1,
+        "the selected source must be attached as a separate security proof"
+    );
+    let unreached = report
+        .candidates
+        .iter()
+        .find(|candidate| candidate.sink.enclosing_fn.as_deref() == Some("clean"))
+        .expect("unreached sink");
+    assert!(
+        !unreached.upstream_flows.is_empty(),
+        "sink-analysis must retain source-independent compiler lineage"
+    );
+    assert!(
+        unreached.security_source_flows.is_empty(),
+        "an unrelated clean parameter must not acquire a security-source proof"
     );
     let _ = std::fs::remove_dir_all(root);
 }

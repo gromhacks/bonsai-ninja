@@ -47,7 +47,7 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
         let entry = entry.expect("dir entry");
         let path = entry.path();
         let name = entry.file_name();
-        if name == ".bonsai" {
+        if name == ".bonsai" || bonsai_common::is_bonsai_case_probe_path(&path) {
             continue;
         }
         let target = dst.join(name);
@@ -78,6 +78,9 @@ fn copy_dir_tree_including_bonsai(src: &std::path::Path, dst: &std::path::Path) 
     for entry in std::fs::read_dir(src).expect("read workspace dir") {
         let entry = entry.expect("dir entry");
         let path = entry.path();
+        if bonsai_common::is_bonsai_case_probe_path(&path) {
+            continue;
+        }
         let target = dst.join(entry.file_name());
         if path.is_dir() {
             copy_dir_tree_including_bonsai(&path, &target);
@@ -91,6 +94,21 @@ fn copy_dir_tree_including_bonsai(src: &std::path::Path, dst: &std::path::Path) 
             });
         }
     }
+}
+
+#[test]
+fn fixture_copy_ignores_transient_vfs_case_probe() {
+    let src = tempdir("fixture-copy-case-probe-src");
+    let dst = tempdir("fixture-copy-case-probe-dst");
+    std::fs::write(src.join("app.py"), "value = 1\n").expect("write fixture source");
+    std::fs::write(src.join(".bonsai_case_probe_123_456"), "").expect("write case probe");
+
+    copy_dir(&src, &dst);
+
+    assert!(dst.join("app.py").is_file());
+    assert!(!dst.join(".bonsai_case_probe_123_456").exists());
+    let _ = std::fs::remove_dir_all(src);
+    let _ = std::fs::remove_dir_all(dst);
 }
 
 fn sdk() -> bonsai_sdk::Bonsai {
@@ -2383,7 +2401,7 @@ def handle():
 
 #[test]
 fn facade_browse_dump_export_security_trace_and_inspect_work() {
-    let root = python_micro();
+    let root = temp_python_micro("facade-all-methods");
     let project = sdk().open_query(&root).expect("open query");
     let ws = project.workspace();
 
@@ -2593,6 +2611,15 @@ fn facade_browse_dump_export_security_trace_and_inspect_work() {
         .expect("source analysis")
         .candidates
         .is_empty());
+    let sink_report = project
+        .security()
+        .sink_analysis(Default::default())
+        .expect("sink analysis");
+    assert!(!sink_report.candidates.is_empty());
+    assert!(sink_report
+        .candidates
+        .iter()
+        .any(|candidate| !candidate.upstream_flows.is_empty()));
 
     let trace = project.trace().from("handle_request").expect("trace");
     assert!(!trace.steps.is_empty());
@@ -2625,18 +2652,23 @@ fn facade_browse_dump_export_security_trace_and_inspect_work() {
         .symbol_summaries(Some("handle_request"), false)
         .expect("symbol summaries")
         .is_empty());
+
+    drop(project);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn security_methods_require_rulepack() {
-    let project = bonsai_sdk::Bonsai::new()
-        .open_query(python_micro())
-        .expect("open query");
+    let root = temp_python_micro("security-requires-rulepack");
+    let project = bonsai_sdk::Bonsai::new().open_query(&root).expect("open query");
     let err = project
         .security()
         .taint_analysis(Default::default())
         .expect_err("missing rulepack should error");
     assert!(err.to_string().contains("with_rulepack"));
+
+    drop(project);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

@@ -34,7 +34,8 @@ pub(crate) mod sanitizer_credit;
 
 pub use analysis::{
     dependency_inventory, filter_rules_to_workspace_languages, pack_audit, pack_inventory, pack_tree,
-    pack_tree_for_rules, rule_family, run_source_analysis, run_source_analysis_with_phase_progress,
+    pack_tree_for_rules, rule_family, run_sink_analysis, run_sink_analysis_with_phase_progress,
+    run_sink_analysis_with_progress, run_source_analysis, run_source_analysis_with_phase_progress,
     run_source_analysis_with_progress, run_taint_analysis, run_taint_analysis_with_phase_progress,
     run_taint_analysis_with_progress, sanitizer_inventory, sanitizer_inventory_with_progress,
     security_match_rows, seed_idg_service_for_rulepack, select_pack_rules, select_rules, sink_inventory,
@@ -44,9 +45,10 @@ pub use analysis::{
     DependencyInventoryOptions, FindingWithChain, PackAuditCount, PackAuditFamilyCount, PackAuditLanguage,
     PackAuditReport, PackInventoryOptions, PackRuleRow, PackTreeFile, PackTreeLanguage, PackTreeReport,
     PackTreeRule, PackValidationIssue, PackValidationReport, RulepackTaintTransfers,
-    SecurityInventoryOptions, SecurityMatchRow, SourceAnalysisCandidate, SourceAnalysisOptions,
-    SourceAnalysisReport, SourceLineageLimits, SourceLineageStatus, SourceLineageSummary,
-    TaintAnalysisOptions, TaintAnalysisReport,
+    SecurityInventoryOptions, SecurityMatchRow, SinkAnalysisCandidate, SinkAnalysisFlow, SinkAnalysisOptions,
+    SinkAnalysisReport, SourceAnalysisCandidate, SourceAnalysisOptions, SourceAnalysisReport,
+    SourceLineageLimits, SourceLineageStatus, SourceLineageSummary, TaintAnalysisOptions,
+    TaintAnalysisReport,
 };
 pub use bundled::bundled_rulepack_root;
 pub use compile::{compile_rule_to_inspect_args, CompiledRule};

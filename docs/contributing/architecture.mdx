@@ -862,7 +862,7 @@ params/assignment-target/bare-call-argument seed logic. Sub-modules:
 - `assignment.rs` — assignment effect calculation.
 - `reachable.rs` — IDG-backed source-seeded graph builders, filtered
   call-record export, and semantic reachability helpers used by security,
-  source-analysis, and debug commands.
+  source-analysis, sink-analysis, and debug commands.
 - `text.rs` — text-level normalisation shared with adapters (the engine
   side of the qualified-text canonicalisation).
 - `value_flow.rs` — value-flow graph used by `dump-edges` and the
@@ -946,8 +946,8 @@ candidate indexes before they can narrow a query.
   graph is already available.
 - `TaintGraphIndex` (`taint_index.rs`) — workspace-wide
   `(source_func, sorted_seed_key) → Arc<EntryTaintGraph>`. Lifted
-  out of the per-invocation map so a second `taint-analysis` /
-  `source-analysis` run reuses the cached graph. Persisted to
+  out of the per-invocation map so a second `taint-analysis`,
+  `source-analysis`, or `sink-analysis` run reuses the cached graph. Persisted to
   external-cache `taint_graph.v*.<mode>.<config>.factstore` with version + fingerprint
   guard, so different analysis configurations do not evict each other.
   Write-through persistence is default-on and can be disabled with
@@ -988,7 +988,7 @@ file edit lands so subsequent queries observe current state. Exact-body
 single-flight cells prevent concurrent consumers from lowering the same
 retained file snapshot more than once. Every public security operation that
 can consult package evidence—source, sink, and sanitizer inventory plus
-source/taint analysis—owns one immutable dependency-manifest package snapshot
+source/sink/taint analysis—owns one immutable dependency-manifest package snapshot
 because manifests such as `requirements.txt` are not necessarily VFS compiler
 inputs. Broad matching and later point constraint rechecks share that
 snapshot, so a concurrent save cannot mix old endpoint evidence with new
@@ -1004,9 +1004,14 @@ emit findings. `taint-analysis` first narrows each source group to a
 source-to-sink callgraph/IDG corridor, then propagates only through that
 semantic corridor. `source-analysis` uses a source-lineage corridor from the
 resolved callgraph, including summary-output caller support, and seeds a scoped
-IDG over only the files/functions needed for the rendered lineage. Neither
-surface uses whole-workspace per-source/per-sink traversal for production
-evidence. On a fresh partitioned callgraph, both security scopes replay the
+IDG over only the files/functions needed for the rendered lineage.
+`sink-analysis` reuses taint-analysis's endpoint-matching pass, compiles one
+sink-relevant compiler/IDG scope, and validates candidate value origins
+forward against exact sink nodes. Source-to-sink security proofs are grouped
+separately under the same endpoint; source filters cannot erase compiler
+lineage. It does not run a backward graph walk per sink. None of these surfaces uses
+whole-workspace per-source/per-sink traversal for production evidence. On a
+fresh partitioned callgraph, the security scopes replay the
 same uncapped forward, summary-output reverse, target-return, provider, and
 callback fixed point directly over validated file relations. A cache miss or
 integrity failure falls back to exact adapter-body resolution; storage warmth
@@ -1128,9 +1133,10 @@ full-prewarm paths can additionally materialize stages 8–10:
     using the same shared call graph.
 
 Query commands (`inspect`, `dump`, `trace`, `browse *`) hit the prewarmed
-caches; `security taint-analysis` and `security source-analysis` combine those
-caches with scoped source-specific IDG graphs and the workspace singleton
-caches.
+caches. `security taint-analysis` and `security source-analysis` combine those
+caches with scoped source-specific IDG graphs; `security sink-analysis` adds a
+single sink-relevant IDG scope whose candidate origins are validated forward
+against exact sink nodes. All three reuse workspace singleton caches.
 
 Subsequent runs read the sidecars instead of repeating the work,
 with source-content and dependency-hash checks that invalidate stale

@@ -105,6 +105,7 @@ fn leaf_help_names_the_full_command_and_documents_global_options() {
         "deps",
         "taint-analysis",
         "source-analysis",
+        "sink-analysis",
         "pack",
     ] {
         cases.push((
@@ -197,7 +198,7 @@ fn compact_global_help_preserves_the_correctness_contract() {
 
 #[test]
 fn security_analysis_help_documents_production_default_and_minified_opt_in() {
-    for action in ["taint-analysis", "source-analysis"] {
+    for action in ["taint-analysis", "source-analysis", "sink-analysis"] {
         let help = stdout(&["security", ".", action, "--help"]);
         for expected in ["--profile", "production", "--profile all", "--minified-js"] {
             assert!(

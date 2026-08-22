@@ -338,6 +338,7 @@ Start from externally reachable input, then prove source-to-sink paths.
 ```shell
 ./target/release/bonsai-ninja index <workspace> --no-progress
 ./target/release/bonsai-ninja security <workspace> source-analysis --context 16k --no-color --no-progress
+./target/release/bonsai-ninja security <workspace> sink-analysis --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja security <workspace> taint-analysis --context 16k --no-color --no-progress
 ```
 
@@ -352,6 +353,12 @@ These values and test conventions come from
 test-path filter. Security file and profile filters are workspace-relative:
 an ancestor directory outside the selected workspace does not make the
 workspace generated, vendored, or test code.
+
+`source-analysis` follows selected sources forward without requiring a sink.
+`sink-analysis` follows source-independent compiler/IDG value lineage backward
+from every selected taint-relevant sink without requiring a security source.
+Source/trust/category filters narrow only the separately reported
+`security_source_flows`; they must never erase `upstream_flows`.
 
 Compiler-backed commands exclude adapter-classified minified
 JavaScript/TypeScript by default before parsing, graph construction, security,

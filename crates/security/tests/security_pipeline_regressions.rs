@@ -21,9 +21,9 @@ use bonsai_security::{
     NoSqlFilterSemantics, PathContainmentGuardSemantics, ReceiverConfigurationGuardSemantics,
     ReceiverFactoryGuardSemantics, RelativePathContainmentGuardSemantics, RequiredAggregateFieldSemantics,
     RequiredCallArgumentSemantics, RequiredNamedArgumentSemantics, RequiredReceiverCallSemantics, Rule,
-    RuleConstraint, RuleKind, RuleTarget, Rulepack, SourceAnalysisOptions, SourceLineageLimits,
-    TaintAnalysisOptions, TrustClass, UrlAddressParserSemantics, UrlComponentSemantics, UrlDnsGuardSemantics,
-    UrlGuardRootSemantics, UrlHostAllowlistSemantics, UrlNetworkGuardSemantics,
+    RuleConstraint, RuleKind, RuleTarget, Rulepack, SinkAnalysisOptions, SourceAnalysisOptions,
+    SourceLineageLimits, TaintAnalysisOptions, TrustClass, UrlAddressParserSemantics, UrlComponentSemantics,
+    UrlDnsGuardSemantics, UrlGuardRootSemantics, UrlHostAllowlistSemantics, UrlNetworkGuardSemantics,
     UrlReconstructionGuardSemantics, UrlRedirectGuardSemantics, UrlSchemeGuardSemantics,
 };
 use bonsai_taint::{compose_idg_seed_nodes, ensure_idg_service, IdgSeedRequest, TokenSet};
@@ -1522,6 +1522,53 @@ fn source_analysis_progress_emits_scope_and_cache_notes_to_sdk() {
     assert!(
         ws.db().idg_service().is_none(),
         "source-analysis must retain its scoped IDG explicitly instead of publishing it as the canonical default"
+    );
+}
+
+#[test]
+fn sink_analysis_progress_names_its_own_scope_and_counts_endpoints() {
+    let ws = workspace(&[(
+        "/app/app.py",
+        "def source():\n    return input()\n\n\
+         def sink(value):\n    return value\n\n\
+         def handle():\n    return sink(source())\n",
+    )]);
+    let mut notes: Vec<(&'static str, String)> = Vec::new();
+    let report = bonsai_security::run_sink_analysis_with_phase_progress(
+        &ws,
+        &rulepack("python", "source", "sink"),
+        SinkAnalysisOptions::default(),
+        |event| {
+            if let bonsai_security::AnalysisProgress::Note { label, detail } = event {
+                notes.push((label, detail));
+            }
+        },
+    )
+    .expect("sink analysis");
+
+    assert_eq!(
+        report.candidates.len(),
+        1,
+        "the concrete sink must be inventoried once"
+    );
+    assert!(
+        report
+            .candidates
+            .iter()
+            .any(|candidate| !candidate.upstream_flows.is_empty()),
+        "the source-to-sink fixture must retain its upstream proof"
+    );
+    assert!(
+        notes
+            .iter()
+            .any(|(label, detail)| *label == "scope" && detail.contains("sink-analysis files=")),
+        "sink-analysis progress notes must identify the requesting analysis: {notes:#?}"
+    );
+    assert!(
+        !notes
+            .iter()
+            .any(|(label, detail)| *label == "scope" && detail.contains("taint-analysis files=")),
+        "sink-analysis must not mislabel its scope as taint-analysis: {notes:#?}"
     );
 }
 

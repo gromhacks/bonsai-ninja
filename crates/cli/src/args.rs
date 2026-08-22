@@ -2471,7 +2471,8 @@ pub(crate) enum Cmd {
     /// format) but the rulepack is the query — you don't pass a string,
     /// the rules pre-declare what to look for. `taint-analysis` adds
     /// the inspect-style finding report; `source-analysis` maps downstream
-    /// source paths without requiring sinks. See `docs/pattern-guide.mdx`.
+    /// source paths and `sink-analysis` maps exact upstream paths into every
+    /// matched sink. See `docs/pattern-guide.mdx`.
     #[command(
         display_order = 14,
         long_about = themed_subcommand_long_about("`bonsai-ninja security` is a separate command family for \
@@ -2486,7 +2487,10 @@ pub(crate) enum Cmd {
                       `--page`, `--format json`); the rulepack is the query. \
                       `taint-analysis` adds the inspect-style finding report; \
                       `source-analysis` maps downstream source paths without \
-                      requiring sinks. See `docs/pattern-guide.mdx` for the \
+                      requiring sinks; `sink-analysis` keeps every matched sink \
+                      visible, maps source-independent upstream compiler lineage, \
+                      and reports selected security-source proofs separately. See \
+                      `docs/pattern-guide.mdx` for the \
                       rule schema."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Remote-trust sources (user input, network data)\n  \
@@ -2503,6 +2507,9 @@ pub(crate) enum Cmd {
                       \n  \
                       # Map downstream paths from remote sources\n  \
                       $ bonsai-ninja security ./src source-analysis --trust remote\n  \
+                      \n  \
+                      # Map exact upstream paths into high-severity sinks\n  \
+                      $ bonsai-ninja security ./src sink-analysis --severity high\n  \
                       \n  \
                       # JSON for CI / tooling, no row cap\n  \
                       $ bonsai-ninja security ./src taint-analysis --format json --all\n  \
@@ -3286,6 +3293,97 @@ pub(crate) enum SecurityAction {
         all: bool,
         /// Output shape — `text` for the paginated source-flow report
         /// or `json` for machine-readable output.
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
+    },
+
+    /// Render every matched sink and its exact source-independent upstream
+    /// compiler lineage. Selected security-source proofs are separate
+    /// annotations, making this the backward, sink-centric counterpart to
+    /// `source-analysis`.
+    #[command(
+        name = "sink-analysis",
+        long_about = themed_subcommand_long_about("Render every matched taint-relevant sink and trace the exact \
+                      source-independent value lineage feeding it through the \
+                      compiler graph. This is sink-centric exploration: \
+                      source rules annotate proven security boundaries but never \
+                      decide whether upstream compiler lineage is shown. A sink \
+                      therefore retains its upstream route even when no selected \
+                      source reaches it.\n\
+                      \n\
+                      The command shares taint-analysis's exact Tree-sitter, \
+                      resolver, and sparse-IDG fixed point. Endpoint inventory \
+                      and source attribution come from one matcher pass. Use \
+                      `security sinks` for a lightweight endpoint table, \
+                      `security sink-analysis` for backward lineage, and \
+                      `security taint-analysis` for vulnerability findings."),
+        after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
+                      # Map every high-severity sink and its upstream compiler lineage\n  \
+                      $ bonsai-ninja security ./src sink-analysis --severity high\n  \
+                      \n  \
+                      # One sink family\n  \
+                      $ bonsai-ninja security ./src sink-analysis --tag command-injection\n  \
+                      \n  \
+                      # Show only remote security-source proofs; compiler lineage remains\n  \
+                      $ bonsai-ninja security ./src sink-analysis --trust remote\n  \
+                      \n  \
+                      # JSON for tooling\n  \
+                      $ bonsai-ninja security ./src sink-analysis --format json --all")
+    )]
+    SinkAnalysis {
+        /// Override the bundled `langs/<lang>/…` rulepack tree.
+        /// Also reads `BONSAI_RULES_DIR`.
+        #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
+        rules_dir: Option<PathBuf>,
+        /// Review defaults. `production` is the default; explicit flags
+        /// override its trust, severity, exclusions, and context values. Use
+        /// `--profile all` to disable those review defaults, and combine it
+        /// with global `--minified-js` to admit minified bundles.
+        #[arg(long)]
+        profile: Option<String>,
+        /// Restrict security-source proofs by source rule id regex. This
+        /// never filters source-independent upstream compiler lineage.
+        #[arg(long)]
+        source: Option<String>,
+        /// Restrict security-source proofs by trust class.
+        #[arg(long)]
+        trust: Option<String>,
+        /// Restrict security-source proofs by category.
+        #[arg(long)]
+        category: Option<String>,
+        /// Restrict sink rules by id regex.
+        #[arg(long)]
+        sink: Option<String>,
+        /// Minimum sink severity: `info`, `low`, `medium`, `high`, or
+        /// `critical`.
+        #[arg(long)]
+        severity: Option<String>,
+        /// Restrict sinks to one rulepack tag.
+        #[arg(long)]
+        tag: Option<String>,
+        /// File-path include filter (repeatable), relative to the workspace.
+        #[arg(long = "file")]
+        files: Vec<String>,
+        /// File-path exclude filter (repeatable), relative to the workspace.
+        #[arg(long = "exclude-file")]
+        exclude_files: Vec<String>,
+        /// Also include inferred compiler entry-point parameters as
+        /// security-source proofs. Upstream compiler lineage is independent
+        /// of this switch.
+        #[arg(long = "inferred-sources", default_value_t = false)]
+        inferred_sources: bool,
+        /// Token-budget ceiling for rendered output.
+        #[arg(long)]
+        context: Option<String>,
+        /// Page to render — 1-based number, `P:xxxxxxxx` cursor, or `next`.
+        #[arg(long)]
+        page: Option<String>,
+        /// Show every sink unconditionally, with no paging or context cap.
+        #[arg(long, default_value_t = false)]
+        all: bool,
+        /// Output shape — themed text or machine-readable JSON.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
         #[command(flatten)]

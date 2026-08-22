@@ -88,6 +88,20 @@ impl<'a> FlowBodyCache<'a> {
         taint_path: &[TaintPropagationStep],
         terminal_role: FlowRole,
     ) -> Vec<FlowFunctionBody> {
+        self.build_lineage_bodies(chain_funcs, Some(source), taint_path, terminal_role)
+    }
+
+    /// Build per-hop bodies for compiler lineage that is not rooted at a
+    /// security-source rule. Sink-analysis uses this for source-independent
+    /// backward routes; the first annotation is the first propagation fact,
+    /// not an invented source marker.
+    pub fn build_lineage_bodies(
+        &mut self,
+        chain_funcs: &[FuncId],
+        source: Option<&FindingMatch>,
+        taint_path: &[TaintPropagationStep],
+        terminal_role: FlowRole,
+    ) -> Vec<FlowFunctionBody> {
         if chain_funcs.is_empty() {
             return Vec::new();
         }
@@ -104,7 +118,7 @@ impl<'a> FlowBodyCache<'a> {
         // Flow events in dataflow order: the source read first, then each
         // propagation step; the final step carries `terminal_role`.
         let mut events: Vec<(usize, u32, FlowRole)> = Vec::new();
-        if source.line > 0 {
+        if let Some(source) = source.filter(|source| source.line > 0) {
             if let Some(idx) = hop_index_for(&hops, &source.file, source.line, source.enclosing_fn.as_deref())
             {
                 events.push((idx, source.line, FlowRole::Source));

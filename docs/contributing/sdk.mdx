@@ -102,6 +102,7 @@ let security_report = project.security().taint_analysis(Default::default())?;
 let summaries = project.browse().symbol_summaries(Some("handle_request"), false)?;
 let trace = project.trace().from("main")?;
 let source_flows = project.security().source_analysis(Default::default())?;
+let sink_flows = project.security().sink_analysis(Default::default())?;
 let exported = project.export().native_json(Default::default())?;
 let edge = project.show().by_id("E:0123abcd", Default::default())?;
 ```
@@ -194,6 +195,7 @@ let pack = bonsai.security_pack()?;
 
 let report = project.security().taint_analysis(Default::default())?;
 let source_report = project.security().source_analysis(Default::default())?;
+let sink_report = project.security().sink_analysis(Default::default())?;
 let sources = project.security().sources(Default::default())?;
 let sinks = project.security().sinks(Default::default())?;
 
@@ -413,12 +415,12 @@ eagerly closing the whole IDG once per callable is quadratic-scale work. SDK
 full-prewarm opens also refresh compiler-object/callgraph/linkage/IDG/retrieval coverage
 and publish the external workspace-cache `manifest.json`, so subsequent cache stats can validate
 every produced sidecar instead of treating them as orphaned files.
-Security `taint_analysis*` and `source_analysis*` facades refresh the same
+Security `taint_analysis*`, `source_analysis*`, and `sink_analysis*` facades refresh the same
 manifest after their exact source-seeded taint graph write-through finishes,
 so the current external-cache `taint_graph.v*.<mode>.<config>.factstore` shows as
-validated reusable state on the next `cache.stats()` call. Source-analysis
-and taint-analysis use distinct config-qualified files and do not overwrite
-each other's warm facts.
+validated reusable state on the next `cache.stats()` call. Each analysis
+configuration uses a distinct config-qualified file and does not overwrite
+another mode's warm facts.
 Projects opened through filtered/literal/path-scoped query APIs are exact for
 that scoped command, but they are not complete workspace indexes; their
 security analyses keep taint graph reuse in memory and intentionally skip the
@@ -525,7 +527,8 @@ multiple bonsai crates as dependencies:
   `DeclKind`, `FlowEvent`, `CallArg`, `CallKind`, `ImportSpec`, `RefKind`
 - From `bonsai_security`: `Rule`, `RuleKind`, `Rulepack`, `Finding`,
   `FindingMatch`, `Severity`, `Precision`, `TaintAnalysisReport`,
-  `SourceAnalysisReport`
+  `SourceAnalysisReport`, `SinkAnalysisOptions`, `SinkAnalysisCandidate`,
+  `SinkAnalysisReport`
 - From `bonsai_inspect`: `InspectFilters`, `FactKindFilter`, `FilterHit`,
   `Matcher`
 - From `bonsai_trace`: `TraceResult`, `TraceQuery`, `TraceStep`,

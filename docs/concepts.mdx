@@ -105,12 +105,14 @@ flowchart LR
 
 ## Flow Types
 
-`FLOW`, `SOURCE FLOW`, and `TAINT FLOW` are intentionally different text labels.
+`FLOW`, `SOURCE FLOW`, `UPSTREAM FLOW`, and `TAINT FLOW` are intentionally
+different text labels.
 
 | Label | Produced by | Meaning |
 |---|---|---|
 | `FLOW` | `inspect`, grouped inspect output, and navigation-oriented views | A stable structural evidence unit. For ordinary inspect this is one matched callable; endpoint queries use an exact compressed compiler corridor rather than enumerating every path combination. |
 | `SOURCE FLOW` | `security source-analysis` | A path produced by running taint forward from a matched source rule. It maps where boundary data can travel without requiring a sink. |
+| `UPSTREAM FLOW` | `security sink-analysis` | Exact source-independent compiler value lineage into one matched sink, presented sink-first. Security-source reachability is separate evidence. |
 | `TAINT FLOW` | `security taint-analysis` | A source-to-sink finding path where the security engine proved tainted data reaches the sink operand. Steps include tainted argument indexes or receiver evidence where available. |
 
 <Note>

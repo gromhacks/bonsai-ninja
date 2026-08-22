@@ -1566,6 +1566,154 @@ fn check_security_sources(ws: &str, lang: &str, expected_min: usize) {
     }
 }
 
+/// Assert the sink-centric command inventories endpoints for every adapter
+/// and attaches only exact compiler/IDG upstream lineage. Security-source
+/// attribution is checked separately so source filters cannot erase the
+/// primary sink-navigation result.
+fn check_security_sink_analysis(
+    ws: &str,
+    lang: &str,
+    expected_upstream_min: usize,
+    cmdi_sink: &str,
+    secondary_sink: &str,
+) {
+    let Some((out, _, code)) = run(&[
+        "security",
+        ws,
+        "sink-analysis",
+        "--profile",
+        "all",
+        "--inferred-sources",
+        "--format",
+        "json",
+        "--all",
+    ]) else {
+        return;
+    };
+    assert_eq!(code, 0, "[{lang}] security sink-analysis ec={code}");
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(
+        parsed
+            .get("analysis_complete")
+            .and_then(|value| value.as_bool())
+            .is_some(),
+        "[{lang}] sink-analysis missing top-level completeness: {out}"
+    );
+    assert!(
+        parsed
+            .get("analysis_incomplete_reasons")
+            .and_then(|value| value.as_array())
+            .is_some(),
+        "[{lang}] sink-analysis missing completeness reasons: {out}"
+    );
+    let rows = rows_of(&parsed);
+    assert!(!rows.is_empty(), "[{lang}] security sink-analysis empty");
+
+    let endpoint_text = rows
+        .iter()
+        .filter_map(|row| row.pointer("/sink/text").and_then(|value| value.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        endpoint_text.contains(cmdi_sink),
+        "[{lang}] sink-analysis missed command sink `{cmdi_sink}`; got:\n{endpoint_text}"
+    );
+    assert!(
+        endpoint_text.contains(secondary_sink),
+        "[{lang}] sink-analysis missed secondary sink `{secondary_sink}`; got:\n{endpoint_text}"
+    );
+
+    let mut upstream_count = 0usize;
+    let mut security_source_count = 0usize;
+    for row in &rows {
+        let sink = row
+            .get("sink")
+            .unwrap_or_else(|| panic!("[{lang}] sink-analysis row missing sink: {row}"));
+        assert!(
+            sink.get("rule_id")
+                .and_then(|value| value.as_str())
+                .is_some_and(|rule| !rule.is_empty()),
+            "[{lang}] sink-analysis endpoint missing rule_id: {row}"
+        );
+        let upstream = row
+            .get("upstream_flows")
+            .and_then(|value| value.as_array())
+            .unwrap_or_else(|| panic!("[{lang}] sink-analysis row missing upstream_flows: {row}"));
+        upstream_count += upstream.len();
+        for flow in upstream {
+            assert!(
+                flow.get("origin_function")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|origin| !origin.is_empty()),
+                "[{lang}] sink-analysis upstream lineage missing compiler origin: {flow}"
+            );
+            let precision = flow
+                .get("precision")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            assert!(
+                matches!(precision, "exact" | "narrowed"),
+                "[{lang}] sink-analysis surfaced non-semantic precision `{precision}`: {flow}"
+            );
+            assert!(
+                flow.get("chain_names")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|chain| !chain.is_empty()),
+                "[{lang}] sink-analysis upstream lineage missing chain: {flow}"
+            );
+        }
+        security_source_count += row
+            .get("security_source_flows")
+            .and_then(|value| value.as_array())
+            .map_or(0, Vec::len);
+    }
+    assert!(
+        upstream_count >= expected_upstream_min,
+        "[{lang}] sink-analysis upstream paths = {upstream_count}, want >= {expected_upstream_min}"
+    );
+    assert!(
+        security_source_count > 0,
+        "[{lang}] sink-analysis failed to attach any selected security-source proof"
+    );
+
+    let Some((negative_out, _, negative_code)) = run(&[
+        "security",
+        ws,
+        "sink-analysis",
+        "--profile",
+        "all",
+        "--source",
+        "^does\\.not\\.exist$",
+        "--format",
+        "json",
+        "--all",
+    ]) else {
+        return;
+    };
+    assert_eq!(
+        negative_code, 0,
+        "[{lang}] negative sink-analysis ec={negative_code}"
+    );
+    let negative: serde_json::Value = serde_json::from_str(&negative_out).unwrap();
+    let negative_rows = rows_of(&negative);
+    assert!(
+        !negative_rows.is_empty(),
+        "[{lang}] source filter erased sink endpoints"
+    );
+    assert!(
+        negative_rows.iter().all(|row| {
+            row.get("upstream_flows")
+                .and_then(|value| value.as_array())
+                .is_some_and(|lineage| !lineage.is_empty())
+                && row
+                    .get("security_source_flows")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(Vec::is_empty)
+        }),
+        "[{lang}] source-independent sink lineage/source-proof split regressed: {negative_rows:?}"
+    );
+}
+
 /// Assert `security source-analysis` does not merely render valid JSON:
 /// non-empty languages must produce real source-lineage chains that
 /// mention the fixture entrypoint.
@@ -1712,6 +1860,65 @@ fn check_mega_flow_source_analysis(ws: &str, lang: &str) {
     assert!(
         has_multi_hop_semantic_flow,
         "[{lang}] mega_flow source-analysis did not render any multi-hop semantic flow: {rows:?}"
+    );
+}
+
+/// Assert sink-analysis retains the complex fixture's endpoints and proves at
+/// least one multi-hop upstream route through each language adapter.
+fn check_mega_flow_sink_analysis(ws: &str, lang: &str) {
+    let Some((out, _, code)) = run(&[
+        "security",
+        ws,
+        "sink-analysis",
+        "--profile",
+        "all",
+        "--format",
+        "json",
+        "--all",
+    ]) else {
+        return;
+    };
+    assert_eq!(code, 0, "[{lang}] mega_flow sink-analysis ec={code}");
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let rows = rows_of(&parsed);
+    assert!(
+        !rows.is_empty(),
+        "[{lang}] mega_flow sink-analysis returned no endpoints"
+    );
+
+    let mut has_multi_hop_semantic_flow = false;
+    for row in &rows {
+        assert!(
+            row.pointer("/sink/rule_id")
+                .and_then(|value| value.as_str())
+                .is_some_and(|rule| !rule.is_empty()),
+            "[{lang}] mega_flow sink endpoint missing rule_id: {row}"
+        );
+        let upstream = row
+            .get("upstream_flows")
+            .and_then(|value| value.as_array())
+            .unwrap_or_else(|| panic!("[{lang}] mega_flow sink row missing upstream_flows: {row}"));
+        for flow in upstream {
+            let precision = flow
+                .get("precision")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            assert!(
+                matches!(precision, "exact" | "narrowed"),
+                "[{lang}] mega_flow sink-analysis surfaced non-semantic precision `{precision}`: {flow}"
+            );
+            if flow
+                .get("chain_names")
+                .and_then(|value| value.as_array())
+                .is_some_and(|chain| chain.len() > 1)
+            {
+                has_multi_hop_semantic_flow = true;
+            }
+        }
+    }
+    assert!(
+        has_multi_hop_semantic_flow,
+        "[{lang}] mega_flow sink-analysis did not preserve a multi-hop compiler/IDG proof: {rows:?}"
     );
 }
 
@@ -2053,6 +2260,17 @@ macro_rules! lang_matrix_tests {
                 }
 
                 #[test]
+                fn micro_security_sink_analysis_semantic_chains() {
+                    check_security_sink_analysis(
+                        &ws(EXP.lang, "micro"),
+                        EXP.lang,
+                        EXP.min_findings_micro,
+                        EXP.cmdi_sink,
+                        EXP.sqli_sink,
+                    );
+                }
+
+                #[test]
                 fn micro_security_deps_semantic_inventory() {
                     check_security_deps(&ws(EXP.lang, "micro"), EXP.lang, EXP.min_deps_micro);
                 }
@@ -2253,6 +2471,11 @@ macro_rules! lang_matrix_tests {
                 #[test]
                 fn mega_flow_source_analysis_uses_semantic_paths() {
                     check_mega_flow_source_analysis(&ws(EXP.lang, "mega_flow"), EXP.lang);
+                }
+
+                #[test]
+                fn mega_flow_sink_analysis_uses_semantic_paths() {
+                    check_mega_flow_sink_analysis(&ws(EXP.lang, "mega_flow"), EXP.lang);
                 }
 
                 #[test]

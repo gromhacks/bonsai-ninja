@@ -97,9 +97,10 @@ pub use bonsai_security::{
     PackAuditFamilyCount, PackAuditLanguage, PackAuditReport, PackInventoryOptions, PackRuleRow,
     PackTreeFile, PackTreeLanguage, PackTreeReport, PackTreeRule, PackValidationIssue, PackValidationReport,
     Rule, RuleKind, RuleMatch, Rulepack, RulepackMetadata, RuntimeDisabledRule, SecurityInventoryOptions,
-    SecurityMatchRow, SecurityReport, Severity, SourceAnalysisCandidate, SourceAnalysisOptions,
-    SourceAnalysisReport, SourceLineageLimits, SourceLineageStatus, SourceLineageSummary,
-    TaintAnalysisOptions, TaintAnalysisReport, TaintPropagationArg, TaintPropagationStep, TrustClass,
+    SecurityMatchRow, SecurityReport, Severity, SinkAnalysisCandidate, SinkAnalysisFlow, SinkAnalysisOptions,
+    SinkAnalysisReport, SourceAnalysisCandidate, SourceAnalysisOptions, SourceAnalysisReport,
+    SourceLineageLimits, SourceLineageStatus, SourceLineageSummary, TaintAnalysisOptions,
+    TaintAnalysisReport, TaintPropagationArg, TaintPropagationStep, TrustClass,
 };
 pub use bonsai_trace::{
     summarize_incomplete_reasons, PathSummary, PathTermination, TraceResult, TraceStep, TraceStepKind,
@@ -5219,6 +5220,19 @@ fn normalize_source_analysis_paths(root: &Path, report: &mut SourceAnalysisRepor
     }
 }
 
+fn normalize_sink_analysis_paths(root: &Path, report: &mut SinkAnalysisReport) {
+    for candidate in &mut report.candidates {
+        normalize_finding_match_path(root, &mut candidate.sink);
+        for flow in &mut candidate.upstream_flows {
+            flow.origin_file = normalize_security_file(root, &flow.origin_file);
+            normalize_taint_path_files(root, &mut flow.taint_path);
+        }
+        for flow in &mut candidate.security_source_flows {
+            normalize_combined_finding_paths(root, flow);
+        }
+    }
+}
+
 impl Security<'_> {
     fn pack(&self) -> Result<&Rulepack> {
         self.project
@@ -5333,6 +5347,59 @@ impl Security<'_> {
             on_progress,
         )?;
         normalize_source_analysis_paths(&self.project.root, &mut report);
+        self.refresh_cache_manifest_best_effort();
+        Ok(report)
+    }
+
+    /// Match selected taint-relevant sinks, map source-independent upstream
+    /// compiler lineage, and attach security-source proofs separately.
+    pub fn sink_analysis(&self, options: SinkAnalysisOptions) -> Result<bonsai_security::SinkAnalysisReport> {
+        self.project.refresh_from_disk_best_effort();
+        let mut report = bonsai_security::run_sink_analysis(&self.project.workspace, self.pack()?, options)?;
+        normalize_sink_analysis_paths(&self.project.root, &mut report);
+        self.refresh_cache_manifest_best_effort();
+        Ok(report)
+    }
+
+    /// Sink analysis with the compact label-only progress callback.
+    pub fn sink_analysis_with_progress<F>(
+        &self,
+        options: SinkAnalysisOptions,
+        on_rule: F,
+    ) -> Result<bonsai_security::SinkAnalysisReport>
+    where
+        F: FnMut(&'static str),
+    {
+        self.project.refresh_from_disk_best_effort();
+        let mut report = bonsai_security::run_sink_analysis_with_progress(
+            &self.project.workspace,
+            self.pack()?,
+            options,
+            on_rule,
+        )?;
+        normalize_sink_analysis_paths(&self.project.root, &mut report);
+        self.refresh_cache_manifest_best_effort();
+        Ok(report)
+    }
+
+    /// Phase-aware sink-lineage analysis with the same exact endpoint and
+    /// fixed-point progress events as taint analysis.
+    pub fn sink_analysis_with_phase_progress<F>(
+        &self,
+        options: SinkAnalysisOptions,
+        on_progress: F,
+    ) -> Result<bonsai_security::SinkAnalysisReport>
+    where
+        F: FnMut(bonsai_security::AnalysisProgress),
+    {
+        self.project.refresh_from_disk_best_effort();
+        let mut report = bonsai_security::run_sink_analysis_with_phase_progress(
+            &self.project.workspace,
+            self.pack()?,
+            options,
+            on_progress,
+        )?;
+        normalize_sink_analysis_paths(&self.project.root, &mut report);
         self.refresh_cache_manifest_best_effort();
         Ok(report)
     }

@@ -39,8 +39,9 @@ completion. `InterTaintCaches` remains as a source-compatible handle; graph
 services are cached on `AnalyzerDb` by the canonical transfer-option
 fingerprint.
 
-`security taint-analysis`, `security source-analysis`, `dump-taint`, inspect,
-and the public compatibility API use the IDG-backed graph builders in
+`security taint-analysis`, `security source-analysis`, `security
+sink-analysis`, `dump-taint`, inspect, and the public compatibility API use
+the IDG-backed graph builders in
 `crates/taint/src/reachable.rs`. Those builders resolve source seeds to IDG
 nodes, apply configured transfer summaries, compute a precision-filtered
 closure, and then cut/report only the relevant semantic target or lineage
@@ -463,7 +464,8 @@ lookup instead of a fresh propagation pass.
   source/taint analysis configurations do not overwrite each other.
   Write-through persistence is
   default-on and can be disabled with `BONSAI_TAINT_GRAPH_PERSIST=0`.
-  `security taint-analysis` and `security source-analysis` publish the
+  `security taint-analysis`, `security source-analysis`, and `security
+  sink-analysis` publish the
   prepare/finish decision through `AnalysisProgress::Note` so callers can
   see scope, memory/disk hit or miss, config invalidation, and
   write-through status.

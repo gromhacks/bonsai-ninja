@@ -226,15 +226,19 @@ workflows.
 ./target/release/bonsai-ninja security ./my-app taint-analysis \
   --context 16k --no-color --no-progress
 
+# Work backward from every matched sink through exact compiler value lineage.
+./target/release/bonsai-ninja security ./my-app sink-analysis \
+  --context 16k --no-color --no-progress
+
 # Write every production-profile result to SARIF for CI.
 ./target/release/bonsai-ninja security ./my-app taint-analysis \
   --format sarif --all \
   --output-path findings.sarif.json --no-color --no-progress
 ```
 
-The bundled rulepack defaults `source-analysis` and `taint-analysis` to its
-`production` profile: remote/high review plus common non-production path
-exclusions. Independently, compiler-backed commands exclude
+The bundled rulepack defaults `source-analysis`, `sink-analysis`, and
+`taint-analysis` to its `production` profile: remote/high review plus common
+non-production path exclusions. Independently, compiler-backed commands exclude
 adapter-classified minified JavaScript/TypeScript bundles by default so
 generated distribution artifacts do not dominate indexing, graphs, security,
 or export. Add the global `--minified-js` switch when bundle internals are in
@@ -264,6 +268,8 @@ For any unfamiliar option, use the binary's `--help` and the
 | Reopen a stable result ID | `show` |
 | Parser or semantic internals | `dump-*`, `diagnostics` |
 | Security model or findings | `security` |
+| Downstream paths from sources | `security source-analysis` |
+| Upstream paths into sinks | `security sink-analysis` |
 | Downstream graph artifact | `export` |
 
 `tree` is a direct filesystem walk. It does not initialize the compiler,

@@ -209,6 +209,7 @@ bonsai-ninja security ./src pack --audit --rules-dir ./security-patterns
 | `deps` | None | Show package/framework imports referenced by the rulepack, with complete workspace-relative evidence paths, signals, and rule descriptions. |
 | `taint-analysis` | None | Run source-to-sink taint analysis. |
 | `source-analysis` | None | Map downstream paths from sources without requiring sinks. |
+| `sink-analysis` | None | Map source-independent compiler value lineage into every selected taint-relevant sink. |
 | `pack` | None | Audit (`--audit`), list, tree (`--tree`), or validate (`--validate`) the rulepack. |
 
 `pack --validate` checks rule schema, metadata, and `match_examples`. Add
@@ -704,6 +705,49 @@ without changing the closure.
 | `--all` | false | Emit every source flow. |
 | `--format <FORMAT>` | text | `text` or `json`. Source-flow mapping is not SARIF finding output; use `security taint-analysis --format sarif` for SARIF. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
+
+## `security sink-analysis`
+
+The sink-analysis surface is `security <workspace> sink-analysis`.
+
+```bash
+bonsai-ninja security ./src sink-analysis --severity high
+bonsai-ninja security ./src sink-analysis --sink '^python\.cmdi\.' --format json --all
+```
+
+The command matches each selected taint-relevant sink once, then maps the
+exact source-independent value lineage feeding it through the same
+Tree-sitter, resolver, and sparse-IDG fixed point used by taint-analysis. It is
+the inverse investigation view of source-analysis, not a vulnerability
+verdict. Selected security-source proofs are reported separately under
+`security_source_flows`; source filters never remove `upstream_flows`.
+
+Endpoint matching and source attribution share one matcher pass. The compiler
+builds one sink-relevant semantic scope, then validates candidate origins
+forward against selected sink nodes; it does not guess a reverse call chain or
+run a name-based search. Text presents lineage as `sink ← … ← origin`; JSON
+keeps canonical compiler routes under `upstream_flows` and source-to-sink
+security proofs under `security_source_flows`. Pagination selects rendered
+sink rows only and never caps fixed-point work.
+
+| Flag | Default | Description |
+|---|---:|---|
+| `--rules-dir <DIR>` | Bundled | Override the base rulepack directory. |
+| `--profile <PROFILE>` | Rulepack default (`production` when bundled) | Rulepack-declared preset bundle. Use `all` to disable bundled review defaults; combine with global `--minified-js` to admit every supported source representation. |
+| `--source <REGEX>` | None | Restrict attached security-source proof rule IDs; compiler lineage is unchanged. |
+| `--trust <TRUST>` | None | Restrict attached security-source proofs by trust. |
+| `--category <CATEGORY>` | None | Restrict attached security-source proofs by category. |
+| `--sink <REGEX>` | None | Restrict endpoint sink rule IDs. |
+| `--severity <LEVEL>` | Profile/default | Minimum endpoint severity. |
+| `--tag <TAG>` | None | Restrict endpoints by sink tag. |
+| `--file <TEXT>` | None | Include matching workspace-relative paths. Repeatable. |
+| `--exclude-file <TEXT>` | None | Exclude matching workspace-relative paths. Repeatable. |
+| `--inferred-sources` | false | Include synthetic entry-point parameters as security-source proofs; compiler lineage is unchanged. |
+| `--context <BUDGET>` | Profile/default | Token budget for the rendered page. |
+| `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
+| `--all` | false | Emit every selected sink row. |
+| `--format <FORMAT>` | text | `text` or `json`; use taint-analysis for SARIF findings. |
+| `--output-path <PATH>` | stdout | Write the selected output to a file. |
 
 ## cache
 

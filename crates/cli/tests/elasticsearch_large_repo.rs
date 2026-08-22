@@ -594,6 +594,81 @@ fn elasticsearch_production_taint_analysis_does_not_regress() {
 }
 
 #[test]
+fn elasticsearch_sink_analysis_keeps_source_independent_lineage_at_scale() {
+    let _guard = elasticsearch_test_lock();
+    let (Some(bin), Some(es)) = (release_bin(), elasticsearch_root()) else {
+        return;
+    };
+    ensure_elasticsearch_semantic_cache(&bin, &es);
+    let output = temp_output_path("sink-analysis");
+    let args = es_args(
+        &es,
+        &[
+            "security",
+            "{es}",
+            "sink-analysis",
+            "--profile",
+            "production",
+            "--sink",
+            "^java\\.ssrf\\.apache_httpget_ctor$",
+            "--format",
+            "json",
+            "--all",
+            "--output-path",
+            output.to_str().expect("temp output path utf8"),
+            "--rules-dir",
+            "{rules}",
+        ],
+    );
+    let (stdout, elapsed) = assert_success_timed(&bin, &args);
+    assert_performance(
+        "Elasticsearch sink-centric upstream analysis",
+        elapsed,
+        "BONSAI_ES_SINK_ANALYSIS_MAX_SECS",
+        60,
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "sink-analysis with --output-path should keep stdout empty, got:\n{stdout}"
+    );
+    let written = std::fs::read_to_string(&output).expect("read sink-analysis output");
+    let parsed: serde_json::Value = serde_json::from_str(&written)
+        .unwrap_or_else(|error| panic!("valid sink-analysis JSON ({error}):\n{written}"));
+    let rows = parsed
+        .get("rows")
+        .and_then(serde_json::Value::as_array)
+        .expect("sink-analysis rows");
+    assert!(
+        !rows.is_empty(),
+        "pinned Elasticsearch sink rule must match: {parsed}"
+    );
+    assert!(
+        rows.iter().all(|row| {
+            row.get("upstream_flows")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|flows| {
+                    flows.iter().any(|flow| {
+                        flow.get("endpoint_only").and_then(serde_json::Value::as_bool) == Some(false)
+                            && flow
+                                .get("taint_path")
+                                .and_then(serde_json::Value::as_array)
+                                .is_some_and(|path| !path.is_empty())
+                    })
+                })
+        }),
+        "every matched sink must retain a nontrivial source-independent compiler lineage: {parsed}"
+    );
+    assert!(
+        parsed
+            .pointer("/summary/upstream_flow_count")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|count| count >= rows.len() as u64),
+        "sink-analysis summary lost upstream flow accounting: {parsed}"
+    );
+    let _ = std::fs::remove_file(output);
+}
+
+#[test]
 fn elasticsearch_fresh_cache_taint_planning_does_not_regress() {
     let _guard = elasticsearch_test_lock();
     let (Some(bin), Some(es)) = (release_bin(), elasticsearch_root()) else {

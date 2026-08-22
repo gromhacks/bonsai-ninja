@@ -102,6 +102,7 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("security deps", "Rulepack dependency hits"),
             ("security taint-analysis", "Source-to-sink findings"),
             ("security source-analysis", "Downstream source flows"),
+            ("security sink-analysis", "Upstream sink flows"),
             ("security pack", "Rulepack audit"),
         ],
     ),

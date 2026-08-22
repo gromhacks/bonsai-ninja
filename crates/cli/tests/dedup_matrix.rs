@@ -342,7 +342,8 @@ fn dedup_inspect(lang: &str, fixture: &str) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Security: sources / sinks / sanitizers / taint-analysis / source-analysis.
+// Security: sources / sinks / sanitizers / taint-analysis / source-analysis /
+// sink-analysis.
 // ─────────────────────────────────────────────────────────────────────
 
 fn dedup_security_sources(lang: &str, fixture: &str) {
@@ -469,6 +470,34 @@ fn dedup_source_analysis(lang: &str, fixture: &str) {
     );
 }
 
+fn dedup_sink_analysis(lang: &str, fixture: &str) {
+    let Some(v) = run_json(&[
+        "security",
+        &ws(lang, fixture),
+        "sink-analysis",
+        "--profile",
+        "all",
+    ]) else {
+        return;
+    };
+    let rows = rows_of(&v);
+    assert_unique(
+        &format!("security sink-analysis {lang}/{fixture}"),
+        &rows,
+        |row| {
+            let sink = row.get("sink").cloned().unwrap_or(Value::Null);
+            format!(
+                "{}|{}|{}:{}:{}",
+                s(&sink, "rule_id"),
+                s(&sink, "enclosing_fn"),
+                s(&sink, "file"),
+                n(&sink, "line"),
+                n(&sink, "column"),
+            )
+        },
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // One test per (command) — each iterates over every language. A failure
 // names exactly which (command, lang) combination produced duplicates.
@@ -503,3 +532,4 @@ per_command_dedup!(dedup_security_sinks_all_langs, dedup_security_sinks);
 per_command_dedup!(dedup_security_sanitizers_all_langs, dedup_security_sanitizers);
 per_command_dedup!(dedup_taint_analysis_all_langs, dedup_taint_analysis);
 per_command_dedup!(dedup_source_analysis_all_langs, dedup_source_analysis);
+per_command_dedup!(dedup_sink_analysis_all_langs, dedup_sink_analysis);

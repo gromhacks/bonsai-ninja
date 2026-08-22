@@ -6,12 +6,12 @@ not duplicate dated performance history.
 
 ## Status
 
-The v0.2.7 local release pass completed on 2026-08-22. Documentation claims,
+The v0.2.8 local release pass completed on 2026-08-22. Documentation claims,
 links, command examples, current repository counts, and the rulepack validator
 were rechecked during the pass. The release candidate also passed 228
 release security unit tests, 36 release rulepack conformance tests, 88
-architecture invariants, 1,320 release-binary command/switch checks, 443
-focused CLI integration tests, standalone execution, and the complete
+architecture invariants, 1,320 release-binary command/switch checks, the
+focused CLI integration suites, standalone execution, and the complete
 Elasticsearch gate on that date. Local `main` has no known failing release
 gate.
 The first public-runner tag attempt subsequently completed every semantic
@@ -47,7 +47,7 @@ The final local pass completed these checks with zero failures:
 | Full optimized security package | Passed |
 | Rulepack taint replay | 0 errors, 0 warnings, 0 misses |
 | Release CLI command/language matrix | 1,320 combinations passed |
-| Focused CLI integration suites | 443 tests passed |
+| Focused CLI integration suites | Passed |
 | Layering and public API snapshots | Passed |
 | Hardcoded-knowledge boundary | 0 production violations |
 | Corpus-independence audit | 0 violations |
@@ -178,37 +178,38 @@ after the gate.
 
 The required release test uses the sibling 30,055-source Elasticsearch
 checkout pinned by the release workflow at `e9741368da0`. On August 22, the
-current release candidate completed the six-test exact gate in 254.54 seconds
+current release candidate completed the seven-test exact gate in 167.74 seconds
 under the 3 GiB scheduler while reusing the independently generated semantic
-cache. The most recent deliberately empty-cache semantic generation took
-442.84 seconds and a fresh process validated and reopened it in 2.59 seconds.
+cache. The same candidate's deliberately empty-cache semantic generation took
+418.83 seconds and a fresh process validated and reopened it in 2.40 seconds.
 For memory context, the prior instrumented
 August 20 empty-cache semantic run recorded 3,788,292,096 bytes maximum RSS
 and zero swaps; its fresh-process reopen used 99,287,040 bytes maximum RSS.
 
 | Operation | Time | Enforced SLO |
 |---|---:|---:|
-| Fresh-cache structural index | 62.63 s | 90 s |
-| Warm structural index | 4.20 s | 10 s |
-| Cold semantic generation | 442.84 s | completion required |
-| Fresh-process semantic reuse | 2.51 s | 15 s |
-| Default inspect | 7.48 s | 30 s |
-| Exact raw-taint inspect | 27.77 s | 30 s |
-| Fresh-cache production taint | 31.33 s | 45 s |
-| Warm production taint | 12.07 s | 30 s |
+| Fresh-cache structural index | 57.54 s | 90 s |
+| Warm structural index | 4.05 s | 10 s |
+| Cold semantic generation | 418.83 s | completion required |
+| Fresh-process semantic reuse | 2.40 s | 15 s |
+| Default inspect | 7.23 s | 30 s |
+| Exact raw-taint inspect | 26.27 s | 30 s |
+| Fresh-cache production taint | 30.03 s | 45 s |
+| Warm production taint | 12.13 s | 30 s |
+| Sink-centric upstream analysis (5 matched endpoints) | 42.16 s | 60 s |
 | `tree --max-depth 1` | 0.03 s | 30 s |
-| Search | 3.97 s | 30 s |
-| Definitions | 8.85 s | 30 s |
-| Imports | 7.97 s | 30 s |
-| Classes | 9.00 s | 30 s |
-| Entry points | 12.40 s | 30 s |
-| Calls | 3.68 s | 30 s |
-| Arguments | 5.78 s | 30 s |
-| Scoped `read-file` | 1.73 s | 30 s |
-| Source inventory | 3.68 s | 30 s |
-| High-severity sink inventory | 20.63 s | 30 s |
-| Sanitizer inventory | 13.30 s | 30 s |
-| Dependency inventory | 9.90 s | 30 s |
+| Search | 4.06 s | 30 s |
+| Definitions | 8.87 s | 30 s |
+| Imports | 7.67 s | 30 s |
+| Classes | 8.38 s | 30 s |
+| Entry points | 12.15 s | 30 s |
+| Calls | 3.54 s | 30 s |
+| Arguments | 6.67 s | 30 s |
+| Scoped `read-file` | 1.75 s | 30 s |
+| Source inventory | 4.09 s | 30 s |
+| High-severity sink inventory | 20.16 s | 30 s |
+| Sanitizer inventory | 12.92 s | 30 s |
+| Dependency inventory | 9.45 s | 30 s |
 
 Command:
 
@@ -250,7 +251,7 @@ from 8.41 to 4.05 seconds and maximum RSS from roughly 690 MB to 77,070,336
 bytes; it still rebuilds on any source-ledger mismatch.
 
 The current release gate subsequently measured the same exact structural work
-at 62.63 seconds cold and 4.20 seconds warm. The earlier figures above remain
+at 57.54 seconds cold and 4.05 seconds warm. The earlier figures above remain
 the instrumented CPU/RSS run; the current figures are the release SLO run.
 
 The cold semantic row is a deliberate one-time whole-workspace build, not a

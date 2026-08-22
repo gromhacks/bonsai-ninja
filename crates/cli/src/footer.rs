@@ -314,6 +314,8 @@ fn paging_total_label(cmd_line_hint: &str, total: u64) -> &'static str {
         pluralize("taint flow", "taint flows")
     } else if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" source-analysis") {
         pluralize("source flow", "source flows")
+    } else if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" sink-analysis") {
+        pluralize("sink", "sinks")
     } else if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" sources") {
         pluralize("taint source", "taint sources")
     } else if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" sinks") {

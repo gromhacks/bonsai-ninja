@@ -69,6 +69,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
             workflow,
             "runner calibration must remain tied to a completed exact measurement",
         )
+        self.assertIn(
+            'BONSAI_ES_SINK_ANALYSIS_MAX_SECS: "180"',
+            workflow,
+            "the tag workflow must budget the measured sink-centric scale gate",
+        )
 
 
 if __name__ == "__main__":

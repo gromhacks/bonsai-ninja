@@ -1404,7 +1404,7 @@ fn parse_total_pages(out: &str) -> Option<u64> {
 fn security_text_respects_context_budget() {
     let ws = complex_ws();
     let ws_str = ws.to_str().unwrap();
-    for subcommand in ["taint-analysis", "source-analysis"] {
+    for subcommand in ["taint-analysis", "source-analysis", "sink-analysis"] {
         let Some(out) = run(&["security", ws_str, subcommand, "--context", "4k"]) else {
             return;
         };

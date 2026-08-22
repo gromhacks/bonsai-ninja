@@ -200,6 +200,8 @@ Start from externally reachable input and prove source-to-sink paths:
 ```shell
 ./target/release/bonsai-ninja security <workspace> source-analysis \
   --context 16k --no-color --no-progress
+./target/release/bonsai-ninja security <workspace> sink-analysis \
+  --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja security <workspace> taint-analysis \
   --context 16k --no-color --no-progress
 ```
@@ -215,6 +217,12 @@ source representation. `tree` is a direct filesystem view and remains
 unfiltered. Explicit security flags override profile values.
 
 Inspect the security model when a finding or gap needs explanation:
+
+Use `source-analysis` for “where can this input go?” and `sink-analysis` for
+“what compiler-proven value lineage feeds each dangerous endpoint?”
+Sink-analysis does not require a security source: `upstream_flows` is
+source-independent, while `security_source_flows` separately answers which
+selected security sources reach the endpoint.
 
 ```shell
 ./target/release/bonsai-ninja security <workspace> sources --trust remote \

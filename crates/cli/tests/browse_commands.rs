@@ -2611,6 +2611,10 @@ fn top_level_help_groups_commands() {
         out.contains("security source-analysis"),
         "top-level help should advertise source-analysis: {out}"
     );
+    assert!(
+        out.contains("security sink-analysis"),
+        "top-level help should advertise sink-analysis: {out}"
+    );
     let usage_idx = out.find("USAGE:").expect("USAGE present");
     let groups_idx = out.find("COMMAND GROUPS").expect("COMMAND GROUPS present");
     let options_idx = out.find("OPTIONS:").expect("OPTIONS present");
@@ -2858,6 +2862,7 @@ fn every_help_menu_renders_and_documents_core_surface() {
         vec!["security", ws_str, "deps", "--help"],
         vec!["security", ws_str, "taint-analysis", "--help"],
         vec!["security", ws_str, "source-analysis", "--help"],
+        vec!["security", ws_str, "sink-analysis", "--help"],
         vec!["security", ws_str, "pack", "--help"],
     ];
     for args in cases {
@@ -2865,8 +2870,11 @@ fn every_help_menu_renders_and_documents_core_surface() {
             return;
         };
         assert!(out.contains("USAGE:"), "{args:?}: help missing USAGE:\n{out}");
+        // The curated root menu currently needs 141 lines to represent every
+        // public command exactly once. Keep a one-line growth margin while
+        // preserving a tight regression budget for accidental duplication.
         assert!(
-            out.lines().count() <= 140,
+            out.lines().count() <= 142,
             "{args:?}: help is too long ({} lines):\n{out}",
             out.lines().count()
         );
@@ -2998,6 +3006,7 @@ fn sarif_is_only_accepted_by_security_taint_analysis() {
         vec!["read-file", ws, "app.py", "--format", "sarif"],
         vec!["security", ws, "sources", "--format", "sarif"],
         vec!["security", ws, "source-analysis", "--format", "sarif"],
+        vec!["security", ws, "sink-analysis", "--format", "sarif"],
     ];
     for args in unsupported {
         let out = Command::new(&bin)

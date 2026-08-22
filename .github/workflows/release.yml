@@ -246,6 +246,7 @@ jobs:
           BONSAI_ES_INSPECT_MAX_SECS: "85"
           BONSAI_ES_NAVIGATION_MAX_SECS: "55"
           BONSAI_ES_TAINT_MAX_SECS: "120"
+          BONSAI_ES_SINK_ANALYSIS_MAX_SECS: "180"
           BONSAI_ES_SECURITY_INVENTORY_MAX_SECS: "60"
         run: |
           cargo test --release --locked -p bonsai-ninja \

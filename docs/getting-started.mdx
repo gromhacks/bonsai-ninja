@@ -154,6 +154,20 @@ exclusions from rulepack metadata:
   --no-progress
 ```
 
+For a sink-first review, keep every matched endpoint visible and map exact
+source-independent upstream compiler lineage:
+
+```bash
+./target/release/bonsai-ninja security ./src sink-analysis \
+  --context 16k \
+  --no-color \
+  --no-progress
+```
+
+`upstream_flows` remains present even when no selected security source reaches
+the endpoint. Exact selected-source proofs are reported separately under
+`security_source_flows`.
+
 For a complete machine-readable artifact:
 
 ```bash

@@ -117,15 +117,15 @@ claiming exhaustive coverage.
 
 Retrieval follows the candidate-only evidence and validation contract in
 [Architecture](contributing/architecture.mdx#query-browse-trace).
-The taint-graph sidecar is default-on for `security taint-analysis` and
-`security source-analysis`. Each exact analysis configuration gets a distinct
-filename, so source-analysis and taint-analysis do not overwrite each other's
-warm facts. Set `BONSAI_TAINT_GRAPH_PERSIST=0` only when you intentionally
+The taint-graph sidecar is default-on for `security taint-analysis`,
+`security source-analysis`, and `security sink-analysis`. Each exact analysis
+configuration gets a distinct filename, so analysis modes do not overwrite
+one another's warm facts. Set `BONSAI_TAINT_GRAPH_PERSIST=0` only when you intentionally
 want to trade repeated-run speed for less cache I/O.
 
 Security `--file`, `--exclude-file`, `--exclude-tests`, and production-profile
 path filters are evaluated against workspace-relative paths. The bundled
-production profile is the default for `source-analysis` and `taint-analysis`;
+production profile is the default for `source-analysis`, `sink-analysis`, and `taint-analysis`;
 `--profile all` disables its review-path/trust/severity defaults. Independently,
 the default compiler-input profile excludes adapter-classified minified
 JavaScript/TypeScript for indexing, navigation, graphs, security, and export;

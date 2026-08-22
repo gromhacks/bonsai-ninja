@@ -5248,6 +5248,7 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
     );
     let analysis = read(&repo_root().join("crates/security/src/analysis/mod.rs"));
     let taint_compiler_session = function_body(&analysis, "prepare_taint_compiler_session");
+    let shared_taint_pipeline = function_body(&analysis, "run_taint_pipeline_with_phase_progress");
     assert!(
         function_body(&analysis, "begin_dependency_package_snapshot")
             .contains("begin_workspace_dependency_package_snapshot("),
@@ -5255,14 +5256,20 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
     );
     assert!(
         function_body(&analysis, "run_taint_analysis_with_phase_progress")
-            .contains("prepare_taint_compiler_session")
+            .contains("run_taint_pipeline_with_phase_progress")
+            && function_body(&analysis, "run_sink_analysis_with_phase_progress")
+                .contains("run_taint_pipeline_with_phase_progress")
+            && shared_taint_pipeline.contains("prepare_taint_compiler_session")
             && taint_compiler_session.contains("attach_reusable_compiler_object_store_for_files")
             && taint_compiler_session.contains("ensure_compiler_object_session_with_progress")
             && taint_compiler_session.contains("compiling workspace IR"),
-        "taint endpoint, callgraph, and IDG phases must share one exact compiler-object generation with completed-unit progress"
+        "taint and sink endpoint, callgraph, and IDG phases must share one exact compiler-object generation with completed-unit progress"
+    );
+    assert!(
+        shared_taint_pipeline.contains("begin_dependency_package_snapshot(ws, pack)"),
+        "the shared taint/sink pipeline must retain one immutable dependency-manifest snapshot for the complete analysis"
     );
     for function in [
-        "run_taint_analysis_with_phase_progress",
         "run_source_analysis_with_phase_progress",
         "source_inventory_with_progress",
         "sink_inventory_with_progress",

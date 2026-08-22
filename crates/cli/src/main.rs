@@ -1333,6 +1333,7 @@ fn security_action_output_path(action: &SecurityAction) -> Option<&std::path::Pa
         | SecurityAction::Deps { output, .. }
         | SecurityAction::TaintAnalysis { output, .. }
         | SecurityAction::SourceAnalysis { output, .. }
+        | SecurityAction::SinkAnalysis { output, .. }
         | SecurityAction::Pack { output, .. } => output.output_path.as_deref(),
     }
 }

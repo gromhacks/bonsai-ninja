@@ -5,7 +5,9 @@
 //! analysis narrower and compare the machine-readable result to the
 //! corresponding `bonsai_sdk` facade call.
 
-use bonsai_sdk::{Severity, SourceAnalysisOptions, SourceLineageLimits, TaintAnalysisOptions};
+use bonsai_sdk::{
+    Severity, SinkAnalysisOptions, SourceAnalysisOptions, SourceLineageLimits, TaintAnalysisOptions,
+};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -204,7 +206,7 @@ fn security_cli_args<'a>(workspace: &'a str, subcommand: &'a str, extra: &'a [&'
         "--rules-dir",
         "security-patterns",
     ];
-    if matches!(subcommand, "taint-analysis" | "source-analysis") {
+    if matches!(subcommand, "taint-analysis" | "source-analysis" | "sink-analysis") {
         args.extend(["--profile", "all"]);
     }
     args.extend(["--format", "json"]);
@@ -739,6 +741,22 @@ fn cli_source_json(workspace: &str, extra: &[&str]) -> Value {
     rows_or_array(run_cli(&security_cli_args(workspace, "source-analysis", extra)))
 }
 
+fn cli_sink_json(workspace: &str, extra: &[&str]) -> Value {
+    let mut value = rows_or_array(run_cli(&security_cli_args(workspace, "sink-analysis", extra)));
+    normalize_json_files(&mut value);
+    value
+}
+
+fn sdk_sink_json(project: &bonsai_sdk::Project, options: SinkAnalysisOptions) -> Value {
+    let report = project
+        .security()
+        .sink_analysis(options)
+        .expect("sdk sink-analysis");
+    let mut value = serde_json::to_value(report.candidates).expect("sink-analysis candidates json");
+    normalize_json_files(&mut value);
+    value
+}
+
 #[test]
 fn index_and_diagnostics_cli_json_match_sdk_for_every_language() {
     for &lang in LANGS {
@@ -1011,6 +1029,105 @@ fn source_analysis_paged_cli_json_is_a_window_over_sdk_results() {
 }
 
 #[test]
+fn sink_analysis_cli_flags_map_one_to_one_to_sdk_options() {
+    let project = security_project();
+    let workspace = "examples/python/micro";
+    let cases = [
+        ("default/all", vec!["--all"], SinkAnalysisOptions::default()),
+        (
+            "source regex",
+            vec!["--all", "--source", "^python\\.flask\\."],
+            SinkAnalysisOptions {
+                source: Some("^python\\.flask\\.".to_string()),
+                ..Default::default()
+            },
+        ),
+        (
+            "sink regex",
+            vec!["--all", "--sink", "^python\\.cmdi\\."],
+            SinkAnalysisOptions {
+                sink: Some("^python\\.cmdi\\.".to_string()),
+                ..Default::default()
+            },
+        ),
+        (
+            "trust",
+            vec!["--all", "--trust", "remote"],
+            SinkAnalysisOptions {
+                trust: Some("remote".to_string()),
+                ..Default::default()
+            },
+        ),
+        (
+            "category",
+            vec!["--all", "--category", "http-input"],
+            SinkAnalysisOptions {
+                category: Some("http-input".to_string()),
+                ..Default::default()
+            },
+        ),
+        (
+            "severity",
+            vec!["--all", "--severity", "critical"],
+            SinkAnalysisOptions {
+                severity: Some(Severity::Critical),
+                ..Default::default()
+            },
+        ),
+        (
+            "tag",
+            vec!["--all", "--tag", "command-injection"],
+            SinkAnalysisOptions {
+                tag: Some("command-injection".to_string()),
+                ..Default::default()
+            },
+        ),
+        (
+            "inferred sources",
+            vec!["--all", "--inferred-sources"],
+            SinkAnalysisOptions {
+                include_inferred_sources: true,
+                ..Default::default()
+            },
+        ),
+    ];
+
+    for (name, cli_extra, sdk_options) in cases {
+        assert_eq!(
+            cli_sink_json(workspace, &cli_extra),
+            sdk_sink_json(&project, sdk_options),
+            "sink-analysis CLI/SDK mismatch for {name}"
+        );
+    }
+}
+
+#[test]
+fn sink_analysis_paged_cli_json_is_a_window_over_sdk_results() {
+    let project = security_project();
+    let sdk_rows = sdk_sink_json(&project, Default::default());
+    let sdk_signatures: BTreeSet<_> = sdk_rows
+        .as_array()
+        .expect("SDK sink rows")
+        .iter()
+        .map(|row| {
+            let sink = row.get("sink").expect("sink");
+            source_site_sig(sink)
+        })
+        .collect();
+
+    for page in ["1", "2"] {
+        let rows = cli_sink_json("examples/python/micro", &["--context", "512", "--page", page]);
+        for row in rows.as_array().expect("paged sink rows") {
+            let signature = source_site_sig(row.get("sink").expect("sink"));
+            assert!(
+                sdk_signatures.contains(&signature),
+                "paged sink-analysis row on page {page} was not present in SDK report: {row:#}"
+            );
+        }
+    }
+}
+
+#[test]
 fn security_analysis_cli_json_matches_sdk_for_every_language() {
     for &lang in LANGS {
         let project = security_project_for_lang(lang);
@@ -1023,6 +1140,10 @@ fn security_analysis_cli_json_matches_sdk_for_every_language() {
         let cli_source = cli_source_sigs(cli_source_json(&workspace, &["--all"]));
         let sdk_source = sdk_source_sigs(&project, Default::default());
         assert_eq!(cli_source, sdk_source, "{lang} source-analysis CLI/SDK mismatch");
+
+        let cli_sink = cli_sink_json(&workspace, &["--all"]);
+        let sdk_sink = sdk_sink_json(&project, Default::default());
+        assert_eq!(cli_sink, sdk_sink, "{lang} sink-analysis CLI/SDK mismatch");
     }
 }
 

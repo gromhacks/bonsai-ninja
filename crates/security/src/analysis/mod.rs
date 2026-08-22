@@ -1,7 +1,8 @@
 //! SDK-level security analyses.
 //!
 //! This module owns the command-independent orchestration behind
-//! `security taint-analysis` and `security source-analysis`. CLI code
+//! `security taint-analysis`, `security source-analysis`, and `security
+//! sink-analysis`. CLI code
 //! should call these functions, then handle only formatting, paging,
 //! progress UI, and themed rendering.
 
@@ -40,8 +41,9 @@ use bonsai_lang_api::{
 };
 use bonsai_taint::{
     compose_idg_seed_nodes, CallResultPassthrough, CleanOutputOverwrite, EntryTaintGraph, IdgSeedRequest,
-    InterTaintCaches, InterTaintConfig, OutputArgFlow, ReceiverStatePropagation, SourceCallbackArgs,
-    SourceOutputArgs, TaintedCall, TaintedCallEdge, TokenSet,
+    IdgTaintQuery, IdgTaintSource, IdgTaintTargets, IdgTaintTransfers, InterTaintCaches, InterTaintConfig,
+    OutputArgFlow, ReceiverStatePropagation, SourceCallbackArgs, SourceOutputArgs, TaintedCall,
+    TaintedCallEdge, TokenSet,
 };
 use bonsai_workspace::Workspace;
 use regex::Regex;
@@ -727,6 +729,72 @@ pub struct SourceAnalysisReport {
     pub runtime_disabled_rules: Vec<RuntimeDisabledRule>,
 }
 
+/// Sink-centric counterpart to [`SourceAnalysisOptions`].
+///
+/// The selected sink endpoints and their source-independent compiler
+/// lineages are always returned. Source filters affect only the separate
+/// security-source proofs; an endpoint with no selected source proof remains
+/// visible instead of being mistaken for an absent sink.
+#[derive(Clone, Debug, Default)]
+pub struct SinkAnalysisOptions {
+    pub source: Option<String>,
+    pub trust: Option<String>,
+    pub category: Option<String>,
+    pub sink: Option<String>,
+    pub severity: Option<Severity>,
+    pub tag: Option<String>,
+    pub files: Vec<String>,
+    pub exclude_files: Vec<String>,
+    pub exclude_tests: bool,
+    pub include_inferred_sources: bool,
+}
+
+/// One source-independent compiler lineage feeding a selected sink.
+///
+/// The route is produced from adapter-lowered value facts and the sparse IDG;
+/// it does not require a rulepack source match. `endpoint_only` is true when
+/// no additional compiler value lineage can be resolved for the endpoint
+/// (for example, a source-independent configuration finding), in which case
+/// the route honestly records the endpoint rather than inventing dataflow.
+#[derive(Clone, Debug, Serialize)]
+pub struct SinkAnalysisFlow {
+    pub flow_id: String,
+    pub origin_function: String,
+    pub origin_file: String,
+    pub origin_line: u32,
+    pub chain_names: Vec<String>,
+    #[serde(skip)]
+    pub chain_funcs: Vec<FuncId>,
+    pub taint_path: Vec<TaintPropagationStep>,
+    pub precision: Precision,
+    pub endpoint_only: bool,
+}
+
+/// One matched sink, its source-independent upstream compiler routes, and
+/// any selected security-source proofs that reach it.
+///
+/// `upstream_flows` is never filtered by source-rule selection. An empty
+/// `security_source_flows` collection means no selected source reached the
+/// endpoint; it is not a claim that the operation is safe or has no upstream
+/// value lineage.
+#[derive(Clone, Debug, Serialize)]
+pub struct SinkAnalysisCandidate {
+    pub sink: FindingMatch,
+    pub upstream_flows: Vec<SinkAnalysisFlow>,
+    pub security_source_flows: Vec<CombinedFindingWithChain>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SinkAnalysisReport {
+    pub candidates: Vec<SinkAnalysisCandidate>,
+    pub source_rule_count: usize,
+    pub sink_rule_count: usize,
+    pub sanitizer_rule_count: usize,
+    pub analysis_complete: bool,
+    pub analysis_incomplete_reasons: Vec<String>,
+    pub runtime_disabled_rules: Vec<RuntimeDisabledRule>,
+}
+
 // Rendering guard for the current source-flow report shape. Naively
 // enumerating every raw trace path can explode even in `examples/`;
 // the production-grade exactness follow-up is to report canonical
@@ -1136,8 +1204,32 @@ pub fn run_taint_analysis_with_phase_progress<F>(
     ws: &Workspace,
     pack: &Rulepack,
     options: TaintAnalysisOptions,
-    mut on_progress: F,
+    on_progress: F,
 ) -> Result<TaintAnalysisReport>
+where
+    F: FnMut(AnalysisProgress),
+{
+    run_taint_pipeline_with_phase_progress(ws, pack, options, false, "taint-analysis", on_progress)
+        .map(|output| output.report)
+}
+
+struct TaintPipelineOutput {
+    report: TaintAnalysisReport,
+    sink_matches: Vec<RuleMatch>,
+}
+
+/// Shared source/sink fixed-point pipeline. `collect_sink_matches` changes
+/// only endpoint retention for the sink-centric view: the same matcher pass
+/// supplies both the upstream proof engine and the complete selected sink
+/// inventory, avoiding a second whole-workspace scan.
+fn run_taint_pipeline_with_phase_progress<F>(
+    ws: &Workspace,
+    pack: &Rulepack,
+    options: TaintAnalysisOptions,
+    collect_sink_matches: bool,
+    analysis_mode: &'static str,
+    mut on_progress: F,
+) -> Result<TaintPipelineOutput>
 where
     F: FnMut(AnalysisProgress),
 {
@@ -1181,7 +1273,7 @@ where
     on_progress(AnalysisProgress::Note {
         label: "scope",
         detail: format!(
-            "taint-analysis files={} source_rules={} sink_rules={} sanitizer_rules={} include_inferred_sources={} exclude_tests={} file_filters={} exclude_filters={}",
+            "{analysis_mode} files={} source_rules={} sink_rules={} sanitizer_rules={} include_inferred_sources={} exclude_tests={} file_filters={} exclude_filters={}",
             scan_files.len(),
             sources.len(),
             sinks.len(),
@@ -1236,10 +1328,11 @@ where
     );
     filter_by_path(ws, &mut source_hits, &options.files, &options.exclude_files);
 
-    let include_pattern_only = options.include_pattern_only
-        && options.source.is_none()
-        && options.trust.is_none()
-        && options.category.is_none();
+    let include_pattern_only = collect_sink_matches
+        || (options.include_pattern_only
+            && options.source.is_none()
+            && options.trust.is_none()
+            && options.category.is_none());
     let non_taint_sink_ids: AHashSet<String> = sinks
         .iter()
         .copied()
@@ -1261,9 +1354,10 @@ where
     } else {
         Vec::new()
     };
-    let source_languages: AHashSet<&str> = source_hits.iter().map(|hit| hit.language.as_str()).collect();
+    let source_languages: AHashSet<String> = source_hits.iter().map(|hit| hit.language.clone()).collect();
     sinks.retain(|rule| {
-        !non_taint_sink_ids.contains(&rule.id) && source_languages.contains(rule.language.as_str())
+        !non_taint_sink_ids.contains(&rule.id)
+            && (collect_sink_matches || source_languages.contains(rule.language.as_str()))
     });
     sanitizers.retain(|rule| source_languages.contains(rule.language.as_str()));
 
@@ -1277,7 +1371,7 @@ where
     on_progress(AnalysisProgress::Note {
         label: "scope",
         detail: format!(
-            "taint-analysis source_matches={} endpoint_files={} source_languages={} static_evidence={}",
+            "{analysis_mode} source_matches={} endpoint_files={} source_languages={} static_evidence={}",
             source_hits.len(),
             endpoint_scan_files.len(),
             source_languages.len(),
@@ -1309,7 +1403,7 @@ where
     on_progress(AnalysisProgress::Note {
         label: "scope",
         detail: format!(
-            "taint-analysis sink_matches={} sanitizer_matches={} pattern_sinks={}",
+            "{analysis_mode} sink_matches={} sanitizer_matches={} pattern_sinks={}",
             sink_hits.len(),
             sanitizer_hits.len(),
             pattern_sinks.len()
@@ -1358,6 +1452,19 @@ where
     sort_matches(&mut sanitizer_hits);
     sort_matches(&mut pattern_sink_hits);
 
+    let mut selected_sink_matches = Vec::new();
+    if collect_sink_matches {
+        selected_sink_matches.extend(sink_hits.iter().cloned());
+        selected_sink_matches.extend(pattern_sink_hits.iter().cloned());
+        sort_matches(&mut selected_sink_matches);
+        dedup_inventory_matches(&mut selected_sink_matches);
+        // Only source-language sinks can participate in a source-rooted
+        // closure. Keep the complete endpoint inventory above, then avoid
+        // admitting unrelated language endpoints into the expensive graph
+        // corridor below.
+        sink_hits.retain(|hit| source_languages.contains(hit.language.as_str()));
+    }
+
     // Function attribution can affect completeness only when at least one
     // source/sink pair exists. With either endpoint set empty, no semantic
     // path can exist, so opening the complete linkage graph solely to label
@@ -1404,7 +1511,7 @@ where
 
     hydrate_taint_flow_evidence(ws, &mut findings, options.attach_flow_evidence, &mut on_progress);
 
-    Ok(finish_taint_analysis_report(
+    let report = finish_taint_analysis_report(
         findings,
         TaintReportCompletion {
             ws,
@@ -1416,7 +1523,658 @@ where
             sink_rule_count: selected_sink_rule_count,
             sanitizer_rule_count: selected_sanitizer_rule_count,
         },
+    );
+    Ok(TaintPipelineOutput {
+        report,
+        sink_matches: selected_sink_matches,
+    })
+}
+
+/// Render every selected taint-relevant sink from the sink perspective with
+/// source-independent compiler lineage. Security-source reachability is
+/// attached separately and never gates the upstream routes.
+pub fn run_sink_analysis(
+    ws: &Workspace,
+    pack: &Rulepack,
+    options: SinkAnalysisOptions,
+) -> Result<SinkAnalysisReport> {
+    run_sink_analysis_with_phase_progress(ws, pack, options, |_| {})
+}
+
+/// Label-only per-phase callback. Prefer
+/// [`run_sink_analysis_with_phase_progress`] when progress totals matter.
+pub fn run_sink_analysis_with_progress<F>(
+    ws: &Workspace,
+    pack: &Rulepack,
+    options: SinkAnalysisOptions,
+    mut on_match_file_done: F,
+) -> Result<SinkAnalysisReport>
+where
+    F: FnMut(&'static str),
+{
+    let mut current_label: Option<&'static str> = None;
+    run_sink_analysis_with_phase_progress(ws, pack, options, |event| match event {
+        AnalysisProgress::PhaseStarted { label, .. } => current_label = Some(label),
+        AnalysisProgress::PhaseTicked => {
+            if let Some(label) = current_label {
+                on_match_file_done(label);
+            }
+        }
+        AnalysisProgress::PhaseFinished => current_label = None,
+        AnalysisProgress::Note { .. } => {}
+    })
+}
+
+/// Phase-aware sink-centric lineage analysis. Endpoint matching and upstream
+/// fixed-point execution share one compiler pipeline; `sink-analysis` never
+/// performs a second inventory scan after taint propagation.
+pub fn run_sink_analysis_with_phase_progress<F>(
+    ws: &Workspace,
+    pack: &Rulepack,
+    options: SinkAnalysisOptions,
+    mut on_progress: F,
+) -> Result<SinkAnalysisReport>
+where
+    F: FnMut(AnalysisProgress),
+{
+    let lineage_options = options.clone();
+    let taint_options = TaintAnalysisOptions {
+        source: options.source,
+        trust: options.trust,
+        category: options.category,
+        sink: options.sink,
+        severity: options.severity,
+        tag: options.tag,
+        files: options.files,
+        exclude_files: options.exclude_files,
+        include_inferred_sources: options.include_inferred_sources,
+        include_pattern_only: true,
+        show_sanitized: true,
+        exclude_tests: options.exclude_tests,
+        // Sink-analysis carries structured lineage and lets each frontend
+        // hydrate source bodies only for the requested page.
+        attach_flow_evidence: false,
+        ..TaintAnalysisOptions::default()
+    };
+    let output = run_taint_pipeline_with_phase_progress(
+        ws,
+        pack,
+        taint_options,
+        true,
+        "sink-analysis",
+        &mut on_progress,
+    )?;
+    Ok(build_sink_analysis_report(
+        ws,
+        pack,
+        output,
+        &lineage_options,
+        &mut on_progress,
     ))
+}
+
+type SinkEndpointKey = (String, String, u32, u32);
+
+fn sink_endpoint_key(sink: &FindingMatch) -> SinkEndpointKey {
+    (sink.rule_id.clone(), sink.file.clone(), sink.line, sink.column)
+}
+
+fn sink_rule_match_key(sink: &RuleMatch) -> SinkEndpointKey {
+    (sink.rule_id.clone(), sink.file.clone(), sink.line, sink.column)
+}
+
+fn sink_analysis_lineage_func_scope(
+    sink_funcs: &AHashSet<FuncId>,
+    global: &GlobalIndex,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    max_precision: Option<Precision>,
+) -> AHashSet<FuncId> {
+    let edge_allowed = |precision: Precision| max_precision.is_none_or(|max| precision <= max);
+    let mut scope = sink_funcs.clone();
+    let mut pending: Vec<FuncId> = sink_funcs.iter().copied().collect();
+    pending.sort_unstable_by_key(|func| func.raw());
+    while let Some(func) = pending.pop() {
+        let mut callers: Vec<FuncId> = call_graph
+            .callers_of(func)
+            .filter(|edge| edge_allowed(edge.precision))
+            .map(|edge| edge.from)
+            .collect();
+        callers.sort_unstable_by_key(|caller| caller.raw());
+        callers.dedup();
+        for caller in callers.into_iter().rev() {
+            if scope.insert(caller) {
+                pending.push(caller);
+            }
+        }
+    }
+
+    // Return, receiver-state, out-parameter, and callback providers may sit
+    // below a caller even though their values flow back into it. Admit only
+    // compiler-declared summary providers; this is capability data, not a
+    // language/API-name inventory.
+    let mut provider_pending: Vec<FuncId> = scope.iter().copied().collect();
+    provider_pending.sort_unstable_by_key(|func| func.raw());
+    while let Some(func) = provider_pending.pop() {
+        let mut providers: Vec<FuncId> = call_graph
+            .callees_of(func)
+            .filter(|edge| edge_allowed(edge.precision))
+            .map(|edge| edge.to)
+            .filter(|callee| sink_lineage_summary_provider(global, *callee))
+            .collect();
+        providers.sort_unstable_by_key(|provider| provider.raw());
+        providers.dedup();
+        for provider in providers.into_iter().rev() {
+            if scope.insert(provider) {
+                provider_pending.push(provider);
+            }
+        }
+    }
+    bonsai_workspace::extend_func_set_with_semantic_callback_dispatchers(
+        &mut scope,
+        sink_funcs,
+        global,
+        call_graph,
+        max_precision,
+    );
+    scope
+}
+
+fn sink_lineage_summary_provider(global: &GlobalIndex, func: FuncId) -> bool {
+    let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+        return false;
+    };
+    matches!(decl.kind, DeclKind::Constructor)
+        || !decl.receiver_field_writes.is_empty()
+        || global
+            .linkage_facts(SymbolId::new(func.raw()))
+            .is_some_and(|facts| facts.has_summary_output)
+}
+
+fn sink_flow_origin(ws: &Workspace, global: &GlobalIndex, func: FuncId) -> (String, String, u32) {
+    let function = func_display_name(global, func);
+    let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+        return (function, String::new(), 0);
+    };
+    let (file, line, _) = resolve_span_location(ws, decl.name_span);
+    (function, file, line)
+}
+
+fn endpoint_only_sink_flow(
+    ws: &Workspace,
+    global: &GlobalIndex,
+    sink: &RuleMatch,
+    func: Option<FuncId>,
+) -> SinkAnalysisFlow {
+    let (origin_function, origin_file, origin_line, chain_funcs, chain_names) = if let Some(func) = func {
+        let (function, file, line) = sink_flow_origin(ws, global, func);
+        let names = chain_names_for_path(ws, global, &[func]).unwrap_or_else(|| vec![function.clone()]);
+        (function, file, line, vec![func], names)
+    } else {
+        let function = sink
+            .enclosing_fn
+            .clone()
+            .unwrap_or_else(|| "<module>".to_string());
+        (
+            function.clone(),
+            sink.file.clone(),
+            sink.line,
+            Vec::new(),
+            vec![function],
+        )
+    };
+    let terminal = TaintPropagationStep {
+        caller: chain_names
+            .last()
+            .cloned()
+            .unwrap_or_else(|| origin_function.clone()),
+        callee: sink.match_text.clone(),
+        file: sink.file.clone(),
+        line: sink.line,
+        column: sink.column,
+        tainted_args: Vec::new(),
+    };
+    let taint_path = vec![terminal];
+    SinkAnalysisFlow {
+        flow_id: flow_id_for_taint_path(&chain_names, &taint_path),
+        origin_function,
+        origin_file,
+        origin_line,
+        chain_names,
+        chain_funcs,
+        taint_path,
+        precision: Precision::Exact,
+        endpoint_only: true,
+    }
+}
+
+fn prune_redundant_sink_flow_suffixes(flows: &mut Vec<SinkAnalysisFlow>) {
+    let redundant: AHashSet<usize> = flows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| {
+            (!candidate.endpoint_only
+                && !candidate.chain_funcs.is_empty()
+                && flows.iter().enumerate().any(|(other_index, other)| {
+                    other_index != index
+                        && !other.endpoint_only
+                        && other.chain_funcs.len() > candidate.chain_funcs.len()
+                        && other.chain_funcs.ends_with(&candidate.chain_funcs)
+                }))
+            .then_some(index)
+        })
+        .collect();
+    if redundant.is_empty() {
+        return;
+    }
+    let mut retained_index = 0usize;
+    flows.retain(|_| {
+        let keep = !redundant.contains(&retained_index);
+        retained_index += 1;
+        keep
+    });
+}
+
+fn forward_sink_idg_progress(
+    event: bonsai_workspace::IdgPersistenceProgress,
+    on_progress: &mut impl FnMut(AnalysisProgress),
+) {
+    match event {
+        bonsai_workspace::IdgPersistenceProgress::TransferStarted { segments } => {
+            on_progress(AnalysisProgress::PhaseFinished);
+            on_progress(AnalysisProgress::PhaseStarted {
+                label: "lowering sink-lineage semantic segments",
+                total: segments as u64,
+            });
+        }
+        bonsai_workspace::IdgPersistenceProgress::TransferSegmentCompleted => {
+            on_progress(AnalysisProgress::PhaseTicked);
+        }
+        bonsai_workspace::IdgPersistenceProgress::AcceleratorStarted => {
+            on_progress(AnalysisProgress::PhaseFinished);
+            on_progress(AnalysisProgress::PhaseStarted {
+                label: "compiling sink-lineage query accelerator",
+                total: 0,
+            });
+        }
+        bonsai_workspace::IdgPersistenceProgress::Persisting { .. } => {
+            on_progress(AnalysisProgress::PhaseFinished);
+            on_progress(AnalysisProgress::PhaseStarted {
+                label: "persisting sink-lineage semantic graph",
+                total: 0,
+            });
+        }
+        bonsai_workspace::IdgPersistenceProgress::ResidentFallbackStarted => {
+            on_progress(AnalysisProgress::PhaseFinished);
+            on_progress(AnalysisProgress::PhaseStarted {
+                label: "building exact sink-lineage resident fallback",
+                total: 0,
+            });
+        }
+        bonsai_workspace::IdgPersistenceProgress::ManifestStarted => {
+            on_progress(AnalysisProgress::PhaseFinished);
+            on_progress(AnalysisProgress::PhaseStarted {
+                label: "publishing sink-lineage semantic manifest",
+                total: 0,
+            });
+        }
+    }
+}
+
+fn compile_sink_upstream_flows(
+    ws: &Workspace,
+    pack: &Rulepack,
+    sink_matches: &[RuleMatch],
+    options: &SinkAnalysisOptions,
+    on_progress: &mut impl FnMut(AnalysisProgress),
+) -> (BTreeMap<SinkEndpointKey, Vec<SinkAnalysisFlow>>, Vec<String>) {
+    let mut flows: BTreeMap<SinkEndpointKey, Vec<SinkAnalysisFlow>> = sink_matches
+        .iter()
+        .map(|sink| (sink_rule_match_key(sink), Vec::new()))
+        .collect();
+    if sink_matches.is_empty() {
+        return (flows, Vec::new());
+    }
+
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "building sink lineage scope",
+        total: 3,
+    });
+    let global = ws.compiler_linkage_index();
+    let mut attributed: Vec<(usize, FuncId, Span)> = sink_matches
+        .iter()
+        .enumerate()
+        .filter_map(|(index, sink)| func_id_for_match(ws, sink).map(|func| (index, func, sink.span)))
+        .collect();
+    attributed.sort_unstable_by_key(|(index, func, span)| (func.raw(), span.file.raw(), span.start, *index));
+    if attributed.is_empty() {
+        on_progress(AnalysisProgress::PhaseTicked);
+        on_progress(AnalysisProgress::PhaseTicked);
+        on_progress(AnalysisProgress::PhaseTicked);
+        on_progress(AnalysisProgress::PhaseFinished);
+        for sink in sink_matches {
+            flows
+                .entry(sink_rule_match_key(sink))
+                .or_default()
+                .push(endpoint_only_sink_flow(ws, global.as_ref(), sink, None));
+        }
+        return (
+            flows,
+            vec![format!("unattributed-sink-matches:{}", sink_matches.len())],
+        );
+    }
+
+    let call_graph = ws.cached_resolved_call_graph();
+    on_progress(AnalysisProgress::PhaseTicked);
+    let sink_funcs: AHashSet<FuncId> = attributed.iter().map(|(_, func, _)| *func).collect();
+    let lineage_scope = sink_analysis_lineage_func_scope(
+        &sink_funcs,
+        global.as_ref(),
+        call_graph.as_ref(),
+        Some(Precision::Narrowed),
+    );
+    let mut scoped_funcs: Vec<FuncId> = lineage_scope.iter().copied().collect();
+    scoped_funcs.sort_unstable_by_key(|func| func.raw());
+    let mut scoped_files: Vec<FileId> = scoped_funcs
+        .iter()
+        .filter_map(|func| global.declaring_file(SymbolId::new(func.raw())))
+        .collect();
+    scoped_files.sort_unstable_by_key(|file| file.raw());
+    scoped_files.dedup();
+    on_progress(AnalysisProgress::PhaseTicked);
+
+    let transfer_languages: AHashSet<String> = scoped_files
+        .iter()
+        .filter_map(|file| ws.db().adapter_for(*file))
+        .map(|adapter| adapter.language_id().as_str().to_string())
+        .collect();
+    let rulepack_typing = crate::matcher::build_rulepack_typing(&pack.all_rules());
+    let receiver_state_propagations = compiled_receiver_state_propagations_for_languages(
+        ws,
+        pack,
+        &transfer_languages,
+        &rulepack_typing,
+        Some(&scoped_files),
+        || {},
+    );
+    let graph_config = InterTaintConfig {
+        clean_output_overwrites: clean_output_overwrites_from_rulepack_for_languages(
+            pack,
+            &transfer_languages,
+        ),
+        source_output_args: source_output_args_from_rulepack_for_languages(pack, &transfer_languages),
+        source_callback_args: source_callback_args_from_rulepack_for_languages(pack, &transfer_languages),
+        call_result_passthroughs: call_result_passthroughs_from_rulepack_for_languages(
+            pack,
+            &transfer_languages,
+        ),
+        output_arg_flows: output_arg_flows_from_rulepack_for_languages(pack, &transfer_languages),
+        receiver_state_propagations,
+        max_edge_precision: Some(Precision::Narrowed),
+    };
+    crate::matcher::release_matcher_fact_caches();
+    ws.release_idg_service_cache();
+    ws.release_exact_body_cache();
+    ws.db().release_global_index();
+    on_progress(AnalysisProgress::PhaseTicked);
+    on_progress(AnalysisProgress::PhaseFinished);
+
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "building persisted sink-lineage semantic graph",
+        total: 0,
+    });
+    let idg = {
+        let progress_sink = std::cell::RefCell::new(&mut *on_progress);
+        seed_idg_service_for_rulepack_for_files(
+            ScopedIdgSeedRequest {
+                ws,
+                pack,
+                languages: &transfer_languages,
+                receiver_state_propagations: &graph_config.receiver_state_propagations,
+                included_files: &scoped_files,
+                included_funcs: &scoped_funcs,
+                call_graph: call_graph.as_ref(),
+            },
+            |event| forward_sink_idg_progress(event, &mut **progress_sink.borrow_mut()),
+        )
+    };
+    on_progress(AnalysisProgress::PhaseFinished);
+
+    let target_spans: Vec<(FuncId, Span)> = attributed.iter().map(|(_, func, span)| (*func, *span)).collect();
+    let (target_nodes, unresolved_target_funcs) = idg.nodes_and_unresolved_funcs_at_spans(&target_spans);
+    let relevance = idg.target_relevance_within_funcs_with_max_precision(
+        &target_nodes,
+        Some(&unresolved_target_funcs),
+        &lineage_scope,
+        graph_config.max_edge_precision,
+    );
+    let origin_funcs = idg.funcs_admitted_by_target_relevance(&scoped_funcs, &relevance);
+    let targets = IdgTaintTargets {
+        nodes: Some(&target_nodes),
+        funcs: Some(&unresolved_target_funcs),
+        lineage_funcs: Some(&lineage_scope),
+        relevance: Some(&relevance),
+    };
+    let transfers = IdgTaintTransfers {
+        receiver_state: &graph_config.receiver_state_propagations,
+        call_result_passthroughs: &graph_config.call_result_passthroughs,
+        output_args: &graph_config.output_arg_flows,
+        call_results_materialized: true,
+    };
+    let mut sink_indices_by_func: AHashMap<FuncId, Vec<usize>> = AHashMap::new();
+    for (index, func, _) in &attributed {
+        sink_indices_by_func.entry(*func).or_default().push(*index);
+    }
+    let caches = ws.inter_taint_caches();
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "enumerating upstream sink paths",
+        total: origin_funcs.len() as u64,
+    });
+    for origin in origin_funcs {
+        let mut tokens: TokenSet = idg.read_or_write_names_of_func(origin).into_iter().collect();
+        if let Some(decl) = global.decl_of(SymbolId::new(origin.raw())) {
+            tokens.extend(decl.params.iter().filter(|param| !param.is_empty()).cloned());
+        }
+        let seed_nodes = compose_idg_seed_nodes(
+            IdgSeedRequest::rule_match(origin, &tokens, None, &[]),
+            global.as_ref(),
+            idg.as_ref(),
+        );
+        if seed_nodes.is_empty() {
+            on_progress(AnalysisProgress::PhaseTicked);
+            continue;
+        }
+        let graph = bonsai_taint::entry_taint_graph_from_idg_query(
+            IdgTaintQuery::semantic(
+                IdgTaintSource::precomposed(origin, &tokens, &seed_nodes),
+                ws.db(),
+                idg.as_ref(),
+            )
+            .with_global_index(global.as_ref())
+            .with_transfers(transfers)
+            .with_targets(targets)
+            .with_max_precision(graph_config.max_edge_precision)
+            .with_caches(caches),
+        );
+        let trace_index = trace_record_index(&graph.call_records);
+        for terminal_call in &graph.tainted_calls {
+            let Some(sink_indices) = sink_indices_by_func.get(&terminal_call.caller) else {
+                continue;
+            };
+            let records = lineage_records_for_call_indexed(&trace_index, terminal_call).unwrap_or_default();
+            let Some(chain_funcs) = chain_funcs_for_lineage(&records, origin, terminal_call.caller) else {
+                continue;
+            };
+            let precision = chain_precision_for_records(&records).meet(graph.precision);
+            if !precision.is_semantic() {
+                continue;
+            }
+            let Some(chain_names) = chain_names_for_path(ws, global.as_ref(), &chain_funcs) else {
+                continue;
+            };
+            let taint_path = taint_path_for_lineage(ws, global.as_ref(), &records, Some(terminal_call));
+            let (origin_function, origin_file, origin_line) = sink_flow_origin(ws, global.as_ref(), origin);
+            let flow = SinkAnalysisFlow {
+                flow_id: flow_id_for_taint_path(&chain_names, &taint_path),
+                origin_function,
+                origin_file,
+                origin_line,
+                chain_names,
+                chain_funcs,
+                taint_path,
+                precision,
+                endpoint_only: false,
+            };
+            for &sink_index in sink_indices {
+                let sink = &sink_matches[sink_index];
+                if !tainted_call_matches_sink(terminal_call, sink) {
+                    continue;
+                }
+                let candidate_flows = flows.entry(sink_rule_match_key(sink)).or_default();
+                if !candidate_flows
+                    .iter()
+                    .any(|existing| existing.flow_id == flow.flow_id)
+                {
+                    candidate_flows.push(flow.clone());
+                }
+            }
+        }
+        on_progress(AnalysisProgress::PhaseTicked);
+    }
+    on_progress(AnalysisProgress::PhaseFinished);
+
+    for sink in sink_matches {
+        let key = sink_rule_match_key(sink);
+        let candidate_flows = flows.entry(key).or_default();
+        prune_redundant_sink_flow_suffixes(candidate_flows);
+        if candidate_flows.is_empty() {
+            candidate_flows.push(endpoint_only_sink_flow(
+                ws,
+                global.as_ref(),
+                sink,
+                func_id_for_match(ws, sink),
+            ));
+        }
+    }
+
+    let scan_files = security_scan_files(
+        ws,
+        &options.files,
+        &options.exclude_files,
+        options.exclude_tests,
+        &pack.metadata.test_path_patterns,
+    );
+    let resolution = ResolutionCoverage::from_graph(call_graph.as_ref(), lineage_scope.iter().copied());
+    let incomplete_reasons = workspace_analysis_incomplete_reasons(ws, &scan_files, Some(&resolution));
+    (flows, incomplete_reasons)
+}
+
+fn build_sink_analysis_report(
+    ws: &Workspace,
+    pack: &Rulepack,
+    output: TaintPipelineOutput,
+    options: &SinkAnalysisOptions,
+    on_progress: &mut impl FnMut(AnalysisProgress),
+) -> SinkAnalysisReport {
+    let TaintPipelineOutput { report, sink_matches } = output;
+    let (mut compiler_flows, mut compiler_incomplete_reasons) =
+        compile_sink_upstream_flows(ws, pack, &sink_matches, options, on_progress);
+    let mut candidates: BTreeMap<SinkEndpointKey, SinkAnalysisCandidate> = BTreeMap::new();
+    for sink_match in &sink_matches {
+        let Some(rule) = pack.find_rule_by_id(&sink_match.rule_id) else {
+            continue;
+        };
+        candidates
+            .entry(sink_rule_match_key(sink_match))
+            .or_insert_with(|| SinkAnalysisCandidate {
+                sink: FindingMatch::from_rule_match(sink_match, rule),
+                upstream_flows: compiler_flows
+                    .remove(&sink_rule_match_key(sink_match))
+                    .unwrap_or_default(),
+                security_source_flows: Vec::new(),
+            });
+    }
+
+    for combined in &report.findings {
+        let mut sinks = Vec::with_capacity(1 + combined.additional_sinks.len());
+        sinks.push(combined.finding.sink.clone());
+        sinks.extend(combined.additional_sinks.iter().cloned());
+        for sink in sinks {
+            let key = sink_endpoint_key(&sink);
+            let candidate = candidates
+                .entry(key.clone())
+                .or_insert_with(|| SinkAnalysisCandidate {
+                    sink: sink.clone(),
+                    upstream_flows: compiler_flows.remove(&key).unwrap_or_default(),
+                    security_source_flows: Vec::new(),
+                });
+            // Finding-time constraint checks carry the exact tainted argument
+            // identities; prefer that richer endpoint over the inventory hit.
+            candidate.sink = sink.clone();
+            if combined.finding.source.origin == MatchOrigin::Pattern {
+                continue;
+            }
+            let mut upstream = combined.clone();
+            upstream.finding.sink = sink;
+            upstream
+                .additional_sinks
+                .retain(|additional| sink_endpoint_key(additional) != key);
+            let flow_identity = (
+                upstream.finding.finding_id.as_str(),
+                upstream.finding.representative_flow_id.as_deref(),
+            );
+            if candidate.security_source_flows.iter().any(|existing| {
+                (
+                    existing.finding.finding_id.as_str(),
+                    existing.finding.representative_flow_id.as_deref(),
+                ) == flow_identity
+            }) {
+                continue;
+            }
+            candidate.security_source_flows.push(upstream);
+        }
+    }
+
+    for candidate in candidates.values_mut() {
+        candidate.upstream_flows.sort_by(|left, right| {
+            (left.endpoint_only, left.chain_names.len(), left.flow_id.as_str()).cmp(&(
+                right.endpoint_only,
+                right.chain_names.len(),
+                right.flow_id.as_str(),
+            ))
+        });
+        candidate.security_source_flows.sort_by(|left, right| {
+            (
+                left.finding.representative_flow_id.as_deref(),
+                left.finding.finding_id.as_str(),
+            )
+                .cmp(&(
+                    right.finding.representative_flow_id.as_deref(),
+                    right.finding.finding_id.as_str(),
+                ))
+        });
+    }
+
+    let mut analysis_incomplete_reasons = report.analysis_incomplete_reasons;
+    analysis_incomplete_reasons.append(&mut compiler_incomplete_reasons);
+    let unattributed_sink_matches = sink_matches
+        .iter()
+        .filter(|sink| func_id_for_match(ws, sink).is_none())
+        .count();
+    if unattributed_sink_matches > 0 {
+        analysis_incomplete_reasons.push(format!("unattributed-sink-matches:{unattributed_sink_matches}"));
+    }
+    analysis_incomplete_reasons.sort();
+    analysis_incomplete_reasons.dedup();
+
+    SinkAnalysisReport {
+        candidates: candidates.into_values().collect(),
+        source_rule_count: report.source_rule_count,
+        sink_rule_count: report.sink_rule_count,
+        sanitizer_rule_count: report.sanitizer_rule_count,
+        analysis_complete: report.analysis_complete && analysis_incomplete_reasons.is_empty(),
+        analysis_incomplete_reasons,
+        runtime_disabled_rules: report.runtime_disabled_rules,
+    }
 }
 
 /// Top-level source-only enumeration. Returns every source rule match
