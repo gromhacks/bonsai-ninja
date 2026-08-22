@@ -235,11 +235,12 @@ jobs:
           BONSAI_REQUIRE_ELASTICSEARCH_GATE: "1"
           BONSAI_MEMORY_BUDGET_MB: "3072"
           MIMALLOC_PURGE_DELAY: "0"
-          # The public ubuntu-22.04 runner completed the same exact work
-          # 1.1x-3.4x slower than the recorded M1 Pro reference host. Keep the
-          # product/reference SLO defaults strict; calibrate only this shared
-          # runner class from the first complete release measurement.
-          BONSAI_ES_COLD_STRUCTURAL_INDEX_MAX_SECS: "240"
+          # The first complete v0.2.6 tag run measured the exact cold
+          # structural index at 255.94s on the public ubuntu-22.04 runner,
+          # versus 64.63s on the recorded M1 Pro reference host. Keep the
+          # product/reference SLO defaults strict; this 300s value is only the
+          # measured shared-runner class plus ordinary hosted-runner headroom.
+          BONSAI_ES_COLD_STRUCTURAL_INDEX_MAX_SECS: "300"
           BONSAI_ES_WARM_STRUCTURAL_INDEX_MAX_SECS: "30"
           BONSAI_ES_COLD_TAINT_MAX_SECS: "125"
           BONSAI_ES_INSPECT_MAX_SECS: "85"

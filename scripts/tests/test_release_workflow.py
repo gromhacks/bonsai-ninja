@@ -56,6 +56,20 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "pack-audit must install Rust before invoking Cargo",
         )
 
+    def test_elasticsearch_cold_structural_slo_uses_measured_runner_class(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'BONSAI_ES_COLD_STRUCTURAL_INDEX_MAX_SECS: "300"',
+            workflow,
+            "the tag workflow must retain the measured public-runner calibration",
+        )
+        self.assertIn(
+            "255.94s on the public ubuntu-22.04 runner",
+            workflow,
+            "runner calibration must remain tied to a completed exact measurement",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
