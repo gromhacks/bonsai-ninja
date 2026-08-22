@@ -14,12 +14,12 @@ use crate::loader::{Rulepack, RulepackMetadata};
 use crate::matcher::{
     callback_extension_attribution_match, configured_receiver_factory_attribution_match,
     dedup_inventory_matches, infer_entry_point_sources_for_files_with_progress,
-    match_rules_against_facts_for_inventory_with_progress_on_files,
-    match_rules_against_facts_for_sink_inventory_with_progress_on_files,
-    match_rules_against_facts_for_taint_support_with_progress_on_files,
-    match_rules_against_facts_for_taint_with_progress_on_files,
-    match_rules_against_facts_with_progress_on_files, rule_match_passes_constraints_with_taint_view,
-    rule_target_matches_call, InterTaintView, RuleConstraintTaintContext, RuleMatch, RuntimeDisabledRule,
+    match_rules_against_facts_for_inventory_with_phase_progress_on_files,
+    match_rules_against_facts_for_sink_inventory_with_phase_progress_on_files,
+    match_rules_against_facts_for_strict_with_phase_progress_on_files,
+    match_rules_against_facts_for_taint_with_phase_progress_on_files,
+    rule_match_passes_constraints_with_taint_view, rule_target_matches_call, InterTaintView, MatcherProgress,
+    MatcherProgressStage, RuleConstraintTaintContext, RuleMatch, RuntimeDisabledRule,
 };
 use crate::rule::{
     ConstraintKind, ContextFlowRole, FlowClass, GuardProfile, MatchKind, MatchOrigin, NonTaintEvaluation,
@@ -1033,6 +1033,59 @@ fn begin_dependency_package_snapshot(
     })
 }
 
+/// Establish one exact compiler-object generation for the complete source
+/// snapshot before taint endpoint phases begin.
+///
+/// A taint run performs source, sink, sanitizer, callgraph, and IDG passes.
+/// Letting each cold header lookup fall back to adapter lowering would parse
+/// the same file repeatedly. This generation is disk-backed and bounded by
+/// the shared compiler scheduler; later phases decode only the header/body
+/// projection they request. Reuse and scheduling affect time only.
+fn prepare_taint_compiler_session<F>(ws: &Workspace, on_progress: &mut F)
+where
+    F: FnMut(AnalysisProgress),
+{
+    let mut files = ws.db().vfs().all_files();
+    files.sort_unstable_by_key(|file| file.raw());
+    if files.is_empty() {
+        return;
+    }
+    match ws.db().attach_reusable_compiler_object_store_for_files(&files) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => bonsai_diagnostics::debug_log!(
+            "compiler-object",
+            "complete compiler-object generation unavailable before taint planning: {error}"
+        ),
+    }
+
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "compiling workspace IR",
+        total: files.len() as u64,
+    });
+    let result = std::thread::scope(|scope| {
+        let (progress_tx, progress_rx) = mpsc::sync_channel::<()>(64);
+        let worker_tx = progress_tx.clone();
+        let worker = scope.spawn(move || {
+            ws.db().ensure_compiler_object_session_with_progress(&files, || {
+                let _ = worker_tx.send(());
+            })
+        });
+        drop(progress_tx);
+        for () in progress_rx {
+            on_progress(AnalysisProgress::PhaseTicked);
+        }
+        worker.join().expect("compiler-object session worker panicked")
+    });
+    on_progress(AnalysisProgress::PhaseFinished);
+    if let Err(error) = result {
+        bonsai_diagnostics::debug_log!(
+            "compiler-object",
+            "taint compiler-object session unavailable; exact adapter fallback remains active: {error}"
+        );
+    }
+}
+
 /// Top-level taint analysis entry point. Combines source / sink /
 /// sanitizer matching with interprocedural taint propagation and
 /// returns the assembled findings. No progress reporting — see the
@@ -1123,6 +1176,7 @@ where
         options.exclude_tests,
         &pack.metadata.test_path_patterns,
     );
+    prepare_taint_compiler_session(ws, &mut on_progress);
     let total_files = scan_files.len() as u64;
     on_progress(AnalysisProgress::Note {
         label: "scope",
@@ -1138,12 +1192,11 @@ where
             options.exclude_files.len()
         ),
     });
-    let mut source_hits = gather_taint_support_matches_phased(
+    let mut source_hits = gather_strict_matches_phased(
         ws,
         &sources,
-        "matching source rules",
+        SOURCE_MATCH_PHASES,
         &scan_files,
-        total_files,
         &rulepack_typing,
         &mut on_progress,
     );
@@ -1221,7 +1274,6 @@ where
     // tree-sitter/index work and the IDG performs the expensive semantic
     // narrowing below.
     let endpoint_scan_files = scan_files.clone();
-    let endpoint_total_files = endpoint_scan_files.len() as u64;
     on_progress(AnalysisProgress::Note {
         label: "scope",
         detail: format!(
@@ -1233,30 +1285,22 @@ where
         ),
     });
 
-    on_progress(AnalysisProgress::PhaseStarted {
-        label: "matching sink rules",
-        total: endpoint_total_files,
-    });
     // Rulepack-declared factory-method return types (`returns_type`).
     // Empty (and dormant) unless the pack ships such rules; threaded
     // into both the sink scan and the finding-time constraint re-check
     // so a `receiver_type_in` sink resolves on a factory-typed local.
-    let mut sink_hits = match_rules_against_facts_for_taint_with_progress_on_files(
+    let mut sink_hits = match_rules_against_facts_for_taint_with_phase_progress_on_files(
         ws,
         &sinks,
         &endpoint_scan_files,
         &rulepack_typing,
-        || {
-            on_progress(AnalysisProgress::PhaseTicked);
-        },
+        |event| forward_matcher_progress(event, SINK_MATCH_PHASES, &mut on_progress),
     );
-    on_progress(AnalysisProgress::PhaseFinished);
-    let mut sanitizer_hits = gather_taint_support_matches_phased(
+    let mut sanitizer_hits = gather_strict_matches_phased(
         ws,
         &sanitizers,
-        "matching sanitizer rules",
+        SANITIZER_MATCH_PHASES,
         &endpoint_scan_files,
-        endpoint_total_files,
         &rulepack_typing,
         &mut on_progress,
     );
@@ -1275,12 +1319,11 @@ where
     let mut pattern_sink_hits = if pattern_sinks.is_empty() {
         Vec::new()
     } else {
-        gather_matches_phased(
+        gather_strict_matches_phased(
             ws,
             &pattern_sinks,
-            "matching pattern sink rules",
+            SINK_MATCH_PHASES,
             &endpoint_scan_files,
-            endpoint_total_files,
             &rulepack_typing,
             &mut on_progress,
         )
@@ -1965,12 +2008,11 @@ where
             options.exclude_files.len()
         ),
     });
-    let mut source_hits = gather_matches_phased(
+    let mut source_hits = gather_strict_matches_phased(
         ws,
         &sources,
-        "matching source rules",
+        SOURCE_MATCH_PHASES,
         &scan_files,
-        total_files,
         &rulepack_typing,
         &mut on_progress,
     );
@@ -2305,14 +2347,12 @@ where
         false,
         &pack.metadata.test_path_patterns,
     );
-    let total_files = scan_files.len() as u64;
     let rulepack_typing = crate::matcher::build_rulepack_typing(&pack.all_rules());
     let mut matches = gather_inventory_matches_phased(
         ws,
         &selected,
-        "matching source rules",
+        SOURCE_MATCH_PHASES,
         &scan_files,
-        total_files,
         &rulepack_typing,
         &mut on_progress,
     );
@@ -2377,18 +2417,13 @@ where
         &pack.metadata.test_path_patterns,
     );
     let rulepack_typing = crate::matcher::build_rulepack_typing(&pack.all_rules());
-    on_progress(AnalysisProgress::PhaseStarted {
-        label: "matching sink rules",
-        total: scan_files.len() as u64,
-    });
-    let mut matches = match_rules_against_facts_for_sink_inventory_with_progress_on_files(
+    let mut matches = match_rules_against_facts_for_sink_inventory_with_phase_progress_on_files(
         ws,
         &selected,
         &scan_files,
         &rulepack_typing,
-        || on_progress(AnalysisProgress::PhaseTicked),
+        |event| forward_matcher_progress(event, SINK_MATCH_PHASES, &mut on_progress),
     );
-    on_progress(AnalysisProgress::PhaseFinished);
     on_progress(AnalysisProgress::PhaseStarted {
         label: "finalizing matches",
         total: 0,
@@ -2456,14 +2491,12 @@ where
         false,
         &pack.metadata.test_path_patterns,
     );
-    let total_files = scan_files.len() as u64;
     let rulepack_typing = crate::matcher::build_rulepack_typing(&pack.all_rules());
     let mut matches = gather_inventory_matches_phased(
         ws,
         &selected,
-        "matching sanitizer rules",
+        SANITIZER_MATCH_PHASES,
         &scan_files,
-        total_files,
         &rulepack_typing,
         &mut on_progress,
     );
@@ -2735,89 +2768,100 @@ pub fn pack_tree_for_rules(pack: &Rulepack, rules: &[&Rule]) -> PackTreeReport {
     PackTreeReport { languages }
 }
 
-/// Run a per-file match phase: emit `PhaseStarted { label, total_files }`,
-/// tick once per file, then `PhaseFinished`. Used internally by
-/// `run_taint_analysis_with_phase_progress` so each matching pass shows
-/// up as one progress bar with a known length.
-fn gather_matches_phased<F>(
-    ws: &Workspace,
-    rules: &[&Rule],
-    label: &'static str,
-    scan_files: &[FileId],
-    total_files: u64,
-    factory: &Arc<crate::matcher::RulepackTyping>,
-    on_progress: &mut F,
-) -> Vec<RuleMatch>
-where
-    F: FnMut(AnalysisProgress),
-{
-    on_progress(AnalysisProgress::PhaseStarted {
-        label,
-        total: total_files,
-    });
-    let matches = match_rules_against_facts_with_progress_on_files(ws, rules, scan_files, factory, || {
-        on_progress(AnalysisProgress::PhaseTicked);
-    });
-    on_progress(AnalysisProgress::PhaseFinished);
-    matches
+#[derive(Copy, Clone)]
+struct MatcherPhaseLabels {
+    raw_anchors: &'static str,
+    syntax_headers: &'static str,
+    receiver_ancestry: &'static str,
+    receiver_evidence: &'static str,
+    exact_bodies: &'static str,
 }
 
-fn gather_taint_support_matches_phased<F>(
+const SOURCE_MATCH_PHASES: MatcherPhaseLabels = MatcherPhaseLabels {
+    raw_anchors: "filtering source anchors",
+    syntax_headers: "planning source syntax",
+    receiver_ancestry: "loading source receiver ancestry",
+    receiver_evidence: "resolving source types",
+    exact_bodies: "matching source bodies",
+};
+const SINK_MATCH_PHASES: MatcherPhaseLabels = MatcherPhaseLabels {
+    raw_anchors: "filtering sink anchors",
+    syntax_headers: "planning sink syntax",
+    receiver_ancestry: "loading sink receiver ancestry",
+    receiver_evidence: "resolving sink types",
+    exact_bodies: "matching sink bodies",
+};
+const SANITIZER_MATCH_PHASES: MatcherPhaseLabels = MatcherPhaseLabels {
+    raw_anchors: "filtering sanitizer anchors",
+    syntax_headers: "planning sanitizer syntax",
+    receiver_ancestry: "loading sanitizer receiver ancestry",
+    receiver_evidence: "resolving sanitizer types",
+    exact_bodies: "matching sanitizer bodies",
+};
+
+fn forward_matcher_progress<F>(event: MatcherProgress, labels: MatcherPhaseLabels, on_progress: &mut F)
+where
+    F: FnMut(AnalysisProgress),
+{
+    match event {
+        MatcherProgress::PhaseStarted { stage, total } => {
+            let label = match stage {
+                MatcherProgressStage::RawAnchors => labels.raw_anchors,
+                MatcherProgressStage::SyntaxHeaders => labels.syntax_headers,
+                MatcherProgressStage::ReceiverAncestry => labels.receiver_ancestry,
+                MatcherProgressStage::ReceiverEvidence => labels.receiver_evidence,
+                MatcherProgressStage::ExactBodies => labels.exact_bodies,
+            };
+            on_progress(AnalysisProgress::PhaseStarted {
+                label,
+                total: total as u64,
+            });
+        }
+        MatcherProgress::UnitCompleted => on_progress(AnalysisProgress::PhaseTicked),
+        MatcherProgress::PhaseFinished => on_progress(AnalysisProgress::PhaseFinished),
+    }
+}
+
+/// Run the compiler match pipeline with exact progress for raw anchors,
+/// compact syntax/import headers, and surviving adapter-lowered bodies.
+fn gather_strict_matches_phased<F>(
     ws: &Workspace,
     rules: &[&Rule],
-    label: &'static str,
+    labels: MatcherPhaseLabels,
     scan_files: &[FileId],
-    total_files: u64,
     factory: &Arc<crate::matcher::RulepackTyping>,
     on_progress: &mut F,
 ) -> Vec<RuleMatch>
 where
     F: FnMut(AnalysisProgress),
 {
-    on_progress(AnalysisProgress::PhaseStarted {
-        label,
-        total: total_files,
-    });
-    let matches = match_rules_against_facts_for_taint_support_with_progress_on_files(
+    match_rules_against_facts_for_strict_with_phase_progress_on_files(
         ws,
         rules,
         scan_files,
         factory,
-        || {
-            on_progress(AnalysisProgress::PhaseTicked);
-        },
-    );
-    on_progress(AnalysisProgress::PhaseFinished);
-    matches
+        |event| forward_matcher_progress(event, labels, on_progress),
+    )
 }
 
 fn gather_inventory_matches_phased<F>(
     ws: &Workspace,
     rules: &[&Rule],
-    label: &'static str,
+    labels: MatcherPhaseLabels,
     scan_files: &[FileId],
-    total_files: u64,
     factory: &Arc<crate::matcher::RulepackTyping>,
     on_progress: &mut F,
 ) -> Vec<RuleMatch>
 where
     F: FnMut(AnalysisProgress),
 {
-    on_progress(AnalysisProgress::PhaseStarted {
-        label,
-        total: total_files,
-    });
-    let matches = match_rules_against_facts_for_inventory_with_progress_on_files(
+    match_rules_against_facts_for_inventory_with_phase_progress_on_files(
         ws,
         rules,
         scan_files,
         factory,
-        || {
-            on_progress(AnalysisProgress::PhaseTicked);
-        },
-    );
-    on_progress(AnalysisProgress::PhaseFinished);
-    matches
+        |event| forward_matcher_progress(event, labels, on_progress),
+    )
 }
 
 pub fn source_rule_matches_filters(

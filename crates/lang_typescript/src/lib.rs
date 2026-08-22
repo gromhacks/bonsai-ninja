@@ -1,12 +1,14 @@
 //! TypeScript language adapter.
+mod parse_recovery;
+
 use bonsai_common::FileId;
 use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
     AdapterContext, AdapterError, CallArg, CallKind, CallTargetExtraction, DeclIndex, DeclKind, FieldWrite,
     FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
-    LanguageId, ModifierVocabulary, SourceFileRepresentation, TypeAliasBinding, TypeAliasVocabulary,
-    Visibility, EMPTY_HANDLER,
+    LanguageId, ModifierVocabulary, ParseRecoveryEdit, SourceFileRepresentation, SyntaxTree,
+    TypeAliasBinding, TypeAliasVocabulary, Vfs, Visibility, EMPTY_HANDLER,
 };
 use tree_sitter::Node;
 
@@ -261,6 +263,14 @@ impl LanguageAdapter for TypeScriptAdapter {
             .and_then(std::ffi::OsStr::to_str)
             .filter(|extension| extension.eq_ignore_ascii_case("tsx"))
             .map_or(PACK_NAME, |_| TSX_PACK_NAME)
+    }
+    fn parse_recovery_edits(
+        &self,
+        snapshot: &bonsai_lang_api::FileSnapshot,
+        _vfs: &Vfs,
+        tree: &SyntaxTree,
+    ) -> Vec<ParseRecoveryEdit> {
+        parse_recovery::typescript_parse_recovery_edits(snapshot, tree)
     }
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {

@@ -127,6 +127,58 @@ fn tsx_uses_the_tsx_grammar_and_lowers_component_calls() {
 }
 
 #[test]
+fn import_type_queries_are_syntax_clean_in_ts_and_tsx() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
+    let workspace = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[
+            (
+                "store.ts",
+                "interface Store { get: () => import('pkg').Value[]; }",
+            ),
+            (
+                "view.tsx",
+                "function view(value: import('pkg').Value) { return <Widget value={value}/>; }",
+            ),
+        ],
+    );
+
+    for file in workspace.db().vfs().all_files() {
+        let parsed = workspace.db().parse(file).expect("parse TypeScript fixture");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "valid import-type query must be syntax-clean in {}: {:?}",
+            parsed.grammar_name,
+            (&parsed.diagnostics, parsed.tree.root_node().to_sexp())
+        );
+        if workspace
+            .db()
+            .vfs()
+            .path(file)
+            .expect("fixture path")
+            .ends_with("store.ts")
+        {
+            let source = parsed.source_text().as_bytes();
+            let mut pending = vec![parsed.tree.root_node()];
+            let mut retained_exact_import_type = false;
+            while let Some(node) = pending.pop() {
+                retained_exact_import_type |= source
+                    .get(node.start_byte()..node.end_byte())
+                    .is_some_and(|text| text == b"import('pkg').Value");
+                let mut cursor = node.walk();
+                pending.extend(node.named_children(&mut cursor));
+            }
+            assert!(
+                retained_exact_import_type,
+                "recovery must retain the complete source-level import-type identity"
+            );
+        }
+    }
+}
+
+#[test]
 fn typeof_rejection_guard_is_typed_condition_ir() {
     use bonsai_lang_api::{ConditionExpressionFact, LanguageAdapter};
 

@@ -71,12 +71,13 @@ pub use bonsai_browse::{
     AstFunctionCandidate, AstNode, AstOutcome, CallOut, CallgraphRow, CallsFilters, ClassOut, ClassesFilters,
     CommentOut, CommentsFilters, DefOut, DefsFilters, EdgeRecord, EdgesFilters, EntryPointOut,
     EntryPointsFilters, GraphExportFormat, GraphProjection, HirDump, ImportOut, ImportsFilters, Locator,
-    OperationOperandOut, OperationOut, OperationsFilters, PathFilters, PathFunctionRow, PathOutcome,
-    PathTerminalCallRow, PrecisionClass, RefOut, RefsFilters, ResolutionCoverageDeclRow,
-    ResolutionCoverageFileRow, ResolutionCoverageFilters, ResolveFilters, ResolveOutcome, ResolveTrace,
-    SearchFilters, SearchHit, SliceFilters, SliceOutcome, SliceRow, SliceStep, StringOut, StringsFilters,
-    SummaryAnnotator, SymbolCallEdge, SymbolEvidenceKind, SymbolImport, SymbolSummary, TaintFilters,
-    TaintOutcome, TaintRecord, TaintReport, UnresolvedCallEvidence, VarOut, VarsFilters,
+    NativeExportPhase, NativeExportProgress, OperationOperandOut, OperationOut, OperationsFilters,
+    PathFilters, PathFunctionRow, PathOutcome, PathTerminalCallRow, PrecisionClass, RefOut, RefsFilters,
+    ResolutionCoverageDeclRow, ResolutionCoverageFileRow, ResolutionCoverageFilters, ResolveFilters,
+    ResolveOutcome, ResolveTrace, SearchFilters, SearchHit, SliceFilters, SliceOutcome, SliceRow, SliceStep,
+    StringOut, StringsFilters, SummaryAnnotator, SymbolCallEdge, SymbolEvidenceKind, SymbolImport,
+    SymbolSummary, TaintFilters, TaintOutcome, TaintRecord, TaintReport, UnresolvedCallEvidence, VarOut,
+    VarsFilters,
 };
 pub use bonsai_inspect::{
     chain_matches_filters, chain_matches_filters_for_hit, chain_to_names, compute_flow_id,
@@ -5014,6 +5015,29 @@ impl Export<'_> {
                 compiled_propagations: options.compiled_propagations,
             },
             writer,
+        )
+    }
+
+    pub fn write_native_json_with_progress<W, F>(
+        &self,
+        options: NativeExportOptions,
+        writer: &mut W,
+        on_progress: F,
+    ) -> serde_json::Result<()>
+    where
+        W: Write + ?Sized,
+        F: Fn(bonsai_browse::NativeExportProgress),
+    {
+        self.project.refresh_from_disk_best_effort();
+        bonsai_browse::write_native_export_json_with_config_and_progress(
+            &self.project.workspace,
+            &self.project.root,
+            bonsai_browse::NativeExportConfig {
+                full_propagations: options.full_propagations,
+                compiled_propagations: options.compiled_propagations,
+            },
+            writer,
+            on_progress,
         )
     }
 

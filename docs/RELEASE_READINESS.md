@@ -6,9 +6,9 @@ not duplicate dated performance history.
 
 ## Status
 
-The v0.2.6 local release pass completed on 2026-08-21. Documentation claims,
+The v0.2.6 local release pass completed on 2026-08-22. Documentation claims,
 links, command examples, current repository counts, and the rulepack validator
-were rechecked on that date. The release candidate also passed 228
+were rechecked during the pass. The release candidate also passed 228
 release security unit tests, 36 release rulepack conformance tests, 88
 architecture invariants, 1,320 release-binary command/switch checks, 443
 focused CLI integration tests, standalone execution, and the complete
@@ -59,7 +59,7 @@ The final local pass completed these checks with zero failures:
 | Release binary build-path privacy | Passed |
 | Documentation structure, links, navigation, binary help claims, and skill copies | Passed |
 | Native archive checksum and fresh-profile relocation smoke | Passed on macOS arm64 |
-| Build-artifact size gate | 28.36 GiB / 32 GiB combined limit (workspace and privacy-safe release targets) |
+| Build-artifact size gate | 31.54 GiB / 32 GiB combined limit (workspace and privacy-safe release targets) |
 
 The artifact measurement includes the retained workspace test generations and
 the privacy-remapped optimized CLI build. It remains below the enforced local
@@ -143,67 +143,72 @@ repository contains no defect.
 
 ## Real-project language matrix
 
-On 2026-08-14, the release candidate was exercised against one public
-production repository for every registered language adapter. Each checkout
-was shallow, pinned to the tested commit, processed alone, and deleted before
-the next checkout. The matrix covered jq, fmt, CommandLineParser, args, Plug,
-Cowboy, chi, Gson, Express, Timber, LuaSocket, AFNetworking, Mojolicious, Slim,
-Requests, Rack, ripgrep, os-lib, Alamofire, and Axios.
+On 2026-08-21 and 2026-08-22, the release candidate was exercised against one
+public production repository for every registered language adapter. Each
+checkout was shallow, processed alone under `/tmp`, and removed with its
+workspace cache before the next checkout. The matrix covered libuv, fmt,
+Polly, dart-lang/http, Phoenix, Cowboy, Gin, Hadoop, ESLint, Ktor, Kong,
+AFNetworking, Mojolicious, Laravel, Django, Rails, Tokio, Cats, SwiftNIO, and
+Nest.
 
-Across the 20 checkouts, the CLI indexed 2,388 source files, 38,264
-declarations, and 251,735 call sites. The matrix exercised filesystem and
-context views, structural indexing, declarations, classes, imports,
-entrypoints, calls, diagnostics, search, references, inspect, trace,
-read-file, AST/HIR/CFG debugging, resolution, native export, security
-inventories, taint analysis, and cache reporting. A selected exact declaration
-in every language round-tripped through inspect and the AST/HIR/CFG views, and
-every JSON/export/security result passed schema parsing.
+Across those 20 checkouts, the compiler admitted 31,325 source files. Every
+adapter completed structural indexing, diagnostics, and a production-profile
+security analysis without a work cap or guessed call edge. The largest Java
+case was Hadoop at 9,114 admitted files; its empty-analysis-cache production
+taint run completed in 49.42 seconds with 2.54 GB maximum RSS. A separate
+Express checkout exercised every public top-level command, all security and
+debug subcommands, structural and semantic indexing, watch refresh, paging,
+selectors, HTML output, all four export formats, cache lifecycle operations,
+and captured/no-color output. JSON, SARIF, HTML, GraphML, Cypher, and NetworkX
+artifacts were parsed or structurally checked after emission.
 
 This is a command and frontend integration gate, not a claim that every file
 in every repository has complete static semantics. C/C++ preprocessor
-environments, Objective-C SDK macros, Perl grammar gaps, and mutually
-exclusive Swift build branches can remain unresolved without the build-time
-configuration that selects or expands them. Those files produce syntax or
-resolution diagnostics and make `analysis_complete` false; they are never
-silently skipped, capped, or connected through guessed edges. The run exposed
-and closed adapter-selection, parse-recovery, and rule-precision defects in
-C/C++, C#, Dart, Elixir, Kotlin, Objective-C, and Swift. Temporary checkouts
-and their generated workspace caches are not retained after the gate.
+environments, Objective-C SDK macros, mutually exclusive Swift build
+branches, and Kotlin syntax newer than the bundled grammar can remain
+unresolved without the build configuration or grammar support needed to parse
+them exactly. Those files produce syntax or resolution diagnostics and make
+`analysis_complete` false; they are never silently skipped, capped, or
+connected through guessed edges. The run exposed and closed C# file-directive,
+Ruby ERB statement-boundary, and TypeScript import-type recovery defects.
+Temporary checkouts and their generated workspace caches are not retained
+after the gate.
 
 ## Large-workspace scale gate
 
 The required release test uses the sibling 30,055-source Elasticsearch
-checkout pinned by the release workflow at `e9741368da0`. On August 21, the
-current release candidate completed the six-test exact gate in 685.87 seconds
-under the 3 GiB scheduler, including a deliberately empty-cache semantic
-generation. That generation took 442.84 seconds and a fresh process validated
-and reopened it in 2.59 seconds. For memory context, the prior instrumented
+checkout pinned by the release workflow at `e9741368da0`. On August 22, the
+current release candidate completed the six-test exact gate in 254.54 seconds
+under the 3 GiB scheduler while reusing the independently generated semantic
+cache. The most recent deliberately empty-cache semantic generation took
+442.84 seconds and a fresh process validated and reopened it in 2.59 seconds.
+For memory context, the prior instrumented
 August 20 empty-cache semantic run recorded 3,788,292,096 bytes maximum RSS
 and zero swaps; its fresh-process reopen used 99,287,040 bytes maximum RSS.
 
 | Operation | Time | Enforced SLO |
 |---|---:|---:|
-| Fresh-cache structural index | 64.63 s | 90 s |
-| Warm structural index | 3.88 s | 10 s |
+| Fresh-cache structural index | 62.63 s | 90 s |
+| Warm structural index | 4.20 s | 10 s |
 | Cold semantic generation | 442.84 s | completion required |
-| Fresh-process semantic reuse | 2.59 s | 15 s |
-| Default inspect | 7.44 s | 30 s |
-| Exact raw-taint inspect | 28.73 s | 30 s |
-| Fresh-cache production taint | 14.29 s | 45 s |
-| Warm production taint | 10.82 s | 30 s |
-| `tree --max-depth 1` | 0.02 s | 30 s |
-| Search | 4.11 s | 30 s |
-| Definitions | 8.83 s | 30 s |
-| Imports | 7.94 s | 30 s |
-| Classes | 8.65 s | 30 s |
-| Entry points | 13.13 s | 30 s |
-| Calls | 3.97 s | 30 s |
-| Arguments | 6.17 s | 30 s |
-| Scoped `read-file` | 2.00 s | 30 s |
-| Source inventory | 4.44 s | 30 s |
-| High-severity sink inventory | 23.28 s | 30 s |
-| Sanitizer inventory | 16.61 s | 30 s |
-| Dependency inventory | 11.45 s | 30 s |
+| Fresh-process semantic reuse | 2.51 s | 15 s |
+| Default inspect | 7.48 s | 30 s |
+| Exact raw-taint inspect | 27.77 s | 30 s |
+| Fresh-cache production taint | 31.33 s | 45 s |
+| Warm production taint | 12.07 s | 30 s |
+| `tree --max-depth 1` | 0.03 s | 30 s |
+| Search | 3.97 s | 30 s |
+| Definitions | 8.85 s | 30 s |
+| Imports | 7.97 s | 30 s |
+| Classes | 9.00 s | 30 s |
+| Entry points | 12.40 s | 30 s |
+| Calls | 3.68 s | 30 s |
+| Arguments | 5.78 s | 30 s |
+| Scoped `read-file` | 1.73 s | 30 s |
+| Source inventory | 3.68 s | 30 s |
+| High-severity sink inventory | 20.63 s | 30 s |
+| Sanitizer inventory | 13.30 s | 30 s |
+| Dependency inventory | 9.90 s | 30 s |
 
 Command:
 
@@ -245,7 +250,7 @@ from 8.41 to 4.05 seconds and maximum RSS from roughly 690 MB to 77,070,336
 bytes; it still rebuilds on any source-ledger mismatch.
 
 The current release gate subsequently measured the same exact structural work
-at 64.63 seconds cold and 3.88 seconds warm. The earlier figures above remain
+at 62.63 seconds cold and 4.20 seconds warm. The earlier figures above remain
 the instrumented CPU/RSS run; the current figures are the release SLO run.
 
 The cold semantic row is a deliberate one-time whole-workspace build, not a

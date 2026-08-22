@@ -457,6 +457,38 @@ fn compiler_syntax_header_replays_adapter_call_targets_without_body_decode() {
 }
 
 #[test]
+fn compiler_syntax_header_replays_adapter_receiver_ancestry_without_body_decode() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("models.py");
+    let vfs = Arc::new(Vfs::new());
+    let file = vfs.write(
+        path.to_string_lossy().into_owned(),
+        "class Base:\n    pass\n\nclass Child(Base):\n    pass\n",
+    );
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_python::PythonAdapter::new()));
+    let db = AnalyzerDb::new(Arc::clone(&vfs), Arc::clone(&registry));
+    db.set_workspace_root(root.path().to_path_buf());
+    db.save_compiler_object_sidecar(root.path())
+        .expect("save compiler objects");
+
+    let reopened = AnalyzerDb::new(vfs, registry);
+    reopened.set_workspace_root(root.path().to_path_buf());
+    let header = reopened
+        .compiler_syntax_header_uncached(file)
+        .expect("load independent syntax header");
+    assert!(
+        header
+            .receiver_types
+            .iter()
+            .any(|receiver| { receiver.name == "Child" && receiver.bases == ["Base".to_string()] }),
+        "adapter-declared direct bases must survive the independently decoded projection: {:?}",
+        header.receiver_types
+    );
+    assert_eq!(reopened.stats().cached_decl_indexes, 0);
+}
+
+#[test]
 fn scoped_workspace_reuses_complete_objects_by_stable_file_identity() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 

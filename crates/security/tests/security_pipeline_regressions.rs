@@ -1296,6 +1296,18 @@ fn taint_analysis_schedules_only_source_groups_that_can_reach_sinks() {
     let mut taint_chain_ticks = 0u64;
     let mut reachable_callgraph_total = None;
     let mut reachable_callgraph_ticks = 0u64;
+    let mut compiler_ir_total = None;
+    let mut compiler_ir_ticks = 0u64;
+    let matcher_phase_labels = [
+        "filtering source anchors",
+        "planning source syntax",
+        "matching source bodies",
+        "filtering sink anchors",
+        "planning sink syntax",
+        "matching sink bodies",
+    ];
+    let mut matcher_totals = std::collections::BTreeMap::new();
+    let mut matcher_ticks = std::collections::BTreeMap::new();
     let mut notes: Vec<(&'static str, String)> = Vec::new();
     let report = bonsai_security::run_taint_analysis_with_phase_progress(
         &ws,
@@ -1310,6 +1322,12 @@ fn taint_analysis_schedules_only_source_groups_that_can_reach_sinks() {
                 if label == "building source-reachable callgraph" {
                     reachable_callgraph_total = Some(total);
                 }
+                if label == "compiling workspace IR" {
+                    compiler_ir_total = Some(total);
+                }
+                if matcher_phase_labels.contains(&label) {
+                    matcher_totals.insert(label, total);
+                }
             }
             bonsai_security::AnalysisProgress::PhaseTicked => {
                 if current_phase == Some("building taint chains") {
@@ -1317,6 +1335,12 @@ fn taint_analysis_schedules_only_source_groups_that_can_reach_sinks() {
                 }
                 if current_phase == Some("building source-reachable callgraph") {
                     reachable_callgraph_ticks += 1;
+                }
+                if current_phase == Some("compiling workspace IR") {
+                    compiler_ir_ticks += 1;
+                }
+                if let Some(label) = current_phase.filter(|label| matcher_phase_labels.contains(label)) {
+                    *matcher_ticks.entry(label).or_insert(0_u64) += 1;
                 }
             }
             bonsai_security::AnalysisProgress::PhaseFinished => {
@@ -1336,6 +1360,20 @@ fn taint_analysis_schedules_only_source_groups_that_can_reach_sinks() {
         reachable_callgraph_ticks > 0,
         "source-reachable callgraph should report exact dynamic compiler units"
     );
+    assert_eq!(compiler_ir_total, Some(ws.vfs().all_files().len() as u64));
+    assert_eq!(compiler_ir_ticks, compiler_ir_total.unwrap());
+    for label in matcher_phase_labels {
+        let total = matcher_totals
+            .get(label)
+            .copied()
+            .unwrap_or_else(|| panic!("missing staged matcher progress for {label}"));
+        assert!(total > 0, "{label} must announce real compiler work");
+        assert_eq!(
+            matcher_ticks.get(label).copied().unwrap_or(0),
+            total,
+            "{label} must tick exactly once for each announced unit"
+        );
+    }
     assert!(
         notes
             .iter()

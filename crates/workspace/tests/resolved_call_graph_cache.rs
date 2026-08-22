@@ -224,15 +224,17 @@ fn source_reachable_progress_counts_each_compiled_caller_file_once() {
             .unwrap_or_else(|| panic!("missing {name}"));
         bonsai_common::FuncId::new(symbol.raw())
     };
-    let completed = std::cell::Cell::new(0_u64);
+    let completed = std::sync::atomic::AtomicU64::new(0);
     let reachable = ws.source_reachable_resolved_call_graph_with_progress(
         &[func("source")],
         &[func("sink")],
         Some(bonsai_common::Precision::Narrowed),
-        || completed.set(completed.get() + 1),
+        || {
+            completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        },
     );
 
-    assert_eq!(completed.get(), 1);
+    assert_eq!(completed.load(std::sync::atomic::Ordering::Relaxed), 1);
     assert_eq!(reachable.files.len(), 1);
     assert_eq!(reachable.reached_targets, 1);
 }
@@ -354,12 +356,14 @@ fn persisted_source_reachable_scope_matches_cold_compiler_fixed_point() {
             .unwrap_or_else(|| panic!("missing {name}"));
         bonsai_common::FuncId::new(symbol.raw())
     };
-    let warm_completed = std::cell::Cell::new(0_u64);
+    let warm_completed = std::sync::atomic::AtomicU64::new(0);
     let warm_scope = warm.source_reachable_resolved_call_graph_with_progress(
         &[warm_func("source")],
         &[warm_func("target1"), warm_func("target2")],
         Some(bonsai_common::Precision::Narrowed),
-        || warm_completed.set(warm_completed.get() + 1),
+        || {
+            warm_completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        },
     );
     let warm_edges = warm_scope
         .graph
@@ -390,7 +394,7 @@ fn persisted_source_reachable_scope_matches_cold_compiler_fixed_point() {
     assert_eq!(warm_edges, cold_edges);
     assert_eq!(warm_scope.reached_targets, cold_reached_targets);
     assert!(
-        warm_completed.get() > 0,
+        warm_completed.load(std::sync::atomic::Ordering::Relaxed) > 0,
         "persisted relation replay must expose its completed planning units"
     );
 

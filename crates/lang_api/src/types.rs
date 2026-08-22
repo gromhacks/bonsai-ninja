@@ -722,6 +722,21 @@ pub struct CompilerSyntaxHeader {
     /// scope and ordering remain enforced by the full matcher body.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub type_aliases: Vec<TypeAliasBinding>,
+    /// Class-like declarations that contribute cross-file receiver ancestry.
+    /// The owning adapter supplies the declaration identity and direct bases;
+    /// shared consumers may only compute the transitive type relation from
+    /// these facts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub receiver_types: Vec<CompilerReceiverTypeHeader>,
+}
+
+/// One adapter-lowered class-like declaration needed for receiver ancestry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerReceiverTypeHeader {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualified_name: Option<String>,
+    pub bases: Vec<String>,
 }
 
 /// Independently decodable browse/search terms projected from one compiler
@@ -1226,7 +1241,36 @@ impl CompilerSyntaxHeader {
             }
         }
 
-        let mut out = Self::default();
+        let receiver_types = index
+            .defs
+            .iter()
+            .filter(|decl| {
+                matches!(
+                    decl.kind,
+                    DeclKind::Class
+                        | DeclKind::Struct
+                        | DeclKind::Trait
+                        | DeclKind::Interface
+                        | DeclKind::Enum
+                ) && !decl.bases.is_empty()
+            })
+            .map(|decl| CompilerReceiverTypeHeader {
+                name: decl.name.clone(),
+                qualified_name: decl.qualified_name.clone(),
+                bases: decl.bases.clone(),
+            })
+            .collect();
+        let mut out = Self {
+            receiver_types,
+            ..Self::default()
+        };
+        out.receiver_types.sort_unstable_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.qualified_name.cmp(&right.qualified_name))
+                .then_with(|| left.bases.cmp(&right.bases))
+        });
+        out.receiver_types.dedup();
         let assignment_values = index
             .assignment_values
             .iter()

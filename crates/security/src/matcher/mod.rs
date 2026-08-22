@@ -536,10 +536,12 @@ pub(crate) fn match_rules_against_facts_with_factory(
     factory: &Arc<RulepackTyping>,
 ) -> Vec<RuleMatch> {
     let mut on_file_done = || {};
+    let mut on_phase_progress = |_| {};
     match_rules_against_facts_with_progress_and_mode(
         ws,
         rules,
         &mut on_file_done,
+        &mut on_phase_progress,
         MatchRunConfig {
             mode: ConstraintMode::Strict,
             taint_view: None,
@@ -570,10 +572,12 @@ where
     F: FnMut(),
 {
     let factory = build_rulepack_typing(rules);
+    let mut on_phase_progress = |_| {};
     match_rules_against_facts_with_progress_and_mode(
         ws,
         rules,
         &mut on_file_done,
+        &mut on_phase_progress,
         MatchRunConfig {
             mode: ConstraintMode::Strict,
             taint_view: None,
@@ -586,23 +590,76 @@ where
     )
 }
 
-/// Batch matcher over a caller-filtered file set. Security production
-/// profile paths use this to avoid matching files that will be dropped
-/// by path filters anyway.
-pub(crate) fn match_rules_against_facts_with_progress_on_files<F>(
+/// Exact staged progress for broad matcher planning and body evaluation.
+///
+/// A broad match is a compiler pipeline, not one flat per-file loop: cheap
+/// raw anchors reject impossible files, compact syntax/import headers narrow
+/// the survivors, and only then are exact adapter-lowered bodies decoded.
+/// Reporting those stages separately keeps terminal progress tied to work
+/// that is actually completing instead of emitting a burst of synthetic
+/// "skipped file" ticks after planning has already finished.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum MatcherProgressStage {
+    RawAnchors,
+    SyntaxHeaders,
+    ReceiverAncestry,
+    ReceiverEvidence,
+    ExactBodies,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum MatcherProgress {
+    PhaseStarted {
+        stage: MatcherProgressStage,
+        total: usize,
+    },
+    UnitCompleted,
+    PhaseFinished,
+}
+
+fn load_receiver_ancestry_with_progress<F>(
+    ws: &Workspace,
+    on_completed: &mut F,
+) -> Arc<bonsai_index::ReceiverAncestry>
+where
+    F: FnMut() + ?Sized,
+{
+    std::thread::scope(|scope| {
+        // Compiler-object workers report through a bounded channel so the UI
+        // callback remains on its coordinating thread. This keeps progress
+        // live without making a terminal renderer `Send` or letting display
+        // work alter compiler scheduling.
+        let (progress_tx, progress_rx) = std::sync::mpsc::sync_channel::<()>(64);
+        let worker_tx = progress_tx.clone();
+        let worker = scope.spawn(move || {
+            ws.compiler_receiver_ancestry_with_progress(|| {
+                let _ = worker_tx.send(());
+            })
+        });
+        drop(progress_tx);
+        for () in progress_rx {
+            on_completed();
+        }
+        worker.join().expect("receiver ancestry worker panicked")
+    })
+}
+
+pub(crate) fn match_rules_against_facts_for_strict_with_phase_progress_on_files<F>(
     ws: &Workspace,
     rules: &[&Rule],
     files: &[FileId],
     factory: &Arc<RulepackTyping>,
-    mut on_file_done: F,
+    mut on_progress: F,
 ) -> Vec<RuleMatch>
 where
-    F: FnMut(),
+    F: FnMut(MatcherProgress),
 {
+    let mut on_file_done = || {};
     match_rules_against_facts_with_progress_and_mode(
         ws,
         rules,
         &mut on_file_done,
+        &mut on_progress,
         MatchRunConfig {
             mode: ConstraintMode::Strict,
             taint_view: None,
@@ -615,46 +672,22 @@ where
     )
 }
 
-pub(crate) fn match_rules_against_facts_for_taint_support_with_progress_on_files<F>(
+pub(crate) fn match_rules_against_facts_for_inventory_with_phase_progress_on_files<F>(
     ws: &Workspace,
     rules: &[&Rule],
     files: &[FileId],
     factory: &Arc<RulepackTyping>,
-    mut on_file_done: F,
+    mut on_progress: F,
 ) -> Vec<RuleMatch>
 where
-    F: FnMut(),
+    F: FnMut(MatcherProgress),
 {
+    let mut on_file_done = || {};
     match_rules_against_facts_with_progress_and_mode(
         ws,
         rules,
         &mut on_file_done,
-        MatchRunConfig {
-            mode: ConstraintMode::Strict,
-            taint_view: None,
-            scan_files: Some(files),
-            factory,
-            dedup_file_matches: false,
-            retention: FactRetention::Transient,
-            global_headers: None,
-        },
-    )
-}
-
-pub(crate) fn match_rules_against_facts_for_inventory_with_progress_on_files<F>(
-    ws: &Workspace,
-    rules: &[&Rule],
-    files: &[FileId],
-    factory: &Arc<RulepackTyping>,
-    mut on_file_done: F,
-) -> Vec<RuleMatch>
-where
-    F: FnMut(),
-{
-    match_rules_against_facts_with_progress_and_mode(
-        ws,
-        rules,
-        &mut on_file_done,
+        &mut on_progress,
         MatchRunConfig {
             mode: ConstraintMode::Strict,
             taint_view: None,
@@ -678,11 +711,13 @@ pub(crate) fn match_rule_against_facts_with_taint_view(
     global_headers: &Arc<GlobalIndex>,
 ) -> Vec<RuleMatch> {
     let mut on_file_done = || {};
+    let mut on_phase_progress = |_| {};
     let factory = build_rulepack_typing(&[rule]);
     match_rules_against_facts_with_progress_and_mode(
         ws,
         &[rule],
         &mut on_file_done,
+        &mut on_phase_progress,
         MatchRunConfig {
             mode: ConstraintMode::Strict,
             taint_view: Some(taint_view),
@@ -1154,20 +1189,22 @@ pub(crate) fn rule_example_has_arg_index(ws: &Workspace, rule: &Rule, wanted_ind
 /// semantic taint graph is authoritative for whether user-controlled
 /// data reaches a sink, so sink-side constraints are ignored in this
 /// mode.
-pub(crate) fn match_rules_against_facts_for_taint_with_progress_on_files<F>(
+pub(crate) fn match_rules_against_facts_for_taint_with_phase_progress_on_files<F>(
     ws: &Workspace,
     rules: &[&Rule],
     files: &[FileId],
     factory: &Arc<RulepackTyping>,
-    mut on_file_done: F,
+    mut on_progress: F,
 ) -> Vec<RuleMatch>
 where
-    F: FnMut(),
+    F: FnMut(MatcherProgress),
 {
+    let mut on_file_done = || {};
     match_rules_against_facts_with_progress_and_mode(
         ws,
         rules,
         &mut on_file_done,
+        &mut on_progress,
         MatchRunConfig {
             mode: ConstraintMode::TaintEndpoint,
             taint_view: None,
@@ -1194,10 +1231,12 @@ pub(crate) fn match_rules_against_facts_for_sink_inventory_with_progress_on_file
 where
     F: FnMut(),
 {
+    let mut on_phase_progress = |_| {};
     match_rules_against_facts_with_progress_and_mode(
         ws,
         rules,
         &mut on_file_done,
+        &mut on_phase_progress,
         MatchRunConfig {
             mode: ConstraintMode::Inventory,
             taint_view: None,
@@ -1210,14 +1249,136 @@ where
     )
 }
 
-fn match_rules_against_facts_with_progress_and_mode<F>(
+pub(crate) fn match_rules_against_facts_for_sink_inventory_with_phase_progress_on_files<F>(
+    ws: &Workspace,
+    rules: &[&Rule],
+    files: &[FileId],
+    factory: &Arc<RulepackTyping>,
+    mut on_progress: F,
+) -> Vec<RuleMatch>
+where
+    F: FnMut(MatcherProgress),
+{
+    let mut on_file_done = || {};
+    match_rules_against_facts_with_progress_and_mode(
+        ws,
+        rules,
+        &mut on_file_done,
+        &mut on_progress,
+        MatchRunConfig {
+            mode: ConstraintMode::Inventory,
+            taint_view: None,
+            scan_files: Some(files),
+            factory,
+            dedup_file_matches: true,
+            retention: FactRetention::Transient,
+            global_headers: None,
+        },
+    )
+}
+
+fn parallel_map_with_progress<T, R, M, P>(items: &[T], map: M, on_completed: &mut P) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+    M: Fn(&T) -> R + Send + Sync,
+    P: FnMut() + ?Sized,
+{
+    if items.len() <= 1 {
+        return items
+            .iter()
+            .map(|item| {
+                let result = map(item);
+                on_completed();
+                result
+            })
+            .collect();
+    }
+
+    collect_parallel_with_progress(
+        items.len(),
+        move |tick_tx| {
+            use rayon::prelude::*;
+            items
+                .par_iter()
+                .map(|item| {
+                    let result = map(item);
+                    let _ = tick_tx.send(());
+                    result
+                })
+                .collect::<Vec<_>>()
+        },
+        on_completed,
+    )
+}
+
+fn parallel_into_map_with_progress<T, R, M, P>(items: Vec<T>, map: M, on_completed: &mut P) -> Vec<R>
+where
+    T: Send,
+    R: Send,
+    M: Fn(T) -> R + Send + Sync,
+    P: FnMut() + ?Sized,
+{
+    if items.len() <= 1 {
+        return items
+            .into_iter()
+            .map(|item| {
+                let result = map(item);
+                on_completed();
+                result
+            })
+            .collect();
+    }
+
+    collect_parallel_with_progress(
+        items.len(),
+        move |tick_tx| {
+            use rayon::prelude::*;
+            items
+                .into_par_iter()
+                .map(|item| {
+                    let result = map(item);
+                    let _ = tick_tx.send(());
+                    result
+                })
+                .collect::<Vec<_>>()
+        },
+        on_completed,
+    )
+}
+
+fn collect_parallel_with_progress<R, P, W>(item_count: usize, worker: W, on_completed: &mut P) -> Vec<R>
+where
+    R: Send,
+    P: FnMut() + ?Sized,
+    W: FnOnce(mpsc::Sender<()>) -> Vec<R> + Send,
+{
+    let (tick_tx, tick_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(move || worker(tick_tx));
+        for _ in 0..item_count {
+            if tick_rx.recv().is_err() {
+                break;
+            }
+            on_completed();
+        }
+        match worker.join() {
+            Ok(results) => results,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    })
+}
+
+fn match_rules_against_facts_with_progress_and_mode<F, P>(
     ws: &Workspace,
     rules: &[&Rule],
     on_file_done: &mut F,
+    on_phase_progress: &mut P,
     config: MatchRunConfig<'_, '_>,
 ) -> Vec<RuleMatch>
 where
     F: FnMut(),
+    P: FnMut(MatcherProgress),
 {
     let MatchRunConfig {
         mode,
@@ -1262,27 +1423,36 @@ where
     // cheap raw anchors before opening import/syntax headers or lowering any
     // body. This is candidate planning only; every surviving rule still goes
     // through exact adapter IR and matcher constraints below.
-    use rayon::prelude::*;
-    let raw_scan_files = files
-        .par_iter()
-        .copied()
-        .filter(|file| {
-            let Some(adapter) = ws.db().adapter_for(*file) else {
-                return false;
-            };
-            let Some(file_rules) = prepared_by_language.get(adapter.language_id().as_str()) else {
-                return false;
-            };
+    if total > 0 {
+        on_phase_progress(MatcherProgress::PhaseStarted {
+            stage: MatcherProgressStage::RawAnchors,
+            total,
+        });
+    }
+    let raw_scan_files = parallel_map_with_progress(
+        &files,
+        |file| {
+            let adapter = ws.db().adapter_for(*file)?;
+            let file_rules = prepared_by_language.get(adapter.language_id().as_str())?;
             let Ok(snapshot) = ws.db().vfs().snapshot(*file) else {
-                return false;
+                return None;
             };
-            file_rules.syntax_target_possible_in_text(
-                snapshot.text.as_ref(),
-                mode,
-                adapter.capabilities().call_text_prefilter,
-            )
-        })
-        .collect::<Vec<_>>();
+            file_rules
+                .syntax_target_possible_in_text(
+                    snapshot.text.as_ref(),
+                    mode,
+                    adapter.capabilities().call_text_prefilter,
+                )
+                .then_some(*file)
+        },
+        &mut || on_phase_progress(MatcherProgress::UnitCompleted),
+    )
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if total > 0 {
+        on_phase_progress(MatcherProgress::PhaseFinished);
+    }
     // Retrieval/path-filtered workspaces intentionally begin without a
     // whole-workspace store attached. Their candidates retain stable full
     // workspace FileIds, so bind the existing immutable generation to this
@@ -1332,19 +1502,17 @@ where
     // actually change through a base type.
     let needs_receiver_ancestry = prepared.iter().any(prepared_rule_needs_receiver_base_map);
     let mut global_file_indexes = global_headers.cloned();
-    let mut inventory_receiver_ancestry: Option<Arc<bonsai_index::ReceiverAncestry>> = None;
+    let mut receiver_ancestry: Option<Arc<bonsai_index::ReceiverAncestry>> = None;
     if let Some(started) = headers_started {
         bonsai_diagnostics::debug_log!(
             "security-phase",
             "matcher symbol projection: {:.3}s declarations={} receiver_types={}",
             started.elapsed().as_secs_f64(),
             global_file_indexes.as_ref().map_or(0, |headers| headers.len()),
-            inventory_receiver_ancestry
-                .as_ref()
-                .map_or(0, |ancestry| ancestry.len())
+            receiver_ancestry.as_ref().map_or(0, |ancestry| ancestry.len())
         );
     }
-    let mut receiver_base_map = global_file_indexes
+    let receiver_base_map = global_file_indexes
         .as_ref()
         .map_or_else(AHashMap::new, |headers| {
             workspace_receiver_base_map_if_needed(&prepared, mode, headers.as_ref())
@@ -1359,12 +1527,12 @@ where
     let syntax_filter_ns = AtomicU64::new(0);
     let build_scan_plan = |candidate_files: &[FileId],
                            receiver_base_map: &AHashMap<String, Vec<String>>,
-                           inventory_receiver_ancestry: Option<&Arc<bonsai_index::ReceiverAncestry>>,
-                           receiver_ancestry_complete: bool| {
-        use rayon::prelude::*;
-        candidate_files
-            .par_iter()
-            .map(|&file| {
+                           receiver_ancestry: Option<&Arc<bonsai_index::ReceiverAncestry>>,
+                           receiver_ancestry_complete: bool,
+                           on_completed: &mut dyn FnMut()| {
+        parallel_map_with_progress(
+            candidate_files,
+            |&file| {
                 let adapter = ws.db().adapter_for(file)?;
                 let language = adapter.language_id();
                 let file_rules = prepared_by_language.get(language.as_str())?;
@@ -1405,10 +1573,10 @@ where
                 if let Some(started) = syntax_load_started {
                     record_elapsed_ns(&syntax_load_ns, started);
                 }
-                if let Some(ancestry) = inventory_receiver_ancestry.as_ref() {
+                if let Some(ancestry) = receiver_ancestry.as_ref() {
                     ancestry.apply_to_syntax_header(&mut syntax);
                 }
-                if inventory_receiver_ancestry.is_none() {
+                if receiver_ancestry.is_none() {
                     enrich_compiler_syntax_header_receiver_types(&mut syntax, receiver_base_map);
                 }
                 let syntax_filter_started = debug_security_phase.then(Instant::now);
@@ -1439,20 +1607,31 @@ where
                     deferred_plan,
                     needs_workspace_constructor_resolution,
                 ))
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
+            },
+            on_completed,
+        )
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
     };
     let ancestry_already_complete =
-        !needs_receiver_ancestry || global_file_indexes.is_some() || inventory_receiver_ancestry.is_some();
+        !needs_receiver_ancestry || global_file_indexes.is_some() || receiver_ancestry.is_some();
+    if !raw_scan_files.is_empty() {
+        on_phase_progress(MatcherProgress::PhaseStarted {
+            stage: MatcherProgressStage::SyntaxHeaders,
+            total: raw_scan_files.len(),
+        });
+    }
     let initial_plan = build_scan_plan(
         &raw_scan_files,
         &receiver_base_map,
-        inventory_receiver_ancestry.as_ref(),
+        receiver_ancestry.as_ref(),
         ancestry_already_complete,
+        &mut || on_phase_progress(MatcherProgress::UnitCompleted),
     );
+    if !raw_scan_files.is_empty() {
+        on_phase_progress(MatcherProgress::PhaseFinished);
+    }
     let mut deferred_plans = Vec::new();
     let mut scan_plan = Vec::new();
     let mut needs_workspace_constructor_resolution = false;
@@ -1465,42 +1644,48 @@ where
         }
     }
     if !deferred_plans.is_empty() {
-        let ancestry_started = debug_security_phase.then(Instant::now);
-        if matches!(mode, ConstraintMode::Inventory) {
-            inventory_receiver_ancestry = Some(ws.compiler_receiver_ancestry());
-        } else if global_file_indexes.is_none() {
-            global_file_indexes = Some(matcher_global_headers(ws, retention));
-            receiver_base_map = global_file_indexes
-                .as_ref()
-                .map_or_else(AHashMap::new, |headers| {
-                    workspace_receiver_base_map_if_needed(&prepared, mode, headers.as_ref())
-                });
-        }
         let deferred_file_count = deferred_plans.len();
-        use rayon::prelude::*;
-        let completed_deferred = deferred_plans
-            .into_par_iter()
-            .filter_map(
-                |(file, (rules, mut syntax, source_text, compiler_imports, language))| {
-                    if let Some(ancestry) = inventory_receiver_ancestry.as_ref() {
-                        ancestry.apply_to_syntax_header(&mut syntax);
-                    } else {
-                        enrich_compiler_syntax_header_receiver_types(&mut syntax, &receiver_base_map);
-                    }
-                    let file_rules = prepared_by_language.get(&language)?;
-                    let (rules, _, needs_constructor_resolution) = file_rules
-                        .filtered_rule_refs_for_syntax_header(
-                            rules,
-                            &syntax,
-                            source_text.as_ref(),
-                            compiler_imports.as_ref(),
-                            &language,
-                            true,
-                        );
-                    (!rules.is_empty()).then_some((file, rules, needs_constructor_resolution))
-                },
-            )
-            .collect::<Vec<_>>();
+        on_phase_progress(MatcherProgress::PhaseStarted {
+            stage: MatcherProgressStage::ReceiverAncestry,
+            total: ws.db().vfs().all_files().len(),
+        });
+        let ancestry_started = debug_security_phase.then(Instant::now);
+        if receiver_ancestry.is_none() && global_file_indexes.is_none() {
+            receiver_ancestry = Some(load_receiver_ancestry_with_progress(ws, &mut || {
+                on_phase_progress(MatcherProgress::UnitCompleted);
+            }));
+        }
+        on_phase_progress(MatcherProgress::PhaseFinished);
+        on_phase_progress(MatcherProgress::PhaseStarted {
+            stage: MatcherProgressStage::ReceiverEvidence,
+            total: deferred_file_count,
+        });
+        let completed_deferred = parallel_into_map_with_progress(
+            deferred_plans,
+            |(file, (rules, mut syntax, source_text, compiler_imports, language))| {
+                if let Some(ancestry) = receiver_ancestry.as_ref() {
+                    ancestry.apply_to_syntax_header(&mut syntax);
+                } else {
+                    enrich_compiler_syntax_header_receiver_types(&mut syntax, &receiver_base_map);
+                }
+                let file_rules = prepared_by_language.get(&language)?;
+                let (rules, _, needs_constructor_resolution) = file_rules
+                    .filtered_rule_refs_for_syntax_header(
+                        rules,
+                        &syntax,
+                        source_text.as_ref(),
+                        compiler_imports.as_ref(),
+                        &language,
+                        true,
+                    );
+                (!rules.is_empty()).then_some((file, rules, needs_constructor_resolution))
+            },
+            &mut || on_phase_progress(MatcherProgress::UnitCompleted),
+        )
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        on_phase_progress(MatcherProgress::PhaseFinished);
         for (file, rules, needs_constructor_resolution) in completed_deferred {
             needs_workspace_constructor_resolution |= needs_constructor_resolution;
             scan_plan.push((file, rules));
@@ -1513,9 +1698,7 @@ where
                 started.elapsed().as_secs_f64(),
                 deferred_file_count,
                 global_file_indexes.as_ref().map_or(0, |headers| headers.len()),
-                inventory_receiver_ancestry
-                    .as_ref()
-                    .map_or(0, |ancestry| ancestry.len())
+                receiver_ancestry.as_ref().map_or(0, |ancestry| ancestry.len())
             );
         }
     }
@@ -1566,6 +1749,13 @@ where
     });
     let compiler_session_started = debug_security_phase.then(Instant::now);
     let body_files = scan_plan.iter().map(|(file, _)| *file).collect::<Vec<_>>();
+    let has_body_work = !scan_plan.is_empty();
+    if has_body_work {
+        on_phase_progress(MatcherProgress::PhaseStarted {
+            stage: MatcherProgressStage::ExactBodies,
+            total: scan_plan.len(),
+        });
+    }
     prepare_compiler_object_session_for_body_scan(ws, &body_files, &prepared_by_language, retention);
     if let Some(started) = compiler_session_started {
         bonsai_diagnostics::debug_log!(
@@ -1632,7 +1822,7 @@ where
             Some(headers) => ws.db().remap_decl_index_to_headers(headers.as_ref(), file_index),
             None => file_index,
         };
-        if let Some(ancestry) = inventory_receiver_ancestry.as_ref() {
+        if let Some(ancestry) = receiver_ancestry.as_ref() {
             ancestry.apply_to_decl_index(&mut file_index);
         }
         if let (Some(started), Some(timings)) = (remap_started, phase_timings.as_ref()) {
@@ -1662,14 +1852,19 @@ where
         (file_out, true)
     };
     if parallel_width <= 1 || scan_plan.len() <= 1 {
-        return scan_plan
+        let results = scan_plan
             .iter()
             .flat_map(|(file, rule_refs)| {
                 let (file_out, _) = scan_planned_file(*file, rule_refs);
                 on_file_done();
+                on_phase_progress(MatcherProgress::UnitCompleted);
                 file_out
             })
             .collect();
+        if has_body_work {
+            on_phase_progress(MatcherProgress::PhaseFinished);
+        }
+        return results;
     }
     let run_parallel_scan = |pool: Option<&rayon::ThreadPool>| {
         let scan_total = scan_plan.len();
@@ -1713,6 +1908,7 @@ where
                             );
                         }
                         on_file_done();
+                        on_phase_progress(MatcherProgress::UnitCompleted);
                     }
                     Err(_) => break,
                 }
@@ -1757,14 +1953,18 @@ where
             }
         })
     };
-    match rayon::ThreadPoolBuilder::new()
+    let results = match rayon::ThreadPoolBuilder::new()
         .num_threads(parallel_width)
         .stack_size(matcher_worker_stack_bytes())
         .build()
     {
         Ok(pool) => run_parallel_scan(Some(&pool)),
         Err(_) => run_parallel_scan(None),
+    };
+    if has_body_work {
+        on_phase_progress(MatcherProgress::PhaseFinished);
     }
+    results
 }
 
 fn matcher_worker_count() -> usize {

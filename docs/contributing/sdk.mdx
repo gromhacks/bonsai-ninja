@@ -126,6 +126,10 @@ let project = Bonsai::new()
     .with_rulepack("./patterns")?
     .index_with_progress("./my-app", |event| match event {
         WorkspaceOpenEvent::IngestStarted => println!("Walking filesystem…"),
+        WorkspaceOpenEvent::IngestFilesStarted { files } => {
+            println!("Reading {files} source files…");
+        },
+        WorkspaceOpenEvent::IngestFileRead => print!("."),
         WorkspaceOpenEvent::IngestFinished { files } => println!("{} files", files),
         WorkspaceOpenEvent::ParseStarted { files } => println!("Parsing {} files…", files),
         WorkspaceOpenEvent::ParseFileIndexed => print!("."),
@@ -150,7 +154,10 @@ let project = Bonsai::new()
 ```
 
 The `*_with_progress` reduced-open helpers emit the same ingest/parse
-events for their narrowed file set. Path-filtered query opens may emit
+events for their narrowed file set. `IngestFilesStarted` is the exact read
+worklist after metadata/path filtering; literal queries count every source
+candidate that must be read even when fewer files survive the literal test.
+Each successful read emits one `IngestFileRead`. Path-filtered query opens may emit
 only ingest events when the selected options deliberately defer
 declaration indexing. Reduced-open projects keep that narrowed file set
 stable unless a caller explicitly re-enables auto-refresh. Query and
@@ -170,6 +177,11 @@ exact compiler files before linkage persistence, and
 `warm_idg_sidecar_and_manifest_with_progress` reports exact transfer segments
 plus accelerator, persistence, and manifest phase boundaries. Storage-only
 phases intentionally carry no synthetic percentage.
+
+Native export's `write_native_json_with_progress` reports exact
+`StructuralFiles` and `Files` counts. Compact callgraph, structural-flow, and
+taint-graph relations report indeterminate phase boundaries because counting
+them first would materialize or traverse the stream twice.
 
 ---
 

@@ -1653,6 +1653,52 @@ impl ResolvedCallGraph {
         )
     }
 
+    /// Resolve only the selected callable compiler bodies and report each
+    /// caller file as soon as its exact resolution result is complete.
+    ///
+    /// This is the progress-aware companion to
+    /// [`Self::build_with_file_semantics_for_funcs_streaming_with_context`].
+    /// The callback observes scheduling only and cannot change the selected
+    /// symbols or admitted edges.
+    pub fn build_with_file_semantics_for_funcs_streaming_with_context_and_progress<F, T, D, Q>(
+        global: &GlobalIndex,
+        aliases_for_file: F,
+        alias_targets_for_file: T,
+        included_funcs: &[FuncId],
+        context: &ResolvedCallGraphBuildContext,
+        body_for_file: D,
+        on_file: Q,
+    ) -> Self
+    where
+        F: FnMut(FileId) -> AHashMap<String, String>,
+        T: FnMut(FileId) -> AHashMap<String, AliasTarget>,
+        D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
+        Q: Fn() + Sync,
+    {
+        let included_symbols: AHashSet<SymbolId> = included_funcs
+            .iter()
+            .map(|func| SymbolId::new(func.raw()))
+            .collect();
+        let mut included_files: Vec<FileId> = included_symbols
+            .iter()
+            .filter_map(|symbol| global.declaring_file(*symbol))
+            .collect();
+        included_files.sort_unstable_by_key(|file| file.raw());
+        included_files.dedup();
+        Self::build_with_file_semantics_streaming_with_context_scoped(
+            global,
+            aliases_for_file,
+            alias_targets_for_file,
+            StreamingCallgraphScope {
+                files: &included_files,
+                symbols: Some(&included_symbols),
+            },
+            context,
+            body_for_file,
+            on_file,
+        )
+    }
+
     fn build_with_file_semantics_streaming_with_context_scoped<F, T, D, Q>(
         global: &GlobalIndex,
         mut aliases_for_file: F,

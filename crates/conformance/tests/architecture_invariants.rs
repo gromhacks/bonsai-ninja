@@ -1335,10 +1335,10 @@ fn cli_export_command_uses_sdk_export_cache_facade() {
     let command = function_body(&text, "cmd_export");
     assert!(
         command.contains("stream_default_export_cache_if_fresh")
-            && command.contains("write_native_json(&export, options)")
+            && command.contains("write_native_json(&export, options, &stage)")
             && !command.contains("warm_default_json_cache")
             && !command.contains("write_default_json_cache_streaming"),
-        "one-shot export may reuse an explicit fresh cache but must stream a cache miss directly to the requested sink"
+        "one-shot export may reuse an explicit fresh cache but must stream a cache miss directly to the requested sink through the progress-aware SDK facade"
     );
     assert!(
         function_body(&text, "warm_export_cache_for_project").contains("warm_default_json_cache"),
@@ -3983,7 +3983,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
         function_body(&security_matcher, "prewarm_language_import_package_contexts");
     let compiler_session_prewarm =
         function_body(&security_matcher, "prepare_compiler_object_session_for_body_scan");
-    let compiler_session = function_body(&compiler_object, "ensure_compiler_object_session");
+    let compiler_session = function_body(&compiler_object, "ensure_compiler_object_session_inner");
     let compiler_attachment = function_body(
         &compiler_object,
         "attach_reusable_compiler_object_store_for_files",
@@ -3994,6 +3994,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
         &security_matcher,
         "match_rules_against_facts_with_progress_and_mode",
     );
+    let parallel_matcher_map = function_body(&security_matcher, "parallel_map_with_progress");
     let remap_compiler_object = function_body(&db, "remap_decl_index_to_headers");
     assert!(
         package_contexts.contains("import_index_uncached")
@@ -4058,7 +4059,8 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && broad_matcher
                 .split_once("let raw_scan_files")
                 .and_then(|(_, tail)| tail.split_once("let imports_started"))
-                .is_some_and(|(raw_plan, _)| raw_plan.contains(".par_iter()"))
+                .is_some_and(|(raw_plan, _)| raw_plan.contains("parallel_map_with_progress"))
+            && parallel_matcher_map.contains(".par_iter()")
             && broad_matcher
                 .find("let mut scan_plan")
                 .zip(broad_matcher.find("prepare_compiler_object_session_for_body_scan"))
@@ -4147,13 +4149,17 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
     assert!(
         source_reachable.contains("target_callers_by_callee")
             && source_reachable.contains("while let Some(callee) = pending.pop()")
-            && source_reachable.contains("compiler_weighted_batches")
+            && source_reachable
+                .contains("build_with_file_semantics_for_files_streaming_with_context_and_progress")
+            && source_reachable
+                .contains("build_with_file_semantics_for_funcs_streaming_with_context_and_progress")
             && source_reachable.contains("pending_reached")
             && source_reachable.contains("pending_reverse_output")
+            && !source_reachable.contains("compiler_weighted_batches")
             && !source_reachable.contains("while changed")
             && !source_reachable.contains(".take(")
             && !source_reachable.contains(".truncate("),
-        "source/callback/return corridors must converge through exact indexed compiler worklists and memory-weighted file batches"
+        "source/callback/return corridors must converge through exact indexed continuous compiler worklists"
     );
     let idg_persist = function_body(&workspace, "build_and_persist_idg_sidecar_with_progress");
     assert!(
@@ -4823,6 +4829,7 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
     );
     let compiler_headers = function_body(&workspace, "compiler_header_index");
     let exclusive_headers = function_body(&workspace, "take_exclusive_compiler_header_index");
+    let receiver_ancestry = function_body(&workspace, "compiler_receiver_ancestry_with_progress");
     assert!(
         compiler_headers.contains("load_header_sidecar_checked")
             && compiler_headers
@@ -4832,6 +4839,15 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
             && !exclusive_headers.contains("build_global_header_index")
             && !exclusive_headers.contains("build_global_linkage_index"),
         "syntax lookup must deserialize the compiler symbol payload before its exact cold fallback and must never re-inflate file bodies at the scoped semantic phase boundary"
+    );
+    assert!(
+        receiver_ancestry.contains("ensure_compiler_object_session_with_progress")
+            && receiver_ancestry.contains("compiler_syntax_header_uncached")
+            && receiver_ancestry.contains("from_compiler_syntax_headers")
+            && !receiver_ancestry.contains("compiler_header_index()")
+            && !receiver_ancestry.contains("build_global_header_index")
+            && !receiver_ancestry.contains("global_index()"),
+        "cold receiver ancestry must stream independently decodable compiler headers instead of retaining the whole workspace declaration/body index"
     );
     let load = function_body(&idg_workspace, "load_from_disk");
     assert!(
@@ -4998,11 +5014,13 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
     );
     assert!(
         invalidation.contains("compiler_linkage.write() = None")
-            && invalidation.contains("compiler_headers.write() = None"),
+            && invalidation.contains("compiler_headers.write() = None")
+            && invalidation.contains("compiler_receiver_ancestry.write() = None"),
         "locked source invalidation must clear the compact compiler symbol snapshot"
     );
 
     let broad_matcher = function_body(&matcher, "match_rules_against_facts_with_progress_and_mode");
+    let receiver_ancestry_loader = function_body(&matcher, "load_receiver_ancestry_with_progress");
     assert!(
         broad_matcher
             .matches("compiler_file_object_uncached(file)")
@@ -5030,7 +5048,8 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
                 .is_some_and(|((((text, packages), empty), syntax), body)| {
                     text < packages && packages < empty && empty < syntax && syntax < body
                 })
-            && broad_matcher.contains("compiler_receiver_ancestry()")
+            && broad_matcher.contains("load_receiver_ancestry_with_progress")
+            && receiver_ancestry_loader.contains("compiler_receiver_ancestry_with_progress")
             && broad_matcher.contains("ancestry.apply_to_syntax_header")
             && broad_matcher.contains("ancestry.apply_to_decl_index")
             && !broad_matcher.contains("scan_decl_index"),
@@ -5228,10 +5247,19 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
         "taint source seed planning must derive carriers from exact AST bodies, not compact headers"
     );
     let analysis = read(&repo_root().join("crates/security/src/analysis/mod.rs"));
+    let taint_compiler_session = function_body(&analysis, "prepare_taint_compiler_session");
     assert!(
         function_body(&analysis, "begin_dependency_package_snapshot")
             .contains("begin_workspace_dependency_package_snapshot("),
         "the shared analysis snapshot helper must open one immutable workspace dependency snapshot"
+    );
+    assert!(
+        function_body(&analysis, "run_taint_analysis_with_phase_progress")
+            .contains("prepare_taint_compiler_session")
+            && taint_compiler_session.contains("attach_reusable_compiler_object_store_for_files")
+            && taint_compiler_session.contains("ensure_compiler_object_session_with_progress")
+            && taint_compiler_session.contains("compiling workspace IR"),
+        "taint endpoint, callgraph, and IDG phases must share one exact compiler-object generation with completed-unit progress"
     );
     for function in [
         "run_taint_analysis_with_phase_progress",

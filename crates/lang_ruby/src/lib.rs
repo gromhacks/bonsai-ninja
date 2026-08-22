@@ -8,7 +8,7 @@ use bonsai_lang_api::{
     },
     AdapterContext, AdapterError, CallArg, CallKind, CallTargetExtraction, DeclIndex, DeclKind, FlowEvent,
     GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    ModulePath, PatternBindingSite, Ref, RefKind, EMPTY_HANDLER,
+    ModulePath, ParseRecoveryEdit, PatternBindingSite, Ref, RefKind, EMPTY_HANDLER,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -416,6 +416,21 @@ impl LanguageAdapter for RubyAdapter {
     fn tree_sitter_language(&self) -> Result<Language, AdapterError> {
         language_from_pack(PACK_NAME)
     }
+    fn parse_normalization_edits(
+        &self,
+        snapshot: &bonsai_lang_api::FileSnapshot,
+        _vfs: &bonsai_lang_api::Vfs,
+    ) -> Vec<ParseRecoveryEdit> {
+        let is_erb = snapshot
+            .path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension == "erb" || extension == "rhtml");
+        if !is_erb {
+            return Vec::new();
+        }
+        erb_parser_mask_edits(snapshot.text.as_ref()).unwrap_or_default()
+    }
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
             module_default_export_names: &[],
@@ -527,33 +542,11 @@ impl LanguageAdapter for RubyAdapter {
             bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
             return idx;
         }
-        // ERB files: pre-process the source so the HTML wrapper
-        // becomes whitespace and only `<%= expr %>` / `<% stmt %>`
-        // Ruby code remains, then run the standard pipeline against
-        // the synthetic source. Whitespace masking preserves line
-        // numbers so diagnostics stay accurate.
-        let Some(snapshot) = ctx.vfs.snapshot(file).ok() else {
-            return DeclIndex {
-                file,
-                ..Default::default()
-            };
-        };
-        let processed = preprocess_erb(&snapshot.text);
-        // Parse the processed source manually with tree-sitter-ruby.
-        let Ok(lang) = language_from_pack(PACK_NAME) else {
-            return DeclIndex {
-                file,
-                ..Default::default()
-            };
-        };
-        let mut parser = tree_sitter::Parser::new();
-        if parser.set_language(&lang).is_err() {
-            return DeclIndex {
-                file,
-                ..Default::default()
-            };
-        }
-        let Some(tree) = parser.parse(&processed, None) else {
+        // ERB files use the parser service's adapter-owned, same-width host
+        // normalization. The tree therefore exposes only embedded Ruby while
+        // every node span continues to address the original template bytes.
+        // Diagnostics and lowering consume this one canonical tree.
+        let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) else {
             return DeclIndex {
                 file,
                 ..Default::default()
@@ -564,7 +557,7 @@ impl LanguageAdapter for RubyAdapter {
         // actionable flow events in a synthetic `__module__` decl.
         // That preserves rule constraints that depend on call args
         // (`raw @value`) instead of falling back to arg-less refs.
-        let src = processed.as_bytes();
+        let src = snapshot.text.as_bytes();
         let root = tree.root_node();
         let mut root_events = bonsai_lang_api::kit::walk_flow_events(root, file, src, &HANDLER, &[]);
         inject_ruby_raise_throw_events(&mut root_events);
@@ -2242,33 +2235,23 @@ fn collect_ruby_erb_implicit_inputs(tree: &Tree, src: &[u8]) -> Vec<String> {
     inputs
 }
 
-/// Pre-process an ERB / RHTML template source: replace HTML wrapping
-/// with spaces while preserving the embedded `<%= expr %>` and
-/// `<% stmt %>` Ruby code blocks. The ERB tags themselves (`<%=`,
-/// `<%`, `%>`) are also masked so tree-sitter-ruby sees only Ruby
-/// code surrounded by whitespace.
+/// Build the exact same-width masks that project an ERB/RHTML host document
+/// into its embedded Ruby program. HTML, delimiters, and ERB comments are
+/// masked; statement and expression bodies remain unchanged.
 ///
 /// Line breaks are preserved — every replacement is whitespace of
 /// the same byte length, so column / line positions in the resulting
 /// tree-sitter node match the original `.erb` source.
-fn preprocess_erb(input: &str) -> String {
+fn erb_parser_mask_edits(input: &str) -> Option<Vec<ParseRecoveryEdit>> {
     let bytes = input.as_bytes();
-    let mut out = vec![b' '; bytes.len()];
-    // Preserve all newlines first so blank-string regions still
-    // carry line breaks into the masked output.
-    for (byte_index, &byte) in bytes.iter().enumerate() {
-        if byte == b'\n' || byte == b'\r' {
-            out[byte_index] = byte;
-        }
-    }
-    // Find each `<%` ... `%>` block and copy the Ruby chunk into the
-    // masked output. Tag boundaries themselves stay as spaces so
-    // tree-sitter-ruby sees only Ruby tokens.
+    let mut ruby_ranges = Vec::<std::ops::Range<usize>>::new();
+    let mut separators = Vec::<usize>::new();
     let mut cursor = 0;
     while cursor + 1 < bytes.len() {
         if bytes[cursor] == b'<' && bytes[cursor + 1] == b'%' {
             // Skip optional `=` / `-` / `#` (ERB comment / silent / value).
             let tag_start = cursor;
+            let escaped_tag = bytes.get(tag_start + 2).copied() == Some(b'%');
             let mut content_start = cursor + 2;
             while content_start < bytes.len() && matches!(bytes[content_start], b'=' | b'-' | b'#') {
                 content_start += 1;
@@ -2282,19 +2265,24 @@ fn preprocess_erb(input: &str) -> String {
                 close_start += 1;
             }
             if close_start + 1 >= bytes.len() {
-                // Unclosed tag — treat the rest as masked.
-                break;
+                // An unclosed ERB tag is a real template syntax error. Leave
+                // the raw source untouched so the diagnostic remains visible.
+                return None;
             }
-            // Copy Ruby content [content_start..close_start] into the output.
+            let content_end = close_start
+                .checked_sub(1)
+                .filter(|index| bytes.get(*index).copied() == Some(b'-'))
+                .unwrap_or(close_start);
+            // Retain Ruby content [content_start..content_end]. A semicolon at
+            // the close delimiter models the statement boundary ERB inserts;
+            // plain whitespace would accidentally concatenate adjacent output
+            // expressions that share one HTML line.
             // ERB comments (`<%# ... %>`) — masked, not surfaced as
-            // Ruby. Silent and value forms are surfaced.
+            // Ruby. Escaped `<%%` tags are host text, not Ruby either.
             let is_comment = bytes.get(tag_start + 2).copied() == Some(b'#');
-            if !is_comment {
-                for content_index in content_start..close_start {
-                    if bytes[content_index] != b'\n' && bytes[content_index] != b'\r' {
-                        out[content_index] = bytes[content_index];
-                    }
-                }
+            if !is_comment && !escaped_tag && content_start < content_end {
+                ruby_ranges.push(content_start..content_end);
+                separators.push(close_start);
             }
             // Skip past `%>` (and an optional trailing `-` for trim form).
             cursor = close_start + 2;
@@ -2305,17 +2293,28 @@ fn preprocess_erb(input: &str) -> String {
         }
         cursor += 1;
     }
-    // Safety: only valid-UTF8 bytes were copied (Ruby code from a
-    // UTF-8 input is UTF-8). The rest is ASCII whitespace.
-    match String::from_utf8(out) {
-        Ok(masked) => masked,
-        Err(invalid) => {
-            // Fall back to lossy if a multi-byte char straddled a
-            // tag boundary in a way that produced an invalid byte
-            // sequence (very unlikely with the byte-level copy).
-            String::from_utf8_lossy(invalid.as_bytes()).into_owned()
+
+    let mut retained = ruby_ranges;
+    retained.extend(separators.iter().map(|offset| *offset..offset.saturating_add(1)));
+    retained.sort_by_key(|range| (range.start, range.end));
+
+    let mut edits = Vec::with_capacity(retained.len().saturating_add(separators.len() + 1));
+    let mut masked_from = 0usize;
+    for range in retained {
+        if masked_from < range.start {
+            edits.push(ParseRecoveryEdit::new(masked_from, range.start));
         }
+        masked_from = range.end;
     }
+    if masked_from < bytes.len() {
+        edits.push(ParseRecoveryEdit::new(masked_from, bytes.len()));
+    }
+    edits.extend(
+        separators
+            .into_iter()
+            .map(|offset| ParseRecoveryEdit::replace_ascii(offset, offset + 1, b";")),
+    );
+    Some(edits)
 }
 
 /// Lift every `require` / `require_relative` / `load` / `autoload`

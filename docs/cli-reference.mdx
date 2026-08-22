@@ -56,8 +56,12 @@ compiler files or persisted relation partitions finish, but still omit
 percentage and ETA because the final total is not known up front. The CLI does
 not invent percentages for compression, atomic publication, or other
 indivisible work.
-Plain `index` reports compiler-cache maintenance, workspace ingest, and
-Tree-sitter object compilation. Progress is intentionally absent when stderr
+Plain `index` reports compiler-cache maintenance, the exact source-file read
+worklist after discovery, and Tree-sitter object compilation. Security scans
+split broad matching into raw-anchor, syntax-header, optional receiver-type,
+and exact-body worklists so large candidate planning advances continuously.
+Native JSON export counts its two exact compiler-file passes and names compact
+graph streams without inventing a row total. Progress is intentionally absent when stderr
 is captured or redirected because that is a non-interactive stream; use a
 terminal to see live animation.
 

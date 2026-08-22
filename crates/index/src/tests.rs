@@ -623,6 +623,63 @@ fn receiver_ancestry_projection_enriches_file_local_compiler_bodies() {
 }
 
 #[test]
+fn compiler_syntax_headers_preserve_exact_receiver_ancestry_and_fail_closed_on_ambiguity() {
+    let body_file = FileId::new(45);
+    let mut body = decl(body_file, 0, "run");
+    body.flow_events.push(FlowEvent::Call {
+        span: Span::new(body_file, 10, 20),
+        name: "child.execute".to_string(),
+        receiver: Some("child".to_string()),
+        receiver_types: vec!["Child".to_string()],
+        call_kind: bonsai_lang_api::CallKind::Method,
+        args: Vec::new(),
+    });
+    let header = bonsai_lang_api::CompilerSyntaxHeader {
+        receiver_types: vec![bonsai_lang_api::CompilerReceiverTypeHeader {
+            name: "Child".to_string(),
+            qualified_name: Some("pkg.Child".to_string()),
+            bases: vec!["Base".to_string()],
+        }],
+        ..bonsai_lang_api::CompilerSyntaxHeader::default()
+    };
+    let ancestry = ReceiverAncestry::from_compiler_syntax_headers([header.clone()]);
+    let mut local = DeclIndex {
+        file: body_file,
+        defs: vec![body.clone()],
+        ..DeclIndex::default()
+    };
+    ancestry.apply_to_decl_index(&mut local);
+    let FlowEvent::Call { receiver_types, .. } = &local.defs[0].flow_events[0] else {
+        panic!("expected call");
+    };
+    assert_eq!(receiver_types, &["Child".to_string(), "Base".to_string()]);
+
+    let conflicting = bonsai_lang_api::CompilerSyntaxHeader {
+        receiver_types: vec![bonsai_lang_api::CompilerReceiverTypeHeader {
+            name: "Child".to_string(),
+            qualified_name: Some("other.Child".to_string()),
+            bases: vec!["DifferentBase".to_string()],
+        }],
+        ..bonsai_lang_api::CompilerSyntaxHeader::default()
+    };
+    let ambiguous = ReceiverAncestry::from_compiler_syntax_headers([header, conflicting]);
+    let mut local = DeclIndex {
+        file: body_file,
+        defs: vec![body],
+        ..DeclIndex::default()
+    };
+    ambiguous.apply_to_decl_index(&mut local);
+    let FlowEvent::Call { receiver_types, .. } = &local.defs[0].flow_events[0] else {
+        panic!("expected call");
+    };
+    assert_eq!(
+        receiver_types,
+        &["Child".to_string()],
+        "conflicting bare receiver identities must not invent a base relation"
+    );
+}
+
+#[test]
 fn frontend_only_remap_does_not_invent_cross_file_receiver_ancestry() {
     let class_file = FileId::new(42);
     let body_file = FileId::new(43);

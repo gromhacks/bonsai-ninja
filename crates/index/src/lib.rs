@@ -158,6 +158,38 @@ impl<'de> Deserialize<'de> for ReceiverAncestry {
 }
 
 impl ReceiverAncestry {
+    /// Build exact workspace ancestry from independently decoded compiler
+    /// syntax headers, without retaining declaration tables or function
+    /// bodies. Conflicting declarations for the same type spelling fail
+    /// closed exactly as [`GlobalIndex::receiver_ancestry`].
+    #[must_use]
+    pub fn from_compiler_syntax_headers(
+        headers: impl IntoIterator<Item = bonsai_lang_api::CompilerSyntaxHeader>,
+    ) -> Self {
+        let mut candidates: AHashMap<String, Option<Vec<String>>> = AHashMap::new();
+        for receiver_type in headers.into_iter().flat_map(|header| header.receiver_types) {
+            let mut bases = receiver_type.bases;
+            dedup_strings(&mut bases);
+            for key in type_name_keys(&receiver_type.name, receiver_type.qualified_name.as_deref()) {
+                candidates
+                    .entry(key)
+                    .and_modify(|existing| {
+                        if existing.as_ref().is_some_and(|known| known == &bases) {
+                            return;
+                        }
+                        *existing = None;
+                    })
+                    .or_insert_with(|| Some(bases.clone()));
+            }
+        }
+        Self {
+            by_type: candidates
+                .into_iter()
+                .filter_map(|(key, bases)| bases.map(|bases| (key, bases)))
+                .collect(),
+        }
+    }
+
     /// Apply cross-file base types to one exact file-local compiler object.
     pub fn apply_to_decl_index(&self, index: &mut DeclIndex) {
         for decl in &mut index.defs {

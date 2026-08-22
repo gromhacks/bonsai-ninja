@@ -69,7 +69,9 @@ pub use graph_export::{
 pub use imports::{imports, ImportOut, ImportsFilters};
 pub use native_export::{
     native_export_json, native_export_json_with_config, render_native_export_json,
-    render_native_export_json_with_config, write_native_export_json_with_config, NativeExportConfig,
+    render_native_export_json_with_config, write_native_export_json_with_config,
+    write_native_export_json_with_config_and_progress, NativeExportConfig, NativeExportPhase,
+    NativeExportProgress,
 };
 pub use operations::{operations, OperationOperandOut, OperationOut, OperationsFilters};
 pub use paths::{paths, PathFilters, PathFunctionRow, PathOutcome, PathTerminalCallRow};

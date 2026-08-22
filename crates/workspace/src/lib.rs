@@ -809,6 +809,11 @@ struct Inner {
     /// to their temporary IDG. This prevents a broad query from retaining one
     /// full linkage index beside a second scoped compiler header.
     compiler_headers: parking_lot::RwLock<Option<Arc<GlobalIndex>>>,
+    /// Exact cross-file receiver ancestry projected from independently
+    /// decodable compiler syntax headers. Broad matcher planning needs only
+    /// this small relation; retaining every declaration beside endpoint
+    /// bodies would make memory scale with the entire workspace twice.
+    compiler_receiver_ancestry: parking_lot::RwLock<Option<Arc<ReceiverAncestry>>>,
     /// Memory-scheduled hot set of exact lowered file bodies. Broad compiler
     /// phases still stream every file; repeated query/attribution lookups reuse
     /// these immutable bodies until LRU eviction.
@@ -932,6 +937,12 @@ pub struct FileRefresh {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceOpenEvent {
     IngestStarted,
+    /// The metadata walk has produced the exact source-input worklist.
+    IngestFilesStarted {
+        files: usize,
+    },
+    /// One source input has been read successfully.
+    IngestFileRead,
     IngestFinished {
         files: usize,
     },
@@ -1256,6 +1267,7 @@ impl Workspace {
                 sidecar_source_inputs: Mutex::new(None),
                 compiler_linkage: parking_lot::RwLock::new(None),
                 compiler_headers: parking_lot::RwLock::new(None),
+                compiler_receiver_ancestry: parking_lot::RwLock::new(None),
                 exact_bodies: ExactBodyCache::default(),
                 taint_index: TaintGraphIndex::new(),
                 taint_analysis_serial: Mutex::new(()),
@@ -1900,6 +1912,16 @@ impl Workspace {
     /// the complete workspace symbol table.
     #[must_use]
     pub fn compiler_receiver_ancestry(&self) -> Arc<ReceiverAncestry> {
+        self.compiler_receiver_ancestry_with_progress(|| {})
+    }
+
+    /// Return exact receiver ancestry and report each completed compiler
+    /// source unit when a cold generation or header stream is required.
+    #[must_use]
+    pub fn compiler_receiver_ancestry_with_progress<F>(&self, on_file: F) -> Arc<ReceiverAncestry>
+    where
+        F: Fn() + Sync,
+    {
         if let Some(root) = self.root_path() {
             let path = linkage_sidecar::linkage_sidecar_path(&root);
             if let Ok(ancestry) =
@@ -1908,7 +1930,46 @@ impl Workspace {
                 return Arc::new(ancestry);
             }
         }
-        Arc::new(self.compiler_header_index().receiver_ancestry())
+        if let Some(ancestry) = self.inner.compiler_receiver_ancestry.read().clone() {
+            return ancestry;
+        }
+        let mut slot = self.inner.compiler_receiver_ancestry.write();
+        if let Some(ancestry) = slot.as_ref() {
+            return ancestry.clone();
+        }
+
+        // Establish one complete, bounded, disk-backed compiler-object
+        // generation before streaming headers. This is an optimization only:
+        // an unavailable session falls back to each adapter's exact frontend
+        // lowering through `compiler_syntax_header_uncached` below.
+        let mut files = self.inner.vfs.all_files();
+        files.sort_unstable_by_key(|file| file.raw());
+        let report_header_completion = match self
+            .inner
+            .db
+            .ensure_compiler_object_session_with_progress(&files, &on_file)
+        {
+            Ok(generated) => generated == 0,
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "receiver-ancestry compiler-object session unavailable: {}",
+                    error
+                );
+                true
+            }
+        };
+        let headers = files.into_iter().filter_map(|file| {
+            let header = self.inner.db.compiler_syntax_header_uncached(file);
+            self.inner.db.release_syntax(file);
+            if report_header_completion {
+                on_file();
+            }
+            header
+        });
+        let ancestry = Arc::new(ReceiverAncestry::from_compiler_syntax_headers(headers));
+        *slot = Some(ancestry.clone());
+        ancestry
     }
 
     fn take_exclusive_compiler_header_index(&self) -> Arc<GlobalIndex> {
@@ -2559,7 +2620,7 @@ impl Workspace {
         on_compiled_file: F,
     ) -> SourceReachableCallGraph
     where
-        F: Fn(),
+        F: Fn() + Sync,
     {
         self.source_reachable_resolved_call_graph_with_scope(
             source_funcs,
@@ -2628,7 +2689,7 @@ impl Workspace {
         max_precision: Option<Precision>,
         target_emissions_only: bool,
         function_scoped: bool,
-        on_compiler_unit: &dyn Fn(),
+        on_compiler_unit: &(dyn Fn() + Sync),
     ) -> SourceReachableCallGraph {
         if !target_emissions_only && !function_scoped {
             if let Some(service) = self.callgraph_query_service() {
@@ -2814,120 +2875,93 @@ impl Workspace {
                 continue;
             }
 
-            let source_bytes: Vec<u64> = batch
-                .iter()
-                .map(|file| {
-                    self.inner
-                        .db
-                        .vfs()
-                        .snapshot(*file)
-                        .map_or(0, |snapshot| snapshot.text.len() as u64)
-                })
-                .collect();
-            for range in bonsai_common::resources::compiler_weighted_batches(
-                &source_bytes,
-                rayon::current_num_threads(),
-            ) {
-                let files = &batch[range];
-                let funcs: Vec<FuncId> = if function_scoped {
-                    let files: AHashSet<FileId> = files.iter().copied().collect();
-                    requested_funcs
-                        .iter()
-                        .copied()
-                        .filter(|func| {
-                            global
-                                .declaring_file(SymbolId::new(func.raw()))
-                                .is_some_and(|file| files.contains(&file))
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                let aliases_for_file =
-                    |file| bonsai_resolve::alias_map_for_file(&self.inner.db.imports_for_uncached(file));
-                let alias_targets_for_file = |file| {
-                    bonsai_lang_api::alias_map_from_import_specs(&self.inner.db.imports_for_uncached(file))
-                        .into_iter()
-                        .collect()
-                };
-                let projected_linkage = parking_lot::Mutex::new(Vec::new());
-                let body_for_file = |file| {
-                    let index = self
-                        .inner
-                        .db
-                        .decl_index_remapped_to_headers(global.as_ref(), file);
-                    if function_scoped {
-                        if let Some(index) = index.as_ref() {
-                            projected_linkage
-                                .lock()
-                                .extend(global.project_linkage_from_remapped_file(index));
-                        }
-                    }
-                    index
-                };
-                let batch_graph = if function_scoped {
-                    bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_funcs_streaming_with_context(
-                        global.as_ref(),
-                        aliases_for_file,
-                        alias_targets_for_file,
-                        &funcs,
-                        &callgraph_context,
-                        body_for_file,
-                    )
-                } else {
-                    bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files_streaming_with_context(
-                        global.as_ref(),
-                        aliases_for_file,
-                        alias_targets_for_file,
-                        files,
-                        &callgraph_context,
-                        body_for_file,
-                    )
-                };
-                scoped_linkage.extend(projected_linkage.into_inner());
-                for edge in &batch_graph.inner().edges {
-                    if max_precision.is_some_and(|max| edge.precision > max) {
-                        continue;
-                    }
-                    let edge_id = known_edges.len();
-                    known_edges.push(edge.clone());
-                    outgoing_edge_ids.entry(edge.from).or_default().push(edge_id);
-                    incoming_edge_ids.entry(edge.to).or_default().push(edge_id);
-
-                    // A fact whose endpoint was processed before this caller
-                    // file existed must consume the new edge immediately.
-                    if processed_reached.contains(&edge.from) {
-                        admitted_edge_ids.insert(edge_id);
-                        let compile_callee = !target_emissions_only
-                            || target_set.contains(&edge.to)
-                            || target_emission_requires_callee(global.as_ref(), &scoped_linkage, edge);
-                        if compile_callee && reached_funcs.insert(edge.to) {
-                            pending_reached.push(edge.to);
-                        }
-                    }
-                    if processed_reverse_output.contains(&edge.to)
-                        && has_summary_output(global.as_ref(), edge.from)
-                    {
-                        admitted_edge_ids.insert(edge_id);
-                        if reverse_output_funcs.insert(edge.from) {
-                            pending_reverse_output.push(edge.from);
-                        }
-                        if reached_funcs.insert(edge.from) {
-                            pending_reached.push(edge.from);
-                        }
-                    }
-                }
+            // Submit the complete newly discovered worklist to one bounded
+            // resolver pool. `callgraph_worker_count` owns the measured
+            // memory/concurrency profile, so ten-file batch barriers only
+            // delayed independent files behind the slowest peer and rebuilt
+            // a thread pool for every batch. Continuous scheduling changes
+            // neither the worklist nor resolver semantics.
+            let funcs = requested_funcs;
+            let aliases_for_file =
+                |file| bonsai_resolve::alias_map_for_file(&self.inner.db.imports_for_uncached(file));
+            let alias_targets_for_file = |file| {
+                bonsai_lang_api::alias_map_from_import_specs(&self.inner.db.imports_for_uncached(file))
+                    .into_iter()
+                    .collect()
+            };
+            let projected_linkage = parking_lot::Mutex::new(Vec::new());
+            let body_for_file = |file| {
+                let index = self
+                    .inner
+                    .db
+                    .decl_index_remapped_to_headers(global.as_ref(), file);
                 if function_scoped {
-                    for _ in &funcs {
-                        on_compiler_unit();
+                    if let Some(index) = index.as_ref() {
+                        projected_linkage
+                            .lock()
+                            .extend(global.project_linkage_from_remapped_file(index));
                     }
-                    built_funcs.extend(funcs);
-                } else {
-                    for _ in files {
-                        on_compiler_unit();
-                    }
-                    built_files.extend(files.iter().copied());
                 }
+                index
+            };
+            let batch_graph = if function_scoped {
+                bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_funcs_streaming_with_context_and_progress(
+                    global.as_ref(),
+                    aliases_for_file,
+                    alias_targets_for_file,
+                    &funcs,
+                    &callgraph_context,
+                    body_for_file,
+                    on_compiler_unit,
+                )
+            } else {
+                bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files_streaming_with_context_and_progress(
+                    global.as_ref(),
+                    aliases_for_file,
+                    alias_targets_for_file,
+                    &batch,
+                    &callgraph_context,
+                    body_for_file,
+                    on_compiler_unit,
+                )
+            };
+            scoped_linkage.extend(projected_linkage.into_inner());
+            for edge in &batch_graph.inner().edges {
+                if max_precision.is_some_and(|max| edge.precision > max) {
+                    continue;
+                }
+                let edge_id = known_edges.len();
+                known_edges.push(edge.clone());
+                outgoing_edge_ids.entry(edge.from).or_default().push(edge_id);
+                incoming_edge_ids.entry(edge.to).or_default().push(edge_id);
+
+                // A fact whose endpoint was processed before this caller
+                // file existed must consume the new edge immediately.
+                if processed_reached.contains(&edge.from) {
+                    admitted_edge_ids.insert(edge_id);
+                    let compile_callee = !target_emissions_only
+                        || target_set.contains(&edge.to)
+                        || target_emission_requires_callee(global.as_ref(), &scoped_linkage, edge);
+                    if compile_callee && reached_funcs.insert(edge.to) {
+                        pending_reached.push(edge.to);
+                    }
+                }
+                if processed_reverse_output.contains(&edge.to)
+                    && has_summary_output(global.as_ref(), edge.from)
+                {
+                    admitted_edge_ids.insert(edge_id);
+                    if reverse_output_funcs.insert(edge.from) {
+                        pending_reverse_output.push(edge.from);
+                    }
+                    if reached_funcs.insert(edge.from) {
+                        pending_reached.push(edge.from);
+                    }
+                }
+            }
+            if function_scoped {
+                built_funcs.extend(funcs);
+            } else {
+                built_files.extend(batch.iter().copied());
             }
         }
 
@@ -4055,6 +4089,7 @@ impl Workspace {
         *self.inner.sidecar_source_inputs.lock() = None;
         *self.inner.compiler_linkage.write() = None;
         *self.inner.compiler_headers.write() = None;
+        *self.inner.compiler_receiver_ancestry.write() = None;
         self.inner.exact_bodies.clear();
         self.inner.taint_index.clear();
         self.inner.class_members.clear();
@@ -4155,6 +4190,7 @@ impl Workspace {
             &ws.inner.registry,
             literal,
             ws.inner.include_minified_sources,
+            on_event,
         )?;
         let file_count = files.len();
         for source in files {
@@ -4211,6 +4247,7 @@ impl Workspace {
             &ws.inner.registry,
             literals,
             ws.inner.include_minified_sources,
+            on_event,
         )?;
         let file_count = files.len();
         for source in files {
@@ -4300,6 +4337,7 @@ impl Workspace {
             include_filters,
             exclude_filters,
             ws.inner.include_minified_sources,
+            on_event,
         )?;
         let file_count = files.len();
         for source in files {
@@ -4382,6 +4420,9 @@ impl Workspace {
         selected.sort_unstable_by_key(|(file, _)| file.raw());
 
         on_event(WorkspaceOpenEvent::IngestStarted);
+        on_event(WorkspaceOpenEvent::IngestFilesStarted {
+            files: selected.len(),
+        });
         use rayon::prelude::*;
         let sources = selected
             .into_par_iter()
@@ -4400,6 +4441,7 @@ impl Workspace {
                     return Err(WorkspaceError::NoAdapter(path.display().to_string()));
                 }
                 let text = std::fs::read_to_string(&path).map_err(WorkspaceError::Io)?;
+                on_event(WorkspaceOpenEvent::IngestFileRead);
                 Ok(SourceFileContent {
                     path,
                     text,
@@ -4475,12 +4517,14 @@ impl Workspace {
         *ws.inner.root_label.lock() = root.display().to_string();
         ws.inner.db.set_scoped_workspace_root(canonical_root.clone());
         on_event(WorkspaceOpenEvent::IngestStarted);
+        on_event(WorkspaceOpenEvent::IngestFilesStarted { files: 1 });
         let source = read_supported_source_file_at_path(
             &canonical_root,
             &ws.inner.registry,
             path,
             ws.inner.include_minified_sources,
         )?;
+        on_event(WorkspaceOpenEvent::IngestFileRead);
         let stable_file = ws
             .inner
             .db
@@ -4530,7 +4574,7 @@ impl Workspace {
         let ws = Self::new_with_open_options(registry, options);
         ws.set_idg_sidecar_root(root)?;
         on_event(WorkspaceOpenEvent::IngestStarted);
-        ws.ingest_dir(root)?;
+        ws.ingest_dir_with_events(root, on_event)?;
         let files = ws.vfs().all_files();
         on_event(WorkspaceOpenEvent::IngestFinished { files: files.len() });
         if options.eager_decl_index {
@@ -4834,6 +4878,13 @@ impl Workspace {
     }
 
     pub fn ingest_dir(&self, root: &Path) -> Result<Vec<FileId>, WorkspaceError> {
+        self.ingest_dir_with_events(root, &|_| {})
+    }
+
+    fn ingest_dir_with_events<F>(&self, root: &Path, on_event: &F) -> Result<Vec<FileId>, WorkspaceError>
+    where
+        F: Fn(WorkspaceOpenEvent) + Sync,
+    {
         // A whole ingest publishes one coherent source generation. Security
         // analysis and IDG compilation finish their current immutable
         // snapshot before any VFS entry changes.
@@ -4849,6 +4900,8 @@ impl Workspace {
             &canonical_root,
             &self.inner.registry,
             self.inner.include_minified_sources,
+            |files| on_event(WorkspaceOpenEvent::IngestFilesStarted { files }),
+            || on_event(WorkspaceOpenEvent::IngestFileRead),
             |source| {
                 let path = &source.path;
                 let old_id = self.inner.vfs.lookup(path);
@@ -6549,6 +6602,8 @@ fn stream_supported_source_files<F>(
     canonical_root: &Path,
     registry: &LanguageRegistry,
     include_minified_sources: bool,
+    on_started: impl FnOnce(usize),
+    on_file_read: impl Fn() + Sync,
     mut on_file: F,
 ) -> Result<(), WorkspaceError>
 where
@@ -6564,6 +6619,7 @@ where
                 && source_path_is_admitted(registry, entry.path(), include_minified_sources)
         })
         .collect::<Vec<_>>();
+    on_started(entries.len());
     let source_bytes = entries
         .iter()
         .map(|entry| entry.metadata().map_or(0, |metadata| metadata.len()))
@@ -6582,10 +6638,13 @@ where
             .par_iter()
             .map(|entry| {
                 let path = entry.path();
-                std::fs::read_to_string(path).map(|text| SourceFileContent {
-                    path: path.to_path_buf(),
-                    text,
-                    full_workspace_file: None,
+                std::fs::read_to_string(path).map(|text| {
+                    on_file_read();
+                    SourceFileContent {
+                        path: path.to_path_buf(),
+                        text,
+                        full_workspace_file: None,
+                    }
                 })
             })
             .collect::<Vec<_>>();
@@ -6602,6 +6661,7 @@ fn read_supported_source_files_matching_literal(
     registry: &LanguageRegistry,
     literal: &str,
     include_minified_sources: bool,
+    on_event: &(impl Fn(WorkspaceOpenEvent) + Sync),
 ) -> Result<Vec<SourceFileContent>, WorkspaceError> {
     read_supported_source_files_impl(
         canonical_root,
@@ -6609,6 +6669,7 @@ fn read_supported_source_files_matching_literal(
         Some(std::slice::from_ref(&literal)),
         None,
         include_minified_sources,
+        on_event,
     )
 }
 
@@ -6617,6 +6678,7 @@ fn read_supported_source_files_matching_literals(
     registry: &LanguageRegistry,
     literals: &[&str],
     include_minified_sources: bool,
+    on_event: &(impl Fn(WorkspaceOpenEvent) + Sync),
 ) -> Result<Vec<SourceFileContent>, WorkspaceError> {
     read_supported_source_files_impl(
         canonical_root,
@@ -6624,6 +6686,7 @@ fn read_supported_source_files_matching_literals(
         Some(literals),
         None,
         include_minified_sources,
+        on_event,
     )
 }
 
@@ -6633,6 +6696,7 @@ fn read_supported_source_files_filtered_paths(
     include_filters: &[String],
     exclude_filters: &[String],
     include_minified_sources: bool,
+    on_event: &(impl Fn(WorkspaceOpenEvent) + Sync),
 ) -> Result<Vec<SourceFileContent>, WorkspaceError> {
     read_supported_source_files_impl(
         canonical_root,
@@ -6643,6 +6707,7 @@ fn read_supported_source_files_filtered_paths(
             exclude_filters,
         }),
         include_minified_sources,
+        on_event,
     )
 }
 
@@ -6739,6 +6804,7 @@ fn read_supported_source_files_impl(
     literal_filters: Option<&[&str]>,
     path_filter: Option<PathFilterSpec<'_>>,
     include_minified_sources: bool,
+    on_event: &(impl Fn(WorkspaceOpenEvent) + Sync),
 ) -> Result<Vec<SourceFileContent>, WorkspaceError> {
     // Match the streaming path's compiler contract. Literal/path filters are
     // explicit query scopes; no source-shape heuristic may narrow them.
@@ -6785,18 +6851,22 @@ fn read_supported_source_files_impl(
                 entry,
             )
         })
+        .filter(|(_, entry)| {
+            path_filter.is_none_or(|filter| source_path_allowed(canonical_root, entry.path(), filter))
+        })
         .collect::<Vec<_>>();
+    on_event(WorkspaceOpenEvent::IngestFilesStarted {
+        files: supported_entries.len(),
+    });
     let outcomes: Vec<ReadOutcome> = supported_entries
         .into_par_iter()
         .map(|(file, entry)| {
             let path = entry.path();
-            if let Some(filter) = path_filter {
-                if !source_path_allowed(canonical_root, path, filter) {
-                    return ReadOutcome::Skip;
-                }
-            }
             let text = match std::fs::read_to_string(path) {
-                Ok(text) => text,
+                Ok(text) => {
+                    on_event(WorkspaceOpenEvent::IngestFileRead);
+                    text
+                }
                 Err(error) => return ReadOutcome::Err(error),
             };
             if let Some(literals) = literal_filters {

@@ -1813,6 +1813,21 @@ fn facade_index_with_progress_reports_structural_lifecycle() {
     assert!(project.stats().files > 0);
     let events = events.into_inner().expect("events lock");
     assert!(events.contains(&bonsai_sdk::WorkspaceOpenEvent::IngestStarted));
+    let source_files = events
+        .iter()
+        .find_map(|event| match event {
+            bonsai_sdk::WorkspaceOpenEvent::IngestFilesStarted { files } => Some(*files),
+            _ => None,
+        })
+        .expect("source read started event");
+    assert_eq!(source_files, project.stats().files);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, bonsai_sdk::WorkspaceOpenEvent::IngestFileRead))
+            .count(),
+        source_files
+    );
     let parsed_files = events
         .iter()
         .find_map(|event| match event {
@@ -1920,6 +1935,20 @@ fn facade_reduced_query_opens_report_progress_events() {
     assert!(literal_project.stats().files > 0);
     let literal_events = literal_events.into_inner().expect("events lock");
     assert!(literal_events.contains(&bonsai_sdk::WorkspaceOpenEvent::IngestStarted));
+    let literal_candidates = literal_events
+        .iter()
+        .find_map(|event| match event {
+            bonsai_sdk::WorkspaceOpenEvent::IngestFilesStarted { files } => Some(*files),
+            _ => None,
+        })
+        .expect("literal source candidates");
+    assert_eq!(
+        literal_events
+            .iter()
+            .filter(|event| matches!(event, bonsai_sdk::WorkspaceOpenEvent::IngestFileRead))
+            .count(),
+        literal_candidates
+    );
     assert!(literal_events.iter().any(
         |event| matches!(event, bonsai_sdk::WorkspaceOpenEvent::IngestFinished { files } if *files > 0)
     ));
@@ -1941,6 +1970,18 @@ fn facade_reduced_query_opens_report_progress_events() {
     assert!(filtered_project.stats().files > 0);
     let filtered_events = filtered_events.into_inner().expect("events lock");
     assert!(filtered_events.contains(&bonsai_sdk::WorkspaceOpenEvent::IngestStarted));
+    assert!(
+        filtered_events.contains(&bonsai_sdk::WorkspaceOpenEvent::IngestFilesStarted {
+            files: filtered_project.stats().files,
+        })
+    );
+    assert_eq!(
+        filtered_events
+            .iter()
+            .filter(|event| matches!(event, bonsai_sdk::WorkspaceOpenEvent::IngestFileRead))
+            .count(),
+        filtered_project.stats().files
+    );
     assert!(filtered_events.iter().any(
         |event| matches!(event, bonsai_sdk::WorkspaceOpenEvent::IngestFinished { files } if *files > 0)
     ));
@@ -1953,6 +1994,14 @@ fn facade_reduced_query_opens_report_progress_events() {
         .expect("single-file open with progress");
     let path_events = path_events.into_inner().expect("events lock");
     assert!(path_events.contains(&bonsai_sdk::WorkspaceOpenEvent::IngestStarted));
+    assert!(path_events.contains(&bonsai_sdk::WorkspaceOpenEvent::IngestFilesStarted { files: 1 }));
+    assert_eq!(
+        path_events
+            .iter()
+            .filter(|event| matches!(event, bonsai_sdk::WorkspaceOpenEvent::IngestFileRead))
+            .count(),
+        1
+    );
     assert!(path_events.contains(&bonsai_sdk::WorkspaceOpenEvent::IngestFinished { files: 1 }));
     assert!(path_events.contains(&bonsai_sdk::WorkspaceOpenEvent::ParseStarted { files: 1 }));
     assert_eq!(

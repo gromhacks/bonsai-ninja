@@ -236,19 +236,24 @@ impl ParserCache {
             .set_language(&language)
             .map_err(|e| AdapterError::ParserSetup(e.to_string()))?;
 
-        let incremental_tree = old
-            .as_deref()
-            .and_then(|parsed| incremental_tree(parsed, &snapshot.text));
+        let mut parser_source = snapshot.text.as_bytes().to_vec();
+        let normalization_edits = adapter.parse_normalization_edits(snapshot, vfs);
+        let used_normalization =
+            apply_recovery_edits(snapshot.text.as_ref(), &mut parser_source, &normalization_edits);
+        let parser_text =
+            std::str::from_utf8(&parser_source).expect("same-width parser normalization preserves UTF-8");
+        let incremental_tree = (!used_normalization)
+            .then(|| {
+                old.as_deref()
+                    .and_then(|parsed| incremental_tree(parsed, &snapshot.text))
+            })
+            .flatten();
         let old_tree = incremental_tree.as_ref();
-        let (mut tree, timed_out) = parse_with_timeout(
-            &mut parser,
-            snapshot.text.as_ref(),
-            old_tree,
-            self.options.parse_timeout,
-        )?;
-        let mut used_recovery = false;
+        let (mut tree, timed_out) =
+            parse_with_timeout(&mut parser, parser_text, old_tree, self.options.parse_timeout)?;
+        let mut used_recovery = used_normalization;
         if timed_out.is_none() && tree.root_node().has_error() {
-            let mut recovery_source = snapshot.text.as_bytes().to_vec();
+            let mut recovery_source = parser_source;
             loop {
                 let edits = adapter.parse_recovery_edits(snapshot, vfs, &tree);
                 if !apply_recovery_edits(snapshot.text.as_ref(), &mut recovery_source, &edits) {

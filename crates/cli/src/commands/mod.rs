@@ -341,6 +341,17 @@ fn workspace_open_progress() -> impl Fn(WorkspaceOpenEvent) + Sync {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::time::Instant::now());
             replace_progress(&ingest, progress::spinner("ingesting workspace"));
         }
+        WorkspaceOpenEvent::IngestFilesStarted { files } => {
+            replace_progress(
+                &ingest,
+                progress::progress_bar("reading source files", files as u64),
+            );
+        }
+        WorkspaceOpenEvent::IngestFileRead => {
+            if let Some(bar) = lock_progress_slot(&ingest).as_ref() {
+                bar.inc(1);
+            }
+        }
         WorkspaceOpenEvent::IngestFinished { files } => {
             finish_progress(&ingest);
             if let Some(started) = ingest_started

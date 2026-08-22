@@ -58,17 +58,18 @@ pub(crate) fn cmd_export(
         return Ok(());
     }
 
-    // Native JSON export visits every file, decl, ref, import, and
-    // string. On a 1 k-file workspace this is multi-second; spinner
-    // signals progress while the renderer runs.
-    let spin = progress::ScopedSpinner::new("building native export");
+    // Native JSON export visits exact compiler files in multiple phases and
+    // streams compact graph relations between them. File phases expose real
+    // counters; relation phases remain honest spinners rather than paying an
+    // extra graph-size pre-count pass.
+    let stage = progress::PhaseProgress::spinner("preparing native export");
     let export = project.export();
     let options = bonsai_sdk::NativeExportOptions {
         full_propagations,
         compiled_propagations: true,
     };
-    write_native_json(&export, options)?;
-    spin.finish();
+    write_native_json(&export, options, &stage)?;
+    stage.finish();
     Ok(())
 }
 
@@ -88,9 +89,27 @@ fn graph_export_format(format: ExportFormat) -> Option<GraphExportFormat> {
 fn write_native_json(
     export: &bonsai_sdk::Export<'_>,
     options: bonsai_sdk::NativeExportOptions,
+    stage: &progress::PhaseProgress,
 ) -> Result<()> {
     output::with_writer(|writer| {
-        export.write_native_json(options, writer)?;
+        export.write_native_json_with_progress(options, writer, |event| match event {
+            bonsai_sdk::NativeExportProgress::PhaseStarted { phase, total } => {
+                let label = match phase {
+                    bonsai_sdk::NativeExportPhase::StructuralFiles => "exporting structural files",
+                    bonsai_sdk::NativeExportPhase::Callgraph => "streaming resolved callgraph",
+                    bonsai_sdk::NativeExportPhase::FlowGraph => "streaming structural flow graph",
+                    bonsai_sdk::NativeExportPhase::Files => "exporting compiler file facts",
+                    bonsai_sdk::NativeExportPhase::TaintGraph => "streaming exact taint graph",
+                };
+                if let Some(total) = total {
+                    stage.start_bar(label, total as u64);
+                } else {
+                    stage.start_spinner(label);
+                }
+            }
+            bonsai_sdk::NativeExportProgress::UnitCompleted => stage.inc(1),
+            bonsai_sdk::NativeExportProgress::PhaseFinished => stage.finish(),
+        })?;
         writeln!(writer)?;
         Ok(())
     })

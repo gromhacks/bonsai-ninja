@@ -409,16 +409,35 @@ where
         label: "building source-reachable callgraph",
         total: 0,
     });
+    // Resolution runs on a bounded dedicated pool and may report completion
+    // from several workers. Keep the user callback on this coordinator
+    // thread: workers publish only empty completion messages, so progress can
+    // advance immediately without requiring `FnMut` UI state to be `Sync`.
     let call_graph = {
-        let progress_sink = std::cell::RefCell::new(&mut *on_progress);
-        request.ws.source_reachable_resolved_call_graph_with_progress(
-            &source_funcs,
-            &sink_func_list,
-            request.max_precision,
-            || {
-                (**progress_sink.borrow_mut())(AnalysisProgress::PhaseTicked);
-            },
-        )
+        let (tick_tx, tick_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let ws = request.ws;
+            let max_precision = request.max_precision;
+            let source_funcs = &source_funcs;
+            let sink_func_list = &sink_func_list;
+            let worker = scope.spawn(move || {
+                ws.source_reachable_resolved_call_graph_with_progress(
+                    source_funcs,
+                    sink_func_list,
+                    max_precision,
+                    || {
+                        let _ = tick_tx.send(());
+                    },
+                )
+            });
+            while tick_rx.recv().is_ok() {
+                on_progress(AnalysisProgress::PhaseTicked);
+            }
+            match worker.join() {
+                Ok(graph) => graph,
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        })
     };
     // The source-reachable compiler graph starts with every source function,
     // so its exact indirect edges already include every configured callback

@@ -255,6 +255,32 @@ fn compiler_linkage_progress_counts_each_source_file_once() {
 }
 
 #[test]
+fn compiler_object_progress_counts_each_source_file_once() {
+    let root = tempfile::tempdir().expect("temp workspace");
+    std::fs::write(root.path().join("a.rs"), "fn a() { b(); }\n").expect("write a");
+    std::fs::write(root.path().join("b.rs"), "fn b() {}\n").expect("write b");
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(RustAdapter::new()));
+    let ws = Workspace::open_with_options(
+        root.path(),
+        registry,
+        WorkspaceOpenOptions::sidecar_validation_only(),
+    )
+    .expect("open workspace");
+    let completed = std::sync::atomic::AtomicUsize::new(0);
+
+    let saved = ws
+        .save_compiler_object_sidecar_with_progress(root.path(), || {
+            completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        })
+        .expect("save compiler objects");
+
+    assert_eq!(saved, 2);
+    assert_eq!(completed.load(std::sync::atomic::Ordering::Relaxed), 2);
+    let _ = std::fs::remove_dir_all(bonsai_common::workspace_bonsai_dir(root.path()));
+}
+
+#[test]
 fn idg_persistence_progress_reports_exact_segments_then_finalization() {
     let root = tempfile::tempdir().expect("temp workspace");
     std::fs::write(root.path().join("a.rs"), "fn a() { b(); }\n").expect("write a");

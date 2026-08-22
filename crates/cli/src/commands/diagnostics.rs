@@ -122,10 +122,13 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
             return Ok(());
         }
         let project = open_project_sidecar_validation_only(root)?;
-        let compiler = progress::ScopedSpinner::new("compiling Tree-sitter objects");
-        project.cache().warm_compiler_object_sidecar()?;
-        compiler.finish();
         let stats = project.stats();
+        let compiler = progress::progress_bar("compiling Tree-sitter objects", stats.files as u64);
+        let compiler_result = project
+            .workspace()
+            .save_compiler_object_sidecar_with_progress(root, || compiler.inc(1));
+        compiler.finish_and_clear();
+        compiler_result?;
         cli_println!(
             "{}",
             serde_json::to_string_pretty(&json!({

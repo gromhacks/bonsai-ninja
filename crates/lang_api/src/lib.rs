@@ -52,12 +52,12 @@ pub use types::{
     CharacterSubstitutionDomain, CharacterSubstitutionFact, Comment, CommentKind, CompilerAssignmentAlias,
     CompilerAttribution, CompilerBrowseHeader, CompilerBrowseTermGroup, CompilerCallArgumentAttribution,
     CompilerCallAttribution, CompilerCallHeader, CompilerFactoryCallAssignment, CompilerFunctionAttribution,
-    CompilerGuardFact, CompilerReturnHeader, CompilerSyntaxHeader, CompilerWriteAttribution,
-    ConditionEquality, ConditionExpressionFact, ConditionOperandFact, Decl, DeclIndex, DeclKind,
-    DynamicKeyFilterFact, ExpressionField, ExpressionFlow, ExpressionProjection, FieldWrite,
-    FiniteLiteralSelectionFact, FlowEvent, GuardedValueFilterFact, ImportIndex, ImportScope, ImportSpec,
-    LanguageId, LoopKind, MembershipConditionFact, ModulePath, Operation, OperationKind, OperationOperand,
-    OperationOperandRole, ReceiverFieldInitializer, Ref, RefKind, RuntimeTypeNarrowingFact,
+    CompilerGuardFact, CompilerReceiverTypeHeader, CompilerReturnHeader, CompilerSyntaxHeader,
+    CompilerWriteAttribution, ConditionEquality, ConditionExpressionFact, ConditionOperandFact, Decl,
+    DeclIndex, DeclKind, DynamicKeyFilterFact, ExpressionField, ExpressionFlow, ExpressionProjection,
+    FieldWrite, FiniteLiteralSelectionFact, FlowEvent, GuardedValueFilterFact, ImportIndex, ImportScope,
+    ImportSpec, LanguageId, LoopKind, MembershipConditionFact, ModulePath, Operation, OperationKind,
+    OperationOperand, OperationOperandRole, ReceiverFieldInitializer, Ref, RefKind, RuntimeTypeNarrowingFact,
     SameOriginPathConstraintFact, StaticAggregateFieldValue, StaticScalarValue, StaticStringMapEntry,
     StaticStringMapFact, StringCategory, StringCompositionFact, StringCompositionPart, StringLiteral,
     TypeAliasBinding, UnsupportedConstruct, Visibility, WorkspaceRoot,
@@ -241,6 +241,20 @@ pub trait LanguageAdapter: Send + Sync + 'static {
             tree_sitter_language_pack::get_language(grammar)
                 .map_err(|error| AdapterError::GrammarUnavailable(format!("{grammar}: {error}")))
         }
+    }
+
+    /// Return unconditional same-width parser-buffer normalizations for a
+    /// source representation owned by this adapter.
+    ///
+    /// This is the frontend equivalent of lexing a host-language container:
+    /// an ERB adapter, for example, masks HTML and delimiter bytes while
+    /// retaining the embedded Ruby tokens. The normalized buffer is private
+    /// to Tree-sitter; original source bytes and byte spans remain
+    /// authoritative for every lowered fact. Unlike recovery edits, these
+    /// edits are applied before the first parse because the container syntax
+    /// is not intended to be parsed by the embedded language grammar at all.
+    fn parse_normalization_edits(&self, _snapshot: &FileSnapshot, _vfs: &Vfs) -> Vec<ParseRecoveryEdit> {
+        Vec::new()
     }
 
     /// Return same-width parser-buffer normalizations for a second,

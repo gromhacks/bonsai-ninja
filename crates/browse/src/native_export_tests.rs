@@ -206,6 +206,56 @@ fn parser_gaps_make_buffered_and_streaming_exports_incomplete() {
 }
 
 #[test]
+fn streaming_export_progress_counts_exact_file_phases() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("one.py"), "def one():\n    return 1\n").expect("write one");
+    std::fs::write(dir.path().join("two.py"), "def two():\n    return one()\n").expect("write two");
+    let ws = Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+    let events = std::cell::RefCell::new(Vec::new());
+    let mut streamed = Vec::new();
+    write_native_export_json_with_config_and_progress(
+        &ws,
+        dir.path(),
+        NativeExportConfig::default(),
+        &mut streamed,
+        |event| events.borrow_mut().push(event),
+    )
+    .expect("streaming native export with progress");
+
+    let mut active = None;
+    let mut totals = std::collections::BTreeMap::new();
+    let mut ticks = std::collections::BTreeMap::new();
+    for event in events.into_inner() {
+        match event {
+            NativeExportProgress::PhaseStarted { phase, total } => {
+                assert!(
+                    active.replace(phase).is_none(),
+                    "export progress phases must not overlap"
+                );
+                if let Some(total) = total {
+                    totals.insert(format!("{phase:?}"), total);
+                }
+            }
+            NativeExportProgress::UnitCompleted => {
+                let phase = active.expect("unit completion must belong to an active phase");
+                *ticks.entry(format!("{phase:?}")).or_insert(0_usize) += 1;
+            }
+            NativeExportProgress::PhaseFinished => {
+                assert!(active.take().is_some(), "finished export phase must have started");
+            }
+        }
+    }
+    assert!(active.is_none());
+    for phase in [NativeExportPhase::StructuralFiles, NativeExportPhase::Files] {
+        let key = format!("{phase:?}");
+        assert_eq!(totals.get(&key), Some(&2));
+        assert_eq!(ticks.get(&key), Some(&2));
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&streamed).expect("parse streamed export");
+    assert_eq!(parsed["summary"]["file_count"], 2);
+}
+
+#[test]
 fn unknown_external_calls_do_not_make_native_export_incomplete() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(

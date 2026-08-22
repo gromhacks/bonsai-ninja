@@ -36,6 +36,23 @@ use std::sync::{
 /// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
 /// or the object validation contract changes in a way that can alter compiler
 /// facts.
+// v97: ERB host projection emits exact synthetic statement boundaries at
+// closing tags, including trim-mode tags, so adjacent expressions on one HTML
+// line cannot merge into a different Ruby program. Cached v96 templates can
+// retain false syntax diagnostics or malformed embedded flow facts.
+// v96: adapter-owned host-language normalization runs before Tree-sitter, and
+// Ruby ERB/RHTML diagnostics and lowering share that exact same-width Ruby
+// projection. Cached v95 objects can carry raw-HTML syntax diagnostics or
+// differ from the parser-coverage snapshot used to certify completeness.
+// v95: the C# adapter recovers file-based-program `#:` compiler directives as
+// exact same-width metadata masks. Cached v94 objects can carry false syntax
+// diagnostics or omit top-level declarations and flow facts after a directive.
+// v94: the TypeScript adapter recovers valid import-type queries that the
+// upstream TS/TSX grammar damages when an array suffix participates in a
+// function type, and compiler syntax headers retain exact class-like direct
+// bases for independently streamed receiver ancestry. Cached v93 objects can
+// carry false syntax diagnostics, omit declaration/type facts after the
+// damaged span, or require a workspace-sized declaration table for ancestry.
 // v93: exact projected receiver aliases take precedence over their containing
 // object type, and Rust module-private items retain lexical ModuleTree scope.
 // Cached v92 objects can dispatch a tuple/newtype field back to its wrapper or
@@ -255,7 +272,7 @@ use std::sync::{
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 93;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 97;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;
@@ -1620,6 +1637,28 @@ impl AnalyzerDb {
     /// phases. Existing persistent or scoped objects are copied as compressed
     /// payloads; only genuinely missing or changed files are lowered.
     pub fn ensure_compiler_object_session(&self, files: &[FileId]) -> std::io::Result<usize> {
+        self.ensure_compiler_object_session_inner(files, None)
+    }
+
+    /// Ensure an exact compiler-object session while reporting completed
+    /// source units. The callback observes scheduling only and cannot change
+    /// the admitted files, compiler facts, or canonical metadata order.
+    pub fn ensure_compiler_object_session_with_progress<F>(
+        &self,
+        files: &[FileId],
+        on_file: F,
+    ) -> std::io::Result<usize>
+    where
+        F: Fn() + Sync,
+    {
+        self.ensure_compiler_object_session_inner(files, Some(&on_file))
+    }
+
+    fn ensure_compiler_object_session_inner(
+        &self,
+        files: &[FileId],
+        on_file: Option<&(dyn Fn() + Sync)>,
+    ) -> std::io::Result<usize> {
         if files.is_empty() {
             return Ok(0);
         }
@@ -1684,7 +1723,7 @@ impl AnalyzerDb {
                 .tempdir()?,
         );
         let path = temporary_root.path().join("compiler-objects.factstore");
-        self.write_compiler_object_generation(&path, descriptors, Some(temporary_root), None)
+        self.write_compiler_object_generation(&path, descriptors, Some(temporary_root), on_file)
     }
 
     fn write_compiler_object_generation(

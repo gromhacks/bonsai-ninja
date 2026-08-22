@@ -29,6 +29,31 @@ pub struct NativeExportConfig {
     pub compiled_propagations: bool,
 }
 
+/// Observable native-export phases. File-count phases report exact compiler
+/// units; graph serialization phases are explicitly indeterminate because
+/// their compact persisted relations stream partitions rather than a second
+/// pre-counted row vector.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NativeExportPhase {
+    StructuralFiles,
+    Callgraph,
+    FlowGraph,
+    Files,
+    TaintGraph,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NativeExportProgress {
+    PhaseStarted {
+        phase: NativeExportPhase,
+        /// Exact units for determinate phases; `None` for streaming graph
+        /// relations whose row count is intentionally not materialized first.
+        total: Option<usize>,
+    },
+    UnitCompleted,
+    PhaseFinished,
+}
+
 #[derive(Copy, Clone, Debug, Serialize)]
 struct ExportAnalysisScope {
     semantic_max_precision: &'static str,
@@ -803,7 +828,7 @@ pub fn native_export_json_with_config(
     config: NativeExportConfig,
 ) -> serde_json::Result<serde_json::Value> {
     let mut bytes = Vec::new();
-    write_native_export_streaming(ws, root, config, &mut bytes)?;
+    write_native_export_streaming(ws, root, config, &mut bytes, &|_| {})?;
     serde_json::from_slice(&bytes)
 }
 
@@ -831,7 +856,7 @@ pub fn render_native_export_json_with_config(
     config: NativeExportConfig,
 ) -> serde_json::Result<String> {
     let mut bytes = Vec::new();
-    write_native_export_streaming(ws, root, config, &mut bytes)?;
+    write_native_export_streaming(ws, root, config, &mut bytes, &|_| {})?;
     String::from_utf8(bytes).map_err(|error| {
         serde_json::Error::io(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -849,7 +874,24 @@ pub fn write_native_export_json_with_config<W: Write + ?Sized>(
     config: NativeExportConfig,
     writer: &mut W,
 ) -> serde_json::Result<()> {
-    write_native_export_streaming(ws, root, config, writer)
+    write_native_export_streaming(ws, root, config, writer, &|_| {})
+}
+
+/// Stream native JSON while reporting exact file phases and honest
+/// indeterminate graph phases. Progress is observational and never performs
+/// a pre-count pass or changes the exported relation.
+pub fn write_native_export_json_with_config_and_progress<W, F>(
+    ws: &Workspace,
+    root: &Path,
+    config: NativeExportConfig,
+    writer: &mut W,
+    on_progress: F,
+) -> serde_json::Result<()>
+where
+    W: Write + ?Sized,
+    F: Fn(NativeExportProgress),
+{
+    write_native_export_streaming(ws, root, config, writer, &on_progress)
 }
 
 fn write_native_export_streaming<W: Write + ?Sized>(
@@ -857,6 +899,7 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     root: &Path,
     config: NativeExportConfig,
     writer: &mut W,
+    on_progress: &dyn Fn(NativeExportProgress),
 ) -> serde_json::Result<()> {
     let total_started = Instant::now();
     // Export owns one compiler representation at a time. A prior SDK query
@@ -876,9 +919,14 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     map.serialize_entry("generated_at_unix_ms", &generated_at_unix_ms())?;
     map.serialize_entry("analysis_scope", &export_analysis_scope(config))?;
 
-    let structural = build_export_structural_metadata(ws, global.as_ref(), &spans, &total_started)?;
+    let structural =
+        build_export_structural_metadata(ws, global.as_ref(), &spans, &total_started, on_progress)?;
     map.serialize_entry("summary", &structural.summary)?;
     map.serialize_entry("classes", &structural.classes)?;
+    on_progress(NativeExportProgress::PhaseStarted {
+        phase: NativeExportPhase::Callgraph,
+        total: None,
+    });
     map.serialize_entry(
         "callgraph",
         &ExportStructuralCallgraphStreaming {
@@ -887,6 +935,7 @@ fn write_native_export_streaming<W: Write + ?Sized>(
             spans: &spans,
         },
     )?;
+    on_progress(NativeExportProgress::PhaseFinished);
     drop(structural);
 
     let phase_started = Instant::now();
@@ -908,6 +957,10 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     if let Some(reason) = &flow_sections.flow_chains_incomplete_reason {
         map.serialize_entry("flow_chains_incomplete_reason", &reason)?;
     }
+    on_progress(NativeExportProgress::PhaseStarted {
+        phase: NativeExportPhase::FlowGraph,
+        total: None,
+    });
     map.serialize_entry(
         "flow_graph",
         &ExportFlowGraphStreaming {
@@ -915,6 +968,7 @@ fn write_native_export_streaming<W: Write + ?Sized>(
             global: global.as_ref(),
         },
     )?;
+    on_progress(NativeExportProgress::PhaseFinished);
     drop(flow_sections);
 
     // Completeness and entry-point inference consume file-local compiler
@@ -939,7 +993,21 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     // streamed from the same exact sidecar later instead of retaining another
     // multi-million-edge vector.
     ws.release_resolved_call_graph_cache();
-    map.serialize_entry("files", &ExportFilesStreaming { ws, spans: &spans })?;
+    let export_files = export_files_in_path_order(ws);
+    on_progress(NativeExportProgress::PhaseStarted {
+        phase: NativeExportPhase::Files,
+        total: Some(export_files.len()),
+    });
+    map.serialize_entry(
+        "files",
+        &ExportFilesStreaming {
+            ws,
+            spans: &spans,
+            files: RefCell::new(Some(export_files)),
+            on_progress,
+        },
+    )?;
+    on_progress(NativeExportProgress::PhaseFinished);
     drop(global);
     ws.release_compiler_linkage_cache();
     map.serialize_entry("analysis_complete", &completeness.complete)?;
@@ -952,7 +1020,12 @@ fn write_native_export_streaming<W: Write + ?Sized>(
         chain_rows: RefCell::new(Some(chain_rows)),
         config,
     };
+    on_progress(NativeExportProgress::PhaseStarted {
+        phase: NativeExportPhase::TaintGraph,
+        total: None,
+    });
     map.serialize_entry("taint_graph", &taint_graph)?;
+    on_progress(NativeExportProgress::PhaseFinished);
     export_phase_log(format_args!(
         "taint graph: {:.3}s total={:.3}s",
         phase_started.elapsed().as_secs_f64(),
@@ -971,6 +1044,7 @@ fn build_export_structural_metadata(
     global: &bonsai_index::GlobalIndex,
     spans: &ExportSpanCache,
     total_started: &Instant,
+    on_progress: &dyn Fn(NativeExportProgress),
 ) -> serde_json::Result<ExportStructuralMetadata> {
     let mut classes = Vec::new();
     let mut languages_set: ahash::AHashSet<String> = ahash::AHashSet::new();
@@ -988,6 +1062,10 @@ fn build_export_structural_metadata(
 
     let all_files = export_files_in_path_order(ws);
     let file_count = all_files.len();
+    on_progress(NativeExportProgress::PhaseStarted {
+        phase: NativeExportPhase::StructuralFiles,
+        total: Some(file_count),
+    });
     for (file, path) in all_files {
         let language = ws
             .db()
@@ -999,6 +1077,7 @@ fn build_export_structural_metadata(
         }
 
         let Some(idx) = ws.exact_decl_index_shared(file) else {
+            on_progress(NativeExportProgress::UnitCompleted);
             continue;
         };
 
@@ -1045,7 +1124,9 @@ fn build_export_structural_metadata(
             *by_cat.entry(category).or_insert(0) += 1;
             string_count += 1;
         }
+        on_progress(NativeExportProgress::UnitCompleted);
     }
+    on_progress(NativeExportProgress::PhaseFinished);
     export_phase_log(format_args!(
         "files/classes/callgraph: {:.3}s files={} decls={} calls={}",
         total_started.elapsed().as_secs_f64(),
@@ -1099,6 +1180,8 @@ fn export_import_specs(ws: &Workspace, file: FileId) -> Vec<bonsai_lang_api::Imp
 struct ExportFilesStreaming<'a> {
     ws: &'a Workspace,
     spans: &'a ExportSpanCache,
+    files: RefCell<Option<Vec<(FileId, String)>>>,
+    on_progress: &'a dyn Fn(NativeExportProgress),
 }
 
 impl Serialize for ExportFilesStreaming<'_> {
@@ -1106,12 +1189,13 @@ impl Serialize for ExportFilesStreaming<'_> {
     where
         S: Serializer,
     {
-        let files = export_files_in_path_order(self.ws);
+        let files = self.files.borrow_mut().take().unwrap_or_default();
         let mut sequence = serializer.serialize_seq(Some(files.len()))?;
         for (file, path) in files {
             let index = self.ws.exact_decl_index_shared(file);
             let export_file = build_export_file(self.ws, index.as_deref(), self.spans, file, path);
             sequence.serialize_element(&export_file)?;
+            (self.on_progress)(NativeExportProgress::UnitCompleted);
         }
         SerializeSeq::end(sequence)
     }

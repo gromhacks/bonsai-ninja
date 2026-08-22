@@ -22,6 +22,17 @@ impl LanguageAdapter for TestPythonAdapter {
         bonsai_lang_api::kit::language_from_pack("python")
     }
 
+    fn parse_normalization_edits(
+        &self,
+        snapshot: &bonsai_lang_api::FileSnapshot,
+        _vfs: &Vfs,
+    ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
+        (snapshot.path.file_name().and_then(|name| name.to_str()) == Some("template.py"))
+            .then(|| bonsai_lang_api::ParseRecoveryEdit::new(0, 6))
+            .into_iter()
+            .collect()
+    }
+
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities::unsupported()
     }
@@ -156,6 +167,29 @@ fn c_variadic_pointer_type_recovers_without_changing_source_coordinates() {
     assert!(!parsed.tree.root_node().has_error());
     assert!(parsed.diagnostics.is_empty());
     assert_eq!(parsed.source_text(), source);
+}
+
+#[test]
+fn adapter_host_normalization_runs_before_the_first_parse() {
+    let source = "<html>\ndef embedded():\n    return 1\n";
+    let cache = ParserCache::with_options(ParserOptions::with_parse_timeout(None));
+    let vfs = Vfs::new();
+    let file = vfs.write("template.py", source);
+    let parsed = cache
+        .parse(file, &test_python_adapter(), &vfs)
+        .expect("parse normalized host-language fixture");
+
+    assert!(parsed.used_recovery);
+    assert!(!parsed.tree.root_node().has_error());
+    assert!(parsed.diagnostics.is_empty());
+    assert_eq!(parsed.source_text(), source);
+    let function = parsed
+        .tree
+        .root_node()
+        .named_child(0)
+        .expect("embedded function declaration");
+    assert_eq!(function.kind(), "function_definition");
+    assert_eq!(function.start_byte(), 7);
 }
 
 #[test]
