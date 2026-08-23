@@ -675,11 +675,11 @@ bonsai-ninja security ./src source-analysis --trust remote
 bonsai-ninja security ./src source-analysis --format json --all
 ```
 
-Text output is labelled `SOURCE FLOW`. The command runs taint forward from
-each matched source seed, so it maps where that source value travels without
-requiring a sink rule. Internally it uses resolved callgraph lineage scopes and
-scoped IDG graphs; it does not walk the entire workspace separately for every
-source.
+Text output is labelled `SOURCE n · DOWNSTREAM FLOW m` and keeps the source
+rule id on each flow header. The command runs taint forward from each matched
+source seed, so it maps where that source value travels without requiring a
+sink rule. Internally it uses resolved callgraph lineage scopes and scoped IDG
+graphs; it does not walk the entire workspace separately for every source.
 
 Like `taint-analysis`, source-analysis reports scan scope and taint-graph
 cache hit/miss notes on stderr while progress is enabled. JSON stdout and
@@ -727,10 +727,12 @@ verdict. Selected security-source proofs are reported separately under
 Endpoint matching and source attribution share one matcher pass. The compiler
 builds one sink-relevant semantic scope, then validates candidate origins
 forward against selected sink nodes; it does not guess a reverse call chain or
-run a name-based search. Text presents lineage as `sink ← … ← origin`; JSON
-keeps canonical compiler routes under `upstream_flows` and source-to-sink
-security proofs under `security_source_flows`. Pagination selects rendered
-sink rows only and never caps fixed-point work.
+run a name-based search. Text labels each route
+`SINK n · UPSTREAM FLOW m <flow-id> <sink-rule-id>` and presents lineage as
+`sink ← … ← origin`; JSON keeps canonical compiler routes under
+`upstream_flows` and source-to-sink security proofs under
+`security_source_flows`. Pagination selects rendered sink rows only, preserves
+global endpoint numbers, and never caps fixed-point work.
 
 | Flag | Default | Description |
 |---|---:|---|

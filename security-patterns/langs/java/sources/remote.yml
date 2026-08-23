@@ -1069,7 +1069,10 @@
   description: "String parameter of a Jakarta/Javax WebSocket @OnMessage method - decoded remote text message; session and control parameters remain untainted."
 
 - id: java.source.android_intent_getdata
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: java.source.android_intent_payload
   language: java
   trust: remote
   tag: http-input
@@ -1090,7 +1093,7 @@
           android.net.Uri data = intent.getData();
         }
       }
-  description: "Android Intent.getData() - deep-link/IPC URI from another app, read on a typed Intent receiver."
+  description: "Disabled duplicate - typed Intent.getData() is covered by java.source.android_intent_payload with the correct IPC trust boundary."
 
 - id: java.source.spring_httpentity_getbody
   enabled: true

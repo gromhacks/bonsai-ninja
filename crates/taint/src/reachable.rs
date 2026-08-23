@@ -67,6 +67,20 @@ pub struct IdgSeedRequest<'a> {
 }
 
 impl<'a> IdgSeedRequest<'a> {
+    /// Exact semantic inputs used when a consumer keys a cached closure.
+    /// Keeping this projection on the request prevents cache-key builders
+    /// from accepting an argument list that can drift from seed composition.
+    #[must_use]
+    pub const fn cache_key_parts(&self) -> (&'a TokenSet, Option<Span>, &'a [String], bool, bool) {
+        (
+            self.names,
+            self.anchor,
+            self.output_arg_names,
+            self.callback_only,
+            self.output_only,
+        )
+    }
+
     #[must_use]
     pub fn rule_match(
         func: FuncId,
@@ -1223,16 +1237,7 @@ pub fn compose_idg_seed_nodes_with_decl(
     entry_decl: Option<&bonsai_lang_api::Decl>,
 ) -> Vec<bonsai_idg::WsNodeId> {
     match request.policy {
-        IdgSeedPolicy::RuleMatch => rule_match_seed_nodes(
-            request.func,
-            request.names,
-            request.anchor,
-            request.output_arg_names,
-            request.callback_only,
-            request.output_only,
-            global,
-            idg,
-        ),
+        IdgSeedPolicy::RuleMatch => rule_match_seed_nodes(request, global, idg),
         IdgSeedPolicy::TokenApi => {
             let entry_decl = entry_decl.or_else(|| global.decl_of(SymbolId::new(request.func.raw())));
             token_api_seed_nodes(request.func, request.names, entry_decl, global, idg)
@@ -1241,30 +1246,26 @@ pub fn compose_idg_seed_nodes_with_decl(
 }
 
 fn rule_match_seed_nodes(
-    source_func: FuncId,
-    seeds: &TokenSet,
-    source_anchor: Option<bonsai_common::Span>,
-    output_arg_names: &[String],
-    callback_only: bool,
-    output_only: bool,
+    request: IdgSeedRequest<'_>,
     global: &GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
 ) -> Vec<bonsai_idg::WsNodeId> {
-    if callback_only {
-        return source_anchor.map_or_else(Vec::new, |anchor| {
-            idg.source_callback_param_nodes_at_span(source_func, anchor)
+    if request.callback_only {
+        return request.anchor.map_or_else(Vec::new, |anchor| {
+            idg.source_callback_param_nodes_at_span(request.func, anchor)
         });
     }
-    if output_only {
-        let Some(anchor) = source_anchor else {
+    if request.output_only {
+        let Some(anchor) = request.anchor else {
             return Vec::new();
         };
-        if output_arg_names.is_empty() {
+        if request.output_arg_names.is_empty() {
             return Vec::new();
         }
-        let output_seed_names = bonsai_idg::expand_bare_seed_names_with_descendants(output_arg_names.iter());
+        let output_seed_names =
+            bonsai_idg::expand_bare_seed_names_with_descendants(request.output_arg_names.iter());
         let mut seed_nodes = idg
-            .source_seed_nodes_at_span(source_func, anchor)
+            .source_seed_nodes_at_span(request.func, anchor)
             .into_iter()
             .filter(|node| {
                 idg.resolve_point(*node).is_some_and(|point| {
@@ -1282,9 +1283,9 @@ fn rule_match_seed_nodes(
     // (`args.q`) — same expansion the security scheduler applies, so
     // the graph built here propagates exactly what the scheduling cut
     // proved reachable.
-    let seed_names = field_sensitive_rule_seed_names(seeds);
-    if let Some(anchor) = source_anchor {
-        let anchor_nodes = idg.source_seed_nodes_at_span(source_func, anchor);
+    let seed_names = field_sensitive_rule_seed_names(request.names);
+    if let Some(anchor) = request.anchor {
+        let anchor_nodes = idg.source_seed_nodes_at_span(request.func, anchor);
         let anchor_has_call_return = anchor_nodes.iter().any(|node| {
             idg.resolve_point(*node)
                 .is_some_and(|point| point.kind == bonsai_idg::PointKind::CallRet)
@@ -1314,13 +1315,13 @@ fn rule_match_seed_nodes(
                 // `event.command`. Seed only AST-materialized descendant READS
                 // requested by the compiler seed pattern (`event.*`); never
                 // descendant writes, which may be later clean overwrites.
-                seed_nodes.extend(token_descendant_read_seed_nodes(source_func, &seed_names, idg));
+                seed_nodes.extend(token_descendant_read_seed_nodes(request.func, &seed_names, idg));
             } else {
-                let mut named_nodes = idg.read_or_write_nodes_for_names(source_func, &seed_names);
+                let mut named_nodes = idg.read_or_write_nodes_for_names(request.func, &seed_names);
                 // A read-kind source whose matched name is a parameter
                 // taints from the parameter binding too — parity with the
                 // security scheduler's seed builder.
-                named_nodes.extend(idg.param_nodes_for_names(source_func, &seed_names, global));
+                named_nodes.extend(idg.param_nodes_for_names(request.func, &seed_names, global));
                 if named_nodes.is_empty() {
                     seed_nodes.extend(anchor_nodes);
                 } else {
@@ -1340,26 +1341,31 @@ fn rule_match_seed_nodes(
                 // result. This preserves field sensitivity (projected source
                 // names never widen to siblings) and avoids seeding later
                 // writes, which may be clean overwrites.
-                seed_nodes.extend(token_descendant_read_seed_nodes(source_func, &seed_names, idg));
+                seed_nodes.extend(token_descendant_read_seed_nodes(request.func, &seed_names, idg));
             }
         }
     }
-    if !output_arg_names.is_empty() && source_anchor.is_none() {
-        let output_seed_names = bonsai_idg::expand_bare_seed_names_with_descendants(output_arg_names.iter());
-        seed_nodes.extend(idg.read_or_write_nodes_for_names(source_func, &output_seed_names));
-    } else if !output_arg_names.is_empty() {
-        seed_nodes.extend(output_arg_read_seed_nodes(source_func, output_arg_names, idg));
+    if !request.output_arg_names.is_empty() && request.anchor.is_none() {
+        let output_seed_names =
+            bonsai_idg::expand_bare_seed_names_with_descendants(request.output_arg_names.iter());
+        seed_nodes.extend(idg.read_or_write_nodes_for_names(request.func, &output_seed_names));
+    } else if !request.output_arg_names.is_empty() {
+        seed_nodes.extend(output_arg_read_seed_nodes(
+            request.func,
+            request.output_arg_names,
+            idg,
+        ));
     }
     if seed_nodes.is_empty() {
         if seed_names.is_empty() {
-            if source_anchor.is_none() {
-                seed_nodes.extend(idg.param_nodes_of(source_func));
+            if request.anchor.is_none() {
+                seed_nodes.extend(idg.param_nodes_of(request.func));
             }
         } else {
-            let narrowed = idg.param_nodes_for_names(source_func, &seed_names, global);
+            let narrowed = idg.param_nodes_for_names(request.func, &seed_names, global);
             seed_nodes.extend(narrowed);
         }
-        seed_nodes.extend(idg.read_or_write_nodes_for_names(source_func, &seed_names));
+        seed_nodes.extend(idg.read_or_write_nodes_for_names(request.func, &seed_names));
     }
     seed_nodes.sort();
     seed_nodes.dedup();

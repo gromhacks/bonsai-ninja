@@ -26,8 +26,8 @@ The validated product contains:
 
 - 20 registered Tree-sitter language adapters;
 - one adapter-lowered compiler IR and one production sparse IDG taint engine;
-- 7,311 bundled rules, of which 6,134 are enabled;
-- 10,505 enabled positive/negative rule examples;
+- 7,311 bundled rules, of which 6,132 are enabled;
+- 10,504 enabled positive/negative rule examples;
 - native CLI, Rust SDK, SARIF 2.1.0, JSON, HTML, and graph-export surfaces.
 
 ## Correctness and architecture gates
@@ -79,10 +79,10 @@ The rulepack replay command was:
 | Rulepack measure | Result |
 |---|---:|
 | Rules | 7,311 |
-| Enabled rules | 6,134 |
-| Disabled rules | 1,177 |
-| Examples | 11,060 |
-| Enabled examples | 10,505 |
+| Enabled rules | 6,132 |
+| Disabled rules | 1,179 |
+| Examples | 11,061 |
+| Enabled examples | 10,504 |
 | Errors | 0 |
 | Warnings | 0 |
 

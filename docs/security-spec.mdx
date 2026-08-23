@@ -520,8 +520,9 @@ follows the value it introduced, not every parameter, local, or unrelated
 branch in the entry function. Before rendering, the command builds a
 source-lineage scope from resolved callgraph edges, adds summary-output caller
 support for source-returning helpers, and seeds a scoped IDG for only the files
-and functions in that lineage. Text output is labelled `SOURCE FLOW` to
-distinguish these paths from generic `inspect` call flows.
+and functions in that lineage. Text output is labelled
+`SOURCE n · DOWNSTREAM FLOW m` and retains the source rule id, distinguishing
+the path and its parent boundary from generic `inspect` call flows.
 
 Each JSON row carries `analysis_complete`, `analysis_incomplete_reasons`,
 and `lineage`. If representative lineage rendering hits its hop or path
@@ -551,8 +552,8 @@ Text output uses distinct labels for different evidence surfaces:
 | Label | Surface | Evidence |
 |---|---|---|
 | `FLOW` | `inspect` and navigation views | Stable bounded structural evidence; endpoint reachability remains a compressed compiler corridor. |
-| `SOURCE FLOW` | `security source-analysis` | Taint propagation from a source rule without sink attribution. |
-| `UPSTREAM FLOW` | `security sink-analysis` | Exact source-independent compiler lineage attached to a matched sink and presented sink-first. |
+| `SOURCE n · DOWNSTREAM FLOW m` | `security source-analysis` | Taint propagation from numbered source `n` without sink attribution. |
+| `SINK n · UPSTREAM FLOW m` | `security sink-analysis` | Exact source-independent compiler lineage attached to numbered sink `n` and presented sink-first. |
 | `TAINT FLOW` | `security taint-analysis` | Source-to-sink propagation with tainted args, receiver evidence, sanitizer context, and sink attribution. |
 
 JSON and SARIF expose the same underlying propagation as structured

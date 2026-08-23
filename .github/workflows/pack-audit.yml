@@ -13,10 +13,15 @@ on:
   pull_request:
     paths:
       - "security-patterns/**"
+      - "crates/security/**"
+      - "crates/lang_api/**"
+      - "crates/lang_*/**"
+      - "crates/cli/src/commands/security.rs"
       - "scripts/pack_audit.py"
       - "scripts/fp_audit.py"
       - "scripts/category_audit.py"
       - "scripts/validate-pattern-pack.py"
+      - "scripts/audit_match_example_collisions.py"
       - "scripts/pattern_variants_na.yml"
       - "docs/pattern-variants.mdx"
       - ".github/requirements/pack-audit.txt"
@@ -25,10 +30,15 @@ on:
     branches: [main]
     paths:
       - "security-patterns/**"
+      - "crates/security/**"
+      - "crates/lang_api/**"
+      - "crates/lang_*/**"
+      - "crates/cli/src/commands/security.rs"
       - "scripts/pack_audit.py"
       - "scripts/fp_audit.py"
       - "scripts/category_audit.py"
       - "scripts/validate-pattern-pack.py"
+      - "scripts/audit_match_example_collisions.py"
       - "scripts/pattern_variants_na.yml"
       - "docs/pattern-variants.mdx"
       - ".github/requirements/pack-audit.txt"

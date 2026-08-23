@@ -97,7 +97,7 @@ use prototype_guard::prototype_pollution_sink_is_guarded;
 use source_seeds::seed_descendant_aliases_for_qualified_source_reads;
 use source_seeds::{
     collect_source_seed_targets, insert_descendant_taint_aliases, insert_taint_aliases,
-    security_text_matches_source_strict,
+    security_text_matches_source_strict, SourceSeedContext,
 };
 pub use validation::validate_pack;
 #[cfg(test)]
@@ -8441,12 +8441,14 @@ fn source_seed_set(pack: &Rulepack, src: &RuleMatch, decl: &bonsai_lang_api::Dec
     let allow_text_only_source_match = is_inferred || is_param_rule;
     collect_source_seed_targets(
         &decl.flow_events,
-        src,
-        source_output_args,
-        source_output_args_from,
-        source_callback_args,
-        source_callback_only,
-        allow_text_only_source_match,
+        SourceSeedContext {
+            source: src,
+            output_args: source_output_args,
+            output_args_from: source_output_args_from,
+            callback_args: source_callback_args,
+            callback_only: source_callback_only,
+            allow_text_only_match: allow_text_only_source_match,
+        },
         &mut out,
     );
     if out.is_empty() && (is_inferred || is_param_rule) {
@@ -9518,7 +9520,18 @@ mod source_seed_tests {
         let source = source_rule_match_at(Span::new(file, 20, 36));
         let mut seeds = TokenSet::default();
 
-        collect_source_seed_targets(&events, &source, &[], None, &[], false, false, &mut seeds);
+        collect_source_seed_targets(
+            &events,
+            SourceSeedContext {
+                source: &source,
+                output_args: &[],
+                output_args_from: None,
+                callback_args: &[],
+                callback_only: false,
+                allow_text_only_match: false,
+            },
+            &mut seeds,
+        );
 
         assert!(seeds.contains("token"));
         assert!(!seeds.contains("action"));
@@ -9545,7 +9558,18 @@ mod source_seed_tests {
         }];
         let mut seeds = TokenSet::default();
 
-        collect_source_seed_targets(&events, &source, &[], None, &callbacks, true, false, &mut seeds);
+        collect_source_seed_targets(
+            &events,
+            SourceSeedContext {
+                source: &source,
+                output_args: &[],
+                output_args_from: None,
+                callback_args: &callbacks,
+                callback_only: true,
+                allow_text_only_match: false,
+            },
+            &mut seeds,
+        );
 
         assert!(
             !seeds.contains("subscription"),
@@ -9574,7 +9598,18 @@ mod source_seed_tests {
         }];
         let mut seeds = TokenSet::default();
 
-        collect_source_seed_targets(&events, &source, &[], None, &callbacks, false, false, &mut seeds);
+        collect_source_seed_targets(
+            &events,
+            SourceSeedContext {
+                source: &source,
+                output_args: &[],
+                output_args_from: None,
+                callback_args: &callbacks,
+                callback_only: false,
+                allow_text_only_match: false,
+            },
+            &mut seeds,
+        );
 
         assert!(
             seeds.contains("answer"),
@@ -9613,7 +9648,18 @@ mod source_seed_tests {
         let source = source_rule_match_at(Span::new(file, 10, 30));
         let mut seeds = TokenSet::default();
 
-        collect_source_seed_targets(&events, &source, &[], None, &[], false, false, &mut seeds);
+        collect_source_seed_targets(
+            &events,
+            SourceSeedContext {
+                source: &source,
+                output_args: &[],
+                output_args_from: None,
+                callback_args: &[],
+                callback_only: false,
+                allow_text_only_match: false,
+            },
+            &mut seeds,
+        );
 
         assert!(seeds.contains("request.args.get"));
         assert!(!seeds.contains("other.args.get"));

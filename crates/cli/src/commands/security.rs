@@ -802,40 +802,63 @@ fn source_inventory_exact_rule_literal(
 }
 
 fn literal_anchor_for_rule_target(rule: &Rule) -> Option<String> {
-    for signal in rule
-        .packages
-        .iter()
-        .chain(rule.imports.iter())
-        .chain(rule.modules.iter())
-    {
-        if safe_inventory_literal_anchor(signal) {
-            return Some(signal.clone());
-        }
-    }
     let target = rule
         .match_spec
         .target
         .as_ref()
-        .or(rule.match_spec.callee.as_ref())?;
-    if let Some(annotation) = target.annotation.as_deref() {
-        if safe_inventory_literal_anchor(annotation) {
-            return Some(annotation.to_string());
-        }
-    }
-    if let Some(name) = target.name.as_deref() {
-        if safe_inventory_literal_anchor(name) {
-            return Some(name.to_string());
-        }
-    }
-    if let Some(attribute) = target.attribute.as_ref() {
-        // The terminal callable/property is the narrowest source-text anchor
-        // that remains valid across imports and aliases. Never special-case a
-        // provider namespace here; exact matching still happens on compiler
-        // facts after candidate retrieval.
-        for part in attribute.iter().rev() {
-            if safe_inventory_literal_anchor(part) {
-                return Some(part.clone());
+        .or(rule.match_spec.callee.as_ref());
+    // The exact syntax target must win over provider metadata. Package names
+    // can differ from source-level imports (`phoenix_live_view` versus
+    // `Phoenix.LiveView`) and are not guaranteed to occur in every matching
+    // file. Candidate lookup is only a prefilter, so anchor it on syntax that
+    // every real match must contain and leave package/type proof to the
+    // canonical matcher.
+    if let Some(target) = target {
+        if let Some(annotation) = target.annotation.as_deref() {
+            if safe_inventory_literal_anchor(annotation) {
+                return Some(annotation.to_string());
             }
+        }
+        if let Some(default_call) = target.default_call.as_deref() {
+            if safe_inventory_literal_anchor(default_call) {
+                return Some(default_call.to_string());
+            }
+        }
+        if let Some(name) = target.name.as_deref() {
+            if safe_inventory_literal_anchor(name) {
+                return Some(name.to_string());
+            }
+        }
+        if let Some(attribute) = target.attribute.as_ref() {
+            // The terminal callable/property is the narrowest source-text
+            // anchor that remains valid across imports and aliases. Never
+            // special-case a provider namespace here; exact matching still
+            // happens on compiler facts after candidate retrieval.
+            for part in attribute.iter().rev() {
+                if safe_inventory_literal_anchor(part) {
+                    return Some(part.clone());
+                }
+            }
+        }
+        for method in &target.in_method {
+            if safe_inventory_literal_anchor(method) {
+                return Some(method.clone());
+            }
+        }
+        for class_name in &target.in_class {
+            if safe_inventory_literal_anchor(class_name) {
+                return Some(class_name.clone());
+            }
+        }
+    }
+    for signal in rule
+        .imports
+        .iter()
+        .chain(rule.modules.iter())
+        .chain(rule.packages.iter())
+    {
+        if safe_inventory_literal_anchor(signal) {
+            return Some(signal.clone());
         }
     }
     None
@@ -2964,6 +2987,10 @@ fn render_sink_analysis_text_page(
 
     let mut body_cache = bonsai_sdk::FlowBodyCache::new(ws);
     for (candidate_index, candidate) in candidates.iter().enumerate() {
+        let sink_number = usize::try_from(info.start_offset)
+            .unwrap_or(usize::MAX)
+            .saturating_add(candidate_index)
+            .saturating_add(1);
         let severity = candidate
             .sink
             .severity
@@ -2972,7 +2999,7 @@ fn render_sink_analysis_text_page(
         cli_println!("{}", u.ruler('═', 70));
         cli_println!(
             "{} · {} · {}  {}",
-            u.annotation(&format!("SINK {}", candidate_index + 1)),
+            u.annotation(&format!("SINK {sink_number}")),
             u.name(candidate.sink.tag.as_deref().unwrap_or("sink")),
             severity_cell(u, &severity),
             u.dim(&candidate.sink.rule_id),
@@ -2990,7 +3017,7 @@ fn render_sink_analysis_text_page(
                 .join(" ← ");
             cli_println!(
                 "  {} {}  {}",
-                u.annotation(&format!("UPSTREAM FLOW {}", flow_index + 1)),
+                u.annotation(&format!("SINK {sink_number} · UPSTREAM FLOW {}", flow_index + 1)),
                 u.dim(&flow.flow_id),
                 u.dim(&reverse_chain),
             );
@@ -3015,13 +3042,14 @@ fn render_sink_analysis_text_page(
             if let Some(rendered) = flow_from_sink_lineage_hops(flow, &candidate.sink, hops, flow_index) {
                 let render_opts = crate::commands::InspectRenderOptions::default();
                 let mut local_seen: crate::commands::BodySet = ahash::AHashSet::new();
+                let heading = format!("SINK {sink_number} · UPSTREAM FLOW");
                 crate::commands::render_flow_block_with_heading(
                     u,
                     &render_opts,
                     &rendered,
                     &candidate.sink.rule_id,
                     &mut local_seen,
-                    "UPSTREAM FLOW",
+                    &heading,
                 );
             }
         }
@@ -3157,7 +3185,7 @@ fn cmd_source_analysis(
                 filters_hash,
                 cost,
                 |paged, info, _cfg| {
-                    let rendered = render_source_analysis_candidates(ws, paged);
+                    let rendered = render_source_analysis_candidates(ws, paged, info.start_offset);
                     let analysis_incomplete_reasons = source_analysis_json_incomplete_reasons(
                         "security/source-analysis",
                         info,
@@ -3276,7 +3304,7 @@ fn render_source_analysis_text_page(
     report_analysis_incomplete_reasons: &[String],
     runtime_disabled_rules: &[RuntimeDisabledRule],
 ) -> Result<()> {
-    let rendered = render_source_analysis_candidates(ws, candidates);
+    let rendered = render_source_analysis_candidates(ws, candidates, info.start_offset);
     let u = ui();
     cli_println!(
         "{}",
@@ -3321,15 +3349,17 @@ fn render_source_analysis_text_page(
     }
     let render_opts = crate::commands::InspectRenderOptions::default();
     for item in rendered.iter() {
-        render_source_analysis_header(u, workspace, item.flow.flow_number as usize, item, pack);
+        let source_number = item.flow.flow_number as usize;
+        render_source_analysis_header(u, workspace, source_number, item, pack);
         let mut local_seen: crate::commands::BodySet = ahash::AHashSet::new();
+        let heading = format!("SOURCE {source_number} · DOWNSTREAM FLOW");
         crate::commands::render_flow_block_with_heading(
             u,
             &render_opts,
             &item.flow,
             &item.source.rule_id,
             &mut local_seen,
-            "SOURCE FLOW",
+            &heading,
         );
     }
     render_paging_footer(info, "bonsai-ninja security <workspace> source-analysis");
@@ -3339,11 +3369,17 @@ fn render_source_analysis_text_page(
 fn render_source_analysis_candidates(
     ws: &bonsai_sdk::Workspace,
     candidates: &[CombinedSourceAnalysisCandidate],
+    start_offset: u64,
 ) -> Vec<CombinedSourceAnalysisFlow> {
     candidates
         .iter()
         .enumerate()
-        .filter_map(|(idx, item)| render_source_analysis_candidate(ws, idx, item))
+        .filter_map(|(idx, item)| {
+            let global_idx = usize::try_from(start_offset)
+                .unwrap_or(usize::MAX)
+                .saturating_add(idx);
+            render_source_analysis_candidate(ws, global_idx, item)
+        })
         .collect()
 }
 
@@ -3721,7 +3757,7 @@ fn render_source_analysis_header(
     cli_println!("{}", u.ruler('═', 70));
     cli_println!(
         "{} · {}  {}",
-        u.annotation(&format!("SOURCE FLOW {idx}")),
+        u.annotation(&format!("SOURCE {idx}")),
         u.name(source.tag.as_deref().unwrap_or("source")),
         u.dim(&source.rule_id),
     );

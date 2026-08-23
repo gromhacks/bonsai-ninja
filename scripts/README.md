@@ -31,7 +31,9 @@ cannot silently accumulate here.
 - `audit-hardcoded.sh` — enforces the adapter/rulepack ownership boundary for
   language and security knowledge.
 - `audit-layering.sh` — validates the workspace crate dependency DAG.
-- `audit-loop.sh` — runs the combined rulepack, fixture, sanitizer, and taint-engine health loop.
+- `audit-loop.sh` — runs the combined rulepack, fixture, sanitizer, taint-engine,
+  CLI, and release-binary health loop. Release-only tests preserve the remapped
+  distributable instead of replacing it with a local build.
 - `audit-public-api.sh` — compares the public Rust API surface with its checked-in snapshot.
 - `audit-release-metadata.py` — validates public Cargo package and repository metadata.
 - `audit-release-binary.py` — rejects distributable binaries that retain the

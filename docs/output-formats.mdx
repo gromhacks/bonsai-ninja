@@ -55,7 +55,14 @@ GROUP 1 G:701fc172b976025d  3 flow(s)
 
 ## Compact
 
-Compact text keeps flow headers and step labels while omitting repeated source bodies. `inspect` uses `FLOW`; security source mapping uses `SOURCE FLOW`; security findings use `TAINT FLOW`. Security text expands flow bodies by default and paginates when needed; compact security blocks remain only when full source bodies cannot be resolved for a finding.
+Compact text keeps flow headers and step labels while omitting repeated source
+bodies. `inspect` uses `FLOW`; security source mapping uses
+`SOURCE n · DOWNSTREAM FLOW m`; sink mapping uses
+`SINK n · UPSTREAM FLOW m`; security findings use `TAINT FLOW`. Endpoint
+numbers remain global across pages, and each lineage header retains its rule
+id. Security text expands flow bodies by default and paginates when needed;
+compact security blocks remain only when full source bodies cannot be resolved
+for a finding.
 
 ```bash
 bonsai-ninja inspect ./src --query execute --compact

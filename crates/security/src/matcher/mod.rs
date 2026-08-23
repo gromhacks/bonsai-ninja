@@ -1988,10 +1988,10 @@ fn matcher_worker_count() -> usize {
         .min(available)
 }
 
-/// Keep one inventory row per rule and concrete call site, preferring the
-/// match text with the most receiver context.
+/// Keep one inventory row per exact compiler binding and rule, preferring
+/// callable attribution over a duplicate module-body projection.
 pub(crate) fn dedup_inventory_matches(matches: &mut Vec<RuleMatch>) {
-    type InventoryDedupKey = (String, String, u32, u32, String);
+    type InventoryDedupKey = (String, String, u64, u64, String, String);
 
     let mut seen: AHashMap<InventoryDedupKey, usize> = AHashMap::new();
     let mut deduped: Vec<RuleMatch> = Vec::with_capacity(matches.len());
@@ -1999,24 +1999,23 @@ pub(crate) fn dedup_inventory_matches(matches: &mut Vec<RuleMatch>) {
         let key = (
             m.language.clone(),
             m.file.clone(),
-            m.line,
-            m.column,
+            m.span.start,
+            m.span.end,
             m.rule_id.clone(),
+            m.match_text.clone(),
         );
         if let Some(&idx) = seen.get(&key) {
             // A module body and its nested callable can both expose the same
-            // compiler fact. The concrete source/sink site is one endpoint;
-            // retain the callable attribution when available and otherwise
-            // prefer the match text with the most receiver context.
+            // compiler fact. The span plus bound text is one exact endpoint;
+            // `kind: param` rules intentionally use the declaration anchor,
+            // so distinct parameter bindings on that declaration must not be
+            // collapsed. Retain callable attribution when available.
             let existing_is_callable = deduped[idx]
                 .enclosing_fn
                 .as_deref()
                 .is_some_and(|name| name != "__module__");
             let candidate_is_callable = m.enclosing_fn.as_deref().is_some_and(|name| name != "__module__");
-            if (candidate_is_callable && !existing_is_callable)
-                || (candidate_is_callable == existing_is_callable
-                    && m.match_text.len() > deduped[idx].match_text.len())
-            {
+            if candidate_is_callable && !existing_is_callable {
                 deduped[idx] = m;
             }
             continue;

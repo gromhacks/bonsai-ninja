@@ -179,16 +179,27 @@ impl SourceGroupExecutor<'_> {
         metrics: &mut SourceGroupMetrics,
     ) -> Arc<EntryTaintGraph> {
         let source_func = group.src_func_id;
-        let mut seed_key = effective_source_seed_key(
-            source_func,
-            &source_item.seeds,
-            source_item.anchor,
-            &source_item.output_arg_names,
-            source_item.callback_only,
-            source_item.output_only,
-            self.global.as_ref(),
-            idg,
-        );
+        let seed_request = if source_item.callback_only {
+            source_item.anchor.map_or_else(
+                || IdgSeedRequest::rule_match(source_func, &source_item.seeds, None, &[]),
+                |anchor| IdgSeedRequest::callback_rule_match(source_func, &source_item.seeds, anchor),
+            )
+        } else if source_item.output_only {
+            IdgSeedRequest::output_rule_match(
+                source_func,
+                &source_item.seeds,
+                source_item.anchor,
+                &source_item.output_arg_names,
+            )
+        } else {
+            IdgSeedRequest::rule_match(
+                source_func,
+                &source_item.seeds,
+                source_item.anchor,
+                &source_item.output_arg_names,
+            )
+        };
+        let mut seed_key = effective_source_seed_key(seed_request, self.global.as_ref(), idg);
         let sink_funcs = targets.sink_funcs(group);
         let lineage_funcs = Some(&group.corridor.lineage_funcs);
         append_taint_target_key(&mut seed_key, "target_funcs", sink_funcs);

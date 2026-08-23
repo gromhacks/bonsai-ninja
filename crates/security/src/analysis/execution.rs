@@ -1972,25 +1972,11 @@ fn security_taint_worker_count() -> usize {
 /// name/anchor/output-arg key because the IDG seed builder will do
 /// the same fallback internally.
 pub(super) fn effective_source_seed_key(
-    source_func: FuncId,
-    seeds: &TokenSet,
-    anchor: Option<bonsai_common::Span>,
-    output_arg_names: &[String],
-    callback_only: bool,
-    output_only: bool,
+    seed_request: IdgSeedRequest<'_>,
     global: &GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
 ) -> Vec<String> {
-    let seed_request = if callback_only {
-        anchor.map_or_else(
-            || IdgSeedRequest::rule_match(source_func, seeds, None, &[]),
-            |anchor| IdgSeedRequest::callback_rule_match(source_func, seeds, anchor),
-        )
-    } else if output_only {
-        IdgSeedRequest::output_rule_match(source_func, seeds, anchor, output_arg_names)
-    } else {
-        IdgSeedRequest::rule_match(source_func, seeds, anchor, output_arg_names)
-    };
+    let (names, anchor, output_arg_names, callback_only, output_only) = seed_request.cache_key_parts();
     let seed_nodes = compose_idg_seed_nodes(seed_request, global, idg);
     if !seed_nodes.is_empty() {
         let node_ids = seed_nodes
@@ -2000,7 +1986,7 @@ pub(super) fn effective_source_seed_key(
             .join(",");
         return vec![format!("__idg_seed_nodes@{node_ids}")];
     }
-    sorted_seed_key_with_anchor(seeds, anchor, output_arg_names, callback_only, output_only)
+    sorted_seed_key_with_anchor(names, anchor, output_arg_names, callback_only, output_only)
 }
 
 pub(super) fn sorted_seed_key_with_anchor(

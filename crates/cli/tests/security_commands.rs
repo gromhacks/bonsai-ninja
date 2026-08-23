@@ -2082,6 +2082,85 @@ fn sink_analysis_maps_python_endpoints_and_exact_upstream_paths() {
 }
 
 #[test]
+fn source_and_sink_text_flows_keep_parent_endpoint_labels_and_global_page_numbers() {
+    let ws = micro_path("python");
+    if !ws.exists() {
+        return;
+    }
+    let rules = rules_dir();
+
+    let source_text = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "source-analysis",
+        "--rules-dir",
+        &rules,
+        "--all",
+    ])
+    .unwrap();
+    assert!(
+        source_text
+            .lines()
+            .any(|line| { line.contains("SOURCE 1 · DOWNSTREAM FLOW 1") && line.contains("python.") }),
+        "each downstream flow heading must carry its source number and rule id:\n{source_text}"
+    );
+
+    let sink_text = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "sink-analysis",
+        "--rules-dir",
+        &rules,
+        "--profile",
+        "all",
+        "--all",
+    ])
+    .unwrap();
+    assert!(
+        sink_text
+            .lines()
+            .any(|line| { line.contains("SINK 1 · UPSTREAM FLOW 1") && line.contains("python.") }),
+        "each upstream flow heading must carry its sink number and rule id:\n{sink_text}"
+    );
+
+    let source_page_two = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "source-analysis",
+        "--rules-dir",
+        &rules,
+        "--context",
+        "1",
+        "--page",
+        "2",
+    ])
+    .unwrap();
+    assert!(
+        source_page_two.contains("SOURCE 2 ·"),
+        "source endpoint numbering must not reset on page two:\n{source_page_two}"
+    );
+
+    let sink_page_two = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "sink-analysis",
+        "--rules-dir",
+        &rules,
+        "--profile",
+        "all",
+        "--context",
+        "1",
+        "--page",
+        "2",
+    ])
+    .unwrap();
+    assert!(
+        sink_page_two.contains("SINK 2 ·"),
+        "sink endpoint numbering must not reset on page two:\n{sink_page_two}"
+    );
+}
+
+#[test]
 fn sink_analysis_keeps_endpoints_when_the_selected_source_matches_nothing() {
     let ws = micro_path("python");
     if !ws.exists() {
@@ -2175,6 +2254,51 @@ def login():
             "security {subcommand} should not leak an absolute workspace path:\n{out}"
         );
     }
+}
+
+#[test]
+fn exact_source_rule_filter_uses_syntax_anchor_and_keeps_same_line_parameters() {
+    let ws = temp_workspace("exact-source-rule-anchor");
+    std::fs::write(
+        ws.join("page_live.ex"),
+        r#"
+alias Phoenix.LiveView
+defmodule PageLive do
+  use Phoenix.LiveView
+  def handle_params(params, uri, socket) do
+    {:noreply, socket}
+  end
+end
+"#,
+    )
+    .expect("write LiveView fixture");
+    let rules = rules_dir();
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules,
+        "sources",
+        "--rule",
+        "elixir.phoenix.liveview_handle_params",
+        "--format",
+        "json",
+        "--all",
+    ])
+    .expect("source inventory output");
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("source inventory JSON");
+    let rows = json_rows(&parsed);
+    assert_eq!(
+        rows.len(),
+        2,
+        "both LiveView input parameters must survive exact-rule candidate lookup and inventory dedup: {out}"
+    );
+    let texts = rows
+        .iter()
+        .filter_map(|row| row["text"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(texts, BTreeSet::from(["params", "uri"]));
+    let _ = std::fs::remove_dir_all(ws);
 }
 
 #[test]

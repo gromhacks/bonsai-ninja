@@ -393,7 +393,7 @@
   trust: remote
   tag: http-input
   category: http-input
-  packages: [koa, koa-body, "@koa/router", fastify]
+  packages: [koa, koa-body, koa-bodyparser, "@koa/bodyparser", "@koa/router", fastify]
   match:
     kind: read
     target:
@@ -413,6 +413,14 @@
         return payload.body;
       }
     expect_no_match: true
+  - name: koa context request body
+    code: |
+      const Koa = require("koa");
+      const bodyParser = require("koa-bodyparser");
+      const app = new Koa();
+      app.use(bodyParser());
+      app.use(ctx => sink(ctx.request.body));
+    expect_match_text: [ctx.request.body]
   description: Koa/Fastify request.body - HTTP request body. The exact `request.body` carrier avoids turning every `.body` property in a framework-using file into a source.
 
 - id: javascript.source.koa_request_query
@@ -477,7 +485,10 @@
   description: Koa/Fastify/Hapi/Next request.headers. Same adapter fact is canonicalized here to avoid duplicate framework-specific header sources.
 
 - id: javascript.source.koa_ctx_request_body
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: javascript.source.koa_request_body
   language: javascript
   trust: remote
   tag: http-input
@@ -497,7 +508,7 @@
         return ctx.request.body;
       }
     expect_match_text: [ctx.request.body]
-  description: "Koa ctx.request.body - parsed HTTP body from bodyparser middleware."
+  description: "Disabled duplicate - attribute suffix matching lets javascript.source.koa_request_body cover both request.body and ctx.request.body with the merged Koa package evidence."
 
 - id: javascript.source.koa_ctx_query
   enabled: true

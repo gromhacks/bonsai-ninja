@@ -9,16 +9,29 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+#[derive(Copy, Clone)]
+pub(super) struct SourceSeedContext<'a> {
+    pub source: &'a RuleMatch,
+    pub output_args: &'a [usize],
+    pub output_args_from: Option<usize>,
+    pub callback_args: &'a [SourceCallbackArgSemantics],
+    pub callback_only: bool,
+    pub allow_text_only_match: bool,
+}
+
 pub(super) fn collect_source_seed_targets(
     events: &[bonsai_lang_api::FlowEvent],
-    src: &RuleMatch,
-    source_output_args: &[usize],
-    source_output_args_from: Option<usize>,
-    source_callback_args: &[SourceCallbackArgSemantics],
-    source_callback_only: bool,
-    allow_text_only_source_match: bool,
+    context: SourceSeedContext<'_>,
     out: &mut TokenSet,
 ) {
+    let SourceSeedContext {
+        source: src,
+        output_args: source_output_args,
+        output_args_from: source_output_args_from,
+        callback_args: source_callback_args,
+        callback_only: source_callback_only,
+        allow_text_only_match: allow_text_only_source_match,
+    } = context;
     use bonsai_lang_api::FlowEvent;
     for event in events {
         match event {
@@ -187,38 +200,11 @@ pub(super) fn collect_source_seed_targets(
                 else_events,
                 ..
             } => {
-                collect_source_seed_targets(
-                    then_events,
-                    src,
-                    source_output_args,
-                    source_output_args_from,
-                    source_callback_args,
-                    source_callback_only,
-                    allow_text_only_source_match,
-                    out,
-                );
-                collect_source_seed_targets(
-                    else_events,
-                    src,
-                    source_output_args,
-                    source_output_args_from,
-                    source_callback_args,
-                    source_callback_only,
-                    allow_text_only_source_match,
-                    out,
-                );
+                collect_source_seed_targets(then_events, context, out);
+                collect_source_seed_targets(else_events, context, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_source_seed_targets(
-                    body,
-                    src,
-                    source_output_args,
-                    source_output_args_from,
-                    source_callback_args,
-                    source_callback_only,
-                    allow_text_only_source_match,
-                    out,
-                );
+                collect_source_seed_targets(body, context, out);
             }
             FlowEvent::Try {
                 body,
@@ -226,36 +212,9 @@ pub(super) fn collect_source_seed_targets(
                 finally_events,
                 ..
             } => {
-                collect_source_seed_targets(
-                    body,
-                    src,
-                    source_output_args,
-                    source_output_args_from,
-                    source_callback_args,
-                    source_callback_only,
-                    allow_text_only_source_match,
-                    out,
-                );
-                collect_source_seed_targets(
-                    catch_events,
-                    src,
-                    source_output_args,
-                    source_output_args_from,
-                    source_callback_args,
-                    source_callback_only,
-                    allow_text_only_source_match,
-                    out,
-                );
-                collect_source_seed_targets(
-                    finally_events,
-                    src,
-                    source_output_args,
-                    source_output_args_from,
-                    source_callback_args,
-                    source_callback_only,
-                    allow_text_only_source_match,
-                    out,
-                );
+                collect_source_seed_targets(body, context, out);
+                collect_source_seed_targets(catch_events, context, out);
+                collect_source_seed_targets(finally_events, context, out);
             }
             _ => {}
         }

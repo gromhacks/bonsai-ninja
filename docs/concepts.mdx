@@ -105,14 +105,16 @@ flowchart LR
 
 ## Flow Types
 
-`FLOW`, `SOURCE FLOW`, `UPSTREAM FLOW`, and `TAINT FLOW` are intentionally
-different text labels.
+`FLOW`, `SOURCE n · DOWNSTREAM FLOW m`, `SINK n · UPSTREAM FLOW m`, and
+`TAINT FLOW` are intentionally different text labels. Source and sink flow
+headers retain the numbered parent endpoint and its rule id so a paged report
+never separates lineage from the boundary it explains.
 
 | Label | Produced by | Meaning |
 |---|---|---|
 | `FLOW` | `inspect`, grouped inspect output, and navigation-oriented views | A stable structural evidence unit. For ordinary inspect this is one matched callable; endpoint queries use an exact compressed compiler corridor rather than enumerating every path combination. |
-| `SOURCE FLOW` | `security source-analysis` | A path produced by running taint forward from a matched source rule. It maps where boundary data can travel without requiring a sink. |
-| `UPSTREAM FLOW` | `security sink-analysis` | Exact source-independent compiler value lineage into one matched sink, presented sink-first. Security-source reachability is separate evidence. |
+| `SOURCE n · DOWNSTREAM FLOW m` | `security source-analysis` | A path produced by running taint forward from numbered source `n`. It maps where boundary data can travel without requiring a sink. |
+| `SINK n · UPSTREAM FLOW m` | `security sink-analysis` | Exact source-independent compiler value lineage into numbered sink `n`, presented sink-first. Security-source reachability is separate evidence. |
 | `TAINT FLOW` | `security taint-analysis` | A source-to-sink finding path where the security engine proved tainted data reaches the sink operand. Steps include tainted argument indexes or receiver evidence where available. |
 
 <Note>

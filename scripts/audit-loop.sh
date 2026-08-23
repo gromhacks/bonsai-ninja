@@ -20,6 +20,7 @@
 #   6. matrix-tests      — taint engine language matrix
 #   7. cli-e2e-tests     — CLI / engine end-to-end matrix
 #   8. cli-docs          — documented commands and flags match the release CLI
+#   9. release-binary    — distributable contains no build-machine paths
 #
 # Use `--quick` to skip the long-running matrix + cli-e2e tests when
 # you want a fast structural sweep.
@@ -93,6 +94,37 @@ section_cli_e2e() {
     (cd "$REPO" && cargo test --release -q -p bonsai-ninja --test taint_engine_e2e)
 }
 
+section_release_binary() {
+    require_release_binary || return 1
+    python3 "$SCRIPT_DIR/audit-release-binary.py" "$BIN"
+}
+
+# `cargo test --release` builds the package's binary targets as test
+# dependencies and can therefore replace the remapped distributable at BIN
+# with an ordinary local build. Preserve the exact release artifact while the
+# release-only tests run, then restore it before binary/package audits.
+saved_release_binary=""
+preserve_release_binary() {
+    require_release_binary || return 1
+    saved_release_binary=$(mktemp "${TMPDIR:-/tmp}/bonsai-ninja-release.XXXXXX")
+    if ! cp -p "$BIN" "$saved_release_binary"; then
+        rm -f "$saved_release_binary"
+        saved_release_binary=""
+        return 1
+    fi
+}
+
+restore_release_binary() {
+    if [[ -n "$saved_release_binary" && -f "$saved_release_binary" ]]; then
+        if ! cmp -s "$saved_release_binary" "$BIN"; then
+            cp -p "$saved_release_binary" "$BIN"
+            echo "restored remapped release binary after release-only tests"
+        fi
+        rm -f "$saved_release_binary"
+        saved_release_binary=""
+    fi
+}
+
 run_section "pack-validate"     section_pack_validate
 run_section "mega-cli"          section_mega_cli
 run_section "sanitizer-credit"  section_sanitizer_credit
@@ -100,9 +132,16 @@ run_section "logic-alignment"   section_logic_alignment
 run_section "duplication"       section_duplication
 run_section "cli-docs"          section_cli_docs
 if (( QUICK == 0 )); then
+    if preserve_release_binary; then
+        trap restore_release_binary EXIT
+    else
+        fails+=("release-binary-preservation")
+    fi
     run_section "matrix-tests"      section_matrix_tests
     run_section "cli-e2e"           section_cli_e2e
+    restore_release_binary
 fi
+run_section "release-binary"    section_release_binary
 
 echo
 echo "=== summary ==="

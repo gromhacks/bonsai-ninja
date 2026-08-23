@@ -2730,3 +2730,28 @@ fn inventory_dedup_prefers_callable_attribution_for_one_concrete_site() {
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].enclosing_fn.as_deref(), Some("runAdminCommand"));
 }
+
+#[test]
+fn inventory_dedup_keeps_distinct_same_line_parameter_bindings() {
+    let declaration = Span::new(FileId::new(4), 64, 77);
+    let make = |text: &str| RuleMatch {
+        origin: MatchOrigin::Rulepack,
+        rule_id: "elixir.phoenix.liveview_handle_params".to_string(),
+        language: "elixir".to_string(),
+        file: "page_live.ex".to_string(),
+        line: 4,
+        // `kind: param` binds the declaration anchor; the bound parameter
+        // text is the remaining compiler identity for each carrier.
+        column: 7,
+        span: declaration,
+        match_text: text.to_string(),
+        enclosing_fn: Some("handle_params".to_string()),
+    };
+    let mut matches = vec![make("params"), make("uri")];
+
+    dedup_inventory_matches(&mut matches);
+
+    assert_eq!(matches.len(), 2);
+    assert_eq!(matches[0].match_text, "params");
+    assert_eq!(matches[1].match_text, "uri");
+}

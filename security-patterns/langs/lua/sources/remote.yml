@@ -213,7 +213,7 @@
       app:get("/search", function(self)
         return self.GET.q
       end)
-    expect_match_text: [self.GET]
+    expect_match_text: [self.GET.q]
   - name: Lapis response fields are not request query parameters
     code: |
       local lapis = require("lapis")
@@ -243,7 +243,7 @@
       app:post("/submit", function(self)
         return self.POST.title
       end)
-    expect_match_text: [self.POST]
+    expect_match_text: [self.POST.title]
   - name: ordinary POST field is not a Lapis request carrier
     code: |
       local lapis = require("lapis")
@@ -271,7 +271,7 @@
       app:get("/", function(self)
         return self.cookies.theme
       end)
-    expect_match_text: [self.cookies]
+    expect_match_text: [self.cookies.theme]
   - name: response headers are not request cookies
     code: |
       local lapis = require("lapis")
@@ -391,7 +391,7 @@
       app:get("/", function(self)
         return self.req.parsed_url.path
       end)
-    expect_match_text: [self.req.parsed_url]
+    expect_match_text: [self.req.parsed_url.path]
   - name: application URL setting is not the request URL
     code: |
       local lapis = require("lapis")
