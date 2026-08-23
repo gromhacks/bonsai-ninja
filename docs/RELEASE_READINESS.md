@@ -6,7 +6,7 @@ not duplicate dated performance history.
 
 ## Status
 
-The v0.2.8 local release pass completed on 2026-08-22. Documentation claims,
+The v0.2.9 local release pass completed on 2026-08-22. Documentation claims,
 links, command examples, current repository counts, and the rulepack validator
 were rechecked during the pass. The release candidate also passed 231
 release security unit tests, 36 release rulepack conformance tests, 88
