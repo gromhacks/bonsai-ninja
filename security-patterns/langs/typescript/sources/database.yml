@@ -1,0 +1,132 @@
+- id: typescript.source.mongodb_collection_find_one
+  enabled: true
+  language: typescript
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  packages: [mongodb]
+  match:
+    kind: call
+    callee:
+      name: findOne
+  constraints:
+  - receiver_type_in: [Collection]
+  - max_args: 2
+  match_examples:
+  - name: typed MongoDB collection document
+    code: |
+      import type { Collection } from "mongodb";
+      async function load(users: Collection) {
+        return await users.findOne({ active: true });
+      }
+    expect_match_text: [users.findOne]
+  - name: same method on an application repository is not a database carrier
+    code: |
+      import type { Collection } from "mongodb";
+      class Repository { findOne(filter: object) { return { local: true }; } }
+      async function load(repo: Repository) {
+        return repo.findOne({ active: true });
+      }
+    expect_no_match: true
+  description: "MongoDB Collection.findOne() - one document read from persistent database state on a compiler-typed Collection receiver."
+
+- id: typescript.source.mongodb_collection_distinct
+  enabled: true
+  language: typescript
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  packages: [mongodb]
+  match:
+    kind: call
+    callee:
+      name: distinct
+  constraints:
+  - receiver_type_in: [Collection]
+  - min_args: 1
+  - max_args: 3
+  match_examples:
+  - name: typed MongoDB distinct database values
+    code: |
+      import type { Collection } from "mongodb";
+      async function roles(users: Collection) {
+        return await users.distinct("role");
+      }
+    expect_match_text: [users.distinct]
+  - name: array helper with same method name is not MongoDB input
+    code: |
+      import type { Collection } from "mongodb";
+      class Values { distinct(name: string) { return [name]; } }
+      function roles(values: Values) { return values.distinct("role"); }
+    expect_no_match: true
+  description: "MongoDB Collection.distinct(field[, filter[, options]]) - values read from persistent database documents."
+
+- id: typescript.source.pg_query_single_argument_result
+  enabled: true
+  language: typescript
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  packages: [pg]
+  match:
+    kind: call
+    callee:
+      name: query
+  constraints:
+  - receiver_type_in: [Client, Pool]
+  - arg_count: 1
+  match_examples:
+  - name: typed node-postgres one-argument query result
+    code: |
+      import type { Pool } from "pg";
+      async function load(pool: Pool) {
+        return await pool.query({ text: "SELECT name FROM users" });
+      }
+    expect_match_text: [pool.query]
+  - name: application query builder is not a database result carrier
+    code: |
+      import type { Pool } from "pg";
+      class Builder { query(spec: object) { return spec; } }
+      function build(builder: Builder) { return builder.query({ table: "users" }); }
+    expect_no_match: true
+  description: "node-postgres Client/Pool.query(config-or-text) one-argument Promise form - QueryResult containing database rows. Multi-argument overloads are intentionally deferred because two arguments can mean values or a callback."
+
+- id: typescript.source.pg_query_callback_result
+  enabled: true
+  language: typescript
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  packages: [pg]
+  match:
+    kind: call
+    callee:
+      name: query
+  constraints:
+  - receiver_type_in: [Client, Pool]
+  - arg_count: 3
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 2
+      source_param_indices: [1]
+  match_examples:
+  - name: typed node-postgres callback query result
+    code: |
+      import type { Client } from "pg";
+      function load(client: Client) {
+        client.query("SELECT name FROM users WHERE id = $1", [1], (error, result) => sink(result.rows));
+      }
+    expect_match_text: [client.query]
+  - name: two-argument promise query is not the three-argument callback carrier
+    code: |
+      import type { Client } from "pg";
+      async function load(client: Client) {
+        return await client.query("SELECT name FROM users WHERE id = $1", [1]);
+      }
+    expect_no_match: true
+  description: "Second callback parameter of node-postgres Client/Pool.query(text, values, callback) - QueryResult containing database rows. The query registration/status return is not a source."

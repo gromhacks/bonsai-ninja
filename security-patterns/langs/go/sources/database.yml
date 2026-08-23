@@ -10,7 +10,10 @@
     callee:
       regex: "\\.Scan$"
   constraints:
+  - receiver_type_in: [Rows, Row]
   - min_args: 1
+  taint_semantics:
+    source_output_args_from: 0
   match_examples:
   - name: sql rows scan
     code: |
@@ -29,12 +32,10 @@
         _ = s.Scan()
       }
     expect_no_match: true
-  description: "sql.Rows.Scan / Row.Scan - reads DB row values into destination vars. `min_args: 1` rejects the zero-arg `bufio.Scanner.Scan()` iterator decoy that shares the `.Scan$` tail."
+  description: "sql.Rows.Scan / Row.Scan reads database values into every destination argument beginning at index 0. Receiver typing and `min_args: 1` reject bufio.Scanner.Scan()."
 
 - id: go.gorm.scan
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: go
   trust: database
   tag: db-input
@@ -43,7 +44,27 @@
     kind: call
     callee:
       regex: "\\.Scan$"
-  description: "Disabled - GORM DB.Scan(&dest) reads DB row values; bare `.Scan$` already matches via go.sql.rows_scan, which has the same call shape."
+  constraints:
+  - receiver_type_in: [DB]
+  - min_args: 1
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: gorm scan destination
+    code: |
+      package main
+      import "gorm.io/gorm"
+      func example(db *gorm.DB, out any) { _ = db.Scan(out) }
+    expect_match_text: [db.Scan]
+  - name: unrelated scan receiver negative
+    code: |
+      package main
+      import "gorm.io/gorm"
+      type Scanner struct{}
+      func (Scanner) Scan(any) error { return nil }
+      func example(s Scanner, out any) { _ = s.Scan(out) }
+    expect_no_match: true
+  description: "GORM DB.Scan(dest) populates destination argument 0 from database rows; the receiver-type constraint distinguishes it from other Scan methods."
 
 - id: go.gorm.first
   enabled: true
@@ -56,7 +77,10 @@
     callee:
       regex: "\\.First$"
   constraints:
+  - receiver_type_in: [DB]
   - min_args: 1
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
   - name: gorm first
     code: |
@@ -87,7 +111,10 @@
     callee:
       regex: "\\.Find$"
   constraints:
+  - receiver_type_in: [DB]
   - min_args: 1
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
   - name: gorm find
     code: |
@@ -106,3 +133,163 @@
       }
     expect_no_match: true
   description: "GORM DB.Find(&models, ...) - populates a slice of models from DB rows; second-order taint origin. `min_args: 1` requires the destination argument."
+
+- id: go.sqlx.get
+  enabled: true
+  language: go
+  trust: database
+  tag: db-input
+  packages: ["github.com/jmoiron/sqlx"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Get$"
+  constraints:
+  - receiver_type_in: [DB, Tx]
+  - min_args: 2
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: sqlx get destination
+    code: |
+      package main
+      import "github.com/jmoiron/sqlx"
+      func example(db *sqlx.DB, out any) { _ = db.Get(out, "SELECT name FROM users") }
+    expect_match_text: [db.Get]
+  - name: unrelated get receiver negative
+    code: |
+      package main
+      import "github.com/jmoiron/sqlx"
+      type Cache struct{}
+      func (Cache) Get(any, string) error { return nil }
+      func example(c Cache, out any) { _ = c.Get(out, "key") }
+    expect_no_match: true
+  description: "sqlx DB/Tx.Get(dest, query, ...) populates destination argument 0 from a database row."
+
+- id: go.sqlx.select
+  enabled: true
+  language: go
+  trust: database
+  tag: db-input
+  packages: ["github.com/jmoiron/sqlx"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Select$"
+  constraints:
+  - receiver_type_in: [DB, Tx]
+  - min_args: 2
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: sqlx select destination
+    code: |
+      package main
+      import "github.com/jmoiron/sqlx"
+      func example(db *sqlx.DB, out any) { _ = db.Select(out, "SELECT name FROM users") }
+    expect_match_text: [db.Select]
+  - name: unrelated select receiver negative
+    code: |
+      package main
+      import "github.com/jmoiron/sqlx"
+      type Menu struct{}
+      func (Menu) Select(any, string) error { return nil }
+      func example(m Menu, out any) { _ = m.Select(out, "item") }
+    expect_no_match: true
+  description: "sqlx DB/Tx.Select(dest, query, ...) populates destination argument 0 from database rows."
+
+- id: go.sqlx.rows_structscan
+  enabled: true
+  language: go
+  trust: database
+  tag: db-input
+  packages: ["github.com/jmoiron/sqlx"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.StructScan$"
+  constraints:
+  - receiver_type_in: [Rows, Row]
+  - min_args: 1
+  - max_args: 1
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: sqlx struct scan destination
+    code: |
+      package main
+      import "github.com/jmoiron/sqlx"
+      func example(rows *sqlx.Rows, out any) { _ = rows.StructScan(out) }
+    expect_match_text: [rows.StructScan]
+  - name: unrelated structscan receiver negative
+    code: |
+      package main
+      import "github.com/jmoiron/sqlx"
+      type Decoder struct{}
+      func (Decoder) StructScan(any) error { return nil }
+      func example(d Decoder, out any) { _ = d.StructScan(out) }
+    expect_no_match: true
+  description: "sqlx Rows/Row.StructScan(dest) populates destination argument 0 from a database row."
+
+- id: go.pgx.row_scan
+  enabled: true
+  language: go
+  trust: database
+  tag: db-input
+  packages: ["github.com/jackc/pgx/v4", "github.com/jackc/pgx/v5"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Scan$"
+  constraints:
+  - receiver_type_in: [Row, Rows]
+  - min_args: 1
+  taint_semantics:
+    source_output_args_from: 0
+  match_examples:
+  - name: pgx row variadic destinations
+    code: |
+      package main
+      import "github.com/jackc/pgx/v5"
+      func read(row pgx.Row) { var name string; var age int; _ = row.Scan(&name, &age) }
+    expect_match_text: [row.Scan]
+  - name: unrelated scan receiver negative
+    code: |
+      package main
+      import "github.com/jackc/pgx/v5"
+      type Decoder struct{}
+      func (Decoder) Scan(...any) error { return nil }
+      func read(decoder Decoder, out any) { _ = decoder.Scan(out) }
+    expect_no_match: true
+  description: "pgx Row/Rows.Scan writes database columns into every variadic destination beginning at argument 0."
+
+- id: go.pgx.rows_values
+  enabled: true
+  language: go
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: ["github.com/jackc/pgx/v4", "github.com/jackc/pgx/v5"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Values$"
+  constraints:
+  - receiver_type_in: [Rows]
+  - max_args: 0
+  match_examples:
+  - name: pgx current row values
+    code: |
+      package main
+      import "github.com/jackc/pgx/v5"
+      func read(rows pgx.Rows) { values, _ := rows.Values(); _ = values }
+    expect_match_text: [rows.Values]
+  - name: unrelated values receiver negative
+    code: |
+      package main
+      import "github.com/jackc/pgx/v5"
+      type Form struct{}
+      func (Form) Values() []string { return nil }
+      func read(form Form) { _ = form.Values() }
+    expect_no_match: true
+  description: "pgx Rows.Values returns the decoded values of the current database result row."

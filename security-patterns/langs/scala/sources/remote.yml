@@ -539,7 +539,10 @@
   description: "Disabled duplicate - merged into scala.play.request_param."
 
 - id: scala.play.request_get_query_string
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: scala.play.request_param
   language: scala
   trust: remote
   tag: http-input
@@ -559,10 +562,13 @@
           playRequest.getQueryString(value)
         }
       }
-  description: "Play request.getQueryString(...)."
+  description: "Disabled - the typed Play Request parameter is the boundary; getQueryString is an accessor that must preserve that existing provenance rather than create a second source."
 
 - id: scala.play.request_body
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: scala.play.request_param
   language: scala
   trust: remote
   tag: http-input
@@ -582,10 +588,13 @@
           request.body()
         }
       }
-  description: "Play request.body - narrowed to attribute chain to avoid bare name FPs. Property-style getter (no args); `max_args: 0` rejects unrelated overloads."
+  description: "Disabled - Play request.body is a property on the already sourced typed Request parameter, not a separate input boundary."
 
 - id: scala.play.request_headers
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: scala.play.request_param
   language: scala
   trust: remote
   tag: http-input
@@ -607,10 +616,13 @@
           request.headers()
         }
       }
-  description: "Play request.headers - narrowed to attribute chain. Property-style getter (no args). Gated on `play.api.mvc` so the rule only fires on Play handlers."
+  description: "Disabled - Play request.headers inherits provenance from the typed Request parameter."
 
 - id: scala.play.request_cookies
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: scala.play.request_param
   language: scala
   trust: remote
   tag: http-input
@@ -632,10 +644,12 @@
           request.cookies()
         }
       }
-  description: "Play request.cookies - narrowed to attribute chain. Property-style getter (no args). Gated on `play.api.mvc` so the rule only fires on Play handlers."
+  description: "Disabled - Play request.cookies inherits provenance from the typed Request parameter."
 
 - id: scala.akka.entity
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: scala
   trust: remote
   tag: http-input
@@ -663,10 +677,12 @@
         }
       }
     expect_no_match: true
-  description: "akka-http entity(as[T]) directive - unmarshals request body. `top_level: true` rejects receiver-qualified `session.entity(...)` ORM/persistence calls that are not the akka-http directive."
+  description: "Disabled - entity(as[T]) constructs a Directive; the remote value is the inner-route callback parameter. Re-enable when the Scala adapter maps curried directive callbacks to generic callback-argument source facts."
 
 - id: scala.akka.parameters
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: scala
   trust: remote
   tag: http-input
@@ -694,10 +710,12 @@
         }
       }
     expect_no_match: true
-  description: "akka-http parameters(...) directive - query string. `top_level: true` rejects receiver-qualified `obj.parameters(...)` builder calls that are not the akka-http directive."
+  description: "Disabled - parameters(...) returns a Directive and passes extracted query values to its inner callback. The directive construction result is not request data."
 
 - id: scala.akka.formfields
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: scala
   trust: remote
   tag: http-input
@@ -725,10 +743,12 @@
         }
       }
     expect_no_match: true
-  description: "akka-http formFields directive - form body. `top_level: true` rejects receiver-qualified `obj.formFields(...)` calls that are not the akka-http directive."
+  description: "Disabled - formFields(...) is a directive constructor; the extracted form values are curried callback parameters."
 
 - id: scala.akka.path
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: scala
   trust: remote
   tag: http-input
@@ -746,10 +766,13 @@
           pathPrefix(value)
         }
       }
-  description: "akka-http pathPrefix / path extractor - URL path segment."
+  description: "Disabled - pathPrefix with a literal constructs a route matcher and is not itself client input. Dynamic path extraction belongs on the directive callback parameter."
 
 - id: scala.play.request_as_json
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: scala.play.request_param
   language: scala
   trust: remote
   tag: http-input
@@ -767,10 +790,13 @@
           asJson(value)
         }
       }
-  description: "Play request.body.asJson - parsed JSON request body."
+  description: "Disabled - AnyContent.asJson is a property/value projection from the already sourced Play Request body."
 
 - id: scala.play.request_as_form
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: scala.play.request_param
   language: scala
   trust: remote
   tag: http-input
@@ -788,10 +814,12 @@
           asFormUrlEncoded(value)
         }
       }
-  description: "Play request.body.asFormUrlEncoded - parsed form-encoded body."
+  description: "Disabled - AnyContent.asFormUrlEncoded is a projection from the already sourced Play Request body."
 
 - id: scala.akka.header_value_by_name
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: scala
   trust: remote
   tag: http-input
@@ -809,10 +837,12 @@
           headerValueByName(value)
         }
       }
-  description: "akka-http headerValueByName(name) directive - extracts a request header value."
+  description: "Disabled - headerValueByName(name) constructs a Directive; the header value is delivered to the inner callback parameter."
 
 - id: scala.akka.cookie
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: scala
   trust: remote
   tag: http-input
@@ -840,10 +870,12 @@
         }
       }
     expect_no_match: true
-  description: "akka-http cookie(name) directive - extracts a request cookie. `top_level: true` rejects receiver-qualified `resp.cookie(...)` builder calls that are not the akka-http directive."
+  description: "Disabled - cookie(name) constructs a Directive; the cookie is delivered to the inner callback parameter."
 
 - id: scala.akka.parameter_singular
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: scala
   trust: remote
   tag: http-input
@@ -871,10 +903,12 @@
         }
       }
     expect_no_match: true
-  description: "akka-http parameter(name) directive - singular form of parameters(...). `top_level: true` rejects receiver-qualified `obj.parameter(...)` calls that are not the akka-http directive."
+  description: "Disabled - parameter(name) constructs a Directive; the query value is delivered to the inner callback parameter."
 
 - id: scala.http4s.request_body
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: scala
   trust: remote
   tag: http-input
@@ -896,10 +930,12 @@
           Request.body()
         }
       }
-  description: "http4s Request.body - raw entity stream from the client. Property-style getter (no args)."
+  description: "Disabled - Request.body is a property and Request is used by both clients and servers. Re-enable when route-pattern/callback facts prove this Request is inbound."
 
 - id: scala.http4s.uri_params
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: scala
   trust: remote
   tag: http-input
@@ -919,10 +955,12 @@
           uri.params(value)
         }
       }
-  description: "http4s req.uri.params - parsed query string map."
+  description: "Disabled - Uri values may be locally constructed or outbound. Query params become a source only when generic route-pattern facts prove an inbound http4s Request origin."
 
 - id: scala.http4s.request_headers
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: scala
   trust: remote
   tag: http-input
@@ -944,10 +982,12 @@
           Request.headers()
         }
       }
-  description: "http4s Request.headers - request header collection. Property-style getter (no args)."
+  description: "Disabled - Request.headers is a property on a type shared by http4s clients and servers; inbound route provenance is required."
 
 - id: scala.tapir.input_query
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: scala
   trust: remote
   tag: http-input
@@ -971,10 +1011,12 @@
           query(value)
         }
       }
-  description: "Tapir endpoint .in(query[T](\"name\")) - declares a query-string input bound into the handler. `top_level` rejects `obj.query(...)` ORM/SQL `query` decoys; `min/max_args: 1` matches Tapir's `query[T](name: String)` shape."
+  description: "Disabled - query[T](name) is an immutable endpoint-input description, often containing only a literal name. The runtime value appears in serverLogic callback parameters and requires endpoint-input-to-callback association."
 
 - id: scala.tapir.input_json_body
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: scala
   trust: remote
   tag: http-input
@@ -994,13 +1036,12 @@
           jsonBody(value)
         }
       }
-  description: "Tapir endpoint .in(jsonBody[T]) - declares a JSON request body input."
+  description: "Disabled - jsonBody[T] describes an endpoint input; request data is delivered later to serverLogic callback parameters."
 
 - id: scala.zio.http_request_body
   enabled: false
   disabled_reason:
-    code: subsumed
-    subsumed_by: scala.http4s.request_body
+    code: pending-adapter-fact
   language: scala
   trust: remote
   tag: http-input
@@ -1022,7 +1063,7 @@
           Request.body()
         }
       }
-  description: "Disabled duplicate - same matcher as canonical scala.http4s.request_body; receiver type is not available in YAML."
+  description: "Disabled - ZIO Request.body is a property on a request type used in handler values; precise server-route provenance is required and cannot be borrowed from the unrelated http4s rule."
 
   imports:
   - dev

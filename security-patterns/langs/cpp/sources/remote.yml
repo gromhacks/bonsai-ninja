@@ -457,17 +457,28 @@
   match:
     kind: call
     callee:
-      attribute: [StreamSocket, receiveBytes]
+      regex: "\\.receiveBytes$"
+  constraints:
+  - receiver_type_in: [StreamSocket, Poco::Net::StreamSocket]
+  - min_args: 2
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
   - name: poco stream socket receive bytes
     code: |
       #include <Poco/Net/StreamSocket.h>
-      void example() {
+      void example(Poco::Net::StreamSocket &socket) {
         char buffer[1024];
-        StreamSocket.receiveBytes(buffer, sizeof(buffer));
+        socket.receiveBytes(buffer, sizeof(buffer));
       }
-    expect_match_text: [StreamSocket.receiveBytes]
-  description: "Poco StreamSocket::receiveBytes - remote socket bytes; local receiver calls require semantic StreamSocket receiver-type facts."
+    expect_match_text: [socket.receiveBytes]
+  - name: unrelated receive bytes receiver negative
+    code: |
+      #include <Poco/Net/StreamSocket.h>
+      struct Buffer { int receiveBytes(char *, int); };
+      void example(Buffer &buffer) { char out[8]; buffer.receiveBytes(out, 8); }
+    expect_no_match: true
+  description: "Poco StreamSocket::receiveBytes(buffer, length, ...) writes remote socket bytes to output buffer argument 0; the integer return is the byte count."
 
 - id: cpp.input.grpc_request_param
   enabled: false
@@ -669,7 +680,9 @@
   description: "Drogon HttpRequest::getHeader(name) - caller-controlled HTTP header."
 
 - id: cpp.input.qt_qnetworkrequest_url
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: cpp
   trust: remote
   tag: http-input
@@ -679,24 +692,20 @@
     callee:
       attribute: [QNetworkRequest, url]
   match_examples:
-  - name: generated direct match
+  - name: outbound qnetworkrequest url is not input
     code: |
-      #include <QtCore/Qt>
-      #include <QtCore/Qt>
-      #include <QtCore/Qt> /* Qt */
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        QNetworkRequest::url(arg);
-      }
-  description: "Qt QNetworkRequest::url() - request-controlled URL accessor."
+      #include <QNetworkRequest>
+      QUrl destination(const QNetworkRequest &request) { return request.url(); }
+    expect_no_match: true
+  description: "Disabled - QNetworkRequest is outbound client request configuration, not received network input. QNetworkReply accessors model response data."
 
   imports:
   - QtCore
   - QtCore/Qt
 - id: cpp.input.qt_qnetworkrequest_rawheader
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: cpp
   trust: remote
   tag: http-input
@@ -707,18 +716,12 @@
     callee:
       attribute: [QNetworkRequest, rawHeader]
   match_examples:
-  - name: generated direct match
+  - name: outbound qnetworkrequest header is not input
     code: |
-      #include <QtCore/Qt>
-      #include <QtCore/Qt>
-      #include <QtCore/Qt> /* Qt */
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        QNetworkRequest::rawHeader(arg);
-      }
-  description: "Qt QNetworkRequest::rawHeader(name) - caller-controlled header value."
+      #include <QNetworkRequest>
+      QByteArray header(const QNetworkRequest &request) { return request.rawHeader("X-Trace"); }
+    expect_no_match: true
+  description: "Disabled - QNetworkRequest headers are outbound client configuration, not received network input."
 
   imports:
   - QtCore

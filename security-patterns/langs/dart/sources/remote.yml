@@ -48,7 +48,9 @@
   description: "Disabled - whole context object taints too broadly without field-sensitive Request access tracking."
 
 - id: dart.http.request_query_parameters
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: dart
   trust: remote
   tag: http-input
@@ -65,10 +67,12 @@
         var q = uri.queryParameters;
         return q;
       }
-  description: "Uri.queryParameters - parsed query-string parameters read via `uri.queryParameters` on a typed Uri receiver."
+  description: "Disabled - Uri is also constructed from literals and trusted configuration. Query fields inherit provenance from a proven inbound Request.url/requestedUri boundary."
 
 - id: dart.http.request_query_parameters_all
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: dart
   trust: remote
   tag: http-input
@@ -85,7 +89,7 @@
         var q = uri.queryParametersAll;
         return q;
       }
-  description: "Uri.queryParametersAll - multi-valued query-string parameters read via `uri.queryParametersAll` on a typed Uri receiver."
+  description: "Disabled - Uri.queryParametersAll is an accessor, not an input origin. It requires proven inbound Request/Intent provenance."
 
 - id: dart.http.request_headers
   enabled: false
@@ -112,22 +116,21 @@
   match:
     kind: call
     callee:
-      attribute: [request, readAsString]
+      name: readAsString
   constraints:
+  - receiver_type_in: [Request]
   - max_args: 1
   match_examples:
-  - name: declared shape
+  - name: shelf request body text
     code: |
       import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      void test() { var input = "x"; var amount = 1; request.readAsString(input); }
-  - name: unrelated request method negative
+      Future<String> readBody(Request request) => request.readAsString();
+    expect_match_text: [request.readAsString]
+  - name: local reader is not a shelf request
     code: |
       import 'package:shelf/shelf.dart';
-      void test() { request.change(); }
+      class Reader { String readAsString() => 'local'; }
+      String readBody(Reader reader) => reader.readAsString();
     expect_no_match: true
   description: "shelf Request.readAsString - body read. Signature: `readAsString([Encoding])` (0 or 1 arg); `max_args: 1` rejects same-name decoys with extra args."
 
@@ -144,22 +147,21 @@
   match:
     kind: call
     callee:
-      attribute: [request, read]
+      name: read
   constraints:
+  - receiver_type_in: [Request]
   - max_args: 0
   match_examples:
-  - name: declared shape
+  - name: shelf request byte stream
     code: |
       import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      void test() { var input = "x"; var amount = 1; request.read(); }
-  - name: read with arg negative
+      Stream<List<int>> readBody(Request request) => request.read();
+    expect_match_text: [request.read]
+  - name: local reader is not a shelf request
     code: |
       import 'package:shelf/shelf.dart';
-      void test() { var n = 1; request.read(n); }
+      class Reader { String read() => 'local'; }
+      String readBody(Reader reader) => reader.read();
     expect_no_match: true
   description: "shelf Request.read - byte stream body. Signature: `read()` (0 args); `max_args: 0` rejects unrelated `read(n)` decoys (e.g. file readers)."
 
@@ -168,22 +170,37 @@
 - id: dart.http.response_body
   enabled: false
   disabled_reason:
-    code: requires-constraint
+    code: pending-adapter-fact
   language: dart
   trust: remote
   tag: network-response
   payload_types: [form]
-  packages: [http, dio]
+  packages: [http]
   match:
     kind: read
     target:
       name: body
-  description: "Disabled - FP-prone. Bare name 'body' matches every .body attribute. Re-enable with attribute chain."
+      receiver_type_in: [Response, http.Response]
+  match_examples:
+  - name: package http response body
+    code: |
+      import 'package:http/http.dart' as http;
+      String consume(http.Response response) => response.body;
+    expect_match_text: [response.body]
+  - name: local response body is not network input
+    code: |
+      import 'package:http/http.dart' as http;
+      class LocalResponse { final String body = 'local'; }
+      String consume(LocalResponse response) => response.body;
+    expect_no_match: true
+  description: "Disabled - package:http Response.body is a real network-response boundary, but precise receiver-type evidence is not yet adapter-visible on Dart property reads. A bare `.body` source would overmatch application models."
 
 # --- Re-enabled / new framework-scoped HTTP request handlers ---
 
 - id: dart.shelf.request_url
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: dart
   trust: remote
   tag: http-input
@@ -191,31 +208,30 @@
   frameworks: [shelf]
   packages: [shelf]
   match:
-    kind: call
-    callee:
-      attribute: [request, url]
-  constraints:
-  - max_args: 0
+    kind: read
+    target:
+      name: url
+      receiver_type_in: [Request]
   match_examples:
-  - name: declared shape
+  - name: shelf request URL property
     code: |
       import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      void test() { var input = "x"; var amount = 1; request.url(); }
-  - name: url builder with arg negative
+      Uri requestUrl(Request request) => request.url;
+    expect_match_text: [request.url]
+  - name: local URL property is not a shelf request
     code: |
       import 'package:shelf/shelf.dart';
-      void test() { var input = "x"; request.url(input); }
+      class LocalRequest { final Uri url = Uri.parse('https://example.test'); }
+      Uri requestUrl(LocalRequest request) => request.url;
     expect_no_match: true
-  description: "shelf Request.url - tainted Uri (path + query). Property-style getter (no args); `max_args: 0` rejects unrelated `request.url(...)` setters/builders elsewhere."
+  description: "Disabled - Shelf Request.url is an inbound value, but the Dart adapter does not yet prove the receiver type on property reads; matching bare `.url` would include local URL models."
 
   imports:
   - shelf/shelf.dart
 - id: dart.shelf.request_requested_uri
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: dart
   trust: remote
   tag: http-input
@@ -223,31 +239,30 @@
   frameworks: [shelf]
   packages: [shelf]
   match:
-    kind: call
-    callee:
-      attribute: [request, requestedUri]
-  constraints:
-  - max_args: 0
+    kind: read
+    target:
+      name: requestedUri
+      receiver_type_in: [Request]
   match_examples:
-  - name: declared shape
+  - name: shelf requested URI property
     code: |
       import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      void test() { var input = "x"; var amount = 1; request.requestedUri(); }
-  - name: requestedUri with arg negative
+      Uri requested(Request request) => request.requestedUri;
+    expect_match_text: [request.requestedUri]
+  - name: local property is not a shelf request
     code: |
       import 'package:shelf/shelf.dart';
-      void test() { var input = "x"; request.requestedUri(input); }
+      class LocalRequest { final Uri requestedUri = Uri.parse('https://example.test'); }
+      Uri requested(LocalRequest request) => request.requestedUri;
     expect_no_match: true
-  description: "shelf Request.requestedUri - full requested URL including host. Property-style getter (no args); `max_args: 0` rejects unrelated overloads."
+  description: "Disabled - Shelf Request.requestedUri is inbound, but exact typed property-read evidence is not yet emitted by the Dart adapter."
 
   imports:
   - shelf/shelf.dart
 - id: dart.shelf.request_headers_chain
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: dart
   trust: remote
   tag: http-input
@@ -255,26 +270,23 @@
   frameworks: [shelf]
   packages: [shelf]
   match:
-    kind: call
-    callee:
-      attribute: [request, headers]
-  constraints:
-  - max_args: 0
+    kind: read
+    target:
+      name: headers
+      receiver_type_in: [Request]
   match_examples:
-  - name: declared shape
+  - name: shelf request headers property
     code: |
       import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      import 'package:shelf/shelf.dart';
-      void test() { var input = "x"; var amount = 1; request.headers(); }
-  - name: headers setter with arg negative
+      Map<String, String> headers(Request request) => request.headers;
+    expect_match_text: [request.headers]
+  - name: local headers property is not a shelf request
     code: |
       import 'package:shelf/shelf.dart';
-      void test() { var input = "x"; request.headers(input); }
+      class LocalRequest { final Map<String, String> headers = const {}; }
+      Map<String, String> headers(LocalRequest request) => request.headers;
     expect_no_match: true
-  description: "shelf Request.headers - tainted header map. Property-style getter (no args); `max_args: 0` rejects unrelated `headers(...)` setters."
+  description: "Disabled - Shelf Request.headers is inbound, but enabling a bare `.headers` source without typed property-read evidence would overmatch local objects."
 
   imports:
   - shelf/shelf.dart
@@ -310,10 +322,6 @@
   - name: declared shape
     code: |
       import 'package:aqueduct/aqueduct.dart';
-      import 'package:aqueduct/aqueduct.dart';
-      import 'package:aqueduct/aqueduct.dart';
-      import 'package:aqueduct/aqueduct.dart';
-      import 'package:aqueduct/aqueduct.dart'; // aqueduct
       void test() { var input = "x"; var amount = 1; body.decode(input); }
   - name: unrelated body method negative
     code: |
@@ -325,7 +333,9 @@
   imports:
   - aqueduct/aqueduct.dart
 - id: dart.dart_frog.request_uri
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: dart
   trust: remote
   tag: http-input
@@ -333,26 +343,23 @@
   frameworks: [dart_frog]
   packages: [dart_frog]
   match:
-    kind: call
-    callee:
-      attribute: [request, uri]
-  constraints:
-  - max_args: 0
+    kind: read
+    target:
+      name: uri
+      receiver_type_in: [Request]
   match_examples:
-  - name: declared shape
+  - name: Dart Frog request URI property
     code: |
       import 'package:dart_frog/dart_frog.dart';
-      import 'package:dart_frog/dart_frog.dart';
-      import 'package:dart_frog/dart_frog.dart';
-      import 'package:dart_frog/dart_frog.dart';
-      import 'package:dart_frog/dart_frog.dart'; // dart_frog
-      void test() { var input = "x"; var amount = 1; request.uri(); }
-  - name: uri builder with arg negative
+      Uri requestUri(Request request) => request.uri;
+    expect_match_text: [request.uri]
+  - name: local URI property is not a Dart Frog request
     code: |
       import 'package:dart_frog/dart_frog.dart';
-      void test() { var input = "x"; request.uri(input); }
+      class LocalRequest { final Uri uri = Uri.parse('https://example.test'); }
+      Uri requestUri(LocalRequest request) => request.uri;
     expect_no_match: true
-  description: "Dart Frog RequestContext.request.uri - tainted Uri. Property-style getter (no args); `max_args: 0` rejects unrelated overloads."
+  description: "Disabled - Dart Frog Request.uri is inbound, but the Dart adapter does not yet expose receiver-type evidence on property reads; bare `.uri` is not precise enough."
 
   imports:
   - dart_frog/dart_frog.dart
@@ -376,10 +383,6 @@
   - name: declared shape
     code: |
       import 'package:dart_frog/dart_frog.dart';
-      import 'package:dart_frog/dart_frog.dart';
-      import 'package:dart_frog/dart_frog.dart';
-      import 'package:dart_frog/dart_frog.dart';
-      import 'package:dart_frog/dart_frog.dart'; // dart_frog
       void test() { var input = "x"; var amount = 1; request.json(); }
   - name: json serializer with arg negative
     code: |
@@ -425,17 +428,24 @@
   tag: ipc-input
   payload_types: [text, json]
   frameworks: [flutter]
+  packages: [flutter]
   match:
     kind: call
     callee:
-      attribute: [methodChannel, invokeMethod]
+      name: invokeMethod
+  constraints:
+  - receiver_type_in: [MethodChannel]
   match_examples:
-  - name: declared shape
+  - name: typed Flutter method channel invocation
     code: |
-      void test() { var input = "x"; var amount = 1; methodChannel.invokeMethod(input); }
-  - name: unrelated method channel method negative
+      import 'package:flutter/services.dart';
+      Future<String?> read(MethodChannel channel) => channel.invokeMethod<String>('read');
+    expect_match_text: [channel.invokeMethod]
+  - name: same method on a local object negative
     code: |
-      void test() { var input = "x"; methodChannel.setMethodCallHandler(input); }
+      import 'package:flutter/services.dart';
+      class LocalChannel { String invokeMethod(String name) => 'local'; }
+      String read(LocalChannel channel) => channel.invokeMethod('read');
     expect_no_match: true
   description: "Flutter MethodChannel.invokeMethod - return value crosses platform boundary (e.g. JS bridge, native plugin)."
 
@@ -446,22 +456,31 @@
   tag: ipc-input
   payload_types: [text, json]
   frameworks: [flutter]
+  packages: [flutter]
   match:
     kind: call
     callee:
-      attribute: [eventChannel, receiveBroadcastStream]
+      name: receiveBroadcastStream
+  constraints:
+  - receiver_type_in: [EventChannel]
   match_examples:
-  - name: declared shape
+  - name: typed Flutter event channel stream
     code: |
-      void test() { var input = "x"; var amount = 1; eventChannel.receiveBroadcastStream(input); }
-  - name: unrelated event channel method negative
+      import 'package:flutter/services.dart';
+      Stream<dynamic> events(EventChannel channel) => channel.receiveBroadcastStream();
+    expect_match_text: [channel.receiveBroadcastStream]
+  - name: local event stream is not a platform channel
     code: |
-      void test() { var input = "x"; eventChannel.binaryMessenger(input); }
+      import 'package:flutter/services.dart';
+      class LocalChannel { Stream<int> receiveBroadcastStream() => const Stream.empty(); }
+      Stream<int> events(LocalChannel channel) => channel.receiveBroadcastStream();
     expect_no_match: true
   description: "Flutter EventChannel.receiveBroadcastStream - values arrive from native/JS over platform channel."
 
 - id: dart.cloud.firebase_oncall_data
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: dart
   trust: remote
   tag: cloud-input
@@ -478,17 +497,13 @@
   - name: declared shape
     code: |
       import 'package:firebase_functions_interop/firebase_functions_interop.dart';
-      import 'package:firebase_functions_interop/firebase_functions_interop.dart';
-      import 'package:firebase_functions_interop/firebase_functions_interop.dart';
-      import 'package:firebase_functions_interop/firebase_functions_interop.dart';
-      import 'package:firebase_functions_interop/firebase_functions_interop.dart'; // firebase_functions_interop
       void test() { var input = "x"; var amount = 1; data.onCall(input); }
   - name: zero-arg onCall accessor negative
     code: |
       import 'package:firebase_functions_interop/firebase_functions_interop.dart';
       void test() { data.onCall(); }
     expect_no_match: true
-  description: "Firebase Cloud Functions onCall handler - `data.data` is the caller-supplied payload. `onCall(handler)` is a registration call with at least one handler arg; `min_args: 1` rejects unrelated `data.onCall()` 0-arg accessors."
+  description: "Disabled - onCall(handler) is a registration call. The caller payload belongs on the registered handler parameter and requires a compiler-resolved callback source edge."
 
   imports:
   - firebase_functions_interop/firebase_functions_interop.dart
@@ -522,10 +537,12 @@
     kind: param
     target:
       name: request
-  description: "Disabled - bare `param name: request` is FP-prone; no canonical exists. Use the attribute-chain rule dart.grpc.service_call_request for `call.request`. Re-enable when adapter supports class-scoped gRPC ServiceCall param matching."
+  description: "Disabled - bare `param name: request` is FP-prone. Re-enable after generated service inheritance and fixed request-parameter position can be proven."
 
 - id: dart.grpc.service_call_request
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: dart
   trust: remote
   tag: rpc-input
@@ -540,17 +557,13 @@
   - name: declared shape
     code: |
       import 'package:grpc/grpc.dart';
-      import 'package:grpc/grpc.dart';
-      import 'package:grpc/grpc.dart';
-      import 'package:grpc/grpc.dart';
-      import 'package:grpc/grpc.dart'; // grpc
       void test() { var input = "x"; var amount = 1; call.request(input); }
   - name: unrelated call method negative
     code: |
       import 'package:grpc/grpc.dart';
       void test() { var input = "x"; call.sendTrailers(input); }
     expect_no_match: true
-  description: "gRPC ServiceCall.request - protobuf message off the call object."
+  description: "Disabled - gRPC Dart server methods receive (ServiceCall, Request); ServiceCall has no request() payload accessor. Re-enable the request parameter rule when generated service inheritance and fixed parameter position are available."
 
   imports:
   - grpc/grpc.dart
@@ -572,10 +585,6 @@
   - name: dart.shelf_multipart_part_filename example
     code: |
       import 'package:shelf_multipart/shelf_multipart.dart';
-      import 'package:shelf_multipart/shelf_multipart.dart';
-      import 'package:shelf_multipart/shelf_multipart.dart';
-      import 'package:shelf_multipart/shelf_multipart.dart';
-      import 'package:shelf_multipart/shelf_multipart.dart'; // shelf_multipart
       void test(part) { part.filename(); }
   - name: filename setter with arg negative
     code: |

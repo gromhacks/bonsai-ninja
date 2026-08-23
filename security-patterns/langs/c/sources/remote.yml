@@ -131,8 +131,109 @@
       }
     expect_match_text: [SSL_peek]
   description: "SSL_peek(ssl, buf, len) - copies TLS peer bytes into the caller buffer without consuming them; same attacker-controlled payload as SSL_read."
-- id: c.input.bio_read
+- id: c.input.ssl_read_ex
   enabled: true
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  packages: [openssl]
+  match:
+    kind: call
+    callee:
+      name: SSL_read_ex
+  taint_semantics:
+    source_output_args: [1]
+  constraints:
+  - min_args: 4
+  - max_args: 4
+  match_examples:
+  - name: openssl read ex output buffer
+    code: |
+      #include <openssl/ssl.h>
+      void handle(SSL *ssl) {
+        unsigned char buf[4096]; size_t readbytes = 0;
+        SSL_read_ex(ssl, buf, sizeof(buf), &readbytes);
+      }
+    expect_match_text: [SSL_read_ex]
+  - name: openssl write ex is not input
+    code: |
+      #include <openssl/ssl.h>
+      void send(SSL *ssl, const void *buf, size_t len) {
+        size_t written = 0; SSL_write_ex(ssl, buf, len, &written);
+      }
+    expect_no_match: true
+  description: "SSL_read_ex(ssl, buf, num, readbytes) writes TLS peer bytes to output buffer argument 1; readbytes is only the count."
+- id: c.input.gnutls_record_recv
+  enabled: true
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  packages: [gnutls]
+  match:
+    kind: call
+    callee:
+      name: gnutls_record_recv
+  taint_semantics:
+    source_output_args: [1]
+  constraints:
+  - min_args: 3
+  - max_args: 3
+  match_examples:
+  - name: gnutls record receive output
+    code: |
+      #include <gnutls/gnutls.h>
+      void handle(gnutls_session_t session) {
+        unsigned char buf[4096];
+        gnutls_record_recv(session, buf, sizeof(buf));
+      }
+    expect_match_text: [gnutls_record_recv]
+  - name: gnutls record send negative
+    code: |
+      #include <gnutls/gnutls.h>
+      void send(gnutls_session_t session, const void *buf, size_t len) {
+        gnutls_record_send(session, buf, len);
+      }
+    expect_no_match: true
+  description: "gnutls_record_recv(session, data, size) writes TLS peer bytes to output buffer argument 1."
+- id: c.input.mbedtls_ssl_read
+  enabled: true
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  packages: [mbedtls]
+  match:
+    kind: call
+    callee:
+      name: mbedtls_ssl_read
+  taint_semantics:
+    source_output_args: [1]
+  constraints:
+  - min_args: 3
+  - max_args: 3
+  match_examples:
+  - name: mbed tls read output
+    code: |
+      #include <mbedtls/ssl.h>
+      void handle(mbedtls_ssl_context *ssl) {
+        unsigned char buf[4096];
+        mbedtls_ssl_read(ssl, buf, sizeof(buf));
+      }
+    expect_match_text: [mbedtls_ssl_read]
+  - name: mbed tls write negative
+    code: |
+      #include <mbedtls/ssl.h>
+      void send(mbedtls_ssl_context *ssl, const unsigned char *buf, size_t len) {
+        mbedtls_ssl_write(ssl, buf, len);
+      }
+    expect_no_match: true
+  description: "mbedtls_ssl_read(ssl, buf, len) writes TLS peer bytes to output buffer argument 1."
+- id: c.input.bio_read
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: c
   trust: remote
   tag: network-input
@@ -153,7 +254,7 @@
         BIO_read(bio, buf, sizeof(buf));
       }
     expect_match_text: [BIO_read]
-  description: "BIO_read(bio, buf, len) - reads bytes from an OpenSSL BIO; when the BIO wraps a socket/connect chain the data is peer-controlled."
+  description: "Disabled - BIO_read may consume socket, file, memory, filter, or chained BIO data. Re-enable as a remote source only after compiler facts prove network-backed BIO construction/lineage."
 - id: c.input.mhd_lookup_connection_value
   enabled: true
   language: c
@@ -186,16 +287,29 @@
     kind: call
     callee:
       name: mg_get_http_var
+  taint_semantics:
+    source_output_args: [2]
+  constraints:
+  - min_args: 4
+  - max_args: 4
   match_examples:
-  - name: generated direct match
+  - name: legacy mongoose decoded variable output
     code: |
       #include <mongoose.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        mg_get_http_var(arg);
+      void example(struct mg_str body) {
+        char value[128];
+        mg_get_http_var(&body, "name", value, sizeof(value));
       }
-  description: "mongoose mg_get_http_var - extracts a query-string parameter; attacker-controlled."
+    expect_match_text: [mg_get_http_var]
+  - name: legacy mongoose variable call without output length
+    code: |
+      #include <mongoose.h>
+      void example(struct mg_str body) {
+        char value[128];
+        mg_get_http_var(&body, "name", value);
+      }
+    expect_no_match: true
+  description: "Legacy Mongoose mg_get_http_var(var, name, buf, len) decodes an HTTP variable into output buffer argument 2."
 
 - id: c.input.mg_http_get_var
   enabled: true
@@ -208,15 +322,61 @@
     kind: call
     callee:
       name: mg_http_get_var
+  taint_semantics:
+    source_output_args: [2]
+  constraints:
+  - min_args: 4
+  - max_args: 4
   match_examples:
-  - name: c.input.mg_http_get_var example
+  - name: mongoose decoded variable output
     code: |
       #include <mongoose.h>
-      void example(void) {
-        char *arg = "tainted";
-        mg_http_get_var(arg);
+      void example(struct mg_str body) {
+        char value[128];
+        mg_http_get_var(&body, "name", value, sizeof(value));
       }
-  description: "Mongoose mg_http_get_var - extracts query/form variable value from an HTTP message."
+    expect_match_text: [mg_http_get_var]
+  - name: mongoose variable call without output length
+    code: |
+      #include <mongoose.h>
+      void example(struct mg_str body) {
+        char value[128];
+        mg_http_get_var(&body, "name", value);
+      }
+    expect_no_match: true
+  description: "Mongoose mg_http_get_var(var, name, buf, len) decodes an HTTP variable into output buffer argument 2; the integer return is only a length/error status."
+
+- id: c.input.mg_http_creds
+  enabled: true
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [text]
+  packages: [mongoose]
+  match:
+    kind: call
+    callee:
+      name: mg_http_creds
+  taint_semantics:
+    source_output_args: [1, 3]
+  constraints:
+  - min_args: 5
+  - max_args: 5
+  match_examples:
+  - name: mongoose authorization credentials outputs
+    code: |
+      #include <mongoose.h>
+      void example(struct mg_http_message *hm) {
+        char user[128], pass[128];
+        mg_http_creds(hm, user, sizeof(user), pass, sizeof(pass));
+      }
+    expect_match_text: [mg_http_creds]
+  - name: unrelated short call negative
+    code: |
+      #include <mongoose.h>
+      void example(void) { mg_http_creds(0); }
+    expect_no_match: true
+  description: "Mongoose mg_http_creds(hm, user, userlen, pass, passlen) writes request credentials to output buffers 1 and 3."
 
 - id: c.input.mg_http_get_header
   enabled: true

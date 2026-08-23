@@ -7,11 +7,21 @@
   match:
     kind: call
     callee:
-      name: ReadLine
+      attribute: [Console, ReadLine]
+  constraints:
+  - max_args: 0
   match_examples:
-    - name: declared shape
+    - name: Console stdin line
       code: |
-        class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ReadLine(input); } }
+        using System;
+        class App { string Read() { return Console.ReadLine(); } }
+      expect_match_text: [Console.ReadLine]
+    - name: unrelated reader method negative
+      code: |
+        using System;
+        class Reader { public string ReadLine() => "local"; }
+        class App { string Read(Reader reader) { return reader.ReadLine(); } }
+      expect_no_match: true
   description: "Console.ReadLine - local CLI input from stdin."
 
 - id: csharp.source.environment_args
@@ -36,7 +46,7 @@
   enabled: true
   language: csharp
   tag: env-input
-  trust: local
+  trust: config
   payload_types: [text]
   analysis_semantics:
     flow_classes: [environment-input]
@@ -50,6 +60,11 @@
         using System;
         class App { string Home() { return Environment.GetEnvironmentVariable("HOME"); } }
       expect_match_text: [Environment.GetEnvironmentVariable]
+    - name: environment setter is not an input source
+      code: |
+        using System;
+        class App { void Configure() { Environment.SetEnvironmentVariable("MODE", "local"); } }
+      expect_no_match: true
   description: "Environment.GetEnvironmentVariable(name) - process environment value; local trust but attacker-controlled through shells, service managers, CI, and container configuration."
 
 - id: csharp.source.main_args_param
@@ -78,3 +93,58 @@
         class App { void Helper(string[] args) { } }
       expect_no_match: true
   description: "The string[] parameter of static C# Main(...) - command-line arguments matched from signature position/type, independent of the parameter name."
+
+- id: csharp.source.file_static_read
+  enabled: true
+  language: csharp
+  trust: local
+  tag: file-input
+  payload_types: [text, binary]
+  packages: [System.IO]
+  match:
+    kind: call
+    callee:
+      regex: '^File\.(ReadAllText|ReadAllTextAsync|ReadAllBytes|ReadAllBytesAsync|ReadAllLines|ReadAllLinesAsync|ReadLines)$'
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: local file text read
+    code: |
+      using System.IO;
+      class App { string Load(string path) { return File.ReadAllText(path); } }
+    expect_match_text: [File.ReadAllText]
+  - name: local file write is not input
+    code: |
+      using System.IO;
+      class App { void Save(string path) { File.WriteAllText(path, "constant"); } }
+    expect_no_match: true
+  description: "Exact System.IO.File content-reading operations - values read from a local filesystem boundary."
+
+- id: csharp.source.filestream_read_buffer
+  enabled: true
+  language: csharp
+  trust: local
+  tag: file-input
+  payload_types: [binary]
+  packages: [System.IO]
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])(Read|ReadAsync)$'
+  constraints:
+  - receiver_type_in: [FileStream, System.IO.FileStream]
+  - min_args: 1
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: file stream fills byte buffer
+    code: |
+      using System.IO;
+      class App { int Load(FileStream stream, byte[] buffer) { return stream.Read(buffer, 0, buffer.Length); } }
+    expect_match_text: [stream.Read]
+  - name: memory stream is not a filesystem boundary
+    code: |
+      using System.IO;
+      class App { int Load(MemoryStream stream, byte[] buffer) { return stream.Read(buffer, 0, buffer.Length); } }
+    expect_no_match: true
+  description: "FileStream.Read/ReadAsync writes local-file bytes into argument 0; its return is a count or completion handle."

@@ -1,0 +1,92 @@
+# Rust database-origin sources. API identity remains in rule data; receiver
+# types keep ubiquitous `get` helpers from becoming database sources.
+- id: rust.sqlx.row_get
+  enabled: true
+  language: rust
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [sqlx]
+  match:
+    kind: call
+    callee:
+      regex: "\\.(get|try_get)$"
+  constraints:
+  - receiver_type_in: [PgRow, MySqlRow, SqliteRow, AnyRow]
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: sqlx postgres row get
+    code: |
+      use sqlx::postgres::PgRow;
+      use sqlx::Row;
+      fn read(row: &PgRow) -> String { row.get("name") }
+    expect_match_text: [row.get]
+  - name: unrelated get receiver negative
+    code: |
+      use sqlx::Row;
+      struct Cache;
+      impl Cache { fn get(&self, key: &str) -> String { key.into() } }
+      fn read(cache: &Cache) -> String { cache.get("name") }
+    expect_no_match: true
+  description: "sqlx PgRow/MySqlRow/SqliteRow/AnyRow get/try_get returns a value read from a database result row."
+
+- id: rust.tokio_postgres.row_get
+  enabled: true
+  language: rust
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [tokio_postgres]
+  match:
+    kind: call
+    callee:
+      regex: "\\.(get|try_get)$"
+  constraints:
+  - receiver_type_in: [Row, SimpleQueryRow]
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: tokio postgres row get
+    code: |
+      use tokio_postgres::Row;
+      fn read(row: &Row) -> String { row.get("name") }
+    expect_match_text: [row.get]
+  - name: unrelated row named type negative
+    code: |
+      use tokio_postgres;
+      struct Cache;
+      impl Cache { fn get(&self, key: &str) -> String { key.into() } }
+      fn read(cache: &Cache) -> String { cache.get("name") }
+    expect_no_match: true
+  description: "tokio-postgres Row/SimpleQueryRow get/try_get returns a database result value."
+
+- id: rust.rusqlite.row_get
+  enabled: true
+  language: rust
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [rusqlite]
+  match:
+    kind: call
+    callee:
+      regex: "\\.(get|get_ref)$"
+  constraints:
+  - receiver_type_in: [Row]
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: rusqlite row get
+    code: |
+      use rusqlite::Row;
+      fn read(row: &Row) -> rusqlite::Result<String> { row.get(0) }
+    expect_match_text: [row.get]
+  - name: unrelated get receiver negative
+    code: |
+      use rusqlite;
+      struct Cache;
+      impl Cache { fn get(&self, key: usize) -> String { key.to_string() } }
+      fn read(cache: &Cache) -> String { cache.get(0) }
+    expect_no_match: true
+  description: "rusqlite Row.get/get_ref returns a value read from a SQLite result row."

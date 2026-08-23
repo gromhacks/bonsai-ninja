@@ -3,7 +3,7 @@
   enabled: true
   language: c
   trust: service
-  tag: network-input
+  tag: queue-input
   payload_types: [binary]
   packages: [rdkafka]
   match:
@@ -19,13 +19,20 @@
         char *fmt = arg;
         rd_kafka_consumer_poll(arg);
       }
+  - name: librdkafka consumer close returns no message
+    code: |
+      #include <rdkafka/rdkafka.h>
+      void close_consumer(rd_kafka_t *consumer) {
+        rd_kafka_consumer_close(consumer);
+      }
+    expect_no_match: true
   description: "librdkafka rd_kafka_consumer_poll - message broker delivers producer-supplied payload; treat as untrusted service input."
 
 - id: c.input.zmq_recv
   enabled: true
   language: c
   trust: service
-  tag: network-input
+  tag: queue-input
   payload_types: [binary]
   packages: [libzmq]
   match:
@@ -42,4 +49,11 @@
         char buf[4096];
         zmq_recv(0, buf, sizeof(buf), 0);
       }
+  - name: zeromq send is outbound
+    code: |
+      #include <libzmq/zmq.h>
+      void publish(void *socket, const char *buf, unsigned len) {
+        zmq_send(socket, buf, len, 0);
+      }
+    expect_no_match: true
   description: "libzmq zmq_recv - receives a frame from the socket; peer is another service but payload is still untrusted."

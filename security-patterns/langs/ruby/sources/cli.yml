@@ -1,9 +1,7 @@
-# Ruby CLI / environment sources. trust: local - attacker with shell access.
-# Disabled by default; enable for CLI-tool audits.
+# Ruby CLI / environment sources. The production security profile filters
+# local-trust sources; the rules remain available for explicit CLI audits.
 - id: ruby.source.argv
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: ruby
   tag: cli-input
   trust: local
@@ -11,7 +9,20 @@
     kind: read
     target:
       name: ARGV
-  description: "Disabled - ARGV is CLI input; enable for CLI / bin script audits."
+  match_examples:
+  - name: Ruby command-line argument
+    code: |
+      def command
+        ARGV[0]
+      end
+    expect_match_text: [ARGV]
+  - name: similarly named local is not ARGV
+    code: |
+      def helper(local_argv)
+        local_argv[0]
+      end
+    expect_no_match: true
+  description: "Ruby `ARGV` - command-line arguments supplied by the invoking process."
 
 - id: ruby.source.stdin_gets
   enabled: true
@@ -22,24 +33,25 @@
     kind: call
     callee:
       name: gets
+  constraints:
+  - top_level: true
   match_examples:
-    - name: ruby.source.stdin_gets example
-      code: |
-        def example(input, url, id, item, req_obj, options)
-          gets(input)
-        end
-    - name: ruby.source.stdin_gets unrelated call negative
-      code: |
-        def example(input)
-          puts(input)
-        end
-      expect_no_match: true
-  description: "Kernel#gets / STDIN.gets - reads one tainted line from stdin."
+  - name: Kernel gets reads stdin or ARGF
+    code: |
+      def example
+        gets
+      end
+    expect_match_text: [gets]
+  - name: receiver gets is not Kernel gets
+    code: |
+      def example(socket)
+        socket.gets
+      end
+    expect_no_match: true
+  description: "Unqualified Kernel#gets - reads one line from ARGF, which falls back to stdin when no input files are named."
 
 - id: ruby.source.stdin_read
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: ruby
   tag: cli-input
   trust: local
@@ -47,12 +59,71 @@
     kind: call
     callee:
       attribute: [STDIN, read]
-  description: "Disabled - STDIN.read."
+  match_examples:
+  - name: STDIN read
+    code: |
+      def example
+        STDIN.read
+      end
+    expect_match_text: [STDIN.read]
+  - name: file read is not stdin
+    code: |
+      def example(file)
+        file.read
+      end
+    expect_no_match: true
+  description: "STDIN.read - bytes/text supplied through the process standard input stream."
+
+- id: ruby.source.stdin_line_read
+  enabled: true
+  language: ruby
+  tag: cli-input
+  trust: local
+  match:
+    kind: call
+    callee:
+      regex: '^STDIN\.(gets|readline)$'
+  match_examples:
+  - name: STDIN readline
+    code: |
+      def example
+        STDIN.readline
+      end
+    expect_match_text: [STDIN.readline]
+  - name: other receiver readline is not stdin
+    code: |
+      def example(file)
+        file.readline
+      end
+    expect_no_match: true
+  description: "STDIN.gets/readline - one line supplied through process stdin."
+
+- id: ruby.source.argf_read
+  enabled: true
+  language: ruby
+  tag: file-input
+  trust: local
+  match:
+    kind: call
+    callee:
+      regex: '^ARGF\.(read|gets|readline)$'
+  match_examples:
+  - name: ARGF read
+    code: |
+      def example
+        ARGF.read
+      end
+    expect_match_text: [ARGF.read]
+  - name: other receiver read is not ARGF
+    code: |
+      def example(stream)
+        stream.read
+      end
+    expect_no_match: true
+  description: "ARGF.read/gets/readline - contents of files named in ARGV, or stdin when no files are named."
 
 - id: ruby.source.env_read
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: ruby
   tag: env-input
   trust: local
@@ -62,4 +133,74 @@
     kind: read
     target:
       name: ENV
-  description: "Disabled by default - flag only when crossing trust boundary."
+  match_examples:
+  - name: Ruby environment value
+    code: |
+      def example
+        ENV["TOKEN"]
+      end
+    expect_match_text: [ENV]
+  - name: local map is not process environment
+    code: |
+      def example(settings)
+        settings["TOKEN"]
+      end
+    expect_no_match: true
+  description: "Ruby ENV - values inherited from the process environment."
+
+- id: ruby.source.file_class_read
+  enabled: true
+  language: ruby
+  tag: file-input
+  trust: local
+  payload_types: [text, binary]
+  match:
+    kind: call
+    callee:
+      regex: '^(File|IO)\.(read|binread|readlines)$'
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: Ruby File read materializes local contents
+    code: |
+      def load_config(path)
+        File.read(path)
+      end
+    expect_match_text: [File.read]
+  - name: instance reader is not the File or IO class API
+    code: |
+      def load_config(reader, path)
+        reader.read(path)
+      end
+    expect_no_match: true
+  description: "File/IO read, binread, and readlines class methods - bytes, text, or lines materialized from a local filesystem path. File.open handles and arbitrary receiver reads remain excluded."
+
+- id: ruby.source.csv_read_file
+  enabled: true
+  language: ruby
+  tag: file-input
+  trust: local
+  payload_types: [csv]
+  packages: [csv]
+  match:
+    kind: call
+    callee:
+      attribute: [CSV, read]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: Ruby CSV reads local rows
+    code: |
+      require "csv"
+      def rows(path)
+        CSV.read(path, headers: true)
+      end
+    expect_match_text: [CSV.read]
+  - name: CSV generation does not read a local file
+    code: |
+      require "csv"
+      def render(rows)
+        CSV.generate { |csv| rows.each { |row| csv << row } }
+      end
+    expect_no_match: true
+  description: "CSV.read(path, ...) - rows parsed from a local CSV file."

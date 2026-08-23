@@ -5,41 +5,72 @@
   trust: local
   tag: cli-input
   payload_types: [text]
-  packages: [readline, readline-sync]
+  packages: [readline]
+  match:
+    kind: call
+    callee:
+      name: question
+  constraints:
+  - receiver_type_in: [Interface]
+  - arg_count: 2
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
+  match_examples:
+  - name: typed readline interface question callback
+    code: |
+      import * as readline from "readline";
+      function demo() {
+        const rl = readline.createInterface({ input: process.stdin });
+        rl.question("name?", (answer: string) => {
+          return answer;
+        });
+      }
+    expect_match_text: [rl.question]
+  - name: typed application question method is not readline input
+    code: |
+      import * as readline from "readline";
+      class Survey { question(prompt: string, callback: (value: string) => void) { callback("fixed"); } }
+      function demo(survey: Survey) {
+        survey.question("name?", answer => sink(answer));
+      }
+    expect_no_match: true
+  description: "readline.Interface.question(query, callback) - callback parameter 0 is interactive stdin input. Factory-derived receiver typing prevents same-named application methods from matching, and the void registration result remains clean."
+
+- id: typescript.source.readline_sync_question
+  enabled: true
+  language: typescript
+  trust: local
+  tag: cli-input
+  payload_types: [text]
+  packages: [readline-sync]
+  analysis_semantics:
+    allow_file_package_evidence: false
   match:
     kind: call
     callee:
       name: question
   constraints:
   - min_args: 1
-  taint_semantics:
-    source_callback_args:
-    - callback_arg_index: 1
-      source_param_indices: [0]
   match_examples:
-  - name: readline question
+  - name: readline sync namespace import question
     code: |
-      const _u = require("readline");
-      function demo(input, req, obj) {
-        return question(input);
+      import * as rlsync from "readline-sync";
+      function demo() {
+        return rlsync.question("name?");
       }
-  - name: readline question callback
+    expect_match_text: [rlsync.question]
+  - name: same named application method beside readline sync import
     code: |
-      const _u = require("readline");
-      function demo(rl: any) {
-        rl.question("name?", (answer: string) => {
-          return answer;
-        });
-      }
-    expect_match_text: [rl.question]
-  - name: readline question no args negative
-    code: |
-      const _u = require("readline");
-      function demo(question: any) {
-        return question();
+      import * as rlsync from "readline-sync";
+      class Survey { question(prompt: string): string { return "fixed"; } }
+      function demo(survey: Survey) {
+        return survey.question("name?");
       }
     expect_no_match: true
-  description: "readline.Interface.question(query, callback) and readline-sync question(query) - interactive stdin prompt. Callback answer parameters and synchronous return values are attacker-controlled."
+  description: "readline-sync namespace-import question(query) - synchronous interactive stdin input. Exact compiler import-alias evidence binds the receiver to readline-sync; file-level dependency presence alone cannot qualify a same-named application method."
 
 - id: typescript.source.process_argv
   enabled: true
@@ -323,6 +354,7 @@
   - min_args: 2
   - max_args: 2
   taint_semantics:
+    source_callback_only: true
     source_callback_args:
     - callback_arg_index: 1
       source_param_indices: [1]
@@ -336,6 +368,15 @@
         });
       }
     expect_match_text: [fs.readFile]
+  - name: typed fs access callback does not carry file contents
+    code: |
+      const fs = require("fs");
+      function demo(path: string) {
+        fs.access(path, (err: Error | null) => {
+          return err;
+        });
+      }
+    expect_no_match: true
   description: "fs.readFile(path, callback) - callback data parameter receives local file bytes/text."
 
 - id: typescript.source.fs_readfile_options_callback
@@ -353,6 +394,7 @@
   - min_args: 3
   - max_args: 3
   taint_semantics:
+    source_callback_only: true
     source_callback_args:
     - callback_arg_index: 2
       source_param_indices: [1]
@@ -366,6 +408,15 @@
         });
       }
     expect_match_text: [fs.readFile]
+  - name: typed fs writeFile callback does not carry file contents
+    code: |
+      const fs = require("fs");
+      function demo(path: string) {
+        fs.writeFile(path, "local", (err: Error | null) => {
+          return err;
+        });
+      }
+    expect_no_match: true
   description: "fs.readFile(path, options, callback) - callback data parameter receives local file bytes/text."
 
 - id: typescript.source.process_stdin_on_data
@@ -377,7 +428,7 @@
   match:
     kind: call
     callee:
-      attribute: [process, stdin, on]
+      attribute: [process, stdin, "on"]
   constraints:
   - min_args: 2
   - max_args: 2
@@ -385,6 +436,7 @@
       index: 0
       regex: "^['\"]data['\"]$"
   taint_semantics:
+    source_callback_only: true
     source_callback_args:
     - callback_arg_index: 1
       source_param_indices: [0]
@@ -404,3 +456,89 @@
       }
     expect_no_match: true
   description: "process.stdin.on('data', callback) - callback chunk parameter receives piped stdin bytes."
+
+- id: typescript.source.deno_read_file
+  enabled: true
+  language: typescript
+  trust: local
+  tag: file-input
+  payload_types: [binary]
+  frameworks: [deno]
+  match:
+    kind: call
+    callee:
+      attribute: [Deno, readFile]
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: typed Deno reads local file bytes
+    code: |
+      async function load(path: string) {
+        return await Deno.readFile(path);
+      }
+    expect_match_text: [Deno.readFile]
+  - name: Deno file write is not input
+    code: |
+      async function save(path: string, data: Uint8Array) {
+        return await Deno.writeFile(path, data);
+      }
+    expect_no_match: true
+  description: "Deno.readFile(path[, options]) - materializes bytes from a local filesystem path."
+
+- id: typescript.source.deno_read_text_file
+  enabled: true
+  language: typescript
+  trust: local
+  tag: file-input
+  payload_types: [text]
+  frameworks: [deno]
+  match:
+    kind: call
+    callee:
+      attribute: [Deno, readTextFile]
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: typed Deno reads local file text
+    code: |
+      async function load(path: string) {
+        return await Deno.readTextFile(path);
+      }
+    expect_match_text: [Deno.readTextFile]
+  - name: similarly named application method is not Deno file input
+    code: |
+      async function load(store: Store, path: string) {
+        return await store.readTextFile(path);
+      }
+    expect_no_match: true
+  description: "Deno.readTextFile(path[, options]) - materializes decoded text from a local filesystem path."
+
+- id: typescript.source.bun_file_materialize
+  enabled: true
+  language: typescript
+  trust: local
+  tag: file-input
+  payload_types: [text, binary, json]
+  frameworks: [bun]
+  match:
+    kind: call
+    callee:
+      regex: "^Bun\\.file\\(.+\\)\\.(text|arrayBuffer|json)$"
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: typed Bun materializes local file text
+    code: |
+      async function load(path: string) {
+        return await Bun.file(path).text();
+      }
+    expect_match_text: [Bun.file(path).text]
+  - name: Bun file handle alone is not materialized input
+    code: |
+      function open(path: string) {
+        return Bun.file(path);
+      }
+    expect_no_match: true
+  description: "Bun.file(path).text()/arrayBuffer()/json() - materialized contents of the selected local file; Bun.file(path) alone is only a handle and is intentionally excluded."

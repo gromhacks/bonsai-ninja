@@ -130,3 +130,38 @@
       }
     expect_match_text: [d.ReadRegU16BE]
   description: "ReadRegU16BE - big-endian 16-bit register read from an attached peripheral."
+
+- id: go.physical.periph_tx_receive
+  enabled: true
+  language: go
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  payload_types: [binary]
+  packages: ["periph.io/x/conn/v3/i2c", "periph.io/x/conn/v3/spi"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Tx$"
+  constraints:
+  - receiver_type_in: [Dev, Conn]
+  - min_args: 2
+  - max_args: 2
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: periph i2c receive buffer
+    code: |
+      package main
+      import "periph.io/x/conn/v3/i2c"
+      func exchange(device *i2c.Dev, request, response []byte) { _ = device.Tx(request, response) }
+    expect_match_text: [device.Tx]
+  - name: unrelated transaction receiver negative
+    code: |
+      package main
+      import "periph.io/x/conn/v3/i2c"
+      type Session struct{}
+      func (Session) Tx([]byte, []byte) error { return nil }
+      func exchange(session Session, request, response []byte) { _ = session.Tx(request, response) }
+    expect_no_match: true
+  description: "periph I2C Dev/SPI Conn Tx(write, read) fills read buffer argument 1 with bytes received from attached hardware."

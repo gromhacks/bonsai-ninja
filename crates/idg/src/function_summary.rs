@@ -774,7 +774,7 @@ fn record_call_boundary(
     // boundaries. Compatibility field edges can carry the same edge kind but
     // never get to invent a callee from endpoint ownership.
     let structural = match edge.meta.kind {
-        IdgEdgeKind::InterCallArg => to.boundary == BOUNDARY_PARAM,
+        IdgEdgeKind::InterCallArg | IdgEdgeKind::InterSourceCallback => to.boundary == BOUNDARY_PARAM,
         IdgEdgeKind::InterReturn => from.boundary == BOUNDARY_RETURN,
         IdgEdgeKind::InterThrow => from.boundary == BOUNDARY_THROW,
         IdgEdgeKind::InterYield => from.boundary == BOUNDARY_YIELD,
@@ -785,7 +785,7 @@ fn record_call_boundary(
     }
 
     match edge.meta.kind {
-        IdgEdgeKind::InterCallArg => inputs.push(BoundaryPairRow {
+        IdgEdgeKind::InterCallArg | IdgEdgeKind::InterSourceCallback => inputs.push(BoundaryPairRow {
             key: CallBoundaryKey {
                 caller: from.func,
                 callee: to.func,

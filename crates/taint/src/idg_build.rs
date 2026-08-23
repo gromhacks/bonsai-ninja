@@ -171,6 +171,8 @@ pub(crate) fn idg_service_for_inter_config(
             .map(|shape| bonsai_idg::SourceOutputArgSpec {
                 callee: shape.callee.clone(),
                 output_arg_indices: shape.output_arg_indices.clone(),
+                output_arg_start_index: shape.output_arg_start_index,
+                resolved_call_sites: shape.resolved_call_sites.clone(),
             })
             .collect(),
         source_callback_args: config
@@ -180,6 +182,7 @@ pub(crate) fn idg_service_for_inter_config(
                 callee: shape.callee.clone(),
                 callback_arg_index: shape.callback_arg_index,
                 source_param_indices: shape.source_param_indices.clone(),
+                resolved_call_sites: shape.resolved_call_sites.clone(),
             })
             .collect(),
         call_result_passthroughs: config

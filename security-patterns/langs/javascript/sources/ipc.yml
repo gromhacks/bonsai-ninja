@@ -1,0 +1,66 @@
+- id: javascript.source.process_message_callback
+  enabled: true
+  language: javascript
+  trust: ipc
+  tag: ipc-input
+  payload_types: [event, json]
+  match:
+    kind: call
+    callee:
+      attribute: [process, "on"]
+  constraints:
+  - arg_count: 2
+  - arg_matches_regex:
+      index: 0
+      regex: "^['\"]message['\"]$"
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
+  match_examples:
+  - name: Node child-process IPC message
+    code: |
+      process.on("message", message => {
+        sink(message.action);
+      });
+    expect_match_text: [process.on]
+  - name: process lifecycle event has no IPC payload
+    code: |
+      process.on("exit", code => sink(code));
+    expect_no_match: true
+  description: "First parameter of process.on('message', listener) - structured IPC data delivered by a Node parent or cluster controller. The listener-registration return is not source data."
+
+- id: javascript.source.worker_parent_port_message_callback
+  enabled: true
+  language: javascript
+  trust: ipc
+  tag: ipc-input
+  payload_types: [event, json]
+  packages: [worker_threads, "node:worker_threads"]
+  match:
+    kind: call
+    callee:
+      attribute: [parentPort, "on"]
+  constraints:
+  - arg_count: 2
+  - arg_matches_regex:
+      index: 0
+      regex: "^['\"]message['\"]$"
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
+  match_examples:
+  - name: worker parentPort message
+    code: |
+      const { parentPort } = require("node:worker_threads");
+      parentPort.on("message", value => sink(value));
+    expect_match_text: [parentPort.on]
+  - name: non-message parentPort event has no message payload
+    code: |
+      const { parentPort } = require("node:worker_threads");
+      parentPort.on("close", () => cleanup());
+    expect_no_match: true
+  description: "First parameter of parentPort.on('message', listener) - structured-clone data received from the owning Node thread."

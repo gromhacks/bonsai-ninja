@@ -1,0 +1,26 @@
+# Dart physical-device sources.
+- id: dart.physical.geolocator_position
+  enabled: true
+  language: dart
+  trust: physical
+  tag: hw-input
+  payload_types: [sensor-frame]
+  packages: [geolocator]
+  match:
+    kind: call
+    callee:
+      regex: '^Geolocator\.(getCurrentPosition|getLastKnownPosition)$'
+  constraints:
+  - max_args: 1
+  match_examples:
+  - name: current device position
+    code: |
+      import 'package:geolocator/geolocator.dart';
+      Future<Position> sample() => Geolocator.getCurrentPosition();
+    expect_match_text: [Geolocator.getCurrentPosition]
+  - name: permission check is not position data
+    code: |
+      import 'package:geolocator/geolocator.dart';
+      Future<LocationPermission> check() => Geolocator.checkPermission();
+    expect_no_match: true
+  description: "Geolocator current/last-known position - physical location sampled from the device platform."

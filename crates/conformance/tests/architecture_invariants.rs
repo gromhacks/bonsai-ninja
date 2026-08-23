@@ -6118,7 +6118,8 @@ fn python_parameter_default_calls_are_api_neutral_compiler_facts() {
         rule_schema.contains("pub default_call: Option<String>")
             && python_sources.contains("default_call: Body")
             && python_sources.contains("default_call: Query")
-            && python_sources.contains("default_call: Depends"),
+            && python_sources.contains("default_call: Path")
+            && !python_sources.contains("default_call: Depends"),
         "framework binder identities must be declared by rulepack default_call selectors"
     );
 }

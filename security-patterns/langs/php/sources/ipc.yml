@@ -1,0 +1,55 @@
+- id: php.source.sysv_message_receive
+  enabled: true
+  language: php
+  trust: ipc
+  tag: ipc-input
+  payload_types: [event, binary]
+  match:
+    kind: call
+    callee:
+      name: msg_receive
+  constraints:
+  - top_level: true
+  - min_args: 5
+  - max_args: 8
+  taint_semantics:
+    source_output_args: [4]
+  match_examples:
+  - name: SysV message output parameter
+    code: |
+      <?php
+      msg_receive($queue, 0, $receivedType, 4096, $message);
+      sink($message);
+    expect_match_text: [msg_receive]
+  - name: send operation does not receive IPC input
+    code: |
+      <?php
+      msg_send($queue, 1, $message);
+    expect_no_match: true
+  description: "Fifth argument of msg_receive() - message payload written by the System V queue receive operation. The boolean return is status only and is not tainted."
+
+- id: php.source.sysv_shared_memory_get
+  enabled: true
+  language: php
+  trust: ipc
+  tag: ipc-input
+  payload_types: [event, binary]
+  match:
+    kind: call
+    callee:
+      name: shm_get_var
+  constraints:
+  - top_level: true
+  - arg_count: 2
+  match_examples:
+  - name: SysV shared-memory value
+    code: |
+      <?php
+      $value = shm_get_var($segment, 7);
+    expect_match_text: [shm_get_var]
+  - name: shared-memory write is not an input source
+    code: |
+      <?php
+      shm_put_var($segment, 7, $value);
+    expect_no_match: true
+  description: "shm_get_var(segment, key) - value read from a System V shared-memory segment managed by another process."

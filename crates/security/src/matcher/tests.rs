@@ -1541,6 +1541,40 @@ description: Flask request args source.
         ),
         "source rules may use file-level package evidence for dynamic request receiver extraction"
     );
+    let exact_source_rule = rule_from_yaml(
+        r#"
+id: typescript.source.readline_sync_question
+enabled: true
+language: typescript
+trust: local
+packages: [readline-sync]
+analysis_semantics:
+  allow_file_package_evidence: false
+match:
+  kind: call
+  callee:
+    name: question
+description: readline-sync question.
+"#,
+        crate::rule::RuleKind::Source,
+    );
+    let exact_source_prepared = PreparedRule::new(&exact_source_rule).expect("exact source rule prepares");
+    let source_file_packages = AHashSet::from_iter(["readline-sync".to_string()]);
+    let alias_map = std::collections::HashMap::from_iter([(
+        "rlsync".to_string(),
+        AliasTarget::Namespace {
+            module: "readline-sync".to_string(),
+        },
+    )]);
+    assert!(
+        exact_source_prepared.call_context_allows("rlsync.question", &[], &alias_map, &source_file_packages,),
+        "an exact namespace-import binding must satisfy the source package gate"
+    );
+    assert!(
+        !exact_source_prepared
+            .call_context_allows("survey.question", &[], &alias_map, &source_file_packages,),
+        "file package presence must not qualify an unrelated same-named source method"
+    );
     let receiver_taint_rule = rule_from_yaml(
         r#"
 id: javascript.test.uploaded_file_mv
@@ -2670,4 +2704,29 @@ fn safe_call_receiver_inherits_type_alias() {
         vec!["java.sql.Statement".to_string()],
         "safe-call receiver must inherit the alias type of its root binding"
     );
+}
+
+#[test]
+fn inventory_dedup_prefers_callable_attribution_for_one_concrete_site() {
+    let site = Span::new(FileId::new(3), 40, 55);
+    let make = |enclosing_fn: &str, match_text: &str| RuleMatch {
+        origin: MatchOrigin::Rulepack,
+        rule_id: "dart.ipc.process_result".to_string(),
+        language: "dart".to_string(),
+        file: "auth_service.dart".to_string(),
+        line: 15,
+        column: 18,
+        span: site,
+        match_text: match_text.to_string(),
+        enclosing_fn: Some(enclosing_fn.to_string()),
+    };
+    let mut matches = vec![
+        make("__module__", "Process.runSync"),
+        make("runAdminCommand", "Process.runSync"),
+    ];
+
+    dedup_inventory_matches(&mut matches);
+
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].enclosing_fn.as_deref(), Some("runAdminCommand"));
 }

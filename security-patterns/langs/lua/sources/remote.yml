@@ -59,54 +59,6 @@
       end
   description: "ngx.req.get_body_data - raw request body; attacker-controlled."
 
-- id: lua.source.openresty_get_body_file
-  enabled: true
-  language: lua
-  trust: remote
-  tag: http-input
-  packages: [openresty]
-  match:
-    kind: call
-    callee:
-      attribute: [ngx, req, get_body_file]
-  match_examples:
-  - name: lua.source.openresty_get_body_file example
-    code: |
-      local _openresty = require("openresty")
-      function example(input, url, id, payload, request, params, user)
-        ngx.req.get_body_file(input)
-      end
-  description: "ngx.req.get_body_file - body spooled to temp file; contents attacker-controlled."
-
-- id: lua.source.openresty_resty_upload_read
-  enabled: true
-  language: lua
-  trust: remote
-  tag: http-input
-  payload_types: [multipart]
-  packages: [lua-resty-upload, openresty]
-  match:
-    kind: call
-    callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]read$
-  constraints:
-  - max_args: 0
-  match_examples:
-  - name: lua.source.openresty_resty_upload_read example
-    code: |
-      local _lua_resty_upload = require("lua-resty-upload")
-      function example(form)
-        form.read()
-      end
-  - name: lua.source.openresty_resty_upload_read with args negative
-    code: |
-      local _lua_resty_upload = require("lua-resty-upload")
-      function example(form, size)
-        form.read(size)
-      end
-    expect_no_match: true
-  description: "lua-resty-upload form:read() - multipart headers/body chunks, including browser-supplied filename metadata. The `max_args: 0` constraint pins the no-argument reader call so argument-bearing `x.read(n)` byte-count readers do not over-match."
-
 - id: lua.source.openresty_get_headers
   enabled: true
   language: lua
@@ -126,25 +78,6 @@
         ngx.req.get_headers(input)
       end
   description: "ngx.req.get_headers - all request headers; attacker-controlled."
-
-- id: lua.source.openresty_read_body
-  enabled: true
-  language: lua
-  trust: remote
-  tag: http-input
-  packages: [openresty]
-  match:
-    kind: call
-    callee:
-      attribute: [ngx, req, read_body]
-  match_examples:
-  - name: lua.source.openresty_read_body example
-    code: |
-      local _openresty = require("openresty")
-      function example(input, url, id, payload, request, params, user)
-        ngx.req.read_body(input)
-      end
-  description: "ngx.req.read_body - side-effect that reads request body into memory; precedes get_body_data."
 
 - id: lua.source.openresty_get_method
   enabled: true
@@ -261,6 +194,212 @@
       end
   description: "Lapis self.params - request params read via `self.params` in a Lapis action (the `self.` receiver avoids matching a bare `params` local)."
 
+- id: lua.source.lapis_get_params
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  packages: [lapis]
+  match:
+    kind: read
+    target:
+      attribute: [self, GET]
+  match_examples:
+  - name: Lapis query parameters
+    code: |
+      local lapis = require("lapis")
+      local app = lapis.Application()
+      app:get("/search", function(self)
+        return self.GET.q
+      end)
+    expect_match_text: [self.GET]
+  - name: Lapis response fields are not request query parameters
+    code: |
+      local lapis = require("lapis")
+      local app = lapis.Application()
+      app:get("/", function(self)
+        return self.res.GET
+      end)
+    expect_no_match: true
+  description: "Lapis self.GET - query parameters parsed from the inbound request URL."
+
+- id: lua.source.lapis_post_params
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [form]
+  packages: [lapis]
+  match:
+    kind: read
+    target:
+      attribute: [self, POST]
+  match_examples:
+  - name: Lapis form parameters
+    code: |
+      local lapis = require("lapis")
+      local app = lapis.Application()
+      app:post("/submit", function(self)
+        return self.POST.title
+      end)
+    expect_match_text: [self.POST]
+  - name: ordinary POST field is not a Lapis request carrier
+    code: |
+      local lapis = require("lapis")
+      local record = { POST = { title = "local" } }
+      return record.POST.title
+    expect_no_match: true
+  description: "Lapis self.POST - form-encoded parameters parsed from the inbound request body."
+
+- id: lua.source.lapis_cookies
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [cookie]
+  packages: [lapis]
+  match:
+    kind: read
+    target:
+      attribute: [self, cookies]
+  match_examples:
+  - name: Lapis request cookie
+    code: |
+      local lapis = require("lapis")
+      local app = lapis.Application()
+      app:get("/", function(self)
+        return self.cookies.theme
+      end)
+    expect_match_text: [self.cookies]
+  - name: response headers are not request cookies
+    code: |
+      local lapis = require("lapis")
+      local app = lapis.Application()
+      app:get("/", function(self)
+        return self.res.headers
+      end)
+    expect_no_match: true
+  description: "Lapis self.cookies - cookie names and values supplied by the client. Signed session state is intentionally excluded."
+
+- id: lua.source.lapis_request_headers
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  packages: [lapis]
+  match:
+    kind: read
+    target:
+      attribute: [self, req, headers]
+  match_examples:
+  - name: Lapis request headers
+    code: |
+      local lapis = require("lapis")
+      local app = lapis.Application()
+      app:get("/", function(self)
+        return self.req.headers["user-agent"]
+      end)
+    expect_match_text: [self.req.headers]
+  - name: Lapis response headers are not request headers
+    code: |
+      local lapis = require("lapis")
+      local app = lapis.Application()
+      app:get("/", function(self)
+        return self.res.headers
+      end)
+    expect_no_match: true
+  description: "Lapis self.req.headers - inbound request headers supplied by the underlying server."
+
+- id: lua.source.lapis_raw_query_params
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  packages: [lapis]
+  match:
+    kind: read
+    target:
+      attribute: [self, req, params_get]
+  match_examples:
+  - name: Lapis unprocessed query parameters
+    code: |
+      local lapis = require("lapis")
+      local app = lapis.Application()
+      app:get("/", function(self)
+        return self.req.params_get
+      end)
+    expect_match_text: [self.req.params_get]
+  - name: Lapis body parameter table is a different carrier
+    code: |
+      local lapis = require("lapis")
+      local app = lapis.Application()
+      app:post("/", function(self)
+        return self.req.params_post
+      end)
+    expect_no_match: true
+  description: "Lapis self.req.params_get - unprocessed query-string parameter table."
+
+- id: lua.source.lapis_raw_post_params
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [form]
+  packages: [lapis]
+  match:
+    kind: read
+    target:
+      attribute: [self, req, params_post]
+  match_examples:
+  - name: Lapis unprocessed body parameters
+    code: |
+      local lapis = require("lapis")
+      local app = lapis.Application()
+      app:post("/", function(self)
+        return self.req.params_post
+      end)
+    expect_match_text: [self.req.params_post]
+  - name: Lapis query parameter table is a different carrier
+    code: |
+      local lapis = require("lapis")
+      local app = lapis.Application()
+      app:get("/", function(self)
+        return self.req.params_get
+      end)
+    expect_no_match: true
+  description: "Lapis self.req.params_post - unprocessed body parameter table."
+
+- id: lua.source.lapis_parsed_url
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [url, path, query]
+  packages: [lapis]
+  match:
+    kind: read
+    target:
+      attribute: [self, req, parsed_url]
+  match_examples:
+  - name: Lapis parsed inbound URL
+    code: |
+      local lapis = require("lapis")
+      local app = lapis.Application()
+      app:get("/", function(self)
+        return self.req.parsed_url.path
+      end)
+    expect_match_text: [self.req.parsed_url]
+  - name: application URL setting is not the request URL
+    code: |
+      local lapis = require("lapis")
+      local app = { parsed_url = { path = "/local" } }
+      return app.parsed_url.path
+    expect_no_match: true
+  description: "Lapis self.req.parsed_url - components of the client-requested URL."
+
 - id: lua.source.lapis_session
   enabled: false
   disabled_reason:
@@ -364,14 +503,128 @@
     kind: call
     callee:
       attribute: [kong, request, get_path]
+  constraints:
+  - max_args: 0
   match_examples:
-  - name: lua.source.kong_request_get_path example
+  - name: Kong normalized request path
     code: |
       local _u = require("kong")
-      function example(input, url, id, payload, request, params, user)
-        kong.request.get_path(input)
+      function example()
+        return kong.request.get_path()
       end
+    expect_match_text: [kong.request.get_path]
+  - name: same API with invalid arguments is not the documented carrier
+    code: |
+      local _u = require("kong")
+      function example(path)
+        return kong.request.get_path(path)
+      end
+    expect_no_match: true
   description: "Kong PDK kong.request.get_path - request path; attacker-controlled."
+
+- id: lua.source.kong_request_get_raw_path
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [path]
+  packages: [kong]
+  match:
+    kind: call
+    callee:
+      attribute: [kong, request, get_raw_path]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: Kong raw request path
+    code: |
+      local _u = require("kong")
+      return kong.request.get_raw_path()
+    expect_match_text: [kong.request.get_raw_path]
+  - name: Kong response namespace is not request input
+    code: |
+      local _u = require("kong")
+      return kong.response.get_raw_body()
+    expect_no_match: true
+  description: "Kong PDK kong.request.get_raw_path() - original non-normalized client request path."
+
+- id: lua.source.kong_request_get_path_with_query
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [url, path, query]
+  packages: [kong]
+  match:
+    kind: call
+    callee:
+      attribute: [kong, request, get_path_with_query]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: Kong request path and query
+    code: |
+      local _u = require("kong")
+      return kong.request.get_path_with_query()
+    expect_match_text: [kong.request.get_path_with_query]
+  - name: similarly named local helper is not Kong request input
+    code: |
+      local _u = require("kong")
+      return request.get_path_with_query()
+    expect_no_match: true
+  description: "Kong PDK kong.request.get_path_with_query() - normalized path plus the client query string."
+
+- id: lua.source.kong_request_get_raw_query
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  packages: [kong]
+  match:
+    kind: call
+    callee:
+      attribute: [kong, request, get_raw_query]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: Kong raw request query
+    code: |
+      local _u = require("kong")
+      return kong.request.get_raw_query()
+    expect_match_text: [kong.request.get_raw_query]
+  - name: response helper is not request query input
+    code: |
+      local _u = require("kong")
+      return kong.response.get_headers()
+    expect_no_match: true
+  description: "Kong PDK kong.request.get_raw_query() - unnormalized client query string without the leading question mark."
+
+- id: lua.source.kong_request_get_query_arg
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  packages: [kong]
+  match:
+    kind: call
+    callee:
+      attribute: [kong, request, get_query_arg]
+  constraints:
+  - arg_count: 1
+  match_examples:
+  - name: Kong request query value
+    code: |
+      local _u = require("kong")
+      return kong.request.get_query_arg("q")
+    expect_match_text: [kong.request.get_query_arg]
+  - name: query getter requires one argument name
+    code: |
+      local _u = require("kong")
+      return kong.request.get_query_arg()
+    expect_no_match: true
+  description: "Kong PDK kong.request.get_query_arg(name) - one decoded client query value."
 
 - id: lua.source.kong_request_get_header
   enabled: true

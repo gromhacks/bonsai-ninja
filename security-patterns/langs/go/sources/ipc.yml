@@ -46,3 +46,34 @@
       }
     expect_match_text: [cmd.StderrPipe]
   description: "exec.Cmd.StderrPipe() - subprocess stderr; receiver-agnostic method regex gated to os/exec and zero arguments."
+
+- id: go.ipc.cmd_output
+  enabled: true
+  language: go
+  trust: ipc
+  tag: ipc-input
+  payload_types: [text, binary]
+  packages: ["os/exec"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.(Output|CombinedOutput)$"
+  constraints:
+  - receiver_type_in: [Cmd]
+  - max_args: 0
+  match_examples:
+  - name: exec command output
+    code: |
+      package main
+      import "os/exec"
+      func run(cmd *exec.Cmd) ([]byte, error) { return cmd.Output() }
+    expect_match_text: [cmd.Output]
+  - name: unrelated output receiver negative
+    code: |
+      package main
+      import "os/exec"
+      type Renderer struct{}
+      func (Renderer) Output() []byte { return nil }
+      func run(renderer Renderer) []byte { return renderer.Output() }
+    expect_no_match: true
+  description: "exec.Cmd.Output/CombinedOutput returns bytes written by a subprocess to stdout/stderr."

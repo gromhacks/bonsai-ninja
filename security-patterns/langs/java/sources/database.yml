@@ -109,3 +109,118 @@
       class User {}
     expect_match_text: [session.get]
   description: "Hibernate Session.get(...) on a session receiver - entity data read from the database boundary."
+
+- id: java.jdbc.resultset_complex_value
+  enabled: true
+  language: java
+  trust: database
+  tag: db-input
+  packages: [java.sql]
+  match:
+    kind: call
+    callee:
+      regex: "(^|[.])(getAsciiStream|getBinaryStream|getCharacterStream|getNCharacterStream|getBlob|getClob|getNClob|getSQLXML|getArray)$"
+  constraints:
+  - receiver_type_in: [ResultSet, java.sql.ResultSet]
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: ResultSet binary stream
+    code: |
+      import java.sql.ResultSet;
+      import java.io.InputStream;
+      class App {
+        InputStream read(ResultSet rs) throws Exception { return rs.getBinaryStream("payload"); }
+      }
+    expect_match_text: [rs.getBinaryStream]
+  - name: local row stream getter is not JDBC
+    code: |
+      import java.sql.ResultSet;
+      class LocalRow { Object getBinaryStream(String column) { return null; } }
+      class App { Object read(LocalRow row) { return row.getBinaryStream("payload"); } }
+    expect_no_match: true
+  description: "Typed JDBC ResultSet stream/LOB/XML/array getters - complex values read from the database boundary."
+
+- id: java.jpa.entitymanager_find
+  enabled: true
+  language: java
+  trust: database
+  tag: db-input
+  packages: [jakarta.persistence, javax.persistence]
+  match:
+    kind: call
+    callee:
+      name: find
+  constraints:
+  - receiver_type_in: [EntityManager, jakarta.persistence.EntityManager, javax.persistence.EntityManager]
+  - min_args: 2
+  match_examples:
+  - name: JPA entity lookup
+    code: |
+      import jakarta.persistence.EntityManager;
+      class User {}
+      class App { User load(EntityManager em, long id) { return em.find(User.class, id); } }
+    expect_match_text: [em.find]
+  - name: local repository find is not JPA
+    code: |
+      class Repository { Object find(Class<?> type, long id) { return null; } }
+      class App { Object load(Repository repo, long id) { return repo.find(Object.class, id); } }
+    expect_no_match: true
+  description: "Typed JPA EntityManager.find - an entity loaded from persistent storage."
+
+- id: java.jpa.query_results
+  enabled: true
+  language: java
+  trust: database
+  tag: db-input
+  packages: [jakarta.persistence, javax.persistence]
+  match:
+    kind: call
+    callee:
+      regex: "(^|[.])(getResultList|getSingleResult|getSingleResultOrNull|getResultStream)$"
+  constraints:
+  - receiver_type_in: [Query, TypedQuery, jakarta.persistence.Query, jakarta.persistence.TypedQuery, javax.persistence.Query, javax.persistence.TypedQuery]
+  - max_args: 0
+  match_examples:
+  - name: JPA typed query result
+    code: |
+      import jakarta.persistence.TypedQuery;
+      import java.util.List;
+      class App { List<String> load(TypedQuery<String> query) { return query.getResultList(); } }
+    expect_match_text: [query.getResultList]
+  - name: local query result is not JPA
+    code: |
+      import java.util.List;
+      class LocalQuery { List<String> getResultList() { return List.of(); } }
+      class App { List<String> load(LocalQuery query) { return query.getResultList(); } }
+    expect_no_match: true
+  description: "Typed JPA Query/TypedQuery result materialization - values returned from the database boundary."
+
+- id: java.jdbc.resultset_scalar_value
+  enabled: true
+  language: java
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [java.sql]
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])(getBoolean|getByte|getShort|getInt|getLong|getFloat|getDouble|getBigDecimal|getDate|getTime|getTimestamp|getURL)$'
+  constraints:
+  - receiver_type_in: [ResultSet, java.sql.ResultSet]
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: JDBC scalar result value
+    code: |
+      import java.sql.ResultSet;
+      class App { long read(ResultSet rs) throws Exception { return rs.getLong("account_id"); } }
+    expect_match_text: [rs.getLong]
+  - name: local row scalar is not a database source
+    code: |
+      import java.sql.ResultSet;
+      class LocalRow { long getLong(String key) { return 0; } }
+      class App { long read(LocalRow row) { return row.getLong("account_id"); } }
+    expect_no_match: true
+  description: "Typed JDBC ResultSet scalar/temporal getters - values read from a database result."

@@ -15,19 +15,25 @@
     kind: call
     callee:
       name: GetEnvironmentVariableA
+  taint_semantics:
+    source_output_args: [1]
   match_examples:
-  - name: generated direct match
+  - name: win32 environment output buffer
     code: |
       #include <windows.h>
-      #include <windows.h>
-      #include <windows.h> /* win32 */
-      #include <windows.h> /* win32 */
       void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        GetEnvironmentVariableA(arg);
+        char value[256];
+        GetEnvironmentVariableA("APP_MODE", value, sizeof(value));
       }
-  description: "Win32 GetEnvironmentVariableA - process environment lookup; same trust profile as getenv()."
+    expect_match_text: [GetEnvironmentVariableA]
+  - name: win32 environment setter is outbound
+    code: |
+      #include <windows.h>
+      void configure(void) {
+        SetEnvironmentVariableA("APP_MODE", "production");
+      }
+    expect_no_match: true
+  description: "Win32 GetEnvironmentVariableA(name, buffer, size) writes process-environment text to output buffer argument 1; the return is a length/status."
   imports:
   - windows
   - windows.h
@@ -44,19 +50,25 @@
     kind: call
     callee:
       name: GetEnvironmentVariableW
+  taint_semantics:
+    source_output_args: [1]
   match_examples:
-  - name: generated direct match
+  - name: win32 wide environment output buffer
     code: |
       #include <windows.h>
-      #include <windows.h>
-      #include <windows.h> /* win32 */
-      #include <windows.h> /* win32 */
       void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        GetEnvironmentVariableW(arg);
+        wchar_t value[256];
+        GetEnvironmentVariableW(L"APP_MODE", value, 256);
       }
-  description: "Win32 GetEnvironmentVariableW - UTF-16 environment lookup; attacker-influenced."
+    expect_match_text: [GetEnvironmentVariableW]
+  - name: win32 wide environment setter is outbound
+    code: |
+      #include <windows.h>
+      void configure(void) {
+        SetEnvironmentVariableW(L"APP_MODE", L"production");
+      }
+    expect_no_match: true
+  description: "Win32 GetEnvironmentVariableW(name, buffer, size) writes UTF-16 process-environment text to output buffer argument 1."
   imports:
   - windows
   - windows.h
@@ -125,19 +137,25 @@
     kind: call
     callee:
       name: RegQueryValueExA
+  taint_semantics:
+    source_output_args: [4]
   match_examples:
-  - name: generated direct match
+  - name: registry query data output
     code: |
       #include <winreg.h>
-      #include <winreg.h>
-      #include <advapi32.h> /* win32-advapi32 */
-      #include <advapi32.h> /* win32-advapi32 */
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        RegQueryValueExA(arg);
+      void example(HKEY key) {
+        char data[256]; DWORD size = sizeof(data), type = 0;
+        RegQueryValueExA(key, "Endpoint", 0, &type, (BYTE *) data, &size);
       }
-  description: "Win32 RegQueryValueExA - reads a registry value; HKCU and per-machine writable hives are attacker-influenced."
+    expect_match_text: [RegQueryValueExA]
+  - name: registry ANSI value setter is outbound
+    code: |
+      #include <winreg.h>
+      void configure(HKEY key, const BYTE *data, DWORD size) {
+        RegSetValueExA(key, "Endpoint", 0, REG_SZ, data, size);
+      }
+    expect_no_match: true
+  description: "Win32 RegQueryValueExA writes registry value data to output buffer argument 4; the LSTATUS return is not the payload."
   imports:
   - winreg.h
   - winreg
@@ -154,19 +172,25 @@
     kind: call
     callee:
       name: RegQueryValueExW
+  taint_semantics:
+    source_output_args: [4]
   match_examples:
-  - name: generated direct match
+  - name: registry wide query data output
     code: |
       #include <winreg.h>
-      #include <winreg.h>
-      #include <advapi32.h> /* win32-advapi32 */
-      #include <advapi32.h> /* win32-advapi32 */
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        RegQueryValueExW(arg);
+      void example(HKEY key) {
+        wchar_t data[256]; DWORD size = sizeof(data), type = 0;
+        RegQueryValueExW(key, L"Endpoint", 0, &type, (BYTE *) data, &size);
       }
-  description: "Win32 RegQueryValueExW - UTF-16 registry value read."
+    expect_match_text: [RegQueryValueExW]
+  - name: registry wide value setter is outbound
+    code: |
+      #include <winreg.h>
+      void configure(HKEY key, const BYTE *data, DWORD size) {
+        RegSetValueExW(key, L"Endpoint", 0, REG_SZ, data, size);
+      }
+    expect_no_match: true
+  description: "Win32 RegQueryValueExW writes UTF-16 registry value data to output buffer argument 4."
   imports:
   - winreg.h
   - winreg
@@ -183,19 +207,25 @@
     kind: call
     callee:
       name: RegGetValueA
+  taint_semantics:
+    source_output_args: [5]
   match_examples:
-  - name: generated direct match
+  - name: registry get data output
     code: |
       #include <winreg.h>
-      #include <winreg.h>
-      #include <advapi32.h> /* win32-advapi32 */
-      #include <advapi32.h> /* win32-advapi32 */
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        RegGetValueA(arg);
+      void example(HKEY key) {
+        char data[256]; DWORD size = sizeof(data), type = 0;
+        RegGetValueA(key, 0, "Endpoint", RRF_RT_REG_SZ, &type, data, &size);
       }
-  description: "Win32 RegGetValueA - typed registry value read; attacker-influenced for writable hives."
+    expect_match_text: [RegGetValueA]
+  - name: registry ANSI value setter is outbound
+    code: |
+      #include <winreg.h>
+      void configure(HKEY key, const BYTE *data, DWORD size) {
+        RegSetValueExA(key, "Endpoint", 0, REG_SZ, data, size);
+      }
+    expect_no_match: true
+  description: "Win32 RegGetValueA writes registry value data to output buffer argument 5."
   imports:
   - winreg.h
   - winreg
@@ -212,19 +242,25 @@
     kind: call
     callee:
       name: RegGetValueW
+  taint_semantics:
+    source_output_args: [5]
   match_examples:
-  - name: generated direct match
+  - name: registry wide get data output
     code: |
       #include <winreg.h>
-      #include <winreg.h>
-      #include <advapi32.h> /* win32-advapi32 */
-      #include <advapi32.h> /* win32-advapi32 */
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        RegGetValueW(arg);
+      void example(HKEY key) {
+        wchar_t data[256]; DWORD size = sizeof(data), type = 0;
+        RegGetValueW(key, 0, L"Endpoint", RRF_RT_REG_SZ, &type, data, &size);
       }
-  description: "Win32 RegGetValueW - UTF-16 typed registry value read."
+    expect_match_text: [RegGetValueW]
+  - name: registry wide value setter is outbound
+    code: |
+      #include <winreg.h>
+      void configure(HKEY key, const BYTE *data, DWORD size) {
+        RegSetValueExW(key, L"Endpoint", 0, REG_SZ, data, size);
+      }
+    expect_no_match: true
+  description: "Win32 RegGetValueW writes UTF-16 registry value data to output buffer argument 5."
   imports:
   - winreg.h
   - winreg
@@ -241,19 +277,25 @@
     kind: call
     callee:
       name: RegEnumValueA
+  taint_semantics:
+    source_output_args: [2, 6]
   match_examples:
-  - name: generated direct match
+  - name: registry enumeration name and data outputs
     code: |
       #include <winreg.h>
-      #include <winreg.h>
-      #include <advapi32.h> /* win32-advapi32 */
-      #include <advapi32.h> /* win32-advapi32 */
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        RegEnumValueA(arg);
+      void example(HKEY key) {
+        char name[128], data[256]; DWORD namesz = 128, datasz = 256, type = 0;
+        RegEnumValueA(key, 0, name, &namesz, 0, &type, (BYTE *) data, &datasz);
       }
-  description: "Win32 RegEnumValueA - enumerates registry value names/data; writable-hive contents are attacker-influenced like RegQueryValueExA."
+    expect_match_text: [RegEnumValueA]
+  - name: registry ANSI value setter is not enumeration
+    code: |
+      #include <winreg.h>
+      void configure(HKEY key, const BYTE *data, DWORD size) {
+        RegSetValueExA(key, "Endpoint", 0, REG_SZ, data, size);
+      }
+    expect_no_match: true
+  description: "Win32 RegEnumValueA writes registry value names and data to output arguments 2 and 6."
   imports:
   - winreg.h
   - winreg
@@ -270,19 +312,25 @@
     kind: call
     callee:
       name: RegEnumValueW
+  taint_semantics:
+    source_output_args: [2, 6]
   match_examples:
-  - name: generated direct match
+  - name: registry wide enumeration outputs
     code: |
       #include <winreg.h>
-      #include <winreg.h>
-      #include <advapi32.h> /* win32-advapi32 */
-      #include <advapi32.h> /* win32-advapi32 */
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        RegEnumValueW(arg);
+      void example(HKEY key) {
+        wchar_t name[128]; BYTE data[256]; DWORD namesz = 128, datasz = 256, type = 0;
+        RegEnumValueW(key, 0, name, &namesz, 0, &type, data, &datasz);
       }
-  description: "Win32 RegEnumValueW - UTF-16 registry value enumeration; writable-hive contents are attacker-influenced."
+    expect_match_text: [RegEnumValueW]
+  - name: registry wide value setter is not enumeration
+    code: |
+      #include <winreg.h>
+      void configure(HKEY key, const BYTE *data, DWORD size) {
+        RegSetValueExW(key, L"Endpoint", 0, REG_SZ, data, size);
+      }
+    expect_no_match: true
+  description: "Win32 RegEnumValueW writes UTF-16 registry value names and data to output arguments 2 and 6."
   imports:
   - winreg.h
   - winreg

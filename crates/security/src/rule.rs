@@ -364,6 +364,12 @@ pub struct TaintSemantics {
     /// becomes tainted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_output_args: Vec<usize>,
+    /// Source rules only: the first argument in a variadic output tail.
+    /// Every actual argument at or after this index receives untrusted
+    /// output. This models compiler-visible shapes such as `scanf` and
+    /// database `Scan` calls without imposing an arbitrary destination cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_output_args_from: Option<usize>,
     /// Source rules only: callback argument shapes whose callback
     /// parameters receive attacker-controlled data from the source call.
     /// This covers Node-style APIs such as
@@ -371,6 +377,11 @@ pub struct TaintSemantics {
     /// `process.stdin.on("data", chunk => ...)`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_callback_args: Vec<SourceCallbackArgSemantics>,
+    /// Source rules only: the call's return is registration/status state, not
+    /// source data. Callback delivery parameters remain the only seeds. Leave
+    /// false for hybrid APIs whose return and callback can both carry input.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub source_callback_only: bool,
     /// Sanitizer/passthrough rules only: argument indices whose value
     /// flows unchanged to the call result. This covers decode/unescape
     /// APIs that preserve attacker control while changing representation.
@@ -1126,8 +1137,11 @@ pub struct AnalysisSemantics {
     /// source. Authored categories may inherit this through rulepack metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub non_taint_evaluation: Option<NonTaintEvaluation>,
-    /// Permit file-level package/import evidence for this sink even when the
-    /// call itself has no receiver/package identity.
+    /// Permit file-level package/import evidence when the matched call itself
+    /// has no receiver/package identity. Sources default to `true` for
+    /// framework request objects; sinks default to `false`. Set this to
+    /// `false` on a source whose compiler import/alias binding is required to
+    /// distinguish a library API from a same-named application method.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_file_package_evidence: Option<bool>,
     /// The sink's compiler/lifecycle constraint is sufficient identity, so a

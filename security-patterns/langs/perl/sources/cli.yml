@@ -9,12 +9,19 @@
     target:
       name: ARGV
   match_examples:
-    - name: perl.source.argv example
-      code: |
-        sub example {
-          my ($input, $url, $id, $payload, $request) = @_;
-          my $value = $ARGV[0];
-        }
+  - name: Perl command-line argument
+    code: |
+      sub example {
+        my $value = $ARGV[0];
+        return $value;
+      }
+  - name: ordinary array is not ARGV
+    code: |
+      sub example {
+        my @values = ("local");
+        return $values[0];
+      }
+    expect_no_match: true
   description: "@ARGV - command-line arguments."
 
 - id: perl.source.stdin
@@ -27,10 +34,76 @@
     target:
       name: STDIN
   match_examples:
-    - name: perl.source.stdin example
-      code: |
-        sub example {
-          my ($input, $url, $id, $payload, $request) = @_;
-          my $value = $STDIN;
-        }
-  description: "STDIN - local interactive input."
+  - name: Perl STDIN line read
+    code: |
+      sub example {
+        my $value = <STDIN>;
+        return $value;
+      }
+  - name: similarly named scalar is not STDIN
+    code: |
+      sub example {
+        my $stdin_value = "local";
+        return $stdin_value;
+      }
+    expect_no_match: true
+  description: "STDIN reads - local interactive or piped process input."
+
+- id: perl.source.env
+  enabled: true
+  language: perl
+  trust: local
+  tag: env-input
+  analysis_semantics:
+    flow_classes: [environment-input]
+  match:
+    kind: read
+    target:
+      name: ENV
+  match_examples:
+  - name: Perl process environment value
+    code: |
+      sub example {
+        return $ENV{'TOKEN'};
+      }
+  - name: ordinary hash is not process environment
+    code: |
+      sub example {
+        my %settings = (TOKEN => "local");
+        return $settings{'TOKEN'};
+      }
+    expect_no_match: true
+  description: "%ENV - values inherited from the process environment. CGI-specific remote classification requires exact static-key places and is intentionally not inferred from the whole hash."
+
+- id: perl.source.file_slurp_read_file
+  enabled: true
+  language: perl
+  trust: local
+  tag: file-input
+  payload_types: [text, binary]
+  packages: ["File::Slurp"]
+  match:
+    kind: call
+    callee:
+      name: read_file
+  constraints:
+  - top_level: true
+  - min_args: 1
+  match_examples:
+  - name: File Slurp local file contents
+    code: |
+      use File::Slurp qw(read_file);
+      sub load_config {
+        my ($path) = @_;
+        return read_file($path);
+      }
+    expect_match_text: [read_file]
+  - name: File Slurp write operation is not input
+    code: |
+      use File::Slurp qw(write_file);
+      sub save_config {
+        my ($path, $value) = @_;
+        write_file($path, $value);
+      }
+    expect_no_match: true
+  description: "File::Slurp read_file(path, ...) - bytes/text materialized from a local file. The same call may independently be a path-traversal sink when the path is tainted."

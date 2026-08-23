@@ -39,20 +39,28 @@
   enabled: true
   language: lua
   trust: local
-  tag: cli-input
+  tag: file-input
+  payload_types: [text, binary]
   match:
     kind: call
     callee:
       attribute: [io, read]
   match_examples:
-    - name: lua.source.io_read example
-      code: |
-        function example(input, url, id, payload, request, params, user)
-          io.read(input)
-        end
-  description: "io.read - local stdin input."
+  - name: Lua default input read
+    code: |
+      function example()
+        return io.read()
+      end
+    expect_match_text: [io.read]
+  - name: unrelated receiver read is not io input
+    code: |
+      function example(reader)
+        return reader:read()
+      end
+    expect_no_match: true
+  description: "io.read - data from Lua's current default input stream. That stream is stdin initially, but io.input(file) can redirect it to a local file; the explicit io.stdin:read rule retains the narrower CLI-input classification."
 
-- id: lua.source.io_lines
+- id: lua.source.io_stdin_read
   enabled: true
   language: lua
   trust: local
@@ -60,11 +68,18 @@
   match:
     kind: call
     callee:
-      attribute: [io, lines]
+      attribute: [io, stdin, read]
   match_examples:
-    - name: lua.source.io_lines example
-      code: |
-        function example(input, url, id, payload, request, params, user)
-          for line in io.lines(input) do end
-        end
-  description: "io.lines - iterates lines from stdin (no arg) or a named file; each line is local/file-controlled input."
+  - name: Lua explicit stdin read
+    code: |
+      function example()
+        return io.stdin:read("*l")
+      end
+    expect_match_text: [io.stdin.read]
+  - name: file handle read is not explicit stdin
+    code: |
+      function example(file)
+        return file:read("*l")
+      end
+    expect_no_match: true
+  description: "io.stdin:read - text or bytes supplied through the process standard input stream."

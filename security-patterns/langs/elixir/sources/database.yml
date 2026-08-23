@@ -1,0 +1,28 @@
+# Elixir database results whose provider module is explicit in source.
+- id: elixir.database.query_results
+  enabled: true
+  language: elixir
+  trust: database
+  tag: db-input
+  packages: [postgrex, myxql, ecto_sql]
+  match:
+    kind: call
+    callee:
+      regex: '^(Postgrex|MyXQL|Ecto\.Adapters\.SQL)\.(query|query!)$'
+  match_examples:
+  - name: Postgrex query result
+    code: |
+      alias Postgrex
+      defmodule App do
+        def load(conn), do: Postgrex.query!(conn, "select name from users", [])
+      end
+    expect_match_text: [Postgrex.query!]
+  - name: transaction control is not row input
+    code: |
+      alias Postgrex
+      defmodule App do
+        def begin(conn), do: Postgrex.transaction(conn, fn tx -> tx end)
+      end
+    expect_no_match: true
+  description: "Exact Postgrex, MyXQL, and Ecto SQL query results - rows and result metadata returned from the database boundary."
+  imports: [Postgrex]

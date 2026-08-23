@@ -2162,6 +2162,15 @@ fn validate_taint_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) 
             "taint_semantics.source_output_args is only valid on source rules",
         );
     }
+    if semantics.source_output_args_from.is_some() && rule.kind != RuleKind::Source {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-taint-semantics",
+            Some(rule),
+            "taint_semantics.source_output_args_from is only valid on source rules",
+        );
+    }
     if !semantics.source_callback_args.is_empty() && rule.kind != RuleKind::Source {
         push_validation_issue(
             issues,
@@ -2181,6 +2190,39 @@ fn validate_taint_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) 
                 "taint_semantics.source_callback_args entries require source_param_indices",
             );
         }
+    }
+    if semantics.source_callback_only && semantics.source_callback_args.is_empty() {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-taint-semantics",
+            Some(rule),
+            "taint_semantics.source_callback_only requires source_callback_args",
+        );
+    }
+    let has_output_carrier =
+        !semantics.source_output_args.is_empty() || semantics.source_output_args_from.is_some();
+    if has_output_carrier && !semantics.source_callback_args.is_empty() {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-taint-semantics",
+            Some(rule),
+            "source output and callback carriers are mutually exclusive; split hybrid APIs into exact rules",
+        );
+    }
+    if (!semantics.source_output_args.is_empty()
+        || semantics.source_output_args_from.is_some()
+        || !semantics.source_callback_args.is_empty())
+        && rule.match_spec.kind != MatchKind::Call
+    {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-taint-semantics",
+            Some(rule),
+            "source output/callback carriers require match.kind: call",
+        );
     }
     if !semantics.call_result_passthrough_args.is_empty()
         && !matches!(rule.kind, RuleKind::Sanitizer | RuleKind::Typing)

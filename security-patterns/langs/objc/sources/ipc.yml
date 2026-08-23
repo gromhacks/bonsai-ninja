@@ -17,19 +17,29 @@
         void test(id input) { id target = input; int amount = 1; id notification; id result = notification.userInfo; }
   description: "Disabled - a bare `userInfo` property does not establish an IPC boundary. Ordinary NSNotificationCenter notifications are process-local, while Darwin notifications do not carry a userInfo payload. APNS input is modeled by the selector-scoped remote source."
 
-- id: objc.source.pasteboard_string
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: objc.source.uipasteboard_string
+  enabled: true
   language: objc
   trust: ipc
-  tag: ipc-input
+  tag: clipboard-input
+  payload_types: [text, binary]
   match:
     kind: call
     callee:
-      attribute: [UIPasteboard, generalPasteboard]
+      regex: "^(?:.*\\.)?(stringForType|valueForPasteboardType|dataForPasteboardType)$"
+  constraints:
+  - receiver_type_in: [UIPasteboard, NSPasteboard]
+  - min_args: 1
+  - max_args: 1
   match_examples:
-    - name: declared shape
-      code: |
-        void test(id input) { id target = input; int amount = 1; [UIPasteboard generalPasteboard:input]; }
-  description: "Disabled - +generalPasteboard returns the pasteboard object, not clipboard content. Typed string/data accessors are modeled by objc.source.uipasteboard_string."
+  - name: typed pasteboard string value
+    code: |
+      #import <UIKit/UIKit.h>
+      NSString *read(UIPasteboard *pasteboard) { return [pasteboard stringForType:@"public.text"]; }
+    expect_match_text: [pasteboard.stringForType]
+  - name: pasteboard mutator is not input
+    code: |
+      #import <UIKit/UIKit.h>
+      void write(UIPasteboard *pasteboard) { [pasteboard setPersistent:YES]; }
+    expect_no_match: true
+  description: "UIPasteboard/NSPasteboard typed string/data accessors return clipboard payload supplied by another app or user paste action; pasteboard object factories and mutators are not sources."

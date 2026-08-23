@@ -1267,7 +1267,9 @@
   description: "Disabled - generated gRPC stubs name the request parameter `request`, but bare-name param matching overmatches every method with a parameter called `request`. Enable per-project once a `@GrpcService` annotation pivot is available."
 
 - id: java.source.grpc_streamobserver_value
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: java
   trust: remote
   tag: rpc-input
@@ -1285,7 +1287,7 @@
           responseObserver.onNext(input);
         }
       }
-  description: "gRPC StreamObserver.onNext - when the value being forwarded is derived from a peer-supplied request message."
+  description: "Disabled - StreamObserver.onNext is direction-dependent. A server responseObserver.onNext is outbound, while only onNext on the returned request observer is inbound. Re-enable after generic override/returned-observer role facts can distinguish those carriers."
 
 - id: java.source.netty_fullhttprequest_content
   enabled: true
@@ -1782,7 +1784,10 @@
   description: "Vert.x RoutingContext.getBodyAsJson() - parsed JSON request body for the current HTTP request."
 
 - id: java.source.vertx_json_body_getstring
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: java.source.vertx_routingcontext_getbodyasjson
   language: java
   trust: remote
   tag: http-input
@@ -1808,10 +1813,13 @@
         Object getString(Object... args) { return null; }
       }
     expect_match_text: [body.getString]
-  description: "Vert.x JsonObject body.getString(name) - JSON request body field."
+  description: "Disabled - JsonObject is also used for trusted configuration and locally constructed data. Request-body origin is seeded by RoutingContext.getBodyAsJson and ordinary receiver/value propagation carries that taint to getString."
 
 - id: java.source.vertx_json_body_getvalue
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: java.source.vertx_routingcontext_getbodyasjson
   language: java
   trust: remote
   tag: http-input
@@ -1837,7 +1845,7 @@
         Object getValue(Object... args) { return null; }
       }
     expect_match_text: [jsonBody.getValue]
-  description: "Vert.x JsonObject body.getValue(name) - JSON request body field."
+  description: "Disabled - JsonObject.getValue is not itself a boundary. Request-body origin is seeded by RoutingContext.getBodyAsJson and normal receiver/value propagation carries it to field reads."
 
 - id: java.source.wicket_pageparameters_get
   enabled: true
@@ -1997,7 +2005,10 @@
   description: "Play Framework request body().asJson() - JSON body supplied by the HTTP caller."
 
 - id: java.source.play_jsonnode_astext
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: java.source.play_request_body_asjson
   language: java
   trust: remote
   tag: http-input
@@ -2023,10 +2034,13 @@
         Object asText(Object... args) { return null; }
       }
     expect_match_text: [node.asText]
-  description: "Play Framework req.body().asJson().path(...).asText() - JSON field text supplied by the HTTP caller."
+  description: "Disabled - JsonNode.asText is also used on locally constructed JSON. The Play request-body source is req.body().asJson(); ordinary receiver/value propagation must carry that origin through JsonNode accessors."
 
 - id: java.source.play_jsonnode_path_astext
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: java.source.play_request_body_asjson
   language: java
   trust: remote
   tag: http-input
@@ -2063,7 +2077,7 @@
         Object asText(Object... args) { return null; }
       }
     expect_no_match: true
-  description: "Play/Jackson JsonNode.path(...).asText(default) - JSON request-body field text supplied by the HTTP caller."
+  description: "Disabled - JsonNode.path(...).asText(...) is a value transform on any JsonNode, not an input boundary. The exact Play request-body source supplies provenance."
 
 - id: java.source.websocket_message_payload_text
   enabled: true
@@ -2122,7 +2136,9 @@
   description: "Spring WebSocketMessage.getPayload() - raw websocket frame payload supplied by the peer."
 
 - id: java.source.slf4j_mdc_get
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: java
   trust: remote
   tag: http-input
@@ -2169,7 +2185,7 @@
         }
       }
     expect_no_match: true
-  description: "MDC/ThreadContext values often hold request headers or correlation IDs copied at the web boundary; treat reads as remote-controlled logging context input."
+  description: "Disabled - MDC and ThreadContext are generic application-owned thread-local maps. A read is remote only when an earlier boundary-derived write is proven; package and key spelling alone cannot establish that provenance."
 
 - id: java.source.stomp_message_headers_get
   enabled: true
@@ -2226,3 +2242,32 @@
       }
     expect_match_text: [event.getData]
   description: "Jakarta/JAX-RS InboundSseEvent.getData() - Server-Sent Event payload received from a remote SSE producer."
+
+- id: java.source.servlet_request_metadata
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [text, header, file, ip]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      regex: "(^|[.])(getDateHeader|getIntHeader|getParts|getPart|getRemoteAddr|getRemoteHost|getRemotePort|getServerName)$"
+  constraints:
+  - receiver_type_in: [HttpServletRequest, jakarta.servlet.http.HttpServletRequest, javax.servlet.http.HttpServletRequest]
+  - max_args: 1
+  match_examples:
+  - name: servlet client address
+    code: |
+      import jakarta.servlet.http.HttpServletRequest;
+      class App { String peer(HttpServletRequest request) { return request.getRemoteAddr(); } }
+    expect_match_text: [request.getRemoteAddr]
+  - name: same accessor on a local context is not servlet input
+    code: |
+      import jakarta.servlet.http.HttpServletRequest;
+      class LocalContext { String getRemoteAddr() { return "127.0.0.1"; } }
+      class App { String peer(LocalContext context) { return context.getRemoteAddr(); } }
+    expect_no_match: true
+  description: "Typed servlet request metadata and multipart accessors not covered by the core parameter/header/body rules."

@@ -352,6 +352,10 @@
       name: readBytes
   constraints:
   - receiver_type_in: [BytesMessage]
+  - min_args: 1
+  - max_args: 2
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
   - name: jms bytesmessage readbytes
     code: |
@@ -367,7 +371,7 @@
         msg.readBytes()
       }
     expect_no_match: true
-  description: "JMS BytesMessage.readBytes() reads the raw queue payload - attacker-controllable bytes. Gated on the BytesMessage receiver type (resolved from the local/param declaration) so unrelated readBytes() methods stay quiet."
+  description: "JMS BytesMessage.readBytes(byte[]) writes broker bytes into argument 0; its integer return is only the copied-byte count. Receiver type and arity keep unrelated readBytes methods quiet."
 
 - id: kotlin.source.jms_message_getbody
   enabled: true

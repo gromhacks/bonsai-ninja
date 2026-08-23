@@ -318,7 +318,7 @@
   match:
     kind: call
     callee:
-      regex: "\\.(FormFile|MultipartReader|ParseMultipartForm)$"
+      regex: "\\.(FormFile|MultipartReader)$"
   constraints:
   - receiver_type_in: [Request]
   match_examples:
@@ -331,6 +331,14 @@
         _, _, _ = file, header, err
       }
     expect_match_text: [r.FormFile]
+  - name: parsing multipart state is not a returned upload
+    code: |
+      package main
+      import "net/http"
+      func prepare(r *http.Request) error {
+        return r.ParseMultipartForm(1 << 20)
+      }
+    expect_no_match: true
   - name: net/http multipart reader
     code: |
       package main
@@ -340,7 +348,7 @@
         _, _ = reader, err
       }
     expect_match_text: [req.MultipartReader]
-  description: "net/http multipart upload APIs - file parts, headers, and FileHeader.Filename are client-controlled."
+  description: "net/http Request.FormFile and MultipartReader return client-controlled multipart parts and metadata. ParseMultipartForm only mutates request state and is deliberately not a return-value source."
 - id: go.multipart.fileheader_filename
   enabled: true
   language: go
@@ -1283,7 +1291,7 @@
   match:
     kind: call
     callee:
-      regex: "\\.(GetBody|GetBodyString|ReadBody|ReadJSON|ReadXML|ReadForm)$"
+      regex: "\\.(GetBody|GetBodyString)$"
   constraints:
   - receiver_type_in: [Context, Ctx]
   match_examples:
@@ -1295,15 +1303,49 @@
         _ = ctx.GetBodyString()
       }
     expect_match_text: [ctx.GetBodyString]
-  - name: iris read json
+  - name: iris decoder is not a return source
     code: |
       package main
       import "github.com/kataras/iris/v12"
       func handler(ctx iris.Context, dst any) {
         _ = ctx.ReadJSON(dst)
       }
+    expect_no_match: true
+  description: "Iris GetBody/GetBodyString return raw request-body content. Decoder methods that populate a caller destination are modeled separately."
+
+- id: go.iris.context_body_decoders
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json, xml, form]
+  frameworks: [iris]
+  packages: ["github.com/kataras/iris/v12"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.(ReadBody|ReadJSON|ReadXML|ReadForm)$"
+  constraints:
+  - receiver_type_in: [Context, Ctx]
+  - min_args: 1
+  - max_args: 1
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: iris read json destination
+    code: |
+      package main
+      import "github.com/kataras/iris/v12"
+      func handler(ctx iris.Context, dst any) { _ = ctx.ReadJSON(dst) }
     expect_match_text: [ctx.ReadJSON]
-  description: "iris request body readers - raw or decoded body content supplied by the HTTP caller."
+  - name: iris output call requires destination
+    code: |
+      package main
+      import "github.com/kataras/iris/v12"
+      func handler(ctx iris.Context) { _ = ctx.ReadJSON() }
+    expect_no_match: true
+  description: "Iris ReadBody/ReadJSON/ReadXML/ReadForm populate destination argument 0 from the remote request body; their error return is not tainted."
 
 - id: go.iris.context_form_values
   enabled: true
@@ -1503,6 +1545,12 @@
     kind: call
     callee:
       regex: "\\.BodyParser$"
+  constraints:
+  - receiver_type_in: [Context, Ctx]
+  - min_args: 1
+  - max_args: 1
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
   - name: fiber body parser
     code: |
@@ -1512,7 +1560,17 @@
         _ = c.BodyParser(dst)
       }
     expect_match_text: [c.BodyParser]
-  description: "fiber c.BodyParser(&v) - parses attacker-controlled request body into application data."
+  - name: unrelated BodyParser receiver
+    code: |
+      package main
+      import _ "github.com/gofiber/fiber/v2"
+      type Parser struct{}
+      func (Parser) BodyParser(dst any) error { return nil }
+      func decode(p Parser, dst any) {
+        _ = p.BodyParser(dst)
+      }
+    expect_no_match: true
+  description: "Fiber Context.BodyParser(dest) populates destination argument 0 from the remote request body; its error return is not tainted."
 - id: go.fiber.context_cookies
   enabled: false
   disabled_reason:
@@ -1591,7 +1649,7 @@
   match:
     kind: call
     callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(FormFile|MultipartForm|QueryParser)$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(FormFile|MultipartForm)$"
   constraints:
   - receiver_type_in: [Context, Ctx]
   match_examples:
@@ -1612,7 +1670,53 @@
         _, _ = ctx.MultipartForm()
       }
     expect_match_text: [ctx.MultipartForm]
-  description: "fiber form-file, query parser, and upload helpers - attacker-controlled body/form/file data. FormValue is owned by the shared go.nethttp.form_value call-shape rule."
+  - name: unrelated FormFile receiver
+    code: |
+      package main
+      import _ "github.com/gofiber/fiber/v2"
+      type Upload struct{}
+      func (Upload) FormFile(name string) (any, error) { return nil, nil }
+      func load(u Upload) {
+        _, _ = u.FormFile("file")
+      }
+    expect_no_match: true
+  description: "Fiber FormFile/MultipartForm return client-controlled multipart form/file data. QueryParser's output destination is modeled separately."
+
+- id: go.fiber.context_queryparser
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [fiber]
+  packages: ["github.com/gofiber/fiber", "github.com/gofiber/fiber/v2"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.QueryParser$"
+  constraints:
+  - receiver_type_in: [Context, Ctx]
+  - min_args: 1
+  - max_args: 1
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: fiber query parser destination
+    code: |
+      package main
+      import "github.com/gofiber/fiber/v2"
+      func handler(ctx *fiber.Ctx, dst any) { _ = ctx.QueryParser(dst) }
+    expect_match_text: [ctx.QueryParser]
+  - name: query parser wrong receiver negative
+    code: |
+      package main
+      import "github.com/gofiber/fiber/v2"
+      type Parser struct{}
+      func (Parser) QueryParser(any) error { return nil }
+      func handler(p Parser, dst any) { _ = p.QueryParser(dst) }
+    expect_no_match: true
+  description: "Fiber Context.QueryParser(dest) populates destination argument 0 from attacker-controlled query parameters; its error return is not tainted."
 
 # --- fasthttp ---------------------------------------------------------
 - id: go.fasthttp.queryargs
@@ -1788,6 +1892,9 @@
       attribute: [wsjson, Read]
   constraints:
   - min_args: 3
+  - max_args: 3
+  taint_semantics:
+    source_output_args: [2]
   match_examples:
   - name: nhooyr wsjson read
     code: |
@@ -1797,7 +1904,15 @@
         _ = wsjson.Read(ctx, c, out)
       }
     expect_match_text: [wsjson.Read]
-  description: "wsjson.Read(ctx, conn, &out) - decodes attacker-controlled websocket JSON into application data."
+  - name: nhooyr wsjson write is outbound
+    code: |
+      package main
+      import "nhooyr.io/websocket/wsjson"
+      func write(ctx context.Context, c any, value any) {
+        _ = wsjson.Write(ctx, c, value)
+      }
+    expect_no_match: true
+  description: "wsjson.Read(ctx, conn, out) decodes attacker-controlled WebSocket JSON into destination argument 2; its error return is not tainted."
 
 # --- GraphQL ----------------------------------------------------------
 - id: go.graphql.resolveparams_args

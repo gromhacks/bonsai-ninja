@@ -36,6 +36,10 @@ use std::sync::{
 /// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
 /// or the object validation contract changes in a way that can alter compiler
 /// facts.
+// v98: Python keyed reads nested inside arbitrary call arguments no longer
+// rewrite the outer call's assignment target. Exact keyed selections remain
+// compiler projections when they are the value expression itself; resolved
+// argument/parameter and return facts own every call boundary.
 // v97: ERB host projection emits exact synthetic statement boundaries at
 // closing tags, including trim-mode tags, so adjacent expressions on one HTML
 // line cannot merge into a different Ruby program. Cached v96 templates can
@@ -272,7 +276,7 @@ use std::sync::{
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 97;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 98;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;

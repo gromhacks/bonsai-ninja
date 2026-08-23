@@ -11,14 +11,25 @@
     kind: call
     callee:
       attribute: [System, argv]
+  constraints:
+  - max_args: 0
   match_examples:
-    - name: declared shape
+    - name: BEAM command line arguments
       code: |
         defmodule App do
-          def test(input) do
+          def args do
+            System.argv()
+          end
+        end
+      expect_match_text: [System.argv]
+    - name: wrong argv arity negative
+      code: |
+        defmodule App do
+          def args(input) do
             System.argv(input)
           end
         end
+      expect_no_match: true
     - name: system halt negative
       code: |
         defmodule App do
@@ -102,7 +113,7 @@
     kind: param
     target:
       name: args
-  description: "Disabled duplicate - bare `param name: args` is covered by elixir.absinthe.resolver_args; System.argv/0 remains the precise CLI source."
+  description: "Disabled - a parameter named args does not prove the enclosing module uses Mix.Task or that the function is run/1. System.argv/0 remains the precise process boundary until generic `use Mix.Task` facts are available."
 
 - id: elixir.config.system_get_env
   enabled: true
@@ -209,3 +220,30 @@
           end
         end
   description: "Application.fetch_env!/2 - same origin as get_env/3 but raises on missing."
+
+- id: elixir.local.file_content_read
+  enabled: true
+  language: elixir
+  trust: local
+  tag: file-input
+  payload_types: [text, binary]
+  match:
+    kind: call
+    callee:
+      regex: '^File\.(read|read!|stream!|read_link|read_link!)$'
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: Elixir local file read
+    code: |
+      defmodule App do
+        def load(path), do: File.read!(path)
+      end
+    expect_match_text: [File.read!]
+  - name: Elixir local file write is not input
+    code: |
+      defmodule App do
+        def save(path), do: File.write!(path, "constant")
+      end
+    expect_no_match: true
+  description: "Exact Elixir File content and link-target reads - values crossing from the local filesystem into the process."

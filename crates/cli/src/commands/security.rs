@@ -5034,15 +5034,57 @@ fn render_audit(
         "{}",
         u.dim("audit: counts are enabled-only.  gaps lists sink families with 0 enabled rules.")
     );
+
+    let mut source_headers: Vec<&str> = vec!["lang"];
+    source_headers.extend(report.canonical_source_families.iter().map(String::as_str));
+    source_headers.push("gaps");
+    let mut source_table = u.table(&source_headers);
+    source_table.set_content_arrangement(comfy_table::ContentArrangement::Disabled);
+    for language in &report.languages {
+        let mut row = vec![Cell::new(u.name(&language.language))];
+        let mut gaps = Vec::new();
+        for family in &report.canonical_source_families {
+            let entry = language.source_families.get(family);
+            if entry.is_some_and(|count| count.not_applicable) {
+                row.push(Cell::new(u.dim("n/a")));
+                continue;
+            }
+            let enabled = entry.map_or(0, |count| count.enabled);
+            row.push(Cell::new(count_cell(u, enabled, 3)));
+            if enabled == 0 {
+                gaps.push(family.as_str());
+            }
+        }
+        row.push(Cell::new(u.warn(&if gaps.is_empty() {
+            "-".to_string()
+        } else {
+            gaps.join(",")
+        })));
+        source_table.add_row(row);
+    }
+    cli_println!("\n{}", u.heading("source boundary coverage"));
+    cli_println!("{source_table}");
+    cli_println!(
+        "{}",
+        u.dim(
+            "source families are rulepack YAML files; zeroes are explicit coverage gaps, not hidden totals."
+        )
+    );
     let descriptions = report
         .languages
         .iter()
         .flat_map(|language| {
-            language
+            let sources = language
+                .source_families
+                .iter()
+                .filter(|(_, count)| count.not_applicable)
+                .map(|(family, _)| format!("{}/source:{family}", language.language));
+            let sinks = language
                 .sinks
                 .iter()
                 .filter(|(_, count)| count.not_applicable)
-                .map(|(family, _)| format!("{}/{family}", language.language))
+                .map(|(family, _)| format!("{}/sink:{family}", language.language));
+            sources.chain(sinks)
         })
         .collect::<Vec<_>>();
     if !descriptions.is_empty() {

@@ -10,20 +10,28 @@
   match:
     kind: call
     callee:
-      attribute: [BorrowedMessage, payload]
+      regex: "\\.payload$"
+  constraints:
+  - receiver_type_in: [BorrowedMessage]
+  - max_args: 0
   match_examples:
   - name: rdkafka borrowed message payload
     code: |
       use rdkafka::message::BorrowedMessage;
-      fn example() {
-          BorrowedMessage::payload();
-      }
-    expect_match_text: ["BorrowedMessage::payload"]
+      fn example(message: &BorrowedMessage<'_>) { let _ = message.payload(); }
+    expect_match_text: [message.payload]
+  - name: unrelated payload receiver negative
+    code: |
+      use rdkafka::message::BorrowedMessage;
+      struct Local;
+      impl Local { fn payload(&self) -> &[u8] { &[] } }
+      fn example(message: &Local) { let _ = message.payload(); }
+    expect_no_match: true
   description: "rdkafka BorrowedMessage::payload() - Kafka message payload; local receiver calls require semantic BorrowedMessage receiver-type facts."
 - id: rust.lapin.delivery_data
   enabled: false
   disabled_reason:
-    code: over-broad
+    code: pending-adapter-fact
   language: rust
   trust: service
   tag: queue-input
@@ -34,11 +42,24 @@
     kind: read
     target:
       name: data
-  description: "Disabled - bare `data` overmatches unrelated fields; enable with a receiver-qualified Delivery.data read once Rust field receiver facts are available."
+      receiver_type_in: [Delivery, lapin::message::Delivery]
+  match_examples:
+  - name: lapin delivery data
+    code: |
+      use lapin::message::Delivery;
+      fn consume(delivery: Delivery) { let _ = delivery.data; }
+    expect_match_text: [delivery.data]
+  - name: unrelated data field negative
+    code: |
+      use lapin::message::Delivery;
+      struct Local { data: Vec<u8> }
+      fn consume(local: Local) { let _ = local.data; }
+    expect_no_match: true
+  description: "Disabled pending Rust field-read receiver-type facts. lapin Delivery.data is broker input, but a bare data field would overmatch local structs."
 - id: rust.nats.message_data
   enabled: false
   disabled_reason:
-    code: over-broad
+    code: pending-adapter-fact
   language: rust
   trust: service
   tag: queue-input
@@ -49,7 +70,20 @@
     kind: read
     target:
       name: payload
-  description: "Disabled - bare `payload` overmatches unrelated fields; enable with a receiver-qualified Message.payload read once Rust field receiver facts are available."
+      receiver_type_in: [Message, async_nats::Message, nats::Message]
+  match_examples:
+  - name: async nats message payload
+    code: |
+      use async_nats::Message;
+      fn consume(message: Message) { let _ = message.payload; }
+    expect_match_text: [message.payload]
+  - name: unrelated payload field negative
+    code: |
+      use async_nats::Message;
+      struct Local { payload: Vec<u8> }
+      fn consume(local: Local) { let _ = local.payload; }
+    expect_no_match: true
+  description: "Disabled pending Rust field-read receiver-type facts. nats/async-nats Message.payload is broker input, but a bare payload field would overmatch local structs."
 - id: rust.sqs.receive_message
   enabled: true
   language: rust
@@ -61,13 +95,21 @@
   match:
     kind: call
     callee:
-      attribute: [Message, body]
+      regex: "\\.body$"
+  constraints:
+  - receiver_type_in: [Message, aws_sdk_sqs::types::Message]
+  - max_args: 0
   match_examples:
   - name: sqs message body
     code: |
       use aws_sdk_sqs::types::Message;
-      fn example() {
-          Message::body();
-      }
-    expect_match_text: ["Message::body"]
+      fn example(message: &Message) { let _ = message.body(); }
+    expect_match_text: [message.body]
+  - name: unrelated body receiver negative
+    code: |
+      use aws_sdk_sqs::types::Message;
+      struct Local;
+      impl Local { fn body(&self) -> Option<&str> { None } }
+      fn example(message: &Local) { let _ = message.body(); }
+    expect_no_match: true
   description: "aws-sdk-sqs Message::body() - SQS message body; local receiver calls require semantic Message receiver-type facts."

@@ -202,8 +202,10 @@ pub const LANGS: &[LangExp] = &[
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: false,
-        min_sources_micro: 0,
-        min_source_flows_micro: 0,
+        // sqlite3_column_text is the concrete database boundary in this
+        // fixture. False status/handle carriers are intentionally excluded.
+        min_sources_micro: 1,
+        min_source_flows_micro: 1,
         min_deps_micro: 1,
         min_sanitizers_micro: 0,
     },
@@ -221,8 +223,10 @@ pub const LANGS: &[LangExp] = &[
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: false,
-        min_sources_micro: 0,
-        min_source_flows_micro: 0,
+        // sqlite3_column_text is the concrete database boundary in this
+        // fixture. False status/handle carriers are intentionally excluded.
+        min_sources_micro: 1,
+        min_source_flows_micro: 1,
         min_deps_micro: 1,
         min_sanitizers_micro: 0,
     },
@@ -259,8 +263,10 @@ pub const LANGS: &[LangExp] = &[
         min_complex_decls: 5,
         refs_populated: true,
         has_classes: false,
-        min_sources_micro: 0,
-        min_source_flows_micro: 0,
+        // Process.runSync returns child-process output across the IPC
+        // boundary; the discarded status/registration value is not modeled.
+        min_sources_micro: 1,
+        min_source_flows_micro: 1,
         min_deps_micro: 1,
         min_sanitizers_micro: 0,
     },
@@ -278,8 +284,9 @@ pub const LANGS: &[LangExp] = &[
         min_complex_decls: 5,
         refs_populated: true,
         has_classes: false,
-        min_sources_micro: 0,
-        min_source_flows_micro: 0,
+        // System.cmd returns child-process output across the IPC boundary.
+        min_sources_micro: 1,
+        min_source_flows_micro: 1,
         min_deps_micro: 1,
         min_sanitizers_micro: 0,
     },
@@ -297,8 +304,9 @@ pub const LANGS: &[LangExp] = &[
         min_complex_decls: 5,
         refs_populated: false,
         has_classes: false,
-        min_sources_micro: 0,
-        min_source_flows_micro: 0,
+        // epgsql:squery returns database-controlled row data.
+        min_sources_micro: 1,
+        min_source_flows_micro: 1,
         min_deps_micro: 1,
         min_sanitizers_micro: 0,
     },
@@ -319,7 +327,9 @@ pub const LANGS: &[LangExp] = &[
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: false,
-        min_sources_micro: 3,
+        // Decoder-construction false sources were removed; the two concrete
+        // HTTP request accessors remain.
+        min_sources_micro: 2,
         // Six distinct, complete lineages remain after canonical flow
         // identity removes duplicate path renderings: two database-output
         // chains, three request-query chains through VerifyToken/GetUser or
@@ -603,8 +613,9 @@ pub const LANGS: &[LangExp] = &[
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: true,
-        min_sources_micro: 0,
-        min_source_flows_micro: 0,
+        // sqlite3_column_text returns the current database row value.
+        min_sources_micro: 1,
+        min_source_flows_micro: 1,
         min_deps_micro: 1,
         min_sanitizers_micro: 0,
     },
@@ -1716,8 +1727,10 @@ fn check_security_sink_analysis(
 
 /// Assert `security source-analysis` does not merely render valid JSON:
 /// non-empty languages must produce real source-lineage chains that
-/// mention the fixture entrypoint.
-fn check_security_source_analysis(ws: &str, lang: &str, expected_min: usize, handler: &str) {
+/// mention the fixture's verification boundary. A source may originate in
+/// that function itself (for example a database row getter), so requiring the
+/// upstream request handler would reverse the meaning of source analysis.
+fn check_security_source_analysis(ws: &str, lang: &str, expected_min: usize, expected_symbols: &[&str]) {
     let Some((out, _, code)) = run(&[
         "security",
         ws,
@@ -1744,7 +1757,6 @@ fn check_security_source_analysis(ws: &str, lang: &str, expected_min: usize, han
         "[{lang}] security source-analysis = {}, want >= {expected_min}",
         rows.len()
     );
-    let expected_anchor = handler;
     let mut mentions_handler = false;
     for row in &rows {
         assert!(
@@ -1762,33 +1774,34 @@ fn check_security_source_analysis(ws: &str, lang: &str, expected_min: usize, han
             .and_then(|v| v.as_array())
             .unwrap_or_else(|| panic!("[{lang}] source-analysis flow missing chain: {row}"));
         assert!(!chain.is_empty(), "[{lang}] source-analysis chain empty: {row}");
-        if chain
-            .iter()
-            .any(|item| item.as_str().is_some_and(|name| name.contains(expected_anchor)))
-            || row
-                .get("source")
-                .and_then(|source| source.get("enclosing_fn"))
-                .and_then(|v| v.as_str())
-                .is_some_and(|name| name.contains(expected_anchor))
-            || flow
-                .get("functions")
-                .and_then(|v| v.as_array())
-                .is_some_and(|functions| {
-                    functions.iter().any(|function| {
-                        function
-                            .get("owners")
-                            .and_then(|v| v.as_array())
-                            .is_some_and(|owners| {
-                                owners.iter().any(|owner| {
-                                    owner
-                                        .get("name")
-                                        .and_then(|v| v.as_str())
-                                        .is_some_and(|name| name.contains(expected_anchor))
+        if expected_symbols.iter().any(|expected_anchor| {
+            chain
+                .iter()
+                .any(|item| item.as_str().is_some_and(|name| name.contains(expected_anchor)))
+                || row
+                    .get("source")
+                    .and_then(|source| source.get("enclosing_fn"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|name| name.contains(expected_anchor))
+                || flow
+                    .get("functions")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|functions| {
+                        functions.iter().any(|function| {
+                            function
+                                .get("owners")
+                                .and_then(|v| v.as_array())
+                                .is_some_and(|owners| {
+                                    owners.iter().any(|owner| {
+                                        owner
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .is_some_and(|name| name.contains(expected_anchor))
+                                    })
                                 })
-                            })
+                        })
                     })
-                })
-        {
+        }) {
             mentions_handler = true;
         }
         let precision = flow.get("precision").and_then(|v| v.as_str()).unwrap_or("");
@@ -1799,7 +1812,7 @@ fn check_security_source_analysis(ws: &str, lang: &str, expected_min: usize, han
     }
     assert!(
         mentions_handler,
-        "[{lang}] source-analysis never reached expected anchor `{expected_anchor}`"
+        "[{lang}] source-analysis never reached an expected anchor: {expected_symbols:?}"
     );
 }
 
@@ -2255,7 +2268,7 @@ macro_rules! lang_matrix_tests {
                         &ws(EXP.lang, "micro"),
                         EXP.lang,
                         EXP.min_source_flows_micro,
-                        EXP.handle_request,
+                        &[EXP.verify_token, EXP.run_admin_command],
                     );
                 }
 

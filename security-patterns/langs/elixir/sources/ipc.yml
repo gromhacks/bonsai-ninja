@@ -1,0 +1,28 @@
+# Elixir IPC boundaries.
+- id: elixir.ipc.system_cmd_output
+  enabled: true
+  language: elixir
+  trust: ipc
+  tag: ipc-input
+  payload_types: [text, binary]
+  match:
+    kind: call
+    callee:
+      attribute: [System, cmd]
+  constraints:
+  - min_args: 2
+  - max_args: 3
+  match_examples:
+  - name: child-process command output
+    code: |
+      defmodule App do
+        def run, do: System.cmd("tool", ["status"])
+      end
+    expect_match_text: [System.cmd]
+  - name: process environment is not child output
+    code: |
+      defmodule App do
+        def home, do: System.get_env("HOME")
+      end
+    expect_no_match: true
+  description: "System.cmd/2,3 return output emitted by a local child process across an IPC boundary."

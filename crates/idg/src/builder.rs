@@ -2552,6 +2552,21 @@ fn stitch_call_site(request: CallStitchRequest<'_>, outputs: CallStitchOutputs<'
                 } else {
                     0
                 })
+                .enumerate()
+                // A rule-declared callback position is executable code, not
+                // a value returned by the registration API. Its body may
+                // mention callback parameters and lexical captures, but the
+                // unknown-call result summary must not reinterpret those
+                // names as data flowing into a subscription/task/status
+                // return. The dedicated source-callback edge carries the
+                // delivered payload instead.
+                .filter(|(index, _)| {
+                    !site
+                        .source_callback_args
+                        .iter()
+                        .any(|shape| shape.callback_arg_index == *index)
+                })
+                .map(|(_, node)| node)
                 .copied()
                 .chain(
                     site.receiver_arg_node
@@ -3651,7 +3666,7 @@ fn stitch_source_callback_args(
                 if callee_param_node.is_sentinel() {
                     continue;
                 }
-                let edge = IdgEdge::inter_call_arg(
+                let edge = IdgEdge::inter_source_callback(
                     caller_call_ret,
                     callee_param_node,
                     site.site.0,
@@ -3660,10 +3675,71 @@ fn stitch_source_callback_args(
                 );
                 place_inter_edge(caller_seg, endpoints.segment, edge, ws);
                 emitted = emitted.saturating_add(1);
+
+                // The external service delivers the complete callback
+                // parameter, not one guessed scalar field. Connect that
+                // source boundary to only the compiler's unrooted projected
+                // reads for this parameter. If the callback overwrites a
+                // field first, transfer linked the later consumer to that
+                // writer instead of this shared Read node, so the overwrite
+                // remains taint-killing without any control-flow guess here.
+                if let Some(param_name) = endpoints.param_name(callee_param_idx) {
+                    let projected_reads =
+                        source_callback_projection_read_nodes(ws, endpoints.segment, cand.func, param_name);
+                    for projected_read in projected_reads {
+                        let edge = IdgEdge::inter_source_callback(
+                            caller_call_ret,
+                            projected_read,
+                            site.site.0,
+                            cand.precision,
+                            cand.edge_kind,
+                        );
+                        place_inter_edge(caller_seg, endpoints.segment, edge, ws);
+                        emitted = emitted.saturating_add(1);
+                    }
+                }
             }
         }
     }
     emitted
+}
+
+fn source_callback_projection_read_nodes(
+    ws: &IdgWorkspace,
+    segment_id: SegmentId,
+    func: FuncId,
+    param_name: &str,
+) -> Vec<NodeId> {
+    let Some(segment) = ws.segment(segment_id) else {
+        return Vec::new();
+    };
+    let param_name = param_name.trim();
+    if param_name.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (node_index, node) in segment.nodes.nodes.iter().enumerate() {
+        if node.func != func {
+            continue;
+        }
+        let Some(place @ Place::Read { .. }) = segment.places.get(node.place) else {
+            continue;
+        };
+        let Some(storage) = place_storage_name(segment, place) else {
+            continue;
+        };
+        if storage
+            .strip_prefix(param_name)
+            .is_some_and(|suffix| suffix.starts_with('.'))
+        {
+            out.push(NodeId(
+                u32::try_from(node_index).expect("segment-local node count exceeds u32"),
+            ));
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// Route the data operands of an AST-proven indirect callback invocation to

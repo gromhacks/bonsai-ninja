@@ -184,6 +184,8 @@ impl SourceGroupExecutor<'_> {
             &source_item.seeds,
             source_item.anchor,
             &source_item.output_arg_names,
+            source_item.callback_only,
+            source_item.output_only,
             self.global.as_ref(),
             idg,
         );
@@ -207,12 +209,27 @@ impl SourceGroupExecutor<'_> {
                 metrics.graph_builds = metrics.graph_builds.saturating_add(1);
                 let graph = Arc::new(bonsai_taint::entry_taint_graph_from_idg_query(
                     bonsai_taint::IdgTaintQuery::semantic(
-                        bonsai_taint::IdgTaintSource::rule_match(
-                            source_func,
-                            &source_item.seeds,
-                            source_item.anchor,
-                            &source_item.output_arg_names,
-                        ),
+                        if source_item.callback_only {
+                            bonsai_taint::IdgTaintSource::callback_rule_match(
+                                source_func,
+                                &source_item.seeds,
+                                source_item.anchor.expect("callback source remains span-anchored"),
+                            )
+                        } else if source_item.output_only {
+                            bonsai_taint::IdgTaintSource::output_rule_match(
+                                source_func,
+                                &source_item.seeds,
+                                source_item.anchor,
+                                &source_item.output_arg_names,
+                            )
+                        } else {
+                            bonsai_taint::IdgTaintSource::rule_match(
+                                source_func,
+                                &source_item.seeds,
+                                source_item.anchor,
+                                &source_item.output_arg_names,
+                            )
+                        },
                         self.ws.db(),
                         idg,
                     )

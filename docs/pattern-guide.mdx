@@ -623,7 +623,63 @@ This is the right model for `recv`, `recvfrom`, `SSL_read`, `fgets`,
 FreeRTOS receive APIs, serial/SPI reads, and similar out-buffer calls.
 Do not model these as ordinary call sources without
 `source_output_args`; that would also taint descriptors, lengths, flags,
-and handles.
+and handles. Declaring an output carrier also suppresses the ordinary call
+return: a status code, byte count, or task handle is not payload. An
+unresolvable output expression fails closed instead of reverting to the
+return value. The rule's complete package/import/type match is compiled to
+exact call spans before the IDG is built; a local function with the same name
+does not receive this transfer.
+
+For a genuine variadic output tail, use `source_output_args_from` instead of
+enumerating a guessed maximum:
+
+```yaml
+- id: c.input.scanf
+  enabled: true
+  language: c
+  trust: local
+  match:
+    kind: call
+    callee: { name: scanf }
+  taint_semantics:
+    source_output_args_from: 1
+```
+
+The compiler-observed call arity defines the finite destination list. The
+engine does not cap it. Do not use this form when later arguments alternate
+between output buffers and sizes or flags.
+
+## Source Callback Arguments
+
+Use `taint_semantics.source_callback_args` when an external API delivers data
+to a callback rather than through its return value:
+
+```yaml
+- id: javascript.input.http_listener
+  enabled: true
+  language: javascript
+  trust: remote
+  match:
+    kind: call
+    callee: { attribute: [http, createServer] }
+  constraints:
+  - arg_count: 1
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices: [0]
+```
+
+Callback and parameter indices are zero-based. Named callbacks must resolve
+through the compiler call graph; inline callbacks use adapter-lowered AST
+bindings. The dedicated event-delivery edge never taints the registration
+call's assigned server/task/subscription return. Use
+`source_callback_only: true` when that result is a handle or status object;
+omit it for a hybrid API whose synchronous return is also source data. A
+structured callback parameter carries its complete incoming value into exact
+field reads, while a later field assignment remains a normal taint-killing
+definition.
 
 ## Output Argument Flows
 
@@ -949,4 +1005,6 @@ bonsai-ninja security . pack --audit --rules-dir path/
 
 The validator catches missing examples, broken `subsumed_by` chains,
 severity/CWE typos, and match shapes that would not fire on their own
-examples. Audit mode adds the coverage matrix.
+examples. Audit mode adds per-language source-boundary and sink-family
+coverage matrices; every zero remains visible until rule data covers it or
+metadata explicitly declares it inapplicable.

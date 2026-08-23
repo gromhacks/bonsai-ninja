@@ -1,0 +1,28 @@
+# Erlang IPC boundaries.
+- id: erlang.source.os_command_output
+  enabled: true
+  language: erlang
+  trust: ipc
+  tag: ipc-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      regex: '^os:cmd$'
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: operating-system command output
+    code: |
+      -module(example).
+      -export([run/0]).
+      run() -> os:cmd("tool status").
+    expect_match_text: ["os:cmd"]
+  - name: operating-system environment is not process output
+    code: |
+      -module(example).
+      -export([home/0]).
+      home() -> os:getenv("HOME").
+    expect_no_match: true
+  description: "os:cmd/1,2 return data emitted by a local child process across the OS process boundary."

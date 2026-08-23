@@ -1,0 +1,27 @@
+- id: ruby.source.ractor_receive
+  enabled: true
+  language: ruby
+  trust: ipc
+  tag: ipc-input
+  payload_types: [event]
+  match:
+    kind: call
+    callee:
+      attribute: [Ractor, receive]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: Ruby Ractor message receive
+    code: |
+      def worker
+        message = Ractor.receive
+        sink(message)
+      end
+    expect_match_text: [Ractor.receive]
+  - name: Ractor send is an output operation
+    code: |
+      def deliver(worker, message)
+        worker.send(message)
+      end
+    expect_no_match: true
+  description: "Ractor.receive - the next object delivered to the current Ruby Ractor by another concurrency domain."

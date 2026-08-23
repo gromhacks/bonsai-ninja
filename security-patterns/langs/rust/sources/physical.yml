@@ -142,17 +142,60 @@
     kind: call
     callee:
       regex: "\\.transfer_in_place$"
+  constraints:
+  - receiver_type_in: [SpiBus, SpiDevice]
+  - min_args: 1
+  - max_args: 1
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
-  - name: generated direct match
+  - name: embedded hal transfer in place output
     code: |
-      use embedded_hal;
-      use embedded_hal;
-      use embedded_hal::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          obj.transfer_in_place(target);
+      use embedded_hal::spi::SpiBus;
+      fn exchange(bus: &mut impl SpiBus, words: &mut [u8]) {
+          let _ = bus.transfer_in_place(words);
       }
-  description: "transfer_in_place - full-duplex SPI exchange reads peripheral response bytes."
+    expect_match_text: [bus.transfer_in_place]
+  - name: unrelated transfer receiver negative
+    code: |
+      use embedded_hal::spi::SpiBus;
+      struct Cache;
+      impl Cache { fn transfer_in_place(&mut self, _: &mut [u8]) {} }
+      fn exchange(cache: &mut Cache, words: &mut [u8]) { cache.transfer_in_place(words); }
+    expect_no_match: true
+  description: "embedded-hal SpiBus/SpiDevice transfer_in_place overwrites output buffer argument 0 with peripheral response bytes."
   imports:
   - embedded_hal
+
+- id: rust.physical.serialport_read
+  enabled: true
+  language: rust
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  payload_types: [binary]
+  packages: [serialport]
+  match:
+    kind: call
+    callee:
+      regex: "\\.read$"
+  constraints:
+  - receiver_type_in: [SerialPort]
+  - min_args: 1
+  - max_args: 1
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: serial port receive buffer
+    code: |
+      use serialport::SerialPort;
+      fn receive(port: &mut dyn SerialPort, buffer: &mut [u8]) { let _ = port.read(buffer); }
+    expect_match_text: [port.read]
+  - name: unrelated reader negative
+    code: |
+      use serialport::SerialPort;
+      struct Cache;
+      impl Cache { fn read(&mut self, _: &mut [u8]) -> usize { 0 } }
+      fn receive(cache: &mut Cache, buffer: &mut [u8]) { let _ = cache.read(buffer); }
+    expect_no_match: true
+  description: "serialport SerialPort.read fills destination argument 0 with bytes received from attached serial hardware."

@@ -167,6 +167,7 @@ fn configured_source_call_binds_inline_callback_parameter_from_compiler_fact() {
             callee: r"regex:(^|\.)procedure\.input\(.+\)\.query$".to_string(),
             callback_arg_index: 0,
             source_param_indices: vec![0],
+            resolved_call_sites: vec![source_span],
         }],
         ..TransferOptions::default()
     };

@@ -81,6 +81,12 @@ pub enum IdgEdgeKind {
     /// resolved call site. Kept distinct from `InterReturn` because several
     /// languages expose both channels at one invocation.
     InterYield = 14,
+    /// Rulepack-declared event/callback delivery. Unlike an ordinary call
+    /// argument, the source value originates at the registration/event site
+    /// and enters a resolved callback parameter or inline callback binding;
+    /// it is deliberately distinct from the registration call's return
+    /// value.
+    InterSourceCallback = 15,
 }
 
 impl IdgEdgeKind {
@@ -194,6 +200,12 @@ impl IdgEdgeKind {
                 FlowEdgeKind::InterFile,
                 FlowEdgeKind::InterPackage,
             ],
+            Self::InterSourceCallback => &[
+                FlowEdgeKind::CallbackInvocation,
+                FlowEdgeKind::EventDispatch,
+                FlowEdgeKind::InterFile,
+                FlowEdgeKind::InterPackage,
+            ],
         }
     }
 
@@ -209,6 +221,7 @@ impl IdgEdgeKind {
                 | Self::InterFieldCallArg
                 | Self::InterFieldReturn
                 | Self::InterYield
+                | Self::InterSourceCallback
         )
     }
 
@@ -246,6 +259,7 @@ impl IdgEdgeKind {
             12 => Some(Self::InterFieldReturn),
             13 => Some(Self::IntraAggregateConsume),
             14 => Some(Self::InterYield),
+            15 => Some(Self::InterSourceCallback),
             _ => None,
         }
     }
@@ -321,6 +335,29 @@ impl IdgEdge {
             meta: EdgeMeta {
                 precision,
                 kind: IdgEdgeKind::InterCallArg,
+                call_kind,
+                via_span: span,
+            },
+        }
+    }
+
+    /// Construct a rulepack-declared callback/event delivery edge. The
+    /// source endpoint is an internal event anchor at the registration call;
+    /// consumers seed the callback parameter, never the call result.
+    #[must_use]
+    pub const fn inter_source_callback(
+        from: NodeId,
+        to: NodeId,
+        span: Span,
+        precision: Precision,
+        call_kind: CallEdgeKind,
+    ) -> Self {
+        Self {
+            from,
+            to,
+            meta: EdgeMeta {
+                precision,
+                kind: IdgEdgeKind::InterSourceCallback,
                 call_kind,
                 via_span: span,
             },

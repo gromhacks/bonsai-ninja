@@ -607,7 +607,7 @@ fn source_output_arg_names_keep_anchor_seed_precise() {
     let names = TokenSet::default();
     let output_args = ["buf".to_string()];
     let nodes = compose_idg_seed_nodes(
-        IdgSeedRequest::rule_match(func, &names, Some(anchor), &output_args),
+        IdgSeedRequest::output_rule_match(func, &names, Some(anchor), &output_args),
         db.global_index().as_ref(),
         &service,
     );
@@ -639,18 +639,21 @@ fn source_output_arg_names_keep_anchor_seed_precise() {
         "post-source output lookup should exclude pre-source clean writes"
     );
 
-    assert!(nodes.contains(&ret_ws), "anchor CallRet remains a source seed");
     assert!(
-        nodes.contains(&source_output_ws),
-        "the source call's output write remains a source seed"
+        !nodes.contains(&ret_ws),
+        "an output-only source must not taint the call's status/count return"
     );
     assert!(
-        nodes.iter().any(|node| {
+        nodes.contains(&source_output_ws),
+        "the exact source-call output write is the sole carrier seed"
+    );
+    assert!(
+        nodes.iter().all(|node| {
             service
                 .resolve_point(*node)
-                .is_some_and(|point| point.kind == bonsai_idg::PointKind::Read && point.name == "buf.value")
+                .is_some_and(|point| point.kind == bonsai_idg::PointKind::Write && point.span == anchor)
         }),
-        "an anchored output-arg source must seed projected carrier reads"
+        "an output-only source must not seed span-shared pre-call reads"
     );
     assert!(
         output_nodes.iter().all(|node| {
@@ -660,6 +663,36 @@ fn source_output_arg_names_keep_anchor_seed_precise() {
                     .is_some_and(|point| point.span == anchor)
         }),
         "anchored output-arg sources must not directly seed later carrier writes"
+    );
+}
+
+#[test]
+fn unresolved_output_only_carrier_does_not_fall_back_to_call_return() {
+    let func = FuncId::new(71);
+    let anchor = Span {
+        file: FileId::new(0),
+        start: 10,
+        end: 20,
+    };
+    let mut segment = IdgSegment::new();
+    let ret_place = segment.intern_place(Place::CallRet {
+        site: CallSiteId(anchor),
+    });
+    segment.intern_node(func, ret_place);
+    segment.record_func(func);
+    let service = service_from_segment(segment);
+    let db = empty_db();
+    let seeds = TokenSet::from(["status".to_string()]);
+
+    let nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::output_rule_match(func, &seeds, Some(anchor), &[]),
+        db.global_index().as_ref(),
+        &service,
+    );
+
+    assert!(
+        nodes.is_empty(),
+        "an unresolved output carrier must fail closed instead of tainting a status return"
     );
 }
 

@@ -1,0 +1,175 @@
+- id: php.source.pdo_statement_fetch
+  enabled: true
+  language: php
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  match:
+    kind: call
+    callee:
+      regex: "(?:^|\\.)(fetch|fetchAll|fetchColumn|fetchObject)$"
+  constraints:
+  - receiver_type_in: [PDOStatement]
+  match_examples:
+  - name: typed PDO statement row
+    code: |
+      <?php
+      function nextRow(PDOStatement $statement) {
+        return $statement->fetch(PDO::FETCH_ASSOC);
+      }
+    expect_match_text: [$statement.fetch]
+  - name: application statement is not a PDO result carrier
+    code: |
+      <?php
+      class Statement { function fetch() { return ["local"]; } }
+      function nextRow(Statement $statement) { return $statement->fetch(); }
+    expect_no_match: true
+  description: "PDOStatement fetch/fetchAll/fetchColumn/fetchObject - values read from persistent database result state on a compiler-typed PDOStatement receiver."
+
+- id: php.source.mysqli_result_fetch
+  enabled: true
+  language: php
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  match:
+    kind: call
+    callee:
+      regex: "(?:^|\\.)(fetch_assoc|fetch_array|fetch_row|fetch_object|fetch_column|fetch_all)$"
+  constraints:
+  - receiver_type_in: [mysqli_result]
+  match_examples:
+  - name: typed mysqli result row
+    code: |
+      <?php
+      function nextRow(mysqli_result $result) {
+        return $result->fetch_assoc();
+      }
+    expect_match_text: [$result.fetch_assoc]
+  - name: same method on an application result is not database input
+    code: |
+      <?php
+      class Result { function fetch_assoc() { return ["local" => true]; } }
+      function nextRow(Result $result) { return $result->fetch_assoc(); }
+    expect_no_match: true
+  description: "mysqli_result row/column fetch methods - values returned by the database on a compiler-typed mysqli_result receiver."
+
+- id: php.source.sqlite3_result_fetch_array
+  enabled: true
+  language: php
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  match:
+    kind: call
+    callee:
+      name: fetchArray
+  constraints:
+  - receiver_type_in: [SQLite3Result]
+  - max_args: 1
+  match_examples:
+  - name: typed SQLite result row
+    code: |
+      <?php
+      function nextRow(SQLite3Result $result) {
+        return $result->fetchArray(SQLITE3_ASSOC);
+      }
+    expect_match_text: [$result.fetchArray]
+  - name: array wrapper fetch is not SQLite database input
+    code: |
+      <?php
+      class ArrayResult { function fetchArray() { return []; } }
+      function nextRow(ArrayResult $result) { return $result->fetchArray(); }
+    expect_no_match: true
+  description: "SQLite3Result::fetchArray() - one row read from the SQLite result set."
+
+- id: php.source.pgsql_fetch_row
+  enabled: true
+  language: php
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  match:
+    kind: call
+    callee:
+      regex: "^pg_fetch_(assoc|array|row|object)$"
+  constraints:
+  - top_level: true
+  - min_args: 1
+  - max_args: 3
+  match_examples:
+  - name: PostgreSQL result row
+    code: |
+      <?php
+      $row = pg_fetch_assoc($result);
+    expect_match_text: [pg_fetch_assoc]
+  - name: similarly named object method is not the PostgreSQL builtin
+    code: |
+      <?php
+      $row = $reader->pg_fetch_assoc($result);
+    expect_no_match: true
+  description: "pg_fetch_assoc/array/row/object - one row materialized from a PgSql result resource or object."
+
+- id: php.source.pgsql_fetch_result
+  enabled: true
+  language: php
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  match:
+    kind: call
+    callee:
+      name: pg_fetch_result
+  constraints:
+  - top_level: true
+  - arg_count: 3
+  match_examples:
+  - name: PostgreSQL result field
+    code: |
+      <?php
+      $email = pg_fetch_result($result, 0, "email");
+    expect_match_text: [pg_fetch_result]
+  - name: incomplete field lookup is not the documented carrier
+    code: |
+      <?php
+      $email = pg_fetch_result($result);
+    expect_no_match: true
+  description: "pg_fetch_result(result, row, field) - one scalar value materialized from a PostgreSQL result."
+
+- id: php.source.doctrine_dbal_result_fetch
+  enabled: true
+  language: php
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  packages: [doctrine/dbal]
+  imports: [Doctrine]
+  match:
+    kind: call
+    callee:
+      regex: "(?:^|\\.)(fetchAssociative|fetchAllAssociative|fetchNumeric|fetchAllNumeric|fetchOne|fetchFirstColumn)$"
+  constraints:
+  - receiver_type_in: [Result]
+  match_examples:
+  - name: typed Doctrine DBAL result row
+    code: |
+      <?php
+      use Doctrine\DBAL\Result;
+      function nextRow(Result $result) {
+        return $result->fetchAssociative();
+      }
+    expect_match_text: [$result.fetchAssociative]
+  - name: application result with same method is not Doctrine input
+    code: |
+      <?php
+      use Doctrine\DBAL\Result;
+      class LocalResult { function fetchAssociative() { return ["local" => true]; } }
+      function nextRow(LocalResult $result) { return $result->fetchAssociative(); }
+    expect_no_match: true
+  description: "Doctrine DBAL Result fetch methods - rows, columns, or scalars returned from persistent database state on a compiler-typed Result receiver."

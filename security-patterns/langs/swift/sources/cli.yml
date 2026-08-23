@@ -1,4 +1,30 @@
 # Swift CLI/local-trust sources.
+- id: swift.notif.user_info
+  enabled: true
+  language: swift
+  trust: local
+  tag: local-input
+  payload_types: [json]
+  packages: [Foundation]
+  match:
+    kind: read
+    target:
+      name: userInfo
+      receiver_type_in: [Notification]
+  match_examples:
+  - name: in process notification payload
+    code: |
+      import Foundation
+      func handle(notification: Notification) -> [AnyHashable: Any]? { notification.userInfo }
+    expect_match_text: [notification.userInfo]
+  - name: unrelated user info field negative
+    code: |
+      import Foundation
+      struct Account { let userInfo: [String: String] }
+      func handle(account: Account) -> [String: String] { account.userInfo }
+    expect_no_match: true
+  description: "Notification.userInfo is an in-process observer payload with local trust. DistributedNotificationCenter needs a separate ownership-qualified IPC rule."
+
 - id: swift.cli.argv
   enabled: true
   language: swift
@@ -138,6 +164,60 @@
         return s
       }
   description: "NSTextView.string - user-entered text read on a typed NSTextView receiver."
+
+- id: swift.ui.uitextview_text
+  enabled: true
+  language: swift
+  trust: local
+  tag: ui-input
+  payload_types: [text]
+  packages: [UIKit]
+  match:
+    kind: read
+    target:
+      name: text
+      receiver_type_in: [UITextView]
+  match_examples:
+  - name: uitextview text read
+    code: |
+      import UIKit
+      func run(view: UITextView) -> String { view.text }
+    expect_match_text: [view.text]
+  - name: unrelated text property negative
+    code: |
+      import UIKit
+      struct Label { let text: String }
+      func run(label: Label) -> String { label.text }
+    expect_no_match: true
+  description: "UITextView.text returns user-entered text from a compiler-typed UITextView receiver."
+
+- id: swift.uipasteboard_value_read
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: swift
+  trust: local
+  tag: clipboard-input
+  payload_types: [text, binary, url]
+  packages: [UIKit]
+  match:
+    kind: read
+    target:
+      regex: "^(string|strings|items|url|urls)$"
+      receiver_type_in: [UIPasteboard]
+  match_examples:
+  - name: typed clipboard string read
+    code: |
+      import UIKit
+      func read(board: UIPasteboard) -> String? { board.string }
+    expect_match_text: [board.string]
+  - name: unrelated string property negative
+    code: |
+      import UIKit
+      struct Document { let string: String }
+      func read(document: Document) -> String { document.string }
+    expect_no_match: true
+  description: "Disabled pending Swift receiver-type facts for UIPasteboard property reads. UIPasteboard.general itself is not a source, and a bare string/items/url property would overmatch."
 
 - id: swift.swiftui.textfield_binding
   enabled: false

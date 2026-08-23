@@ -70,6 +70,68 @@
     expect_match_text: [flag.String]
   description: "flag.String - CLI flag value."
 
+- id: go.os.readfile
+  enabled: true
+  language: go
+  trust: local
+  tag: file-input
+  category: local-input
+  payload_types: [text, binary]
+  packages: [os]
+  match:
+    kind: call
+    callee:
+      attribute: [os, ReadFile]
+  constraints:
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: os read file bytes
+    code: |
+      package main
+      import "os"
+      func read(path string) ([]byte, error) { return os.ReadFile(path) }
+    expect_match_text: [os.ReadFile]
+  - name: os write file is not input
+    code: |
+      package main
+      import "os"
+      func write(path string, data []byte) error { return os.WriteFile(path, data, 0600) }
+    expect_no_match: true
+  description: "os.ReadFile(path) returns bytes read from a local file."
+
+- id: go.bufio.scanner_value
+  enabled: true
+  language: go
+  trust: local
+  tag: local-input
+  category: local-input
+  payload_types: [text, binary]
+  packages: [bufio]
+  match:
+    kind: call
+    callee:
+      regex: "\\.(Text|Bytes)$"
+  constraints:
+  - receiver_type_in: [Scanner]
+  - max_args: 0
+  match_examples:
+  - name: bufio scanner text
+    code: |
+      package main
+      import "bufio"
+      func read(scanner *bufio.Scanner) string { return scanner.Text() }
+    expect_match_text: [scanner.Text]
+  - name: unrelated text receiver negative
+    code: |
+      package main
+      import "bufio"
+      type Document struct{}
+      func (Document) Text() string { return "safe" }
+      func read(document Document) string { return document.Text() }
+    expect_no_match: true
+  description: "bufio.Scanner.Text/Bytes returns the current token from its local input stream; scanner iteration itself is a status value, not a source."
+
 - id: go.flag.arg
   enabled: true
   language: go

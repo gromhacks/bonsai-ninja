@@ -140,28 +140,6 @@
     expect_no_match: true
   description: "Vapor req.parameters.get(_:) - URL path parameter; attacker-controlled."
 
-- id: swift.uipasteboard_general
-  enabled: true
-  language: swift
-  trust: local
-  tag: clipboard-input
-  packages: [UIKit]
-  match:
-    kind: call
-    callee:
-      attribute: [UIPasteboard, general]
-  match_examples:
-  - name: declared shape
-    code: |
-      import UIKit
-      func test() { let input = "x"; let amount = 1; UIPasteboard.general(input) }
-  - name: unrelated general receiver negative
-    code: |
-      import UIKit
-      func test() { let input = "x"; NotificationCenter.general(input) }
-    expect_no_match: true
-  description: "UIPasteboard.general.string - clipboard contents are user-mutable; treat as untrusted when used in security-sensitive flows."
-
 - id: swift.vapor.request_query
   enabled: true
   language: swift
@@ -440,16 +418,26 @@
   match:
     kind: call
     callee:
-      attribute: [URLSession, shared, data]
+      regex: "\\.data$"
+  constraints:
+  - receiver_type_in: [URLSession]
+  - min_args: 1
+  - max_args: 1
   match_examples:
   - name: declared shape
     code: |
-      func test() { let input = "x"; let amount = 1; URLSession.shared.data(input) }
+      import Foundation
+      func test(session: URLSession, request: URLRequest) async throws {
+        let (data, _) = try await session.data(for: request)
+        _ = data
+      }
+    expect_match_text: [session.data]
   - name: unrelated session method negative
     code: |
-      func test() { URLSession.shared.invalidateAndCancel() }
+      import Foundation
+      func test(session: URLSession) { session.invalidateAndCancel() }
     expect_no_match: true
-  description: "URLSession.shared.data(for:) - returns (Data, URLResponse) from a remote server; payload may be attacker-controlled (supply-chain / redirection)."
+  description: "URLSession.data(for:/from:) returns remote response Data on a compiler-typed URLSession receiver."
 
 - id: swift.alamofire_response
   enabled: false
@@ -572,21 +560,26 @@
   frameworks: ["swift-nio"]
   packages: ["NIO"]
   match:
-    kind: call
-    callee:
-      attribute: [ChannelHandlerContext, fireChannelRead]
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      in_method: [channelRead]
+      param_index_in: [1]
+      param_type_in: [NIOAny]
   match_examples:
   - name: nio channel read
     code: |
       import NIO
-      func test(input: Any) { ChannelHandlerContext.fireChannelRead(input) }
-    expect_match_text: [ChannelHandlerContext.fireChannelRead]
-  - name: unrelated fireChannelRead receiver negative
+      final class Handler: ChannelInboundHandler {
+        func channelRead(context: ChannelHandlerContext, data: NIOAny) { consume(data) }
+      }
+    expect_match_text: [data]
+  - name: ordinary nioany parameter negative
     code: |
       import NIO
-      func test(input: Any) { other.fireChannelRead(input) }
+      func transform(data: NIOAny) { consume(data) }
     expect_no_match: true
-  description: "SwiftNIO ChannelHandlerContext.fireChannelRead(_:) - inbound network bytes/messages; local receiver calls require semantic ChannelHandlerContext receiver-type facts."
+  description: "The NIOAny parameter at index 1 of ChannelInboundHandler.channelRead(context:data:) carries inbound channel bytes/messages. Outbound fireChannelRead calls are not sources."
 
 - id: swift.grpc.request_param
   enabled: false
@@ -605,7 +598,9 @@
   description: "Disabled - `kind: param` cannot currently prove the enclosing function is a grpc-swift service handler, so bare `request` overmatches ordinary Swift APIs."
 
 - id: swift.websocket_on_text
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: swift
   trust: remote
   tag: ws-input
@@ -615,22 +610,33 @@
   match:
     kind: call
     callee:
-      attribute: [WebSocket, onText]
+      regex: "\\.onText$"
+  constraints:
+  - receiver_type_in: [WebSocket]
+  - min_args: 1
+  - max_args: 1
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices: [1]
   match_examples:
   - name: vapor websocket on text
     code: |
       import Vapor
-      func test() { WebSocket.onText { ws, text in _ = text } }
-    expect_match_text: [WebSocket.onText]
+      func test(socket: WebSocket) { socket.onText { ws, text in _ = text } }
+    expect_match_text: [socket.onText]
   - name: unrelated onText receiver negative
     code: |
       import Vapor
       func test() { logger.onText { ws, text in _ = text } }
     expect_no_match: true
-  description: "Vapor WebSocket.onText(_:) - inbound WebSocket text frame; local receiver calls require semantic WebSocket receiver-type facts."
+  description: "Disabled pending Swift receiver-type/callback ownership for trailing closures. The eventual source carrier is callback parameter 1, never the registration call result."
 
 - id: swift.websocket_on_binary
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: swift
   trust: remote
   tag: ws-input
@@ -640,16 +646,25 @@
   match:
     kind: call
     callee:
-      attribute: [WebSocket, onBinary]
+      regex: "\\.onBinary$"
+  constraints:
+  - receiver_type_in: [WebSocket]
+  - min_args: 1
+  - max_args: 1
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices: [1]
   match_examples:
   - name: vapor websocket on binary
     code: |
       import Vapor
-      func test() { WebSocket.onBinary { ws, data in _ = data } }
-    expect_match_text: [WebSocket.onBinary]
+      func test(socket: WebSocket) { socket.onBinary { ws, data in _ = data } }
+    expect_match_text: [socket.onBinary]
   - name: unrelated onBinary receiver negative
     code: |
       import Vapor
       func test() { logger.onBinary { ws, data in _ = data } }
     expect_no_match: true
-  description: "Vapor WebSocket.onBinary(_:) - inbound WebSocket binary frame; attacker-controlled payload."
+  description: "Disabled pending Swift receiver-type/callback ownership for trailing closures. The eventual source carrier is callback parameter 1, never the registration call result."

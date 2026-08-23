@@ -61,6 +61,8 @@ pub struct IdgSeedRequest<'a> {
     names: &'a TokenSet,
     anchor: Option<Span>,
     output_arg_names: &'a [String],
+    callback_only: bool,
+    output_only: bool,
     policy: IdgSeedPolicy,
 }
 
@@ -77,6 +79,39 @@ impl<'a> IdgSeedRequest<'a> {
             names,
             anchor,
             output_arg_names,
+            callback_only: false,
+            output_only: false,
+            policy: IdgSeedPolicy::RuleMatch,
+        }
+    }
+
+    #[must_use]
+    pub const fn output_rule_match(
+        func: FuncId,
+        names: &'a TokenSet,
+        anchor: Option<Span>,
+        output_arg_names: &'a [String],
+    ) -> Self {
+        Self {
+            func,
+            names,
+            anchor,
+            output_arg_names,
+            callback_only: false,
+            output_only: true,
+            policy: IdgSeedPolicy::RuleMatch,
+        }
+    }
+
+    #[must_use]
+    pub const fn callback_rule_match(func: FuncId, names: &'a TokenSet, anchor: Span) -> Self {
+        Self {
+            func,
+            names,
+            anchor: Some(anchor),
+            output_arg_names: &[],
+            callback_only: true,
+            output_only: false,
             policy: IdgSeedPolicy::RuleMatch,
         }
     }
@@ -88,6 +123,8 @@ impl<'a> IdgSeedRequest<'a> {
             names,
             anchor: None,
             output_arg_names: &[],
+            callback_only: false,
+            output_only: false,
             policy: IdgSeedPolicy::TokenApi,
         }
     }
@@ -1191,6 +1228,8 @@ pub fn compose_idg_seed_nodes_with_decl(
             request.names,
             request.anchor,
             request.output_arg_names,
+            request.callback_only,
+            request.output_only,
             global,
             idg,
         ),
@@ -1206,9 +1245,38 @@ fn rule_match_seed_nodes(
     seeds: &TokenSet,
     source_anchor: Option<bonsai_common::Span>,
     output_arg_names: &[String],
+    callback_only: bool,
+    output_only: bool,
     global: &GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
 ) -> Vec<bonsai_idg::WsNodeId> {
+    if callback_only {
+        return source_anchor.map_or_else(Vec::new, |anchor| {
+            idg.source_callback_param_nodes_at_span(source_func, anchor)
+        });
+    }
+    if output_only {
+        let Some(anchor) = source_anchor else {
+            return Vec::new();
+        };
+        if output_arg_names.is_empty() {
+            return Vec::new();
+        }
+        let output_seed_names = bonsai_idg::expand_bare_seed_names_with_descendants(output_arg_names.iter());
+        let mut seed_nodes = idg
+            .source_seed_nodes_at_span(source_func, anchor)
+            .into_iter()
+            .filter(|node| {
+                idg.resolve_point(*node).is_some_and(|point| {
+                    point.kind == bonsai_idg::PointKind::Write
+                        && rule_seed_name_matches(&output_seed_names, &point.name)
+                })
+            })
+            .collect::<Vec<_>>();
+        seed_nodes.sort();
+        seed_nodes.dedup();
+        return seed_nodes;
+    }
     let mut seed_nodes: Vec<bonsai_idg::WsNodeId> = Vec::new();
     // Bare container seeds (`args`) also address their projections
     // (`args.q`) — same expansion the security scheduler applies, so
@@ -1729,7 +1797,11 @@ pub fn source_seed_reaches_return_from_idg(
     idg: &bonsai_idg::IdgQueryService,
 ) -> bool {
     source_seed_reaches_return_from_idg_query(IdgReturnQuery::semantic(
-        IdgTaintSource::rule_match(source_func, seeds, source_anchor, output_arg_names),
+        if output_arg_names.is_empty() {
+            IdgTaintSource::rule_match(source_func, seeds, source_anchor, output_arg_names)
+        } else {
+            IdgTaintSource::output_rule_match(source_func, seeds, source_anchor, output_arg_names)
+        },
         receiver_state_propagations,
         db,
         idg,
@@ -1759,11 +1831,21 @@ pub fn source_seed_reaches_return_from_idg_query(request: IdgReturnQuery<'_>) ->
         IdgTaintSeed::RuleMatch {
             source_anchor,
             output_arg_names,
-        } => compose_idg_seed_nodes(
-            IdgSeedRequest::rule_match(source_func, seeds, source_anchor, output_arg_names),
-            global,
-            idg,
-        ),
+            callback_only,
+            output_only,
+        } => {
+            let request = if callback_only {
+                source_anchor.map_or_else(
+                    || IdgSeedRequest::rule_match(source_func, seeds, None, &[]),
+                    |anchor| IdgSeedRequest::callback_rule_match(source_func, seeds, anchor),
+                )
+            } else if output_only {
+                IdgSeedRequest::output_rule_match(source_func, seeds, source_anchor, output_arg_names)
+            } else {
+                IdgSeedRequest::rule_match(source_func, seeds, source_anchor, output_arg_names)
+            };
+            compose_idg_seed_nodes(request, global, idg)
+        }
         IdgTaintSeed::Precomposed(nodes) => nodes.to_vec(),
     };
     if seed_nodes.is_empty() {
@@ -1783,12 +1865,11 @@ pub fn source_seed_reaches_return_from_idg_query(request: IdgReturnQuery<'_>) ->
 /// interprocedural pass entirely on the workspace IDG —
 /// SSA-narrowed forward closure plus cross-call lifting.
 ///
-/// `source_anchor` is the rule match's source span: seeds are
-/// IDG nodes anchored at that span (`CallRet`, `CallArg`,
-/// span-distinct `Write`). `output_arg_names`, when non-empty,
-/// names additional carriers for the source's side-effect outputs;
-/// for example, a configured read-into-buffer source seeds
-/// post-call reads/writes of that buffer. When neither are supplied,
+/// `source_anchor` is the rule match's source span: ordinary sources seed IDG
+/// nodes anchored at that span (`CallRet`, `CallArg`, span-distinct `Write`).
+/// An output-only query instead seeds only the exact output writer created at
+/// that call; the call return and pre-call reads remain clean. When neither an
+/// anchor nor output carrier is supplied,
 /// the seed set falls back to entry params + every Read/Write of
 /// `seeds`.
 ///
@@ -1805,7 +1886,11 @@ pub fn entry_taint_call_records_from_idg(
 ) -> EntryTaintGraph {
     entry_taint_call_records_from_idg_query(
         IdgTaintQuery::semantic(
-            IdgTaintSource::rule_match(source_func, seeds, source_anchor, output_arg_names),
+            if output_arg_names.is_empty() {
+                IdgTaintSource::rule_match(source_func, seeds, source_anchor, output_arg_names)
+            } else {
+                IdgTaintSource::output_rule_match(source_func, seeds, source_anchor, output_arg_names)
+            },
             db,
             idg,
         )
@@ -1818,6 +1903,7 @@ pub fn entry_taint_call_records_from_idg(
 
 struct ComposedIdgTaintSeeds<'a> {
     nodes: Vec<bonsai_idg::WsNodeId>,
+    callback_boundaries: Vec<bonsai_idg::CrossCallEdge>,
     source_anchor: Option<Span>,
     output_arg_names: &'a [String],
 }
@@ -1834,25 +1920,51 @@ fn compose_idg_taint_query_seeds<'a>(
     global: &GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
 ) -> ComposedIdgTaintSeeds<'a> {
-    let (mut nodes, source_anchor, output_arg_names) = match seed {
+    let (mut nodes, callback_boundaries, source_anchor, output_arg_names) = match seed {
         IdgTaintSeed::RuleMatch {
             source_anchor,
             output_arg_names,
-        } => (
-            compose_idg_seed_nodes(
-                IdgSeedRequest::rule_match(source_func, seeds, source_anchor, output_arg_names),
-                global,
-                idg,
-            ),
-            source_anchor,
-            output_arg_names,
-        ),
-        IdgTaintSeed::Precomposed(nodes) => (nodes.to_vec(), None, &[] as &[String]),
+            callback_only,
+            output_only,
+        } => {
+            let (nodes, callback_boundaries) = if callback_only {
+                source_anchor.map_or_else(
+                    || (Vec::new(), Vec::new()),
+                    |anchor| idg.source_callback_seed_evidence_at_span(source_func, anchor),
+                )
+            } else if output_only {
+                (
+                    compose_idg_seed_nodes(
+                        IdgSeedRequest::output_rule_match(
+                            source_func,
+                            seeds,
+                            source_anchor,
+                            output_arg_names,
+                        ),
+                        global,
+                        idg,
+                    ),
+                    Vec::new(),
+                )
+            } else {
+                (
+                    compose_idg_seed_nodes(
+                        IdgSeedRequest::rule_match(source_func, seeds, source_anchor, output_arg_names),
+                        global,
+                        idg,
+                    ),
+                    Vec::new(),
+                )
+            };
+            (nodes, callback_boundaries, source_anchor, output_arg_names)
+        }
+        IdgTaintSeed::Precomposed(nodes) => (nodes.to_vec(), Vec::new(), None, &[] as &[String]),
     };
     nodes.sort();
     nodes.dedup();
     ComposedIdgTaintSeeds {
         nodes,
+        callback_boundaries,
         source_anchor,
         output_arg_names,
     }
@@ -2518,7 +2630,7 @@ pub fn entry_taint_call_records_from_idg_query(request: IdgTaintQuery<'_>) -> En
     let seed_nodes = composed.nodes.clone();
     let TaintClosureCompilation {
         nodes: closure_nodes,
-        cross_calls,
+        mut cross_calls,
         ..
     } = compile_idg_taint_closure(TaintClosureCompilationRequest {
         seed_nodes,
@@ -2539,6 +2651,7 @@ pub fn entry_taint_call_records_from_idg_query(request: IdgTaintQuery<'_>) -> En
         call_scope,
         source_func,
     });
+    cross_calls.extend(composed.callback_boundaries.iter().copied());
     let cross_calls = renderable_cross_calls_from_closure(
         source_func,
         &closure_nodes,
@@ -2567,7 +2680,11 @@ pub fn entry_taint_graph_from_idg(
 ) -> EntryTaintGraph {
     entry_taint_graph_from_idg_query(
         IdgTaintQuery::semantic(
-            IdgTaintSource::rule_match(source_func, seeds, source_anchor, output_arg_names),
+            if output_arg_names.is_empty() {
+                IdgTaintSource::rule_match(source_func, seeds, source_anchor, output_arg_names)
+            } else {
+                IdgTaintSource::output_rule_match(source_func, seeds, source_anchor, output_arg_names)
+            },
             db,
             idg,
         )
@@ -2643,7 +2760,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
     let seed_nodes = composed.nodes.clone();
     let TaintClosureCompilation {
         nodes: closure_nodes,
-        cross_calls,
+        mut cross_calls,
         emission_target_funcs,
     } = compile_idg_taint_closure(TaintClosureCompilationRequest {
         seed_nodes,
@@ -2664,6 +2781,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
         call_scope,
         source_func,
     });
+    cross_calls.extend(composed.callback_boundaries.iter().copied());
     log_idg_taint_seed(
         source_func,
         seeds,

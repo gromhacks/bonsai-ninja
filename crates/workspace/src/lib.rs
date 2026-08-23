@@ -6251,7 +6251,16 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // v78 (2026-08-06): inline callback source bindings retain whole-value
     // provenance so exact field projections inherit the delivered source
     // without widening projected fields into siblings.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 78;
+    // v79 (2026-08-22): rule-declared external callback delivery uses a
+    // distinct call-result-to-parameter edge. Source seeding can therefore
+    // taint only the callback payload without treating the registration
+    // call's assigned return value as attacker controlled.
+    // v80 (2026-08-22): output-buffer and callback-source transfers retain
+    // exact matcher-approved call spans, so package/type-constrained rules
+    // cannot install graph writers or callback edges at local lookalikes.
+    // Callback delivery also reaches only the named parameter's unshadowed
+    // compiler field reads; ordinary projected overwrites still win.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 80;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 

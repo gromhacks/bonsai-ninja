@@ -1,0 +1,113 @@
+# Scala database-origin sources. These rules use adapter-emitted receiver types;
+# no database API identity is embedded in shared analysis.
+- id: scala.jdbc.resultset_value
+  enabled: true
+  language: scala
+  trust: database
+  tag: db-input
+  packages: [java.sql]
+  match:
+    kind: call
+    callee:
+      regex: "(^|[.])(getString|getNString|getBytes|getObject|getBinaryStream|getCharacterStream|getBlob|getClob|getNClob|getSQLXML|getArray)$"
+  constraints:
+  - receiver_type_in: [ResultSet, java.sql.ResultSet]
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: JDBC result value
+    code: |
+      import java.sql.ResultSet
+      object App {
+        def read(rs: ResultSet): String = rs.getString("name")
+      }
+    expect_match_text: [rs.getString]
+  - name: local row getter is not JDBC
+    code: |
+      class Row { def getString(name: String): String = "local" }
+      object App { def read(row: Row): String = row.getString("name") }
+    expect_no_match: true
+  description: "Typed JDBC ResultSet value getters - data crossing from a database result into Scala code."
+
+- id: scala.jpa.query_results
+  enabled: true
+  language: scala
+  trust: database
+  tag: db-input
+  packages: [jakarta.persistence, javax.persistence]
+  match:
+    kind: call
+    callee:
+      regex: "(^|[.])(find|getResultList|getSingleResult|getSingleResultOrNull|getResultStream)$"
+  constraints:
+  - receiver_type_in: [EntityManager, Query, TypedQuery, jakarta.persistence.EntityManager, jakarta.persistence.Query, jakarta.persistence.TypedQuery, javax.persistence.EntityManager, javax.persistence.Query, javax.persistence.TypedQuery]
+  match_examples:
+  - name: JPA typed query result
+    code: |
+      import jakarta.persistence.TypedQuery
+      object App {
+        def load(query: TypedQuery[String]): java.util.List[String] = query.getResultList()
+      }
+    expect_match_text: [query.getResultList]
+  - name: local query is not JPA
+    code: |
+      class LocalQuery { def getResultList(): List[String] = Nil }
+      object App { def load(query: LocalQuery) = query.getResultList() }
+    expect_no_match: true
+  description: "Typed JPA EntityManager and Query result methods - persistent values returned to Scala code."
+
+- id: scala.hibernate.session_lookup
+  enabled: true
+  language: scala
+  trust: database
+  tag: db-input
+  packages: [org.hibernate]
+  match:
+    kind: call
+    callee:
+      regex: "(^|[.])(get|find|load)$"
+  constraints:
+  - receiver_type_in: [Session, org.hibernate.Session]
+  - min_args: 2
+  match_examples:
+  - name: Hibernate session lookup
+    code: |
+      import org.hibernate.Session
+      class User
+      object App { def load(session: Session, id: Long) = session.get(classOf[User], id) }
+    expect_match_text: [session.get]
+  - name: local session-like lookup is not Hibernate
+    code: |
+      class LocalSession { def get(kind: Class[_], id: Long): Any = null }
+      object App { def load(session: LocalSession, id: Long) = session.get(classOf[String], id) }
+    expect_no_match: true
+  description: "Typed Hibernate Session lookup - entity data loaded from persistent storage."
+
+- id: scala.jdbc.resultset_scalar_value
+  enabled: true
+  language: scala
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [java.sql]
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])(getBoolean|getByte|getShort|getInt|getLong|getFloat|getDouble|getBigDecimal|getDate|getTime|getTimestamp|getURL)$'
+  constraints:
+  - receiver_type_in: [ResultSet, java.sql.ResultSet]
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: Scala JDBC scalar result value
+    code: |
+      import java.sql.ResultSet
+      object App { def read(rs: ResultSet): Long = rs.getLong("account_id") }
+    expect_match_text: [rs.getLong]
+  - name: local row scalar is not a database source
+    code: |
+      import java.sql.ResultSet
+      class LocalRow { def getLong(key: String): Long = 0L }
+      object App { def read(row: LocalRow): Long = row.getLong("account_id") }
+    expect_no_match: true
+  description: "Typed JDBC ResultSet scalar/temporal getters used from Scala."

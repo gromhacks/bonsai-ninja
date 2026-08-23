@@ -1,0 +1,56 @@
+# C# IPC reads whose return values are byte counts while an argument receives
+# external bytes.
+- id: csharp.source.pipestream_read_buffer
+  enabled: true
+  language: csharp
+  trust: ipc
+  tag: ipc-input
+  payload_types: [binary]
+  packages: [System.IO.Pipes]
+  match:
+    kind: call
+    callee:
+      regex: "(^|[.])(Read|ReadAsync)$"
+  constraints:
+  - receiver_type_in: [PipeStream, NamedPipeServerStream, System.IO.Pipes.PipeStream, System.IO.Pipes.NamedPipeServerStream]
+  - min_args: 1
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: named pipe fills IPC buffer
+    code: |
+      using System.IO.Pipes;
+      class App { int Read(NamedPipeServerStream pipe, byte[] buffer) => pipe.Read(buffer, 0, buffer.Length); }
+    expect_match_text: [pipe.Read]
+  - name: memory stream is not IPC
+    code: |
+      using System.IO;
+      class App { int Read(MemoryStream stream, byte[] buffer) => stream.Read(buffer, 0, buffer.Length); }
+    expect_no_match: true
+  description: "PipeStream/NamedPipeServerStream Read methods write peer-process bytes into argument 0."
+
+- id: csharp.source.process_output
+  enabled: true
+  language: csharp
+  trust: ipc
+  tag: ipc-input
+  payload_types: [text]
+  packages: [System.Diagnostics]
+  match:
+    kind: read
+    target:
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.(StandardOutput|StandardError)$'
+      receiver_type_in: [Process, System.Diagnostics.Process]
+  match_examples:
+  - name: redirected child-process stdout
+    code: |
+      using System.Diagnostics;
+      class App { System.IO.StreamReader Output(Process process) { return process.StandardOutput; } }
+    expect_match_text: [process.StandardOutput]
+  - name: local process model is not an IPC source
+    code: |
+      using System.Diagnostics;
+      class LocalProcess { public string StandardOutput => "constant"; }
+      class App { string Output(LocalProcess process) { return process.StandardOutput; } }
+    expect_no_match: true
+  description: "Typed System.Diagnostics.Process StandardOutput/StandardError - text returned by a local child process."

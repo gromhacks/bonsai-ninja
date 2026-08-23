@@ -231,20 +231,43 @@ impl TransferOptions {
         for spec in &mut self.source_output_args {
             spec.output_arg_indices.sort_unstable();
             spec.output_arg_indices.dedup();
+            spec.resolved_call_sites.sort();
+            spec.resolved_call_sites.dedup();
         }
-        self.source_output_args
-            .sort_by(|a, b| (&a.callee, &a.output_arg_indices).cmp(&(&b.callee, &b.output_arg_indices)));
+        self.source_output_args.sort_by(|a, b| {
+            (
+                &a.callee,
+                &a.output_arg_indices,
+                a.output_arg_start_index,
+                &a.resolved_call_sites,
+            )
+                .cmp(&(
+                    &b.callee,
+                    &b.output_arg_indices,
+                    b.output_arg_start_index,
+                    &b.resolved_call_sites,
+                ))
+        });
         self.source_output_args.dedup();
         for spec in &mut self.source_callback_args {
             spec.source_param_indices.sort_unstable();
             spec.source_param_indices.dedup();
+            spec.resolved_call_sites.sort();
+            spec.resolved_call_sites.dedup();
         }
         self.source_callback_args.sort_by(|a, b| {
-            (&a.callee, a.callback_arg_index, &a.source_param_indices).cmp(&(
-                &b.callee,
-                b.callback_arg_index,
-                &b.source_param_indices,
-            ))
+            (
+                &a.callee,
+                a.callback_arg_index,
+                &a.source_param_indices,
+                &a.resolved_call_sites,
+            )
+                .cmp(&(
+                    &b.callee,
+                    b.callback_arg_index,
+                    &b.source_param_indices,
+                    &b.resolved_call_sites,
+                ))
         });
         self.source_callback_args.dedup();
         for spec in &mut self.call_result_passthroughs {
@@ -319,9 +342,15 @@ impl TransferOptions {
             hasher.absorb_separator();
         }
 
+        fn absorb_span(hasher: &mut StableHasher, span: Span) {
+            absorb_u64(hasher, span.file.raw() as u64);
+            absorb_u64(hasher, span.start);
+            absorb_u64(hasher, span.end);
+        }
+
         let options = self.clone().canonicalized();
         let mut hasher = StableHasher::new();
-        absorb_str(&mut hasher, "bonsai-idg-transfer-options-v15");
+        absorb_str(&mut hasher, "bonsai-idg-transfer-options-v16");
         absorb_u64(&mut hasher, u64::from(options.include_diagnostic_field_flows));
         absorb_u64(
             &mut hasher,
@@ -356,6 +385,14 @@ impl TransferOptions {
             for index in &spec.output_arg_indices {
                 absorb_u64(&mut hasher, *index as u64);
             }
+            absorb_u64(
+                &mut hasher,
+                spec.output_arg_start_index.map_or(u64::MAX, |index| index as u64),
+            );
+            absorb_u64(&mut hasher, spec.resolved_call_sites.len() as u64);
+            for span in &spec.resolved_call_sites {
+                absorb_span(&mut hasher, *span);
+            }
         }
         absorb_u64(&mut hasher, options.source_callback_args.len() as u64);
         for spec in &options.source_callback_args {
@@ -365,6 +402,10 @@ impl TransferOptions {
             absorb_u64(&mut hasher, spec.source_param_indices.len() as u64);
             for index in &spec.source_param_indices {
                 absorb_u64(&mut hasher, *index as u64);
+            }
+            absorb_u64(&mut hasher, spec.resolved_call_sites.len() as u64);
+            for span in &spec.resolved_call_sites {
+                absorb_span(&mut hasher, *span);
             }
         }
         absorb_u64(&mut hasher, options.call_result_passthroughs.len() as u64);
@@ -429,6 +470,12 @@ pub struct SourceOutputArgSpec {
     pub callee: String,
     /// Positional argument indices written by the source call.
     pub output_arg_indices: Vec<usize>,
+    /// Every actual argument at or after this index is written by the source
+    /// call. The call's real arity determines the finite set.
+    pub output_arg_start_index: Option<usize>,
+    /// Exact rule-matcher-approved calls. Empty means the rule matched no call
+    /// in this snapshot and therefore installs no transfer.
+    pub resolved_call_sites: Vec<Span>,
 }
 
 /// Declarative source call shape whose callback receives untrusted data.
@@ -440,6 +487,8 @@ pub struct SourceCallbackArgSpec {
     pub callback_arg_index: usize,
     /// Callback parameter indices that receive source data.
     pub source_param_indices: Vec<usize>,
+    /// Exact rule-matcher-approved registration calls.
+    pub resolved_call_sites: Vec<Span>,
 }
 
 /// Declarative external-call dependency summary.
@@ -1115,7 +1164,7 @@ pub(crate) fn transfer_function_for_with_compiled_options_and_syntax_facts(
         options,
         matchers,
         last_writer: ahash::AHashMap::new(),
-        whole_call_result_writer_ids: ahash::AHashSet::default(),
+        whole_value_writer_ids: ahash::AHashSet::default(),
         descendant_writer_ids_by_base: ahash::AHashMap::new(),
         catch_projection_receivers: ahash::AHashSet::default(),
         emitted_edges: ahash::AHashSet::default(),
@@ -1734,7 +1783,10 @@ struct TransferCtx<'a> {
     /// narrower than falling back to every base writer: aggregate call
     /// arguments can carry only one tainted field into a parameter, and must
     /// not thereby taint all sibling fields.
-    whole_call_result_writer_ids: ahash::AHashSet<NodeId>,
+    /// Writers known to bind a complete value (formal parameters and whole
+    /// external/call results). Projected reads may use the nearest such
+    /// ancestor only when no exact projected writer is live.
+    whole_value_writer_ids: ahash::AHashSet<NodeId>,
     /// Monotonic index from a canonical aggregate base to compiler place ids
     /// ever written below it. Entries can outlive a clean overwrite; callers
     /// confirm presence in `last_writer` before using them. This makes whole
@@ -1857,7 +1909,7 @@ impl<'a> TransferCtx<'a> {
             }
         }
         if writers.is_empty() {
-            writers = self.whole_call_result_writers_for_projection(name);
+            writers = self.whole_value_writers_for_projection(name);
             if !writers.is_empty() {
                 // Keep the exact projected read in the compiler graph as
                 // well as the conservative whole-result edge. Phase 3 can
@@ -1902,10 +1954,11 @@ impl<'a> TransferCtx<'a> {
     }
 
     /// Resolve a compiler-normalized projection to the nearest live ancestor
-    /// whose value came directly from a call result. Exact projected writers
-    /// are checked by [`Self::bridge_read`] first and therefore retain normal
-    /// clean-overwrite and field-sensitive semantics.
-    fn whole_call_result_writers_for_projection(&mut self, name: &str) -> smallvec::SmallVec<[NodeId; 4]> {
+    /// whose writer binds the complete value (a formal parameter or whole
+    /// call result). Exact projected writers are checked by
+    /// [`Self::bridge_read`] first and therefore retain normal clean-overwrite
+    /// and field-sensitive semantics.
+    fn whole_value_writers_for_projection(&mut self, name: &str) -> smallvec::SmallVec<[NodeId; 4]> {
         let Some(projection) = ExpressionProjection::from_adapter_place(name) else {
             return smallvec::SmallVec::new();
         };
@@ -1921,7 +1974,7 @@ impl<'a> TransferCtx<'a> {
             let writers = current
                 .iter()
                 .copied()
-                .filter(|writer| self.whole_call_result_writer_ids.contains(writer))
+                .filter(|writer| self.whole_value_writer_ids.contains(writer))
                 .collect::<smallvec::SmallVec<[NodeId; 4]>>();
             if !writers.is_empty() {
                 return writers;
@@ -3413,7 +3466,7 @@ fn walk_assign(
                 // that field writer as a new whole-object root shortcuts the
                 // demanded suffix and can invent sibling/recursive fields.
                 if !is_field_write {
-                    ctx.whole_call_result_writer_ids.insert(write_node);
+                    ctx.whole_value_writer_ids.insert(write_node);
                 }
                 ctx.emit(IdgEdge {
                     from: ret_node,
@@ -3833,7 +3886,7 @@ fn walk_call(
         ret_node,
         ctx,
     );
-    let source_callback_args = source_callback_args_for_call(&observed_callee, ctx);
+    let source_callback_args = source_callback_args_for_call(span, &observed_callee, ctx);
     apply_inline_source_callback_param_bindings(span, ret_node, &source_callback_args, ctx);
     ctx.out.call_sites.push(CallSiteRef {
         site,
@@ -3966,14 +4019,22 @@ fn apply_source_output_arg_writes(
     args: &[CallArg],
     ctx: &mut TransferCtx<'_>,
 ) {
-    let output_indices: Vec<usize> = ctx
+    let mut output_indices = Vec::new();
+    for shape in ctx
         .matchers
         .source_output_args
         .matching_indices(callee)
         .into_iter()
         .filter_map(|index| ctx.options.source_output_args.get(index))
-        .flat_map(|shape| shape.output_arg_indices.iter().copied())
-        .collect();
+        .filter(|shape| shape.resolved_call_sites.binary_search(&span).is_ok())
+    {
+        output_indices.extend(shape.output_arg_indices.iter().copied());
+        if let Some(start) = shape.output_arg_start_index {
+            output_indices.extend(start..args.len());
+        }
+    }
+    output_indices.sort_unstable();
+    output_indices.dedup();
     for output_arg_index in output_indices {
         let Some(output) = args.get(output_arg_index).map(call_arg_place_name) else {
             continue;
@@ -3983,6 +4044,10 @@ fn apply_source_output_arg_writes(
             continue;
         }
         let (write_node, _) = build_target_node(output, span, ctx);
+        // A source output carrier receives a complete external value. Exact
+        // projected reads inherit this writer unless a later field-specific
+        // definition replaces them.
+        ctx.whole_value_writer_ids.insert(write_node);
         ctx.commit_writer(output, write_node);
     }
 }
@@ -4083,6 +4148,7 @@ fn apply_receiver_state_propagation_call(
 }
 
 fn source_callback_args_for_call(
+    span: Span,
     callee: &ObservedCallee<'_>,
     ctx: &TransferCtx<'_>,
 ) -> Vec<SourceCallbackArgSpec> {
@@ -4091,6 +4157,7 @@ fn source_callback_args_for_call(
         .matching_indices(callee)
         .into_iter()
         .filter_map(|index| ctx.options.source_callback_args.get(index))
+        .filter(|shape| shape.resolved_call_sites.binary_search(&span).is_ok())
         .cloned()
         .collect()
 }
@@ -4134,7 +4201,12 @@ fn apply_inline_source_callback_param_bindings(
                 to: binding,
                 meta: crate::edge::EdgeMeta {
                     precision: Precision::Exact,
-                    kind: IdgEdgeKind::IntraAssign,
+                    // This is an external event-delivery boundary, not an
+                    // assignment from the registration call's return value.
+                    // Keeping the provenance distinct lets source queries
+                    // seed the callback binding without tainting an assigned
+                    // subscription/task/status handle.
+                    kind: IdgEdgeKind::InterSourceCallback,
                     call_kind: bonsai_callgraph::EdgeKind::Direct,
                     via_span: span,
                 },
@@ -4145,7 +4217,7 @@ fn apply_inline_source_callback_param_bindings(
             // binding when no narrower projected writer exists. This is the
             // same field-sensitive fallback used for ordinary call results;
             // it never widens one projected field into a sibling.
-            ctx.whole_call_result_writer_ids.insert(binding);
+            ctx.whole_value_writer_ids.insert(binding);
             ctx.commit_writer(param_name, binding);
         }
     }

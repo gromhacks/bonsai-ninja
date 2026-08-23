@@ -1,0 +1,87 @@
+# C# database-origin sources using adapter-emitted receiver types.
+- id: csharp.source.dbdatareader_value
+  enabled: true
+  language: csharp
+  trust: database
+  tag: db-input
+  packages: [System.Data, Microsoft.Data.SqlClient, System.Data.SqlClient]
+  match:
+    kind: call
+    callee:
+      regex: "(^|[.])(GetString|GetValue|GetFieldValue|GetFieldValueAsync|GetStream|GetTextReader)$"
+  constraints:
+  - receiver_type_in: [DbDataReader, SqlDataReader, System.Data.Common.DbDataReader, Microsoft.Data.SqlClient.SqlDataReader, System.Data.SqlClient.SqlDataReader]
+  - min_args: 1
+  match_examples:
+  - name: SQL data reader string
+    code: |
+      using System.Data.Common;
+      class App { string Read(DbDataReader reader) => reader.GetString(0); }
+    expect_match_text: [reader.GetString]
+  - name: local reader getter is not a database source
+    code: |
+      class LocalReader { public string GetString(int column) => "local"; }
+      class App { string Read(LocalReader reader) => reader.GetString(0); }
+    expect_no_match: true
+  description: "Typed ADO.NET data-reader getters - values crossing from a database result into C# code."
+
+- id: csharp.source.dbdatareader_buffer
+  enabled: true
+  language: csharp
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [System.Data, Microsoft.Data.SqlClient, System.Data.SqlClient]
+  match:
+    kind: call
+    callee:
+      regex: "(^|[.])(GetBytes|GetChars)$"
+  constraints:
+  - receiver_type_in: [DbDataReader, SqlDataReader, System.Data.Common.DbDataReader, Microsoft.Data.SqlClient.SqlDataReader, System.Data.SqlClient.SqlDataReader]
+  - min_args: 5
+  taint_semantics:
+    source_output_args: [2]
+  match_examples:
+  - name: SQL data reader fills caller buffer
+    code: |
+      using System.Data.Common;
+      class App {
+        long Read(DbDataReader reader, byte[] buffer) {
+          return reader.GetBytes(0, 0, buffer, 0, buffer.Length);
+        }
+      }
+    expect_match_text: [reader.GetBytes]
+  - name: local reader getter is not a database source
+    code: |
+      class LocalReader { public long GetBytes(int c, long o, byte[] b, int i, int n) => 0; }
+      class App { long Read(LocalReader reader, byte[] buffer) => reader.GetBytes(0, 0, buffer, 0, buffer.Length); }
+    expect_no_match: true
+  description: "Typed ADO.NET GetBytes/GetChars writes database data into argument 2; its return is only the copied-item count."
+
+- id: csharp.source.dbdatareader_scalar
+  enabled: true
+  language: csharp
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [System.Data, Microsoft.Data.SqlClient, System.Data.SqlClient]
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])(GetBoolean|GetByte|GetChar|GetDateTime|GetDateTimeOffset|GetDecimal|GetDouble|GetFloat|GetGuid|GetInt16|GetInt32|GetInt64)$'
+  constraints:
+  - receiver_type_in: [DbDataReader, SqlDataReader, System.Data.Common.DbDataReader, Microsoft.Data.SqlClient.SqlDataReader, System.Data.SqlClient.SqlDataReader]
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: ADO.NET scalar result value
+    code: |
+      using System.Data.Common;
+      class App { long Read(DbDataReader reader) { return reader.GetInt64(0); } }
+    expect_match_text: [reader.GetInt64]
+  - name: local reader scalar is not a database source
+    code: |
+      class LocalReader { public long GetInt64(int column) => 0; }
+      class App { long Read(LocalReader reader) { return reader.GetInt64(0); } }
+    expect_no_match: true
+  description: "Typed ADO.NET data-reader scalar/temporal getters - values read from a database result."

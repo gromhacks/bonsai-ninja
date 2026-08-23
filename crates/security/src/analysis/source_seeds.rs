@@ -13,7 +13,9 @@ pub(super) fn collect_source_seed_targets(
     events: &[bonsai_lang_api::FlowEvent],
     src: &RuleMatch,
     source_output_args: &[usize],
+    source_output_args_from: Option<usize>,
     source_callback_args: &[SourceCallbackArgSemantics],
+    source_callback_only: bool,
     allow_text_only_source_match: bool,
     out: &mut TokenSet,
 ) {
@@ -46,8 +48,20 @@ pub(super) fn collect_source_seed_targets(
                     || spans_overlap(*span, src.span)
                     || (allow_text_only_source_match && source_text_matches);
                 if source_site_matches {
-                    if !source_output_args.is_empty() {
-                        seed_source_output_text_args(out, source_call_args, source_output_args);
+                    if !source_output_args.is_empty() || source_output_args_from.is_some() {
+                        seed_source_output_text_args(
+                            out,
+                            source_call_args,
+                            source_output_args,
+                            source_output_args_from,
+                        );
+                        continue;
+                    }
+                    // Callback-only APIs return registration handles, tasks,
+                    // streams, or unit/status values. The callback parameter
+                    // is the sole source carrier; hybrid APIs deliberately
+                    // keep the ordinary synchronous result below.
+                    if source_callback_only && matches!(value_kind, Some(AssignValueKind::CallResult)) {
                         continue;
                     }
                     let source_is_call_input = source_call.is_some()
@@ -129,8 +143,8 @@ pub(super) fn collect_source_seed_targets(
                     || spans_overlap(*span, src.span)
                     || (allow_text_only_source_match && text_only_call_match);
                 let _ = receiver;
-                if call_matches && !source_output_args.is_empty() {
-                    seed_source_output_call_args(out, args, source_output_args);
+                if call_matches && (!source_output_args.is_empty() || source_output_args_from.is_some()) {
+                    seed_source_output_call_args(out, args, source_output_args, source_output_args_from);
                 }
                 // Callback-source delivery is an IDG edge from this exact
                 // source call's anchored CallRet to the compiler-resolved
@@ -138,7 +152,8 @@ pub(super) fn collect_source_seed_targets(
                 // rendering to rediscover lambda parameters here.
                 if call_matches
                     && source_output_args.is_empty()
-                    && source_callback_args.is_empty()
+                    && source_output_args_from.is_none()
+                    && !source_callback_only
                     && !name.is_empty()
                 {
                     insert_taint_aliases(out, name);
@@ -160,7 +175,10 @@ pub(super) fn collect_source_seed_targets(
                 // therefore wider than any single arg, never trips this)
                 // and the strict source-text filter keeps sibling
                 // operands (`a` in `exec(a + req.params.x)`) untainted.
-                if source_output_args.is_empty() && source_callback_args.is_empty() {
+                if source_output_args.is_empty()
+                    && source_output_args_from.is_none()
+                    && source_callback_args.is_empty()
+                {
                     seed_source_arg_reads(out, args, src);
                 }
             }
@@ -173,7 +191,9 @@ pub(super) fn collect_source_seed_targets(
                     then_events,
                     src,
                     source_output_args,
+                    source_output_args_from,
                     source_callback_args,
+                    source_callback_only,
                     allow_text_only_source_match,
                     out,
                 );
@@ -181,7 +201,9 @@ pub(super) fn collect_source_seed_targets(
                     else_events,
                     src,
                     source_output_args,
+                    source_output_args_from,
                     source_callback_args,
+                    source_callback_only,
                     allow_text_only_source_match,
                     out,
                 );
@@ -191,7 +213,9 @@ pub(super) fn collect_source_seed_targets(
                     body,
                     src,
                     source_output_args,
+                    source_output_args_from,
                     source_callback_args,
+                    source_callback_only,
                     allow_text_only_source_match,
                     out,
                 );
@@ -206,7 +230,9 @@ pub(super) fn collect_source_seed_targets(
                     body,
                     src,
                     source_output_args,
+                    source_output_args_from,
                     source_callback_args,
+                    source_callback_only,
                     allow_text_only_source_match,
                     out,
                 );
@@ -214,7 +240,9 @@ pub(super) fn collect_source_seed_targets(
                     catch_events,
                     src,
                     source_output_args,
+                    source_output_args_from,
                     source_callback_args,
+                    source_callback_only,
                     allow_text_only_source_match,
                     out,
                 );
@@ -222,7 +250,9 @@ pub(super) fn collect_source_seed_targets(
                     finally_events,
                     src,
                     source_output_args,
+                    source_output_args_from,
                     source_callback_args,
+                    source_callback_only,
                     allow_text_only_source_match,
                     out,
                 );
@@ -251,8 +281,23 @@ fn assign_is_callback_parameter_binding(
             .any(|name| matches!(name.as_str(), "function" | "async"))
 }
 
-fn seed_source_output_text_args(out: &mut TokenSet, args: &[String], source_output_args: &[usize]) {
-    for &index in source_output_args {
+fn source_output_indices(explicit: &[usize], start: Option<usize>, arg_count: usize) -> Vec<usize> {
+    let mut indices = explicit.to_vec();
+    if let Some(start) = start {
+        indices.extend(start..arg_count);
+    }
+    indices.sort_unstable();
+    indices.dedup();
+    indices
+}
+
+fn seed_source_output_text_args(
+    out: &mut TokenSet,
+    args: &[String],
+    source_output_args: &[usize],
+    source_output_args_from: Option<usize>,
+) {
+    for index in source_output_indices(source_output_args, source_output_args_from, args.len()) {
         let Some(text) = args.get(index).map(|value| value.trim()) else {
             continue;
         };
@@ -298,8 +343,9 @@ fn seed_source_output_call_args(
     out: &mut TokenSet,
     args: &[bonsai_lang_api::CallArg],
     source_output_args: &[usize],
+    source_output_args_from: Option<usize>,
 ) {
-    for &index in source_output_args {
+    for index in source_output_indices(source_output_args, source_output_args_from, args.len()) {
         let Some(arg) = args.get(index) else {
             continue;
         };

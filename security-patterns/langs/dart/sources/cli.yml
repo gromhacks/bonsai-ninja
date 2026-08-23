@@ -82,7 +82,7 @@
 - id: dart.os.platform_environment
   enabled: true
   language: dart
-  trust: local
+  trust: config
   tag: local-input
   payload_types: [text]
   analysis_semantics:
@@ -99,10 +99,17 @@
         var e = Platform.environment;
         return e;
       }
+  - name: platform executable arguments are not environment values
+    code: |
+      import 'dart:io';
+      List<String> run() => Platform.executableArguments;
+    expect_no_match: true
   description: "Platform.environment - process environment variables read via the static `Platform.environment` map."
 
 - id: dart.os.platform_script
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: dart
   trust: local
   tag: local-input
@@ -119,10 +126,12 @@
         var s = Platform.script;
         return s;
       }
-  description: "Platform.script - the URI of the executing script via the static `Platform.script` property."
+  description: "Disabled - Platform.script is runtime metadata identifying the executing script, not input supplied by a caller or external service."
 
 - id: dart.args.argparser_parse
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: dart
   trust: local
   tag: local-input
@@ -136,31 +145,69 @@
   - name: declared shape
     code: |
       import 'package:args/args.dart';
-      import 'package:args/args.dart';
-      import 'package:args/args.dart';
-      import 'package:args/args.dart';
-      import 'package:args/args.dart'; // args
       void test() { var input = "x"; var amount = 1; parser.parse(input); }
   - name: unrelated parser method negative
     code: |
       import 'package:args/args.dart';
       void test() { var input = "x"; parser.addOption(input); }
     expect_no_match: true
-  description: "package:args ArgParser.parse."
+  description: "Disabled - ArgParser.parse transforms the list supplied by its caller; constants remain trusted and command-line provenance must come from main(List<String>)."
 
   imports:
   - args/args.dart
 - id: dart.flutter.text_editing_controller
   enabled: false
   disabled_reason:
-    code: over-broad
+    code: pending-adapter-fact
   language: dart
   trust: local
   tag: ui-input
   payload_types: [text]
   frameworks: [flutter]
+  packages: [flutter]
   match:
     kind: read
     target:
       name: text
-  description: "Disabled - FP-prone. Bare name 'text' matches every .text attribute across Flutter widgets."
+      receiver_type_in: [TextEditingController]
+  match_examples:
+  - name: Flutter text editing value
+    code: |
+      import 'package:flutter/widgets.dart';
+      String read(TextEditingController controller) => controller.text;
+    expect_match_text: [controller.text]
+  - name: unrelated text property negative
+    code: |
+      import 'package:flutter/widgets.dart';
+      class Label { final String text = 'local'; }
+      String read(Label label) => label.text;
+    expect_no_match: true
+  description: "Disabled - the API is a valid local UI boundary, but the Dart adapter does not yet expose receiver-type evidence on property reads strongly enough for this rule to match without widening to every `.text` field."
+
+- id: dart.local.file_content_read
+  enabled: true
+  language: dart
+  trust: local
+  tag: file-input
+  payload_types: [text, binary]
+  packages: [dart:io]
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])(readAsString|readAsStringSync|readAsBytes|readAsBytesSync|readAsLines|readAsLinesSync)$'
+  constraints:
+  - receiver_type_in: [File]
+  - max_args: 1
+  match_examples:
+  - name: Dart file text read
+    code: |
+      import 'dart:io';
+      Future<String> load(File file) => file.readAsString();
+    expect_match_text: [file.readAsString]
+  - name: local document reader is not a filesystem source
+    code: |
+      import 'dart:io';
+      class Document { String readAsString() => 'constant'; }
+      String load(Document document) => document.readAsString();
+    expect_no_match: true
+  description: "Typed dart:io File content-reading operations - values read from the local filesystem."

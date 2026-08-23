@@ -1,0 +1,30 @@
+- id: ruby.source.active_record_base_connection_select
+  enabled: true
+  language: ruby
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  packages: [activerecord, active_record, rails]
+  match:
+    kind: call
+    callee:
+      regex: '^ActiveRecord::Base\.connection\.(select_all|select_one|select_rows|select_value|select_values)$'
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: Active Record raw select result
+    code: |
+      require "active_record"
+      def rows
+        ActiveRecord::Base.connection.select_all("SELECT name FROM users")
+      end
+    expect_match_text: [ActiveRecord::Base.connection.select_all]
+  - name: Active Record connection handle alone is not row data
+    code: |
+      require "active_record"
+      def connection
+        ActiveRecord::Base.connection
+      end
+    expect_no_match: true
+  description: "ActiveRecord::Base.connection select_* materializers - rows, columns, or scalar values returned from persistent database state. The connection handle itself is not a source."

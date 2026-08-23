@@ -43,6 +43,10 @@ pub struct LanguagePack {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RulepackMetadata {
+    /// Canonical input-boundary families shown by pack audit. Family names
+    /// are source YAML basenames; the analyzer treats them as data.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub canonical_source_families: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub canonical_sink_families: Vec<String>,
     #[serde(default, skip_serializing_if = "map_is_empty")]
@@ -188,6 +192,8 @@ pub struct PackageTailBindingSemantics {
 #[serde(deny_unknown_fields)]
 pub struct LanguageRuleMetadata {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_applicable_source_families: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_applicable_sink_families: Vec<String>,
     /// Exact names or one-asterisk basename patterns for dependency metadata
     /// files (for example `requirements*.txt` or `*.csproj`).
@@ -211,6 +217,9 @@ pub struct LanguageRuleMetadata {
 
 impl LanguageRuleMetadata {
     fn merge_overriding(&mut self, incoming: Self) {
+        if !incoming.not_applicable_source_families.is_empty() {
+            self.not_applicable_source_families = incoming.not_applicable_source_families;
+        }
         if !incoming.not_applicable_sink_families.is_empty() {
             self.not_applicable_sink_families = incoming.not_applicable_sink_families;
         }
@@ -469,6 +478,9 @@ impl Rulepack {
         let mut overridden = Vec::new();
         if !overlay.metadata.canonical_sink_families.is_empty() {
             self.metadata.canonical_sink_families = overlay.metadata.canonical_sink_families.clone();
+        }
+        if !overlay.metadata.canonical_source_families.is_empty() {
+            self.metadata.canonical_source_families = overlay.metadata.canonical_source_families.clone();
         }
         self.metadata
             .sink_family_short_labels

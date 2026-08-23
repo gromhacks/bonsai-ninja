@@ -1,0 +1,58 @@
+# Objective-C database-origin sources.
+- id: objc.database.sqlite_column_value
+  enabled: true
+  language: objc
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [sqlite3.h]
+  match:
+    kind: call
+    callee:
+      regex: "^sqlite3_column_(?:text|text16|blob)$"
+  constraints:
+  - min_args: 2
+  - max_args: 2
+  match_examples:
+  - name: objective c sqlite column
+    code: |
+      #import <sqlite3.h>
+      const unsigned char *readName(sqlite3_stmt *statement) { return sqlite3_column_text(statement, 0); }
+    expect_match_text: [sqlite3_column_text]
+  - name: sqlite column type is metadata
+    code: |
+      #import <sqlite3.h>
+      int readType(sqlite3_stmt *statement) { return sqlite3_column_type(statement, 0); }
+    expect_no_match: true
+  description: "sqlite3_column_text/text16/blob returns database row content from the current prepared-statement row in Objective-C translation units."
+
+- id: objc.database.fmdb_result_value
+  enabled: true
+  language: objc
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [FMDB]
+  match:
+    kind: call
+    callee:
+      regex: "(?:^|\\.)(stringForColumn|dataForColumn|objectForColumnName)$"
+  constraints:
+  - receiver_type_in: [FMResultSet]
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: fmdb result string
+    code: |
+      #import <FMDB/FMDB.h>
+      NSString *readName(FMResultSet *results) { return [results stringForColumn:@"name"]; }
+    expect_match_text: [results.stringForColumn]
+  - name: unrelated column reader negative
+    code: |
+      #import <FMDB/FMDB.h>
+      @interface CacheResult : NSObject
+      - (NSString *)stringForColumn:(NSString *)name;
+      @end
+      NSString *readName(CacheResult *results) { return [results stringForColumn:@"name"]; }
+    expect_no_match: true
+  description: "FMResultSet stringForColumn/dataForColumn/objectForColumnName returns a database result value on a compiler-typed FMResultSet receiver."

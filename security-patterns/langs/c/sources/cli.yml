@@ -120,7 +120,7 @@
     callee:
       name: fscanf
   taint_semantics:
-    source_output_args: [2, 3, 4, 5]
+    source_output_args_from: 2
   match_examples:
   - name: fscanf output buffers
     code: |
@@ -131,7 +131,15 @@
         fscanf(fp, "%63s %63s", user, host);
       }
     expect_match_text: [fscanf]
-  description: "fscanf(stream, format, ...) - reads formatted text from a FILE* into caller-supplied output arguments."
+  - name: sscanf parses an existing memory buffer
+    code: |
+      #include <stdio.h>
+      void example(const char *text) {
+        char value[64];
+        sscanf(text, "%63s", value);
+      }
+    expect_no_match: true
+  description: "fscanf(stream, format, ...) - reads formatted text from a FILE* into every caller-supplied output argument beginning at index 2."
 - id: c.input.gets_unsafe
   enabled: true
   language: c
@@ -263,7 +271,7 @@
     callee:
       name: scanf
   taint_semantics:
-    source_output_args: [1, 2, 3, 4]
+    source_output_args_from: 1
   match_examples:
   - name: generated direct match
     code: |
@@ -274,7 +282,15 @@
         char d[64];
         scanf("%63s %63s %63s %63s", a, b, c, d);
       }
-  description: "scanf - reads from stdin."
+  - name: sscanf is not a stdin source
+    code: |
+      #include <stdio.h>
+      void example(const char *text) {
+        char value[64];
+        sscanf(text, "%63s", value);
+      }
+    expect_no_match: true
+  description: "scanf(format, ...) - reads stdin into every caller-supplied output argument beginning at index 1."
 - id: c.input.readline
   enabled: true
   language: c

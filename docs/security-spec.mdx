@@ -243,7 +243,10 @@ is not simply "return value is tainted" or "arg N is tainted."
 
 | Field | Rule kind | Effect |
 |---|---|---|
-| `taint_semantics.source_output_args: [N, ...]` | source | Treat only the listed call arguments as tainted outputs. Use for out-buffer APIs such as `recv(fd, buf, len, flags)`, `SSL_read(ssl, buf, len)`, and `fgets(buf, size, stdin)`. |
+| `taint_semantics.source_output_args: [N, ...]` | source | Treat only the listed call arguments as tainted outputs. The call return is not a source. Use for out-buffer APIs such as `recv(fd, buf, len, flags)`, `SSL_read(ssl, buf, len)`, and `fgets(buf, size, stdin)`. |
+| `taint_semantics.source_output_args_from: N` | source | Treat every actual argument from `N` through the compiler-observed call arity as a tainted output. The call return is not a source. Use for true variadic output tails such as `scanf(format, ...)`, `fscanf(stream, format, ...)`, and database `Scan(...)`; this never imposes a destination cap. |
+| `taint_semantics.source_callback_args` | source | Declare the callback argument position and callback parameter positions that receive external data. The IDG uses compiler-resolved callback bindings and a distinct event-delivery edge. |
+| `taint_semantics.source_callback_only: true` | source | Suppress the ordinary call-result seed when the API returns a registration, task, status, or server handle. Omit it for hybrid APIs where both the synchronous return and callback delivery can carry input. |
 | `taint_semantics.call_result_passthrough_args: [N, ...]` | sanitizer/passthrough | Treat the listed call arguments as flowing unchanged to the call result. Use for decode/unescape APIs that preserve attacker control while changing representation. |
 | `taint_semantics.call_result_passthrough_receiver: true` | sanitizer/passthrough | Treat the method receiver as flowing unchanged to the call result. Use for receiver transforms such as `value.removingPercentEncoding`. |
 | `taint_semantics.output_arg_flows` | source/sink/sanitizer/passthrough | Treat selected value arguments as flowing into a listed output argument. Use for formatter/copy APIs that write a tainted payload into a caller-owned buffer. |
@@ -262,7 +265,28 @@ changes.
 `source_output_args` is intentionally narrow. It prevents source calls
 from tainting unrelated operands such as file descriptors, size
 arguments, flags, or handles while still introducing taint at the source
-call site for the real output buffer.
+call site for the real output buffer. The ordinary return is deliberately
+excluded because these APIs commonly return a status code or byte count. If
+the compiler cannot resolve the configured carrier, the source fails closed;
+it never falls back to the call result. Transfer lowering accepts only the
+exact call spans that passed the complete source-rule matcher, so package,
+import, and receiver constraints remain authoritative inside the IDG.
+
+`source_output_args_from` has the same carrier discipline for a genuine
+variadic output tail. The frontend supplies the exact number of arguments at
+each call, so all destinations are modeled without enumerating positions or
+silently stopping after an arbitrary count. Do not use it for APIs whose
+variadic tail alternates data buffers with lengths or other non-output values;
+those require explicit positions or a richer declarative shape.
+
+`source_callback_args` models delivery rather than ordinary argument passing.
+Named callbacks resolve through compiler call identities; inline lambdas use
+their adapter-lowered parameter bindings. The callback payload edge is kept
+separate from `CallArg -> Param` and `CallRet -> assignment`, preventing an
+assigned listener/server/subscription handle from becoming a false source.
+The approved registration spans are fingerprinted graph inputs. Whole
+structured callback parameters reach compiler-materialized field reads, and
+ordinary exact field overwrites still kill the earlier value.
 
 `call_result_passthrough_args` and `call_result_passthrough_receiver`
 keep representation-changing APIs configurable in the rulepack. The
@@ -547,5 +571,7 @@ locally without scanning a workspace. It catches:
 - severity / CWE typos,
 - match shapes incompatible with the language's adapter capabilities.
 
-`bonsai-ninja security . pack --audit --rules-dir <path>` adds the coverage
-matrix.
+`bonsai-ninja security . pack --audit --rules-dir <path>` adds data-defined
+source-boundary and sink-family coverage matrices for every supported
+language. A zero is an explicit review gap; `n/a` is emitted only when the
+rulepack metadata marks that family inapplicable.

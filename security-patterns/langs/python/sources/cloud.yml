@@ -1,19 +1,29 @@
 - id: python.aws.lambda_event_param
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: python
   trust: service
   tag: event-input
   payload_types: [event, json]
   frameworks: [aws-lambda]
-  packages: [boto3]
-  imports: [boto3]
   match:
     kind: param
     target:
-      name: event
-  description: "Disabled - Python Lambda handlers are configured externally and boto3 is a client SDK, so a bare `event` parameter plus that import does not prove a runtime entry boundary."
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      in_method: [lambda_handler]
+      param_index_in: [0]
+      param_count_in: [2]
+  match_examples:
+  - name: conventional AWS Lambda handler event
+    code: |
+      def lambda_handler(payload, context):
+          return payload["Records"]
+    expect_match_text: [payload]
+  - name: ordinary two-argument helper is not a Lambda boundary
+    code: |
+      def parse(payload, context):
+          return payload
+    expect_no_match: true
+  description: "First parameter of the conventional two-argument Python AWS Lambda `lambda_handler`. The runtime permits configured alternative handler names, which require deployment-configuration evidence and remain intentionally unmatched."
 - id: python.aws.lambda_event_body
   enabled: false
   disabled_reason:

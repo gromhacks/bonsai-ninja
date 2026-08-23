@@ -5,7 +5,7 @@
   enabled: true
   language: c
   trust: service
-  tag: network-input
+  tag: queue-input
   payload_types: [binary]
   packages: [freertos]
   match:
@@ -23,12 +23,19 @@
         xQueueReceive(queue, item, 0);
       }
     expect_match_text: [xQueueReceive]
+  - name: FreeRTOS queue send is outbound
+    code: |
+      #include <freertos/FreeRTOS.h>
+      void publish(void *queue, const char *item) {
+        xQueueSend(queue, item, 0);
+      }
+    expect_no_match: true
   description: "FreeRTOS xQueueReceive(queue, pvBuffer, ticks) - queue data taints the caller-supplied buffer."
 - id: c.input.freertos_xstream_buffer_receive
   enabled: true
   language: c
   trust: service
-  tag: network-input
+  tag: queue-input
   payload_types: [binary]
   packages: [freertos]
   match:
@@ -46,12 +53,19 @@
         xStreamBufferReceive(stream, buf, sizeof(buf), 0);
       }
     expect_match_text: [xStreamBufferReceive]
+  - name: FreeRTOS stream buffer send is outbound
+    code: |
+      #include <freertos/FreeRTOS.h>
+      void publish(void *stream, const char *buf, unsigned len) {
+        xStreamBufferSend(stream, buf, len, 0);
+      }
+    expect_no_match: true
   description: "FreeRTOS xStreamBufferReceive(stream, pvRxData, len, ticks) - received bytes taint the caller buffer."
 - id: c.input.freertos_xmessage_buffer_receive
   enabled: true
   language: c
   trust: service
-  tag: network-input
+  tag: queue-input
   payload_types: [binary]
   packages: [freertos]
   match:
@@ -69,6 +83,13 @@
         xMessageBufferReceive(messages, buf, sizeof(buf), 0);
       }
     expect_match_text: [xMessageBufferReceive]
+  - name: FreeRTOS message buffer send is outbound
+    code: |
+      #include <freertos/FreeRTOS.h>
+      void publish(void *messages, const char *buf, unsigned len) {
+        xMessageBufferSend(messages, buf, len, 0);
+      }
+    expect_no_match: true
   description: "FreeRTOS xMessageBufferReceive(buffer, pvRxData, len, ticks) - message bytes taint the caller buffer."
 - id: c.input.lwip_netconn_recv
   enabled: true
@@ -81,16 +102,25 @@
     kind: call
     callee:
       name: netconn_recv
+  taint_semantics:
+    source_output_args: [1]
   match_examples:
-  - name: generated direct match
+  - name: lwip netconn receive output
     code: |
-      #include <lwip/sockets.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        netconn_recv(arg);
+      #include <lwip/api.h>
+      void example(struct netconn *conn) {
+        struct netbuf *buf;
+        netconn_recv(conn, &buf);
       }
-  description: "lwIP netconn_recv - returns a netbuf populated from the network peer; payload is attacker-controlled."
+    expect_match_text: [netconn_recv]
+  - name: lwip netconn send is outbound
+    code: |
+      #include <lwip/api.h>
+      void publish(struct netconn *conn, struct netbuf *buf) {
+        netconn_send(conn, buf);
+      }
+    expect_no_match: true
+  description: "lwIP netconn_recv(conn, &buf) writes the received network buffer through output argument 1; the return is an err_t status."
 - id: c.input.lwip_netconn_recv_tcp_pbuf
   enabled: true
   language: c
@@ -102,16 +132,25 @@
     kind: call
     callee:
       name: netconn_recv_tcp_pbuf
+  taint_semantics:
+    source_output_args: [1]
   match_examples:
-  - name: generated direct match
+  - name: lwip tcp pbuf receive output
     code: |
-      #include <lwip/sockets.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        netconn_recv_tcp_pbuf(arg);
+      #include <lwip/api.h>
+      void example(struct netconn *conn) {
+        struct pbuf *buf;
+        netconn_recv_tcp_pbuf(conn, &buf);
       }
-  description: "lwIP netconn_recv_tcp_pbuf - returns a pbuf chain holding TCP segment payload from the network."
+    expect_match_text: [netconn_recv_tcp_pbuf]
+  - name: lwip netconn write is outbound
+    code: |
+      #include <lwip/api.h>
+      void publish(struct netconn *conn, const void *data, unsigned len) {
+        netconn_write(conn, data, len, NETCONN_COPY);
+      }
+    expect_no_match: true
+  description: "lwIP netconn_recv_tcp_pbuf(conn, &pbuf) writes the received TCP pbuf through output argument 1; the return is an err_t status."
 - id: c.input.lwip_netbuf_data
   enabled: true
   language: c

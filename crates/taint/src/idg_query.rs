@@ -23,6 +23,8 @@ pub enum IdgTaintSeed<'a> {
     RuleMatch {
         source_anchor: Option<bonsai_common::Span>,
         output_arg_names: &'a [String],
+        callback_only: bool,
+        output_only: bool,
     },
     Precomposed(&'a [bonsai_idg::WsNodeId]),
 }
@@ -48,6 +50,50 @@ impl<'a> IdgTaintSource<'a> {
             seed: IdgTaintSeed::RuleMatch {
                 source_anchor,
                 output_arg_names,
+                callback_only: false,
+                output_only: false,
+            },
+        }
+    }
+
+    /// A source whose payload is written only through configured output
+    /// arguments. The call's status, byte-count, or handle return is not a
+    /// source carrier.
+    #[must_use]
+    pub const fn output_rule_match(
+        func: FuncId,
+        tokens: &'a TokenSet,
+        source_anchor: Option<bonsai_common::Span>,
+        output_arg_names: &'a [String],
+    ) -> Self {
+        Self {
+            func,
+            tokens,
+            seed: IdgTaintSeed::RuleMatch {
+                source_anchor,
+                output_arg_names,
+                callback_only: false,
+                output_only: true,
+            },
+        }
+    }
+
+    /// A source whose payload is delivered only through configured callback
+    /// parameters. The registration call's return value is not a source.
+    #[must_use]
+    pub const fn callback_rule_match(
+        func: FuncId,
+        tokens: &'a TokenSet,
+        source_anchor: bonsai_common::Span,
+    ) -> Self {
+        Self {
+            func,
+            tokens,
+            seed: IdgTaintSeed::RuleMatch {
+                source_anchor: Some(source_anchor),
+                output_arg_names: &[],
+                callback_only: true,
+                output_only: false,
             },
         }
     }

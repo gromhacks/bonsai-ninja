@@ -3238,7 +3238,7 @@ fn elixir_absinthe_resolver_args_reach_absinthe_run_without_helper_overtaint() {
         r#"alias Absinthe
 
 defmodule App do
-  def resolve(args) do
+  def resolve(_parent, args, _resolution) do
     Absinthe.run(args)
   end
 end
@@ -3267,7 +3267,7 @@ end
         r#"alias Absinthe
 
 defmodule App do
-  def helper(args) do
+  def helper(_parent, args, _resolution) do
     Absinthe.run(args)
   end
 end

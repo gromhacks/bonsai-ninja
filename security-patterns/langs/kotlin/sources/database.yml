@@ -1,0 +1,137 @@
+# Kotlin database-origin sources. API identities remain rule data; the Kotlin
+# adapter supplies only typed call facts.
+- id: kotlin.jdbc.resultset_value
+  enabled: true
+  language: kotlin
+  trust: database
+  tag: db-input
+  packages: [java.sql]
+  match:
+    kind: call
+    callee:
+      regex: "(^|[.])(getString|getNString|getBytes|getObject|getBinaryStream|getCharacterStream|getBlob|getClob|getNClob|getSQLXML|getArray)$"
+  constraints:
+  - receiver_type_in: [ResultSet, java.sql.ResultSet]
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: JDBC result string
+    code: |
+      import java.sql.ResultSet
+      fun read(rs: ResultSet): String = rs.getString("name")
+    expect_match_text: [rs.getString]
+  - name: same method on a local object is not a database source
+    code: |
+      class Row { fun getString(name: String): String = "local" }
+      fun read(row: Row): String = row.getString("name")
+    expect_no_match: true
+  description: "Typed JDBC ResultSet value getters - data crossing from a database result into Kotlin code."
+
+- id: kotlin.jpa.entitymanager_find
+  enabled: true
+  language: kotlin
+  trust: database
+  tag: db-input
+  packages: [jakarta.persistence, javax.persistence]
+  match:
+    kind: call
+    callee:
+      name: find
+  constraints:
+  - receiver_type_in: [EntityManager, jakarta.persistence.EntityManager, javax.persistence.EntityManager]
+  - min_args: 2
+  match_examples:
+  - name: JPA entity lookup
+    code: |
+      import jakarta.persistence.EntityManager
+      class User
+      fun load(em: EntityManager, id: Long): User? = em.find(User::class.java, id)
+    expect_match_text: [em.find]
+  - name: local repository find is not JPA
+    code: |
+      class Repository { fun find(kind: Any, id: Long): Any? = null }
+      fun load(repo: Repository, id: Long) = repo.find(Any::class, id)
+    expect_no_match: true
+  description: "Typed JPA EntityManager.find - an entity value loaded from the database."
+
+- id: kotlin.jpa.query_results
+  enabled: true
+  language: kotlin
+  trust: database
+  tag: db-input
+  packages: [jakarta.persistence, javax.persistence]
+  match:
+    kind: call
+    callee:
+      regex: "(^|[.])(getResultList|getSingleResult|getSingleResultOrNull|getResultStream)$"
+  constraints:
+  - receiver_type_in: [Query, TypedQuery, jakarta.persistence.Query, jakarta.persistence.TypedQuery, javax.persistence.Query, javax.persistence.TypedQuery]
+  - max_args: 0
+  match_examples:
+  - name: typed JPA query result list
+    code: |
+      import jakarta.persistence.TypedQuery
+      fun load(query: TypedQuery<String>): List<String> = query.getResultList()
+    expect_match_text: [query.getResultList]
+  - name: local query result accessor is not JPA
+    code: |
+      class LocalQuery { fun getResultList(): List<String> = emptyList() }
+      fun load(query: LocalQuery) = query.getResultList()
+    expect_no_match: true
+  description: "Typed JPA Query/TypedQuery result materialization - values returned from the database boundary."
+
+- id: kotlin.hibernate.session_lookup
+  enabled: true
+  language: kotlin
+  trust: database
+  tag: db-input
+  packages: [org.hibernate]
+  match:
+    kind: call
+    callee:
+      regex: "(^|[.])(get|find|load)$"
+  constraints:
+  - receiver_type_in: [Session, org.hibernate.Session]
+  - min_args: 2
+  match_examples:
+  - name: Hibernate session lookup
+    code: |
+      import org.hibernate.Session
+      class User
+      fun load(session: Session, id: Long): User? = session.get(User::class.java, id)
+    expect_match_text: [session.get]
+  - name: local session-like object is not Hibernate
+    code: |
+      class LocalSession { fun get(kind: Any, id: Long): Any? = null }
+      fun load(session: LocalSession, id: Long) = session.get(Any::class, id)
+    expect_no_match: true
+  description: "Typed Hibernate Session entity lookup - data loaded from persistent storage."
+
+- id: kotlin.jdbc.resultset_scalar_value
+  enabled: true
+  language: kotlin
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [java.sql]
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])(getBoolean|getByte|getShort|getInt|getLong|getFloat|getDouble|getBigDecimal|getDate|getTime|getTimestamp|getURL)$'
+  constraints:
+  - receiver_type_in: [ResultSet, java.sql.ResultSet]
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: Kotlin JDBC scalar result value
+    code: |
+      import java.sql.ResultSet
+      fun read(rs: ResultSet): Long = rs.getLong("account_id")
+    expect_match_text: [rs.getLong]
+  - name: local row scalar is not a database source
+    code: |
+      import java.sql.ResultSet
+      class LocalRow { fun getLong(key: String): Long = 0 }
+      fun read(row: LocalRow): Long = row.getLong("account_id")
+    expect_no_match: true
+  description: "Typed JDBC ResultSet scalar/temporal getters used from Kotlin."

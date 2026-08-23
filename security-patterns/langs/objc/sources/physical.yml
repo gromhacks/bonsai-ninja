@@ -1,0 +1,64 @@
+# Objective-C physical sensor sources.
+- id: objc.physical.coremotion_latest_sample
+  enabled: true
+  language: objc
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  payload_types: [sensor-frame]
+  packages: [CoreMotion]
+  match:
+    kind: read
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(accelerometerData|gyroData|magnetometerData|deviceMotion)$"
+      receiver_type_in: [CMMotionManager]
+  match_examples:
+  - name: core motion accelerometer sample
+    code: |
+      #import <CoreMotion/CoreMotion.h>
+      CMAccelerometerData *sample(CMMotionManager *manager) { return manager.accelerometerData; }
+    expect_match_text: [manager.accelerometerData]
+  - name: unrelated device motion field negative
+    code: |
+      #import <CoreMotion/CoreMotion.h>
+      @interface Playback : NSObject
+      @property id deviceMotion;
+      @end
+      id sample(Playback *playback) { return playback.deviceMotion; }
+    expect_no_match: true
+  description: "CMMotionManager accelerometerData/gyroData/magnetometerData/deviceMotion returns the latest sample from device motion sensors."
+
+- id: objc.physical.coremotion_update_handler
+  enabled: true
+  language: objc
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  payload_types: [sensor-frame]
+  packages: [CoreMotion]
+  match:
+    kind: call
+    callee:
+      regex: "(?:^|\\.)(startAccelerometerUpdatesToQueue|startGyroUpdatesToQueue|startMagnetometerUpdatesToQueue|startDeviceMotionUpdatesToQueue)$"
+  constraints:
+  - receiver_type_in: [CMMotionManager]
+  - arg_count: 2
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
+  match_examples:
+  - name: core motion callback sample
+    code: |
+      #import <CoreMotion/CoreMotion.h>
+      void start(CMMotionManager *manager, NSOperationQueue *queue) {
+        [manager startAccelerometerUpdatesToQueue:queue withHandler:^(CMAccelerometerData *sample, NSError *error) { NSLog(@"%@", sample); }];
+      }
+    expect_match_text: [manager.startAccelerometerUpdatesToQueue]
+  - name: polling start without callback has no delivered value
+    code: |
+      #import <CoreMotion/CoreMotion.h>
+      void start(CMMotionManager *manager) { [manager startAccelerometerUpdates]; }
+    expect_no_match: true
+  description: "Core Motion queue-based start methods deliver the physical sensor sample through callback parameter 0; the registration call result is never sourced."

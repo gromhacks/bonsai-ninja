@@ -1,0 +1,18 @@
+# TypeScript library-return models used by exact source receiver constraints.
+- id: typescript.typing.readline_interface
+  enabled: true
+  language: typescript
+  packages: [readline]
+  returns_type: Interface
+  match:
+    kind: call
+    callee:
+      name: createInterface
+  match_examples:
+  - name: typed readline factory returns Interface
+    code: |
+      import * as readline from "readline";
+      const rl = readline.createInterface({ input: process.stdin });
+      rl.question("name?", answer => sink(answer));
+    expect_match_text: [readline.createInterface]
+  description: "readline.createInterface(...) returns an Interface; typing-only factory evidence for receiver-scoped input rules."

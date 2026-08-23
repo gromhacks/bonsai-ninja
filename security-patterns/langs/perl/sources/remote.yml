@@ -395,94 +395,40 @@
       }
   description: "Mojolicious $c->req->json - parsed JSON request body. Fully attacker-controlled. `max_args: 1` keeps it to the request-side accessor/JSON-Pointer form and off encode-side `render(json => {...})` calls that take a hashref payload."
 
-# -- DBI second-order taint ----------------------------------------
-# Database row reads are not first-order remote, but represent
-# stored-input flows that can re-enter SQL/eval/cmd sinks. Marked
-# `trust: database` so audits opt in via --trust database.
-- id: perl.source.dbi_fetchrow_array
-  enabled: true
-  language: perl
-  trust: database
-  category: db-input
-  tag: db-input
-  packages: [DBI]
-  match:
-    kind: call
-    callee:
-      name: fetchrow_array
-  match_examples:
-  - name: perl.source.dbi_fetchrow_array example
-    code: |
-      use DBI;
-      sub example {
-        my ($input, $url, $id, $payload, $request) = @_;
-        fetchrow_array($input)
-      }
-  description: "DBI $sth->fetchrow_array - row values previously written to the DB. Models second-order injection (stored XSS / SQL gadget reuse)."
-
-- id: perl.source.dbi_fetchrow_hashref
-  enabled: true
-  language: perl
-  trust: database
-  category: db-input
-  tag: db-input
-  packages: [DBI]
-  match:
-    kind: call
-    callee:
-      name: fetchrow_hashref
-  match_examples:
-  - name: perl.source.dbi_fetchrow_hashref example
-    code: |
-      use DBI;
-      sub example {
-        my ($input, $url, $id, $payload, $request) = @_;
-        fetchrow_hashref($input)
-      }
-  description: "DBI $sth->fetchrow_hashref - hash form of fetchrow_array; same second-order trust model."
-
 # -- Other I/O sources ---------------------------------------------
-- id: perl.source.anyevent_socket_recv
+- id: perl.source.socket_recv_buffer
   enabled: true
   language: perl
   trust: remote
   category: net-input
   tag: net-input
   payload_types: [binary]
-  packages: ["AnyEvent::Socket", "AnyEvent::Handle"]
   match:
     kind: call
     callee:
       name: recv
+  constraints:
+  - top_level: true
+  - arg_count: 4
+  taint_semantics:
+    source_output_args: [1]
   match_examples:
-  - name: perl.source.anyevent_socket_recv example
-    code: |
-      use AnyEvent::Socket;
-      sub example {
-        my ($input, $url, $id, $payload, $request) = @_;
-        recv($input)
-      }
-  description: "AnyEvent::Socket / AnyEvent::Handle recv - raw network bytes from a peer. Attacker-controlled when the socket faces the network."
-
-- id: perl.source.env_http
-  enabled: true
-  language: perl
-  trust: remote
-  category: http-input
-  tag: http-input
-  payload_types: [header]
-  match:
-    kind: read
-    target:
-      name: ENV
-  match_examples:
-  - name: perl.source.env_http example
+  - name: Perl socket recv output buffer
     code: |
       sub example {
-        my ($input, $url, $id, $payload, $request) = @_;
-        my $value = $ENV;
+        my ($socket) = @_;
+        recv($socket, my $buffer, 4096, 0);
+        return $buffer;
       }
-  description: "%ENV HTTP_* - CGI env-var form of inbound request headers. Also used by many Plack-style runners."
+    expect_match_text: [recv]
+  - name: receiver method is not the Perl recv builtin
+    code: |
+      sub example {
+        my ($handle) = @_;
+        return $handle->recv(4096);
+      }
+    expect_no_match: true
+  description: "Second argument of Perl's recv(SOCKET, SCALAR, LENGTH, FLAGS) builtin - buffer overwritten with peer-supplied socket bytes. The return value is peer-address/status information and is not the data carrier."
 
 # -- Disabled / FP-prone -------------------------------------------
 - id: perl.source.dancer_request_body

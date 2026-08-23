@@ -18,44 +18,88 @@
 - id: ruby.source.activejob_perform_args
   enabled: false
   disabled_reason:
-    code: over-broad
+    code: pending-adapter-fact
   language: ruby
   tag: queue-input
   trust: service
-  packages: [activejob]
+  packages: [activejob, active_job, rails]
   match:
     kind: param
     target:
-      name: perform
-  description: "Disabled - bare `param name: perform` is FP-prone (`perform` is the worker method name, not the job-argument parameter identifier); no canonical exists. Re-enable when adapter supports class-scoped ActiveJob `perform` method-arg matching."
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      in_method: [perform]
+      in_class: [ActiveJob::Base]
+  match_examples:
+  - name: Active Job perform argument
+    code: |
+      require "active_job"
+      class ApplicationJob < ActiveJob::Base
+      end
+      class ImportJob < ApplicationJob
+        def perform(payload)
+          payload
+        end
+      end
+    expect_match_text: [payload]
+  - name: ordinary perform method is not a queue boundary
+    code: |
+      require "active_job"
+      class LocalRunner
+        def perform(payload)
+          payload
+        end
+      end
+    expect_no_match: true
+  - name: local ApplicationJob name does not prove Active Job ancestry
+    code: |
+      require "active_job"
+      class ApplicationJob
+      end
+      class LocalJob < ApplicationJob
+        def perform(payload)
+          payload
+        end
+      end
+    expect_no_match: true
+  description: "Disabled pending transitive framework-ancestry proof. The exact boundary is an argument of `perform` on an ActiveJob::Base descendant; package presence plus a locally named ApplicationJob/Base is not sufficient."
 
-- id: ruby.source.shoryuke_message_body
-  enabled: true
+- id: ruby.source.shoryuken_perform_body_param
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: ruby
   tag: queue-input
   trust: service
   packages: [shoryuken]
   match:
-    kind: call
-    callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.body$
-  constraints:
-  - min_args: 1
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      in_method: [perform]
+      param_index_in: [1]
+      param_count_in: [2]
   match_examples:
-  - name: ruby.source.shoryuke_message_body example
+  - name: Shoryuken worker body argument
     code: |
       require "shoryuken"
-      def example(input, url, id, item, req_obj, options)
-        message.body(input)
+      class OrdersWorker
+        include Shoryuken::Worker
+        def perform(sqs_message, body)
+          body
+        end
       end
-  - name: ruby.source.shoryuke_message_body zero-arg negative
+    expect_match_text: [body]
+  - name: one-argument worker does not satisfy the two-argument body contract
     code: |
       require "shoryuken"
-      def example(input)
-        message.body()
+      class OrdersWorker
+        include Shoryuken::Worker
+        def perform(message)
+          message
+        end
       end
     expect_no_match: true
-  description: "Shoryuken worker message.body(payload) - SQS payload accessor invoked with at least one argument. min_args:1 disambiguates from the 0-arg `request.body` Rails getter."
+  description: "Disabled pending class/module provenance: Shoryuken's standard two-argument worker contract delivers the SQS body as `perform(sqs_message, body)`, but package presence plus an arbitrary two-argument `perform` method cannot prove that its class includes Shoryuken::Worker. This replaces the former fictitious `message.body(input)` carrier without creating a new false source."
 
 - id: ruby.source.delayed_job_payload
   enabled: true

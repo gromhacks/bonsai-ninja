@@ -514,31 +514,6 @@
     target:
       attribute: [request, headers]
   description: "Disabled duplicate - bare `request.headers` is too broad; python.web.request_headers_get covers `request.headers.get(name)` across all major frameworks."
-- id: python.fastapi.depends_param
-  enabled: true
-  language: python
-  trust: remote
-  tag: http-input
-  category: http-input
-  frameworks: [fastapi]
-  packages: [fastapi]
-  cwe: [CWE-20]
-  match:
-    kind: param
-    target:
-      annotation: Depends
-      default_call: Depends
-  match_examples:
-  - name: fastapi depends param
-    code: |
-      from fastapi import Depends, FastAPI
-      app = FastAPI()
-      def get_token():
-          return ""
-      def handler(token: str = Depends(get_token)):
-          return token
-    expect_match_text: [token]
-  description: "FastAPI `Depends(...)` parameter binder - value is the dependency factory's return. The rule owns both annotation-metadata and direct-default-call syntax selectors while the adapter remains API-neutral (G1)."
 - id: python.flask.request_args
   enabled: false
   disabled_reason:

@@ -1991,7 +1991,7 @@ fn matcher_worker_count() -> usize {
 /// Keep one inventory row per rule and concrete call site, preferring the
 /// match text with the most receiver context.
 pub(crate) fn dedup_inventory_matches(matches: &mut Vec<RuleMatch>) {
-    type InventoryDedupKey = (String, String, u32, u32, String, Option<String>);
+    type InventoryDedupKey = (String, String, u32, u32, String);
 
     let mut seen: AHashMap<InventoryDedupKey, usize> = AHashMap::new();
     let mut deduped: Vec<RuleMatch> = Vec::with_capacity(matches.len());
@@ -2002,10 +2002,21 @@ pub(crate) fn dedup_inventory_matches(matches: &mut Vec<RuleMatch>) {
             m.line,
             m.column,
             m.rule_id.clone(),
-            m.enclosing_fn.clone(),
         );
         if let Some(&idx) = seen.get(&key) {
-            if m.match_text.len() > deduped[idx].match_text.len() {
+            // A module body and its nested callable can both expose the same
+            // compiler fact. The concrete source/sink site is one endpoint;
+            // retain the callable attribution when available and otherwise
+            // prefer the match text with the most receiver context.
+            let existing_is_callable = deduped[idx]
+                .enclosing_fn
+                .as_deref()
+                .is_some_and(|name| name != "__module__");
+            let candidate_is_callable = m.enclosing_fn.as_deref().is_some_and(|name| name != "__module__");
+            if (candidate_is_callable && !existing_is_callable)
+                || (candidate_is_callable == existing_is_callable
+                    && m.match_text.len() > deduped[idx].match_text.len())
+            {
                 deduped[idx] = m;
             }
             continue;
@@ -2458,6 +2469,26 @@ impl<'a> PreparedRule<'a> {
         alias_map: &std::collections::HashMap<String, AliasTarget>,
         file_packages: &AHashSet<String>,
     ) -> bool {
+        self.call_context_allows_impl(callee, receiver_types, alias_map, file_packages, false)
+    }
+
+    fn imported_default_call_context_allows(
+        &self,
+        callee: &str,
+        alias_map: &std::collections::HashMap<String, AliasTarget>,
+        file_packages: &AHashSet<String>,
+    ) -> bool {
+        self.call_context_allows_impl(callee, &[], alias_map, file_packages, true)
+    }
+
+    fn call_context_allows_impl(
+        &self,
+        callee: &str,
+        receiver_types: &[String],
+        alias_map: &std::collections::HashMap<String, AliasTarget>,
+        file_packages: &AHashSet<String>,
+        exact_binding_only: bool,
+    ) -> bool {
         if !self.requires_call_package_signal {
             return true;
         }
@@ -2515,9 +2546,12 @@ impl<'a> PreparedRule<'a> {
                 push_target(&mut candidates, target);
             }
         }
-        let file_level_package_evidence_allowed = self.file_level_package_evidence_allowed();
-        let component_level_package_evidence_allowed = self.component_level_package_evidence_allowed();
-        let workspace_level_package_evidence_allowed = self.workspace_level_package_evidence_allowed();
+        let file_level_package_evidence_allowed =
+            !exact_binding_only && self.file_level_package_evidence_allowed();
+        let component_level_package_evidence_allowed =
+            !exact_binding_only && self.component_level_package_evidence_allowed();
+        let workspace_level_package_evidence_allowed =
+            !exact_binding_only && self.workspace_level_package_evidence_allowed();
         let allowed = self.package_signals.iter().any(|signal| {
             (file_level_package_evidence_allowed
                 && package_set_contains_import(
@@ -2573,7 +2607,12 @@ impl<'a> PreparedRule<'a> {
             return true;
         }
         match self.rule.kind {
-            crate::rule::RuleKind::Source => true,
+            crate::rule::RuleKind::Source => self
+                .rule
+                .analysis_semantics
+                .as_ref()
+                .and_then(|semantics| semantics.allow_file_package_evidence)
+                .unwrap_or(true),
             crate::rule::RuleKind::Sanitizer => false,
             // Typing rules never participate in the finding/gate path —
             // they feed factory-return resolution via build_rulepack_typing.
@@ -3140,12 +3179,10 @@ fn flush_regex_anchor_token(out: &mut Vec<String>, token: &mut String) {
 }
 
 fn allows_file_package_evidence(rule: &Rule) -> bool {
-    rule.kind == crate::rule::RuleKind::Sink
-        && rule
-            .analysis_semantics
-            .as_ref()
-            .and_then(|semantics| semantics.allow_file_package_evidence)
-            .unwrap_or(false)
+    rule.analysis_semantics
+        .as_ref()
+        .and_then(|semantics| semantics.allow_file_package_evidence)
+        .unwrap_or(false)
 }
 
 fn skips_call_package_gate(rule: &Rule) -> bool {
@@ -4122,20 +4159,19 @@ fn scan_params_batch(
                 }
                 let want_annotation = target.and_then(|t| t.annotation.as_deref());
                 let want_default_call = target.and_then(|t| t.default_call.as_deref());
+                let matched_annotation = want_annotation
+                    .is_some_and(|want| param_anns.iter().any(|a| annotation_name_matches(a, want)));
+                let matched_default_call = want_default_call.and_then(|want| {
+                    param_default_calls
+                        .iter()
+                        .find(|callee| parameter_default_call_matches(callee, want, &alias_map))
+                });
                 let matched = if want_annotation.is_some() || want_default_call.is_some() {
                     // Parameter syntax selectors are alternatives. This lets
                     // one rule own both a decorator/annotation form and an
                     // equivalent direct default-call binder without teaching
                     // the adapter that either spelling is a framework API.
-                    want_annotation
-                        .is_some_and(|want| param_anns.iter().any(|a| annotation_name_matches(a, want)))
-                        || want_default_call.is_some_and(|want| {
-                            param_default_calls.iter().any(|callee| {
-                                callee == want
-                                    || bonsai_common::short_qualified_tail(callee)
-                                        == bonsai_common::short_qualified_tail(want)
-                            })
-                        })
+                    matched_annotation || matched_default_call.is_some()
                 } else if target.is_some_and(param_target_is_context_only) {
                     true
                 } else {
@@ -4151,7 +4187,17 @@ fn scan_params_batch(
                 // param rule with `packages: [django]` should only
                 // fire on files importing django, not on any file
                 // with a same-named parameter.
-                if !prepared.call_context_allows(param, &[], &alias_map, file_packages.as_ref()) {
+                let package_context_allows = if let Some(default_call) = matched_default_call {
+                    !parameter_default_call_is_shadowed(file_index, default_call)
+                        && prepared.imported_default_call_context_allows(
+                            default_call,
+                            &alias_map,
+                            file_packages.as_ref(),
+                        )
+                } else {
+                    prepared.call_context_allows(param, &[], &alias_map, file_packages.as_ref())
+                };
+                if !package_context_allows {
                     continue;
                 }
                 // A `kind: param` rule binds the declaration, not one
@@ -4198,6 +4244,37 @@ fn scan_params_batch(
             }
         }
     }
+}
+
+/// A module-level declaration with the same unqualified name wins over an
+/// imported parameter-default factory in Python-style lexical binding. This
+/// is a generic compiler identity check: framework/API meaning remains in the
+/// rulepack, while the matcher refuses to attribute a locally shadowed call to
+/// that external package.
+fn parameter_default_call_is_shadowed(file_index: &DeclIndex, default_call: &str) -> bool {
+    if bonsai_common::qualified_name_owner(default_call).is_some() {
+        return false;
+    }
+    let name = bonsai_common::short_qualified_tail(default_call);
+    file_index
+        .defs
+        .iter()
+        .any(|decl| decl.parent.is_none() && decl.name == name)
+}
+
+fn parameter_default_call_matches(
+    actual: &str,
+    expected: &str,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+) -> bool {
+    let matches = |candidate: &str| {
+        candidate == expected
+            || bonsai_common::short_qualified_tail(candidate) == bonsai_common::short_qualified_tail(expected)
+    };
+    matches(actual)
+        || expand_callee_alias(actual, alias_map)
+            .as_deref()
+            .is_some_and(matches)
 }
 
 fn decl_target_context_allows(

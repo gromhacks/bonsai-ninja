@@ -1,0 +1,27 @@
+# Dart database result sources using typed package receivers.
+- id: dart.sqflite.query_results
+  enabled: true
+  language: dart
+  trust: database
+  tag: db-input
+  packages: [sqflite]
+  match:
+    kind: call
+    callee:
+      regex: "(^|[.])(query|rawQuery)$"
+  constraints:
+  - receiver_type_in: [Database]
+  - min_args: 1
+  match_examples:
+  - name: sqflite query result
+    code: |
+      import 'package:sqflite/sqflite.dart';
+      Future<List<Map<String, Object?>>> load(Database db) => db.rawQuery('select name from users');
+    expect_match_text: [db.rawQuery]
+  - name: local database-like object is not sqflite
+    code: |
+      import 'package:sqflite/sqflite.dart';
+      class LocalStore { List<String> rawQuery(String query) => const []; }
+      List<String> load(LocalStore db) => db.rawQuery('constant');
+    expect_no_match: true
+  description: "Typed sqflite Database.query/rawQuery results - rows returned from persistent storage."

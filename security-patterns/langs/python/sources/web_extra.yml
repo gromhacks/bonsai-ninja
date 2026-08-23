@@ -1293,6 +1293,164 @@
     expect_match_text: [q]
   description: "FastAPI `Query(...)` parameter binder - URL query value. The rule owns both annotation-metadata and direct-default-call syntax selectors while the adapter remains API-neutral (G1, R7)."
 
+- id: python.fastapi.path_param_marker
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  frameworks: [fastapi]
+  packages: [fastapi]
+  match:
+    kind: param
+    target:
+      annotation: Path
+      default_call: Path
+  match_examples:
+  - name: FastAPI path parameter marker
+    code: |
+      from fastapi import FastAPI, Path
+      app = FastAPI()
+      @app.get("/items/{item_id}")
+      def read_item(item_id: str = Path(...)):
+          return item_id
+    expect_match_text: [item_id]
+  - name: unrelated default factory is not a path parameter
+    code: |
+      from fastapi import FastAPI
+      def PathSetting(): return "local"
+      def helper(item_id: str = PathSetting()): return item_id
+    expect_no_match: true
+  - name: local Path function shadows the FastAPI marker
+    code: |
+      from fastapi import FastAPI, Path
+      app = FastAPI()
+      def Path(value): return value
+      def helper(item_id: str = Path("local")): return item_id
+    expect_no_match: true
+  description: "FastAPI `Path(...)` parameter binder - URL path value."
+
+- id: python.fastapi.header_param_marker
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  frameworks: [fastapi]
+  packages: [fastapi]
+  match:
+    kind: param
+    target:
+      annotation: Header
+      default_call: Header
+  match_examples:
+  - name: FastAPI header parameter marker
+    code: |
+      from fastapi import FastAPI, Header
+      app = FastAPI()
+      @app.get("/items")
+      def read_item(user_agent: str = Header(...)):
+          return user_agent
+    expect_match_text: [user_agent]
+  - name: ordinary parameter is not a header source
+    code: |
+      from fastapi import FastAPI
+      def helper(user_agent: str = "bonsai"): return user_agent
+    expect_no_match: true
+  description: "FastAPI `Header(...)` parameter binder - inbound HTTP header value."
+
+- id: python.fastapi.cookie_param_marker
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  frameworks: [fastapi]
+  packages: [fastapi]
+  match:
+    kind: param
+    target:
+      annotation: Cookie
+      default_call: Cookie
+  match_examples:
+  - name: FastAPI cookie parameter marker
+    code: |
+      from fastapi import Cookie, FastAPI
+      app = FastAPI()
+      @app.get("/items")
+      def read_item(session: str = Cookie(...)):
+          return session
+    expect_match_text: [session]
+  - name: ordinary session parameter is not a cookie source
+    code: |
+      from fastapi import FastAPI
+      def helper(session: str = "local"): return session
+    expect_no_match: true
+  description: "FastAPI `Cookie(...)` parameter binder - inbound cookie value."
+
+- id: python.fastapi.form_param_marker
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form]
+  frameworks: [fastapi]
+  packages: [fastapi]
+  match:
+    kind: param
+    target:
+      annotation: Form
+      default_call: Form
+  match_examples:
+  - name: FastAPI form parameter marker
+    code: |
+      from fastapi import FastAPI, Form
+      app = FastAPI()
+      @app.post("/login")
+      def login(username: str = Form(...)):
+          return username
+    expect_match_text: [username]
+  - name: ordinary form-shaped value is not a request source
+    code: |
+      from fastapi import FastAPI
+      def helper(username: str = "guest"): return username
+    expect_no_match: true
+  description: "FastAPI `Form(...)` parameter binder - form-encoded request value."
+
+- id: python.fastapi.file_param_marker
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [file, multipart, binary]
+  frameworks: [fastapi]
+  packages: [fastapi]
+  match:
+    kind: param
+    target:
+      annotation: File
+      default_call: File
+  match_examples:
+  - name: FastAPI file parameter marker
+    code: |
+      from fastapi import FastAPI, File
+      app = FastAPI()
+      @app.post("/upload")
+      def upload(blob: bytes = File(...)):
+          return blob
+    expect_match_text: [blob]
+  - name: ordinary bytes parameter is not an upload source
+    code: |
+      from fastapi import FastAPI
+      def helper(blob: bytes = b""): return blob
+    expect_no_match: true
+  description: "FastAPI `File(...)` parameter binder - multipart upload bytes or upload object."
+
 - id: python.tornado.websocket_on_message_param
   enabled: true
   language: python
@@ -1437,52 +1595,6 @@
           return value
     expect_match_text: [info.context.args]
   description: "GraphQL resolver info.context.args - framework-provided client argument map exposed through the resolver context."
-
-# ---------------------------------------------------------------------------
-# AWS Lambda - additional API Gateway / event fields
-# ---------------------------------------------------------------------------
-
-- id: python.aws.lambda_event_multivalue_query
-  enabled: true
-  language: python
-  trust: service
-  tag: event-input
-  payload_types: [event, query]
-  frameworks: [aws-lambda]
-  packages: [boto3]
-  match:
-    kind: read
-    target:
-      attribute: [event, multiValueQueryStringParameters]
-  match_examples:
-  - name: aws lambda event multivalue query
-    code: |
-      import boto3
-      def example():
-          value = event.multiValueQueryStringParameters
-          return value
-  description: "AWS Lambda/APIGateway event['multiValueQueryStringParameters'] - repeated query params."
-
-- id: python.aws.lambda_event_request_context
-  enabled: true
-  language: python
-  trust: service
-  tag: event-input
-  payload_types: [event]
-  frameworks: [aws-lambda]
-  packages: [boto3]
-  match:
-    kind: read
-    target:
-      attribute: [event, requestContext]
-  match_examples:
-  - name: aws lambda event request context
-    code: |
-      import boto3
-      def example():
-          value = event.requestContext
-          return value
-  description: "AWS Lambda/APIGateway event['requestContext'] - request context including identity/authorizer claims (attacker-influenced fields)."
 
 # ---------------------------------------------------------------------------
 # Cloud workflow / queue inputs (kept disabled; param-name only would be

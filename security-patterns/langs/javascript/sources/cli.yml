@@ -6,41 +6,54 @@
   trust: local
   tag: cli-input
   payload_types: [text]
-  packages: [readline, readline-sync]
+  packages: [readline]
   match:
     kind: call
     callee:
       name: question
   constraints:
-  - min_args: 1
+  - receiver_type_in: [Interface]
+  - arg_count: 2
   taint_semantics:
+    source_callback_only: true
     source_callback_args:
     - callback_arg_index: 1
       source_param_indices: [0]
   match_examples:
-  - name: readline question
+  - name: readline interface question callback
     code: |
-      const _u = require("readline");
-      function demo(input, req, obj) {
-        return question(input);
-      }
-  - name: readline question callback
-    code: |
-      const _u = require("readline");
-      function demo(rl) {
+      const readline = require("readline");
+      function demo() {
+        const rl = readline.createInterface({ input: process.stdin });
         rl.question("name?", answer => {
           return answer;
         });
       }
     expect_match_text: [rl.question]
-  - name: readline question no args negative
+  - name: application question method is not readline input
     code: |
-      const _u = require("readline");
-      function demo() {
-        return question();
+      const readline = require("readline");
+      class Survey { question(prompt, callback) { callback("fixed"); } }
+      function demo(survey) {
+        survey.question("name?", answer => sink(answer));
       }
     expect_no_match: true
-  description: "readline.Interface.question(query, callback) and readline-sync question(query) - interactive stdin prompt. Callback answer parameters and synchronous return values are attacker-controlled."
+  description: "readline.Interface.question(query, callback) - callback parameter 0 is interactive stdin input. Factory-derived receiver typing prevents same-named application methods from matching, and the void registration result remains clean."
+
+- id: javascript.source.readline_sync_question
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: javascript
+  trust: local
+  tag: cli-input
+  payload_types: [text]
+  packages: [readline-sync]
+  match:
+    kind: call
+    callee:
+      name: question
+  description: "Disabled pending exact CommonJS module-binding receiver provenance. File-level readline-sync package presence plus a same-named question method is not sufficient evidence."
 
 - id: javascript.source.process_argv
   enabled: true
@@ -329,6 +342,7 @@
   - min_args: 2
   - max_args: 2
   taint_semantics:
+    source_callback_only: true
     source_callback_args:
     - callback_arg_index: 1
       source_param_indices: [1]
@@ -342,6 +356,15 @@
         });
       }
     expect_match_text: [fs.readFile]
+  - name: fs access callback does not carry file contents
+    code: |
+      const fs = require("fs");
+      function demo(path) {
+        fs.access(path, err => {
+          return err;
+        });
+      }
+    expect_no_match: true
   description: "fs.readFile(path, callback) - callback data parameter receives local file bytes/text."
 
 - id: javascript.source.fs_readfile_options_callback
@@ -359,6 +382,7 @@
   - min_args: 3
   - max_args: 3
   taint_semantics:
+    source_callback_only: true
     source_callback_args:
     - callback_arg_index: 2
       source_param_indices: [1]
@@ -372,6 +396,15 @@
         });
       }
     expect_match_text: [fs.readFile]
+  - name: fs writeFile callback does not carry file contents
+    code: |
+      const fs = require("fs");
+      function demo(path) {
+        fs.writeFile(path, "local", err => {
+          return err;
+        });
+      }
+    expect_no_match: true
   description: "fs.readFile(path, options, callback) - callback data parameter receives local file bytes/text."
 
 - id: javascript.source.process_stdin_on_data
@@ -383,7 +416,7 @@
   match:
     kind: call
     callee:
-      attribute: [process, stdin, on]
+      attribute: [process, stdin, "on"]
   constraints:
   - min_args: 2
   - max_args: 2
@@ -391,6 +424,7 @@
       index: 0
       regex: "^['\"]data['\"]$"
   taint_semantics:
+    source_callback_only: true
     source_callback_args:
     - callback_arg_index: 1
       source_param_indices: [0]
@@ -410,3 +444,89 @@
       }
     expect_no_match: true
   description: "process.stdin.on('data', callback) - callback chunk parameter receives piped stdin bytes."
+
+- id: javascript.source.deno_read_file
+  enabled: true
+  language: javascript
+  trust: local
+  tag: file-input
+  payload_types: [binary]
+  frameworks: [deno]
+  match:
+    kind: call
+    callee:
+      attribute: [Deno, readFile]
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: Deno reads local file bytes
+    code: |
+      async function load(path) {
+        return await Deno.readFile(path);
+      }
+    expect_match_text: [Deno.readFile]
+  - name: Deno file write is not input
+    code: |
+      async function save(path, data) {
+        return await Deno.writeFile(path, data);
+      }
+    expect_no_match: true
+  description: "Deno.readFile(path[, options]) - materializes bytes from a local filesystem path."
+
+- id: javascript.source.deno_read_text_file
+  enabled: true
+  language: javascript
+  trust: local
+  tag: file-input
+  payload_types: [text]
+  frameworks: [deno]
+  match:
+    kind: call
+    callee:
+      attribute: [Deno, readTextFile]
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: Deno reads local file text
+    code: |
+      async function load(path) {
+        return await Deno.readTextFile(path);
+      }
+    expect_match_text: [Deno.readTextFile]
+  - name: similarly named application method is not Deno file input
+    code: |
+      async function load(store, path) {
+        return await store.readTextFile(path);
+      }
+    expect_no_match: true
+  description: "Deno.readTextFile(path[, options]) - materializes decoded text from a local filesystem path."
+
+- id: javascript.source.bun_file_materialize
+  enabled: true
+  language: javascript
+  trust: local
+  tag: file-input
+  payload_types: [text, binary, json]
+  frameworks: [bun]
+  match:
+    kind: call
+    callee:
+      regex: "^Bun\\.file\\(.+\\)\\.(text|arrayBuffer|json)$"
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: Bun materializes local file text
+    code: |
+      async function load(path) {
+        return await Bun.file(path).text();
+      }
+    expect_match_text: [Bun.file(path).text]
+  - name: Bun file handle alone is not materialized input
+    code: |
+      function open(path) {
+        return Bun.file(path);
+      }
+    expect_no_match: true
+  description: "Bun.file(path).text()/arrayBuffer()/json() - materialized contents of the selected local file; Bun.file(path) alone is only a handle and is intentionally excluded."

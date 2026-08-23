@@ -1,0 +1,63 @@
+# Elixir physical-device sources.
+- id: elixir.physical.circuits_gpio_read
+  enabled: true
+  language: elixir
+  trust: physical
+  tag: hw-input
+  payload_types: [sensor-frame]
+  packages: [circuits_gpio]
+  imports: [Circuits.GPIO]
+  match:
+    kind: call
+    callee:
+      regex: '^(Circuits\.)?GPIO\.(read|read_one)$'
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: Circuits GPIO pin sample
+    code: |
+      alias Circuits.GPIO
+      defmodule App do
+        def sample(handle), do: GPIO.read(handle)
+      end
+    expect_match_text: [GPIO.read]
+  - name: GPIO write is not physical input
+    code: |
+      alias Circuits.GPIO
+      defmodule App do
+        def drive(handle), do: GPIO.write(handle, 1)
+      end
+    expect_no_match: true
+  description: "Circuits.GPIO read/read_one - physical logic state sampled from a GPIO input."
+
+- id: elixir.physical.circuits_bus_read
+  enabled: true
+  language: elixir
+  trust: physical
+  tag: hw-input
+  payload_types: [sensor-frame, binary]
+  packages: [circuits_i2c, circuits_uart]
+  imports: [Circuits.I2C, Circuits.UART]
+  match:
+    kind: call
+    callee:
+      regex: '^(Circuits\.)?(I2C\.(read|read!|write_read|write_read!)|UART\.read)$'
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: Circuits I2C peripheral read
+    code: |
+      alias Circuits.I2C
+      defmodule App do
+        def sample(bus), do: I2C.read!(bus, 64, 8)
+      end
+    expect_match_text: [I2C.read!]
+  - name: I2C write is not physical input
+    code: |
+      alias Circuits.I2C
+      defmodule App do
+        def drive(bus), do: I2C.write!(bus, 64, <<1>>)
+      end
+    expect_no_match: true
+  description: "Circuits I2C and UART read operations - bytes returned by attached devices."

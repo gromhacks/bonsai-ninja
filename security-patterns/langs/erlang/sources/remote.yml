@@ -424,7 +424,9 @@
   description: "yaws_api:parse_post - Yaws form POST body parser output."
 
 - id: erlang.source.inets_httpd_parse_query
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: erlang
   trust: remote
   tag: http-input
@@ -442,7 +444,7 @@
       -export([test/1]).
       test(Input) ->
         httpd:parse_query(Input).
-  description: "inets httpd:parse_query - query string from a client request."
+  description: "Disabled - httpd:parse_query/1 parses any caller-supplied string, including constants. It preserves existing provenance and is not itself an HTTP boundary."
 
 - id: erlang.source.gen_tcp_recv
   enabled: true
@@ -454,13 +456,23 @@
     kind: call
     callee:
       regex: "^gen_tcp:recv$"
+  constraints:
+  - min_args: 2
+  - max_args: 3
   match_examples:
-  - name: declared shape
+  - name: TCP receive
     code: |
       -module(example).
-      -export([test/1]).
-      test(Input) ->
-        gen_tcp:recv(Input).
+      -export([read/1]).
+      read(Socket) ->
+        gen_tcp:recv(Socket, 0).
+    expect_match_text: ["gen_tcp:recv"]
+  - name: wrong recv arity negative
+    code: |
+      -module(example).
+      -export([read/1]).
+      read(Socket) -> gen_tcp:recv(Socket).
+    expect_no_match: true
   - name: gen_tcp send negative
     code: |
       -module(example).
@@ -480,13 +492,23 @@
     kind: call
     callee:
       regex: "^gen_udp:recv$"
+  constraints:
+  - min_args: 2
+  - max_args: 3
   match_examples:
-  - name: declared shape
+  - name: UDP receive
     code: |
       -module(example).
-      -export([test/1]).
-      test(Input) ->
-        gen_udp:recv(Input).
+      -export([read/1]).
+      read(Socket) ->
+        gen_udp:recv(Socket, 0).
+    expect_match_text: ["gen_udp:recv"]
+  - name: wrong recv arity negative
+    code: |
+      -module(example).
+      -export([read/1]).
+      read(Socket) -> gen_udp:recv(Socket).
+    expect_no_match: true
   - name: gen_udp send negative
     code: |
       -module(example).
@@ -506,13 +528,23 @@
     kind: call
     callee:
       regex: "^ssl:recv$"
+  constraints:
+  - min_args: 2
+  - max_args: 3
   match_examples:
-  - name: declared shape
+  - name: TLS receive
     code: |
       -module(example).
-      -export([test/1]).
-      test(Input) ->
-        ssl:recv(Input).
+      -export([read/1]).
+      read(Socket) ->
+        ssl:recv(Socket, 0).
+    expect_match_text: ["ssl:recv"]
+  - name: wrong recv arity negative
+    code: |
+      -module(example).
+      -export([read/1]).
+      read(Socket) -> ssl:recv(Socket).
+    expect_no_match: true
   - name: ssl send negative
     code: |
       -module(example).
@@ -521,3 +553,33 @@
         ssl:send(Input).
     expect_no_match: true
   description: "ssl:recv - TLS-decrypted bytes from peer; cleartext is still attacker-controlled."
+
+- id: erlang.source.cowboy_request_metadata
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  payload_types: [text, url, header]
+  packages: [cowboy]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:(method|scheme|host|port|peer|path_info|host_info|parse_header|match_cookies)$"
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: Cowboy request host
+    code: |
+      -module(example).
+      -include_lib("cowboy/include/cowboy.hrl").
+      -export([host/1]).
+      host(Req) -> cowboy_req:host(Req).
+    expect_match_text: ["cowboy_req:host"]
+  - name: Cowboy response setter is not input
+    code: |
+      -module(example).
+      -include_lib("cowboy/include/cowboy.hrl").
+      -export([reply/1]).
+      reply(Req) -> cowboy_req:set_resp_header(<<"x">>, <<"local">>, Req).
+    expect_no_match: true
+  description: "Exact Cowboy request metadata accessors - method, authority, peer, path segments, parsed headers, and cookies supplied by the HTTP peer."

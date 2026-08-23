@@ -6639,6 +6639,125 @@ impl IdgQueryService {
         None
     }
 
+    /// Return the exact callback parameters that receive rulepack-declared
+    /// source data at `match_span`. The callback delivery edge has its own
+    /// kind, so a registration call's task/stream/status return is never
+    /// mistaken for the delivered payload.
+    pub fn source_callback_param_nodes_at_span(&self, func: FuncId, match_span: Span) -> Vec<WsNodeId> {
+        self.source_callback_seed_evidence_at_span(func, match_span).0
+    }
+
+    /// Return both exact delivery nodes and their compiler-proven callback
+    /// boundaries for a rulepack-declared source callback at `match_span`.
+    ///
+    /// Callback queries seed the delivered parameter rather than the
+    /// registration call result, because subscription/task/status handles are
+    /// not payloads. Retaining this boundary separately lets lineage explain a
+    /// named callback hop without tainting that unrelated return value.
+    pub fn source_callback_seed_evidence_at_span(
+        &self,
+        func: FuncId,
+        match_span: Span,
+    ) -> (Vec<WsNodeId>, Vec<CrossCallEdge>) {
+        let unified = self.ensure_unified();
+        let Some(from_segment) = self.workspace.segment_for_func(func) else {
+            return (Vec::new(), Vec::new());
+        };
+        let Some(segment) = self.workspace.segment_view(from_segment) else {
+            return (Vec::new(), Vec::new());
+        };
+        let mut source_nodes = AHashSet::default();
+        for (index, node) in segment.nodes.nodes.iter().enumerate() {
+            if node.func != func {
+                continue;
+            }
+            let Some(Place::CallRet { site }) = segment.places.get(node.place) else {
+                continue;
+            };
+            if spans_overlap(site.0, match_span) {
+                source_nodes.insert(NodeId(
+                    u32::try_from(index).expect("segment-local node count exceeds u32"),
+                ));
+            }
+        }
+        if source_nodes.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        let mut out = Vec::new();
+        let mut boundaries = Vec::new();
+        let mut record_delivery = |to_segment: SegmentId, edge: &IdgEdge, out: &mut Vec<WsNodeId>| {
+            let Some(node) = Self::ws_node_for(&unified, to_segment, edge.to) else {
+                return;
+            };
+            out.push(node);
+            if let CompactCrossCallLift::Complete(Some(boundary)) =
+                lift_cross_call_edge_from_unified(&unified, from_segment, to_segment, edge)
+            {
+                // Inline callbacks need no interprocedural lineage row.
+                // Named callbacks do, and the exact edge already carries
+                // both compiler function identities and the call span.
+                if boundary.caller != boundary.callee {
+                    boundaries.push(boundary);
+                }
+            }
+        };
+        for edge in &segment.edges {
+            if edge.meta.kind != IdgEdgeKind::InterSourceCallback || !source_nodes.contains(&edge.from) {
+                continue;
+            }
+            record_delivery(from_segment, edge, &mut out);
+        }
+        self.workspace
+            .visit_cross_file_edges(|edges| {
+                for row in edges {
+                    if row.from_segment != from_segment
+                        || row.edge.meta.kind != IdgEdgeKind::InterSourceCallback
+                        || !source_nodes.contains(&row.edge.from)
+                    {
+                        continue;
+                    }
+                    record_delivery(row.to_segment, &row.edge, &mut out);
+                }
+            })
+            .expect("validated IDG cross-file relation remains readable");
+        out.retain(|node| {
+            self.resolve_point(*node).is_some_and(|point| {
+                matches!(point.kind, PointKind::Param | PointKind::Write | PointKind::Read)
+            })
+        });
+        out.sort_unstable();
+        out.dedup();
+        boundaries.sort_by_key(|edge| {
+            (
+                edge.caller.raw(),
+                edge.callee.raw(),
+                edge.call_span,
+                edge.param_idx,
+                edge.precision,
+            )
+        });
+        boundaries.dedup();
+        if bonsai_diagnostics::debug::is_enabled("idg-closure") {
+            let delivered = out
+                .iter()
+                .filter_map(|node| {
+                    self.resolve_point(*node)
+                        .map(|point| format!("ws#{}={:?}:{}", node.0, point.kind, point.name))
+                })
+                .collect::<Vec<_>>();
+            bonsai_diagnostics::debug_log!(
+                "idg-closure",
+                "callback source func={} anchor={}..{} delivery_nodes={:?}",
+                func.raw(),
+                match_span.start,
+                match_span.end,
+                delivered
+            );
+        }
+        (out, boundaries)
+    }
+
     /// Return the `Place::Write` nodes in `func` whose span equals
     /// `write_span`. Each assignment interns a distinct span-tagged Write
     /// node, so this addresses one specific assignment (used to seed the
@@ -7725,11 +7844,17 @@ impl IdgQueryService {
                 let endpoint_is_structural = structural.iter().any(|key| key.callee == endpoint_key.callee);
                 let mut push_boundary = |key: ContextBoundaryKey| {
                     let cross_call = match edge.meta.kind {
-                        IdgEdgeKind::InterCallArg => {
+                        IdgEdgeKind::InterCallArg | IdgEdgeKind::InterSourceCallback => {
                             let from = WsNodeId(from.0);
                             let to = WsNodeId(to.0);
                             let (relation, arg_idx, param_idx) =
-                                if let (Some((_, arg_idx)), Some(param_idx)) =
+                                if edge.meta.kind == IdgEdgeKind::InterSourceCallback {
+                                    (
+                                        CrossCallRelation::Callback,
+                                        u32::MAX,
+                                        unified.params.get(to).unwrap_or(u32::MAX),
+                                    )
+                                } else if let (Some((_, arg_idx)), Some(param_idx)) =
                                     (unified.call_args.get(from), unified.params.get(to))
                                 {
                                     (CrossCallRelation::Argument, arg_idx, param_idx)
@@ -7956,7 +8081,7 @@ impl IdgQueryService {
         to: WsNodeId,
     ) -> bool {
         match kind {
-            IdgEdgeKind::InterCallArg => {
+            IdgEdgeKind::InterCallArg | IdgEdgeKind::InterSourceCallback => {
                 unified.node_boundaries.get(to.0 as usize).copied() == Some(NODE_BOUNDARY_PARAM)
             }
             IdgEdgeKind::InterReturn => {
@@ -7979,9 +8104,11 @@ impl IdgQueryService {
         to: WsNodeId,
     ) -> Option<(ContextBoundaryKey, bool)> {
         let (caller, callee, enters_callee) = match edge.meta.kind {
-            IdgEdgeKind::InterCallArg => Self::ws_node_func(unified, NodeId(from.0))
-                .zip(Self::ws_node_func(unified, NodeId(to.0)))
-                .map(|(caller, callee)| (caller, callee, true)),
+            IdgEdgeKind::InterCallArg | IdgEdgeKind::InterSourceCallback => {
+                Self::ws_node_func(unified, NodeId(from.0))
+                    .zip(Self::ws_node_func(unified, NodeId(to.0)))
+                    .map(|(caller, callee)| (caller, callee, true))
+            }
             IdgEdgeKind::InterReturn | IdgEdgeKind::InterThrow | IdgEdgeKind::InterYield => {
                 { Self::ws_node_func(unified, NodeId(to.0)) }
                     .zip(Self::ws_node_func(unified, NodeId(from.0)))
@@ -9649,6 +9776,18 @@ fn lift_cross_call_edge_from_unified(
             CompactCrossCallLift::Complete(None)
         };
     }
+    if edge.meta.kind == IdgEdgeKind::InterSourceCallback {
+        return CompactCrossCallLift::Complete(unified.params.get(to).map(|param_idx| CrossCallEdge {
+            caller,
+            callee,
+            call_span: edge.meta.via_span,
+            arg_idx: u32::MAX,
+            param_idx,
+            precision: edge.meta.precision,
+            call_kind: edge.meta.call_kind,
+            relation: CrossCallRelation::Callback,
+        }));
+    }
     if edge.meta.kind == IdgEdgeKind::InterFieldCallArg {
         return if caller != callee {
             CompactCrossCallLift::NeedsSegmentPlaces
@@ -9710,7 +9849,7 @@ fn lift_call_arg_edge(
     // parameter). There is no caller-side positional argument that
     // carries the taint, so keep `arg_idx` sentinel while preserving
     // the destination `param_idx` for path rendering and attribution.
-    if edge.meta.kind == crate::edge::IdgEdgeKind::InterCallArg {
+    if edge.meta.kind == crate::edge::IdgEdgeKind::InterSourceCallback {
         if let Place::CallRet { .. } = from_place {
             if let Place::Param { idx: param_idx } = to_place {
                 return Some(CrossCallEdge {

@@ -681,7 +681,9 @@ fn c_recv_output_rulepack() -> Rulepack {
     source.taint_semantics = Some(TaintSemantics {
         clean_output_overwrite: None,
         source_output_args: vec![1],
+        source_output_args_from: None,
         source_callback_args: Vec::new(),
+        source_callback_only: false,
         call_result_passthrough_args: Vec::new(),
         call_result_passthrough_receiver: false,
         output_arg_flows: Vec::new(),
@@ -714,6 +716,44 @@ fn c_recv_output_rulepack() -> Rulepack {
     pack
 }
 
+fn c_package_scoped_output_rulepack() -> Rulepack {
+    let mut pack = c_recv_output_rulepack();
+    let language = pack.packs.get_mut("c").expect("C pack");
+    language.sources.push(rule(
+        "c",
+        RuleKind::Source,
+        "c.test.remote_return_source",
+        Some(TrustClass::Remote),
+        None,
+        "remote",
+    ));
+    let output = language.sources.first_mut().expect("output source");
+    output.match_spec.callee = Some(RuleTarget {
+        name: Some("netconn_recv".to_string()),
+        ..Default::default()
+    });
+    output.packages = vec!["lwip".to_string()];
+    pack
+}
+
+fn c_variadic_output_rulepack() -> Rulepack {
+    let mut pack = c_recv_output_rulepack();
+    let source = pack
+        .packs
+        .get_mut("c")
+        .and_then(|language| language.sources.first_mut())
+        .expect("C source rule");
+    source.id = "c.test.scanf_variadic_output_source".to_string();
+    source.match_spec.callee = Some(RuleTarget {
+        name: Some("scanf".to_string()),
+        ..Default::default()
+    });
+    let semantics = source.taint_semantics.as_mut().expect("source semantics");
+    semantics.source_output_args.clear();
+    semantics.source_output_args_from = Some(1);
+    pack
+}
+
 fn go_bind_output_rulepack() -> Rulepack {
     let mut source = rule(
         "go",
@@ -726,7 +766,9 @@ fn go_bind_output_rulepack() -> Rulepack {
     source.taint_semantics = Some(TaintSemantics {
         clean_output_overwrite: None,
         source_output_args: vec![0],
+        source_output_args_from: None,
         source_callback_args: Vec::new(),
+        source_callback_only: false,
         call_result_passthrough_args: Vec::new(),
         call_result_passthrough_receiver: false,
         output_arg_flows: Vec::new(),
@@ -751,6 +793,57 @@ fn go_bind_output_rulepack() -> Rulepack {
         "go".to_string(),
         LanguagePack {
             language: "go".to_string(),
+            sources: vec![source],
+            sinks: vec![sink],
+            sanitizers: Vec::new(),
+            typing: Vec::new(),
+        },
+    );
+    pack
+}
+
+fn javascript_callback_source_rulepack() -> Rulepack {
+    let mut source = rule(
+        "javascript",
+        RuleKind::Source,
+        "javascript.test.callback_source",
+        Some(TrustClass::Remote),
+        None,
+        "on",
+    );
+    source.taint_semantics = Some(TaintSemantics {
+        clean_output_overwrite: None,
+        source_output_args: Vec::new(),
+        source_output_args_from: None,
+        source_callback_args: vec![bonsai_security::rule::SourceCallbackArgSemantics {
+            callback_arg_index: 1,
+            source_param_indices: vec![0],
+        }],
+        source_callback_only: true,
+        call_result_passthrough_args: Vec::new(),
+        call_result_passthrough_receiver: false,
+        output_arg_flows: Vec::new(),
+        taint_receiver_from_args: false,
+    });
+    let mut sink = rule(
+        "javascript",
+        RuleKind::Sink,
+        "javascript.test.dangerous_sink",
+        None,
+        Some(Severity::Critical),
+        "dangerous",
+    );
+    sink.constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(0),
+            kw: None,
+        },
+    }]);
+    let mut pack = empty_rulepack_with_bundled_metadata();
+    pack.packs.insert(
+        "javascript".to_string(),
+        LanguagePack {
+            language: "javascript".to_string(),
             sources: vec![source],
             sinks: vec![sink],
             sanitizers: Vec::new(),
@@ -897,6 +990,388 @@ void handle(int fd) {
     )
     .expect("taint analysis");
     assert!(report.findings.is_empty(), "{:#?}", report.findings);
+}
+
+#[test]
+fn c_output_arg_source_does_not_taint_status_return() {
+    let ws = workspace(&[(
+        "main.c",
+        r#"
+void dangerous(int p);
+int recv(int fd, void *buf, unsigned long len, int flags);
+
+void handle(int fd) {
+    char buf[128];
+    int count = recv(fd, buf, sizeof(buf), 0);
+    dangerous(count);
+}
+"#,
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &c_recv_output_rulepack(),
+        TaintAnalysisOptions {
+            include_inferred_sources: false,
+            ..Default::default()
+        },
+    )
+    .expect("taint analysis");
+    assert!(report.findings.is_empty(), "{:#?}", report.findings);
+}
+
+#[test]
+fn c_variadic_output_source_taints_every_actual_destination_without_a_cap() {
+    let ws = workspace(&[(
+        "main.c",
+        r#"
+void dangerous(int p);
+int scanf(const char *format, ...);
+
+void handle(void) {
+    int a, b, c, d, e, f;
+    scanf("%d%d%d%d%d%d", &a, &b, &c, &d, &e, &f);
+    dangerous(f);
+}
+"#,
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &c_variadic_output_rulepack(),
+        TaintAnalysisOptions {
+            include_inferred_sources: false,
+            ..Default::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+}
+
+#[test]
+fn c_variadic_output_source_does_not_taint_format_or_unrelated_values() {
+    let ws = workspace(&[(
+        "main.c",
+        r#"
+void dangerous(const char *p);
+int scanf(const char *format, ...);
+
+void handle(void) {
+    const char *format = "%d";
+    int value;
+    scanf(format, &value);
+    dangerous(format);
+}
+"#,
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &c_variadic_output_rulepack(),
+        TaintAnalysisOptions {
+            include_inferred_sources: false,
+            ..Default::default()
+        },
+    )
+    .expect("taint analysis");
+    assert!(report.findings.is_empty(), "{:#?}", report.findings);
+}
+
+#[test]
+fn c_variadic_output_source_does_not_taint_conversion_count() {
+    let ws = workspace(&[(
+        "main.c",
+        r#"
+void dangerous(int p);
+int scanf(const char *format, ...);
+
+void handle(void) {
+    int value;
+    int converted = scanf("%d", &value);
+    dangerous(converted);
+}
+"#,
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &c_variadic_output_rulepack(),
+        TaintAnalysisOptions {
+            include_inferred_sources: false,
+            ..Default::default()
+        },
+    )
+    .expect("taint analysis");
+    assert!(report.findings.is_empty(), "{:#?}", report.findings);
+}
+
+#[test]
+fn callback_source_taints_delivered_parameter_but_not_registration_result() {
+    let positive = workspace(&[(
+        "app.js",
+        r#"
+function handle(stream) {
+  stream.on("data", (chunk) => dangerous(chunk));
+}
+"#,
+    )]);
+    let options = TaintAnalysisOptions {
+        include_inferred_sources: false,
+        ..Default::default()
+    };
+    let report = run_taint_analysis(&positive, &javascript_callback_source_rulepack(), options.clone())
+        .expect("callback taint analysis");
+    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+
+    let named = workspace(&[(
+        "app.js",
+        r#"
+function onData(chunk) {
+  dangerous(chunk);
+}
+function handle(stream) {
+  stream.on("data", onData);
+}
+"#,
+    )]);
+    let report = run_taint_analysis(&named, &javascript_callback_source_rulepack(), options.clone())
+        .expect("named callback taint analysis");
+    assert_eq!(
+        report.findings.len(),
+        1,
+        "compiler-resolved named callbacks must receive the source payload: {:#?}",
+        report.findings
+    );
+
+    let negative = workspace(&[(
+        "app.js",
+        r#"
+function handle(stream) {
+  const registration = stream.on("data", (chunk) => keep(chunk));
+  dangerous(registration);
+}
+"#,
+    )]);
+    let report = run_taint_analysis(&negative, &javascript_callback_source_rulepack(), options)
+        .expect("callback return analysis");
+    assert!(
+        report.findings.is_empty(),
+        "registration handle/task/status must not inherit callback payload taint: {:#?}",
+        report.findings
+    );
+}
+
+#[test]
+fn package_scoped_output_source_does_not_rewrite_local_lookalike_calls() {
+    let ws = workspace(&[(
+        "app.c",
+        r#"
+char *remote(void);
+void dangerous(char *value);
+
+int netconn_recv(void *connection, char **out) {
+  (void)connection;
+  (void)out;
+  return 0;
+}
+
+void handle(void) {
+  char *value = remote();
+  netconn_recv(0, &value);
+  dangerous(value);
+}
+"#,
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &c_package_scoped_output_rulepack(),
+        TaintAnalysisOptions {
+            include_inferred_sources: false,
+            ..Default::default()
+        },
+    )
+    .expect("package-scoped output source analysis");
+    assert_eq!(
+        report.findings.len(),
+        1,
+        "an output-source rule that failed its package/import match must not install a clean writer at a local lookalike call: {:#?}",
+        report.findings
+    );
+}
+
+#[test]
+fn hybrid_callback_source_keeps_its_synchronous_result_source() {
+    let ws = workspace(&[(
+        "app.js",
+        r#"
+function handle(stream) {
+  const answer = stream.on("data", (chunk) => keep(chunk));
+  dangerous(answer);
+}
+"#,
+    )]);
+    let mut pack = javascript_callback_source_rulepack();
+    pack.packs.get_mut("javascript").expect("javascript pack").sources[0]
+        .taint_semantics
+        .as_mut()
+        .expect("callback semantics")
+        .source_callback_only = false;
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            include_inferred_sources: false,
+            ..Default::default()
+        },
+    )
+    .expect("hybrid callback analysis");
+    assert_eq!(
+        report.findings.len(),
+        1,
+        "hybrid APIs must retain their compiler-visible synchronous source result: {:#?}",
+        report.findings
+    );
+}
+
+#[test]
+fn bundled_readline_sources_distinguish_callback_payload_from_void_return() {
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("bundled rulepack");
+    let callback = workspace(&[(
+        "app.js",
+        r#"
+const readline = require("readline");
+function handle() {
+  const rl = readline.createInterface({ input: process.stdin });
+  rl.question("command?", answer => eval(answer));
+}
+"#,
+    )]);
+    let options = TaintAnalysisOptions {
+        include_inferred_sources: false,
+        ..Default::default()
+    };
+    let callback_report = run_taint_analysis(&callback, &pack, options.clone()).expect("callback analysis");
+    assert!(
+        callback_report.findings.iter().any(|finding| {
+            (finding.finding.source.rule_id == "javascript.source.readline_question"
+                || finding
+                    .additional_sources
+                    .iter()
+                    .any(|source| source.rule_id == "javascript.source.readline_question"))
+                && finding.finding.sink.rule_id == "javascript.eval.builtin_eval"
+        }),
+        "readline callback payload should reach eval: {:#?}",
+        callback_report.findings
+    );
+
+    let registration = workspace(&[(
+        "app.js",
+        r#"
+const readline = require("readline");
+function handle() {
+  const rl = readline.createInterface({ input: process.stdin });
+  const registration = rl.question("command?", answer => consume(answer));
+  eval(registration);
+}
+"#,
+    )]);
+    let registration_report =
+        run_taint_analysis(&registration, &pack, options).expect("registration-return analysis");
+    assert!(
+        !registration_report.findings.iter().any(|finding| {
+            (finding.finding.source.rule_id == "javascript.source.readline_question"
+                || finding
+                    .additional_sources
+                    .iter()
+                    .any(|source| source.rule_id == "javascript.source.readline_question"))
+                && finding.finding.sink.rule_id == "javascript.eval.builtin_eval"
+        }),
+        "readline.Interface.question returns void; its assigned result must stay clean: {:#?}",
+        registration_report.findings
+    );
+}
+
+#[test]
+fn bundled_go_lambda_registration_taints_the_registered_handler_event() {
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("bundled rulepack");
+    let ws = workspace(&[(
+        "main.go",
+        r#"
+package main
+
+import (
+  "github.com/aws/aws-lambda-go/lambda"
+  "os/exec"
+)
+
+type Event struct { Command string }
+
+func handle(event Event) {
+  exec.Command("/bin/sh", "-c", event.Command)
+}
+
+func main() {
+  lambda.Start(handle)
+}
+"#,
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            include_inferred_sources: false,
+            ..Default::default()
+        },
+    )
+    .expect("Go Lambda callback analysis");
+    assert!(
+        report.findings.iter().any(|finding| {
+            (finding.finding.source.rule_id == "go.aws.lambda_event"
+                || finding
+                    .additional_sources
+                    .iter()
+                    .any(|source| source.rule_id == "go.aws.lambda_event"))
+                && finding.finding.sink.rule_id == "go.cmdi.exec_command_shell_wrapper"
+        }),
+        "the exact lambda.Start registration must deliver source payload to handler parameter 0: {:#?}",
+        report.findings
+    );
+
+    let clean = workspace(&[(
+        "main.go",
+        r#"
+package main
+
+import (
+  "github.com/aws/aws-lambda-go/lambda"
+  "os/exec"
+)
+
+type Event struct { Command string }
+
+func handle(event Event) {
+  event.Command = "healthcheck"
+  exec.Command("/bin/sh", "-c", event.Command)
+}
+
+func main() {
+  lambda.Start(handle)
+}
+"#,
+    )]);
+    let clean_report = run_taint_analysis(
+        &clean,
+        &pack,
+        TaintAnalysisOptions {
+            include_inferred_sources: false,
+            ..Default::default()
+        },
+    )
+    .expect("Go Lambda clean field overwrite analysis");
+    assert!(
+        clean_report.findings.iter().all(|finding| {
+            finding.finding.source.rule_id != "go.aws.lambda_event"
+                || finding.finding.sink.rule_id != "go.cmdi.exec_command_shell_wrapper"
+        }),
+        "an exact clean callback-field overwrite must kill the delivered source: {:#?}",
+        clean_report.findings
+    );
 }
 
 #[test]
@@ -3522,7 +3997,9 @@ fn nested_fully_qualified_esapi_sanitizer_inside_sink_arg_attaches() {
         taint_semantics: Some(TaintSemantics {
             clean_output_overwrite: None,
             source_output_args: Vec::new(),
+            source_output_args_from: None,
             source_callback_args: Vec::new(),
+            source_callback_only: false,
             call_result_passthrough_args: vec![0],
             call_result_passthrough_receiver: false,
             output_arg_flows: Vec::new(),
@@ -3612,7 +4089,9 @@ fn sanitizer_in_helper_return_attaches_after_chain_display_collapse() {
         taint_semantics: Some(TaintSemantics {
             clean_output_overwrite: None,
             source_output_args: Vec::new(),
+            source_output_args_from: None,
             source_callback_args: Vec::new(),
+            source_callback_only: false,
             call_result_passthrough_args: vec![0],
             call_result_passthrough_receiver: false,
             output_arg_flows: Vec::new(),

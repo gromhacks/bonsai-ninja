@@ -1,0 +1,35 @@
+- id: perl.source.sysv_msgrcv_buffer
+  enabled: true
+  language: perl
+  trust: ipc
+  tag: ipc-input
+  payload_types: [event, binary]
+  packages: ["IPC::SysV"]
+  match:
+    kind: call
+    callee:
+      name: msgrcv
+  constraints:
+  - top_level: true
+  - arg_count: 5
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: Perl SysV message receive buffer
+    code: |
+      use IPC::SysV qw(msgrcv IPC_NOWAIT);
+      sub receive_message {
+        my ($queue) = @_;
+        msgrcv($queue, my $message, 4096, 0, IPC_NOWAIT);
+        return $message;
+      }
+    expect_match_text: [msgrcv]
+  - name: SysV send is not received input
+    code: |
+      use IPC::SysV qw(msgsnd IPC_NOWAIT);
+      sub send_message {
+        my ($queue, $message) = @_;
+        msgsnd($queue, $message, IPC_NOWAIT);
+      }
+    expect_no_match: true
+  description: "Second argument of IPC::SysV msgrcv(id, variable, size, type, flags) - buffer overwritten with a message delivered through the System V queue."

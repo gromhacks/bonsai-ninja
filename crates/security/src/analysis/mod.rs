@@ -365,6 +365,7 @@ pub struct PackRuleRow {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct PackAuditReport {
+    pub canonical_source_families: Vec<String>,
     pub canonical_sink_families: Vec<String>,
     pub sink_family_short_labels: AHashMap<String, String>,
     pub languages: Vec<PackAuditLanguage>,
@@ -373,6 +374,7 @@ pub struct PackAuditReport {
 #[derive(Clone, Debug, Serialize)]
 pub struct PackAuditLanguage {
     pub language: String,
+    pub source_families: BTreeMap<String, PackAuditFamilyCount>,
     pub sinks: BTreeMap<String, PackAuditFamilyCount>,
     pub sources: PackAuditCount,
     pub sanitizers: PackAuditCount,
@@ -1901,8 +1903,11 @@ fn compile_sink_upstream_flows(
             pack,
             &transfer_languages,
         ),
-        source_output_args: source_output_args_from_rulepack_for_languages(pack, &transfer_languages),
-        source_callback_args: source_callback_args_from_rulepack_for_languages(pack, &transfer_languages),
+        // Raw sink-lineage enumeration has no source endpoint selection.
+        // Source-only API transfers are added by the taint pass, where exact
+        // matcher-approved source sites are available.
+        source_output_args: Vec::new(),
+        source_callback_args: Vec::new(),
         call_result_passthroughs: call_result_passthroughs_from_rulepack_for_languages(
             pack,
             &transfer_languages,
@@ -1930,6 +1935,8 @@ fn compile_sink_upstream_flows(
                 pack,
                 languages: &transfer_languages,
                 receiver_state_propagations: &graph_config.receiver_state_propagations,
+                source_output_args: &graph_config.source_output_args,
+                source_callback_args: &graph_config.source_callback_args,
                 included_files: &scoped_files,
                 included_funcs: &scoped_funcs,
                 call_graph: call_graph.as_ref(),
@@ -2221,6 +2228,8 @@ struct SourceGraphJob {
     seeds: TokenSet,
     anchor: Option<Span>,
     output_arg_names: Vec<String>,
+    callback_only: bool,
+    output_only: bool,
     graph_key: Vec<String>,
 }
 
@@ -2291,7 +2300,10 @@ fn schedule_source_graph_groups(
             let seeds = source_seed_set(pack, hit.hit, decl);
             let output_arg_names = output_arg_names_for_match(pack, hit.hit, decl);
             let anchor = source_anchor_for_rule_match(pack, hit.hit);
-            let graph_key = sorted_seed_key_with_anchor(&seeds, anchor, &output_arg_names);
+            let callback_only = source_rule_is_callback_only(pack, hit.hit);
+            let output_only = source_rule_is_output_only(pack, hit.hit);
+            let graph_key =
+                sorted_seed_key_with_anchor(&seeds, anchor, &output_arg_names, callback_only, output_only);
             source_jobs.push((
                 hit.index,
                 SourceGraphJob {
@@ -2300,6 +2312,8 @@ fn schedule_source_graph_groups(
                     seeds,
                     anchor,
                     output_arg_names,
+                    callback_only,
+                    output_only,
                     graph_key,
                 },
             ));
@@ -2464,6 +2478,8 @@ where
             pack: context.pack,
             languages: context.transfer_languages,
             receiver_state_propagations: &context.graph_config.receiver_state_propagations,
+            source_output_args: &context.graph_config.source_output_args,
+            source_callback_args: &context.graph_config.source_callback_args,
             included_files: &scoped_files,
             included_funcs: &scoped_funcs,
             call_graph: source_call_graph.as_ref(),
@@ -2499,12 +2515,27 @@ fn build_source_group_candidates(
             let first = &group.jobs[0];
             let graph = Arc::new(bonsai_taint::entry_taint_call_records_from_idg_query(
                 bonsai_taint::IdgTaintQuery::semantic(
-                    bonsai_taint::IdgTaintSource::rule_match(
-                        group.start,
-                        &first.seeds,
-                        first.anchor,
-                        &first.output_arg_names,
-                    ),
+                    if first.callback_only {
+                        bonsai_taint::IdgTaintSource::callback_rule_match(
+                            group.start,
+                            &first.seeds,
+                            first.anchor.expect("callback source remains span-anchored"),
+                        )
+                    } else if first.output_only {
+                        bonsai_taint::IdgTaintSource::output_rule_match(
+                            group.start,
+                            &first.seeds,
+                            first.anchor,
+                            &first.output_arg_names,
+                        )
+                    } else {
+                        bonsai_taint::IdgTaintSource::rule_match(
+                            group.start,
+                            &first.seeds,
+                            first.anchor,
+                            &first.output_arg_names,
+                        )
+                    },
                     context.ws.db(),
                     context.idg,
                 )
@@ -2827,6 +2858,8 @@ where
         });
     }
     sort_matches(&mut source_hits);
+    let global = ws.compiler_linkage_index();
+    dedup_source_matches_by_compiler_attribution(ws, global.as_ref(), &mut source_hits);
     let unattributed_source_matches = source_hits
         .iter()
         .filter(|source| func_id_for_match(ws, source).is_none())
@@ -2836,7 +2869,6 @@ where
         detail: format!("source-analysis source_matches={}", source_hits.len()),
     });
 
-    let global = ws.compiler_linkage_index();
     let transfer_languages = workspace_languages(ws);
     on_progress(AnalysisProgress::PhaseStarted {
         label: "compiling transfer sites",
@@ -2856,8 +2888,18 @@ where
             pack,
             &transfer_languages,
         ),
-        source_output_args: source_output_args_from_rulepack_for_languages(pack, &transfer_languages),
-        source_callback_args: source_callback_args_from_rulepack_for_languages(pack, &transfer_languages),
+        source_output_args: source_output_args_from_rulepack_for_languages(
+            ws,
+            pack,
+            &transfer_languages,
+            &source_hits,
+        ),
+        source_callback_args: source_callback_args_from_rulepack_for_languages(
+            ws,
+            pack,
+            &transfer_languages,
+            &source_hits,
+        ),
         call_result_passthroughs: call_result_passthroughs_from_rulepack_for_languages(
             pack,
             &transfer_languages,
@@ -3364,6 +3406,7 @@ pub fn pack_inventory(pack: &Rulepack, options: PackInventoryOptions) -> Vec<Pac
 pub fn pack_audit(pack: &Rulepack, lang_filter: Option<&str>) -> PackAuditReport {
     type Counts = AHashMap<(String, String), (u32, u32)>;
     let mut sink_counts: Counts = AHashMap::new();
+    let mut source_family_counts: Counts = AHashMap::new();
     let mut source_counts: AHashMap<String, (u32, u32)> = AHashMap::new();
     let mut sanitizer_counts: AHashMap<String, (u32, u32)> = AHashMap::new();
     let mut langs: AHashSet<String> = AHashSet::new();
@@ -3398,6 +3441,19 @@ pub fn pack_audit(pack: &Rulepack, lang_filter: Option<&str>) -> PackAuditReport
                 } else {
                     entry.1 += 1;
                 }
+                if let Some(family) = Path::new(&rule.source_path)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                {
+                    let entry = source_family_counts
+                        .entry((rule.language.clone(), family.to_string()))
+                        .or_insert((0, 0));
+                    if rule.enabled {
+                        entry.0 += 1;
+                    } else {
+                        entry.1 += 1;
+                    }
+                }
             }
             RuleKind::Sanitizer => {
                 let entry = sanitizer_counts.entry(rule.language.clone()).or_insert((0, 0));
@@ -3419,6 +3475,30 @@ pub fn pack_audit(pack: &Rulepack, lang_filter: Option<&str>) -> PackAuditReport
         .into_iter()
         .map(|language| {
             let metadata = pack.metadata.languages.get(&language);
+            let source_families = pack
+                .metadata
+                .canonical_source_families
+                .iter()
+                .map(|family| {
+                    let (enabled, disabled) = source_family_counts
+                        .get(&(language.clone(), family.clone()))
+                        .copied()
+                        .unwrap_or((0, 0));
+                    (
+                        family.clone(),
+                        PackAuditFamilyCount {
+                            enabled,
+                            disabled,
+                            not_applicable: metadata.is_some_and(|metadata| {
+                                metadata
+                                    .not_applicable_source_families
+                                    .iter()
+                                    .any(|not_applicable| not_applicable == family)
+                            }),
+                        },
+                    )
+                })
+                .collect();
             let sinks = pack
                 .metadata
                 .canonical_sink_families
@@ -3448,6 +3528,7 @@ pub fn pack_audit(pack: &Rulepack, lang_filter: Option<&str>) -> PackAuditReport
                 sanitizer_counts.get(&language).copied().unwrap_or((0, 0));
             PackAuditLanguage {
                 language,
+                source_families,
                 sinks,
                 sources: PackAuditCount {
                     enabled: source_enabled,
@@ -3461,6 +3542,7 @@ pub fn pack_audit(pack: &Rulepack, lang_filter: Option<&str>) -> PackAuditReport
         })
         .collect();
     PackAuditReport {
+        canonical_source_families: pack.metadata.canonical_source_families.clone(),
         canonical_sink_families: pack.metadata.canonical_sink_families.clone(),
         sink_family_short_labels: pack.metadata.sink_family_short_labels.clone(),
         languages,
@@ -4864,6 +4946,53 @@ fn sort_matches(matches: &mut [RuleMatch]) {
             b.line,
             b.column,
         ))
+    });
+}
+
+/// Keep one source-analysis job per concrete rule/span while selecting the
+/// most specific compiler-resolved owner. A module body and a nested callable
+/// may both expose the same syntax fact; display names are not sufficient to
+/// choose between them (for example a CommonJS `render` function whose stable
+/// compiler identity is `default`).
+fn dedup_source_matches_by_compiler_attribution(
+    ws: &Workspace,
+    global: &GlobalIndex,
+    matches: &mut Vec<RuleMatch>,
+) {
+    type Key = (String, String, u64, u64, String);
+    let mut best: AHashMap<Key, (usize, bool, u64)> = AHashMap::new();
+    for (index, source) in matches.iter().enumerate() {
+        let source_func = func_id_for_match(ws, source);
+        let attributed = source_func.is_some();
+        let specificity = source_func
+            .and_then(|func| global.decl_of(SymbolId::new(func.raw())))
+            .map(|decl| decl.span.len())
+            .unwrap_or(u64::MAX);
+        let key = (
+            source.rule_id.clone(),
+            source.file.clone(),
+            source.span.start,
+            source.span.end,
+            source.match_text.clone(),
+        );
+        match best.get_mut(&key) {
+            Some(current)
+                if (attributed && !current.1) || (attributed == current.1 && specificity < current.2) =>
+            {
+                *current = (index, attributed, specificity);
+            }
+            Some(_) => {}
+            None => {
+                best.insert(key, (index, attributed, specificity));
+            }
+        }
+    }
+    let keep: AHashSet<usize> = best.into_values().map(|(index, _, _)| index).collect();
+    let mut index = 0usize;
+    matches.retain(|_| {
+        let retain = keep.contains(&index);
+        index += 1;
+        retain
     });
 }
 
@@ -8160,6 +8289,20 @@ fn source_anchor_for_rule_match(pack: &Rulepack, src: &RuleMatch) -> Option<Span
     }
 }
 
+fn source_rule_is_callback_only(pack: &Rulepack, src: &RuleMatch) -> bool {
+    pack.find_rule_by_id(&src.rule_id)
+        .and_then(|rule| rule.taint_semantics.as_ref())
+        .is_some_and(|semantics| semantics.source_callback_only)
+}
+
+fn source_rule_is_output_only(pack: &Rulepack, src: &RuleMatch) -> bool {
+    pack.find_rule_by_id(&src.rule_id)
+        .and_then(|rule| rule.taint_semantics.as_ref())
+        .is_some_and(|semantics| {
+            !semantics.source_output_args.is_empty() || semantics.source_output_args_from.is_some()
+        })
+}
+
 /// Resolve the source rule's `source_output_args` indices to the
 /// concrete carrier names at the source's call site. The IDG seeder
 /// then includes post-call reads/writes of those carriers so the
@@ -8241,14 +8384,20 @@ fn output_arg_names_for_match(pack: &Rulepack, src: &RuleMatch, decl: &bonsai_la
     let Some(semantics) = rule.taint_semantics.as_ref() else {
         return Vec::new();
     };
-    if semantics.source_output_args.is_empty() {
+    if semantics.source_output_args.is_empty() && semantics.source_output_args_from.is_none() {
         return Vec::new();
     }
     let Some(FlowEvent::Call { args, .. }) = find_call_event_at(&decl.flow_events, src.span) else {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for &idx in &semantics.source_output_args {
+    let mut indices = semantics.source_output_args.clone();
+    if let Some(start) = semantics.source_output_args_from {
+        indices.extend(start..args.len());
+    }
+    indices.sort_unstable();
+    indices.dedup();
+    for idx in indices {
         let Some(arg) = args.get(idx) else { continue };
         if let Some(name) = arg.place.as_deref() {
             if !name.is_empty() {
@@ -8279,6 +8428,12 @@ fn source_seed_set(pack: &Rulepack, src: &RuleMatch, decl: &bonsai_lang_api::Dec
         .and_then(|rule| rule.taint_semantics.as_ref())
         .map(|semantics| semantics.source_callback_args.as_slice())
         .unwrap_or(&[]);
+    let source_output_args_from = rule
+        .and_then(|rule| rule.taint_semantics.as_ref())
+        .and_then(|semantics| semantics.source_output_args_from);
+    let source_callback_only = rule
+        .and_then(|rule| rule.taint_semantics.as_ref())
+        .is_some_and(|semantics| semantics.source_callback_only);
     if is_inferred || is_param_rule {
         insert_taint_aliases(&mut out, &src.match_text);
         insert_descendant_taint_aliases(&mut out, &src.match_text);
@@ -8288,7 +8443,9 @@ fn source_seed_set(pack: &Rulepack, src: &RuleMatch, decl: &bonsai_lang_api::Dec
         &decl.flow_events,
         src,
         source_output_args,
+        source_output_args_from,
         source_callback_args,
+        source_callback_only,
         allow_text_only_source_match,
         &mut out,
     );
@@ -8581,6 +8738,8 @@ fn idg_transfer_options_from_rulepack_shapes(
             .map(|shape| bonsai_idg::SourceOutputArgSpec {
                 callee: shape.callee.clone(),
                 output_arg_indices: shape.output_arg_indices.clone(),
+                output_arg_start_index: shape.output_arg_start_index,
+                resolved_call_sites: shape.resolved_call_sites.clone(),
             })
             .collect(),
         source_callback_args: source_callbacks
@@ -8589,6 +8748,7 @@ fn idg_transfer_options_from_rulepack_shapes(
                 callee: shape.callee.clone(),
                 callback_arg_index: shape.callback_arg_index,
                 source_param_indices: shape.source_param_indices.clone(),
+                resolved_call_sites: shape.resolved_call_sites.clone(),
             })
             .collect(),
         call_result_passthroughs: Vec::new(),
@@ -8641,9 +8801,25 @@ pub fn taint_transfers_from_rulepack(pack: &Rulepack) -> RulepackTaintTransfers 
 pub fn seed_idg_service_for_rulepack(ws: &Workspace, pack: &Rulepack) -> Arc<bonsai_idg::IdgQueryService> {
     let languages = workspace_languages(ws);
     let rulepack_typing = crate::matcher::build_rulepack_typing(&pack.all_rules());
+    let source_transfer_rules: Vec<&Rule> = pack
+        .all_rules()
+        .into_iter()
+        .filter(|rule| {
+            rule.enabled
+                && rule.kind == RuleKind::Source
+                && rule.taint_semantics.as_ref().is_some_and(|semantics| {
+                    !semantics.source_output_args.is_empty()
+                        || semantics.source_output_args_from.is_some()
+                        || !semantics.source_callback_args.is_empty()
+                })
+        })
+        .collect();
+    let source_transfer_hits = crate::matcher::match_rules_against_facts(ws, &source_transfer_rules);
     let overwrites = clean_output_overwrites_from_rulepack_for_languages(pack, &languages);
-    let source_outputs = source_output_args_from_rulepack_for_languages(pack, &languages);
-    let source_callbacks = source_callback_args_from_rulepack_for_languages(pack, &languages);
+    let source_outputs =
+        source_output_args_from_rulepack_for_languages(ws, pack, &languages, &source_transfer_hits);
+    let source_callbacks =
+        source_callback_args_from_rulepack_for_languages(ws, pack, &languages, &source_transfer_hits);
     let output_arg_flows = output_arg_flows_from_rulepack_for_languages(pack, &languages);
     let receiver_state_propagations = compiled_receiver_state_propagations_for_languages(
         ws,
@@ -8673,6 +8849,8 @@ struct ScopedIdgSeedRequest<'a> {
     pack: &'a Rulepack,
     languages: &'a AHashSet<String>,
     receiver_state_propagations: &'a [ReceiverStatePropagation],
+    source_output_args: &'a [SourceOutputArgs],
+    source_callback_args: &'a [SourceCallbackArgs],
     included_files: &'a [FileId],
     included_funcs: &'a [FuncId],
     call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
@@ -8690,18 +8868,18 @@ where
         pack,
         languages,
         receiver_state_propagations,
+        source_output_args,
+        source_callback_args,
         included_files,
         included_funcs,
         call_graph,
     } = request;
     let overwrites = clean_output_overwrites_from_rulepack_for_languages(pack, languages);
-    let source_outputs = source_output_args_from_rulepack_for_languages(pack, languages);
-    let source_callbacks = source_callback_args_from_rulepack_for_languages(pack, languages);
     let output_arg_flows = output_arg_flows_from_rulepack_for_languages(pack, languages);
     let mut options = idg_transfer_options_from_rulepack_shapes(
         &overwrites,
-        &source_outputs,
-        &source_callbacks,
+        source_output_args,
+        source_callback_args,
         &output_arg_flows,
         receiver_state_propagations,
     );
@@ -8741,9 +8919,12 @@ fn symbolic_field_languages(ws: &Workspace, files: &[FileId]) -> Vec<String> {
 }
 
 fn source_output_args_from_rulepack_for_languages(
+    ws: &Workspace,
     pack: &Rulepack,
     languages: &AHashSet<String>,
+    source_hits: &[RuleMatch],
 ) -> Vec<SourceOutputArgs> {
+    let sites_by_rule = source_transfer_sites_by_rule(ws, source_hits);
     let mut out: Vec<_> = pack
         .all_rules()
         .into_iter()
@@ -8751,8 +8932,9 @@ fn source_output_args_from_rulepack_for_languages(
             rule.enabled && rule.kind == RuleKind::Source && languages.contains(rule.language.as_str())
         })
         .filter_map(|rule| {
+            let resolved_call_sites = sites_by_rule.get(&rule.id)?.clone();
             let semantics = rule.taint_semantics.as_ref()?;
-            if semantics.source_output_args.is_empty() {
+            if semantics.source_output_args.is_empty() && semantics.source_output_args_from.is_none() {
                 return None;
             }
             let callee = rule
@@ -8766,6 +8948,8 @@ fn source_output_args_from_rulepack_for_languages(
             Some(SourceOutputArgs {
                 callee,
                 output_arg_indices,
+                output_arg_start_index: semantics.source_output_args_from,
+                resolved_call_sites,
             })
         })
         .collect();
@@ -8774,9 +8958,12 @@ fn source_output_args_from_rulepack_for_languages(
 }
 
 fn source_callback_args_from_rulepack_for_languages(
+    ws: &Workspace,
     pack: &Rulepack,
     languages: &AHashSet<String>,
+    source_hits: &[RuleMatch],
 ) -> Vec<SourceCallbackArgs> {
+    let sites_by_rule = source_transfer_sites_by_rule(ws, source_hits);
     let mut out = Vec::new();
     for rule in pack.all_rules() {
         if !rule.enabled || rule.kind != RuleKind::Source || !languages.contains(rule.language.as_str()) {
@@ -8788,6 +8975,9 @@ fn source_callback_args_from_rulepack_for_languages(
         if semantics.source_callback_args.is_empty() {
             continue;
         }
+        let Some(resolved_call_sites) = sites_by_rule.get(&rule.id) else {
+            continue;
+        };
         let Some(callee) = rule.match_spec.callee.as_ref().and_then(semantic_transfer_callee) else {
             continue;
         };
@@ -8799,11 +8989,33 @@ fn source_callback_args_from_rulepack_for_languages(
                 callee: callee.clone(),
                 callback_arg_index: callback.callback_arg_index,
                 source_param_indices,
+                resolved_call_sites: resolved_call_sites.clone(),
             });
         }
     }
     sort_source_callback_args(&mut out);
     out
+}
+
+fn source_transfer_sites_by_rule(ws: &Workspace, source_hits: &[RuleMatch]) -> AHashMap<String, Vec<Span>> {
+    let mut sites: AHashMap<String, Vec<Span>> = AHashMap::new();
+    for source in source_hits {
+        let Some(func) = func_id_for_match(ws, source) else {
+            continue;
+        };
+        let Some(decl) = ws.exact_decl(SymbolId::new(func.raw())) else {
+            continue;
+        };
+        let Some(FlowEvent::Call { span, .. }) = find_call_event_at(&decl.flow_events, source.span) else {
+            continue;
+        };
+        sites.entry(source.rule_id.clone()).or_default().push(*span);
+    }
+    for spans in sites.values_mut() {
+        spans.sort();
+        spans.dedup();
+    }
+    sites
 }
 
 fn call_result_passthroughs_from_rulepack(pack: &Rulepack) -> Vec<CallResultPassthrough> {
@@ -9045,17 +9257,45 @@ fn sort_clean_output_overwrites(items: &mut Vec<CleanOutputOverwrite>) {
 }
 
 fn sort_source_output_args(items: &mut Vec<SourceOutputArgs>) {
-    items.sort_by(|a, b| (&a.callee, &a.output_arg_indices).cmp(&(&b.callee, &b.output_arg_indices)));
+    for item in items.iter_mut() {
+        item.resolved_call_sites.sort();
+        item.resolved_call_sites.dedup();
+    }
+    items.sort_by(|a, b| {
+        (
+            &a.callee,
+            &a.output_arg_indices,
+            a.output_arg_start_index,
+            &a.resolved_call_sites,
+        )
+            .cmp(&(
+                &b.callee,
+                &b.output_arg_indices,
+                b.output_arg_start_index,
+                &b.resolved_call_sites,
+            ))
+    });
     items.dedup();
 }
 
 fn sort_source_callback_args(items: &mut Vec<SourceCallbackArgs>) {
+    for item in items.iter_mut() {
+        item.resolved_call_sites.sort();
+        item.resolved_call_sites.dedup();
+    }
     items.sort_by(|a, b| {
-        (&a.callee, a.callback_arg_index, &a.source_param_indices).cmp(&(
-            &b.callee,
-            b.callback_arg_index,
-            &b.source_param_indices,
-        ))
+        (
+            &a.callee,
+            a.callback_arg_index,
+            &a.source_param_indices,
+            &a.resolved_call_sites,
+        )
+            .cmp(&(
+                &b.callee,
+                b.callback_arg_index,
+                &b.source_param_indices,
+                &b.resolved_call_sites,
+            ))
     });
     items.dedup();
 }
@@ -9278,10 +9518,68 @@ mod source_seed_tests {
         let source = source_rule_match_at(Span::new(file, 20, 36));
         let mut seeds = TokenSet::default();
 
-        collect_source_seed_targets(&events, &source, &[], &[], false, &mut seeds);
+        collect_source_seed_targets(&events, &source, &[], None, &[], false, false, &mut seeds);
 
         assert!(seeds.contains("token"));
         assert!(!seeds.contains("action"));
+    }
+
+    #[test]
+    fn callback_only_source_does_not_taint_assigned_registration_result() {
+        let file = FileId::new(1);
+        let events = vec![FlowEvent::Assign {
+            span: Span::new(file, 10, 48),
+            target: "subscription".to_string(),
+            source_name: None,
+            source_call: Some("stream.on".to_string()),
+            source_call_args: vec!["\"data\"".to_string(), "callback".to_string()],
+            source_names: vec!["stream".to_string(), "callback".to_string()],
+            value_kind: Some(AssignValueKind::CallResult),
+            declares_new_binding: true,
+        }];
+        let mut source = source_rule_match_at(Span::new(file, 20, 29));
+        source.match_text = "stream.on".to_string();
+        let callbacks = [SourceCallbackArgSemantics {
+            callback_arg_index: 1,
+            source_param_indices: vec![0],
+        }];
+        let mut seeds = TokenSet::default();
+
+        collect_source_seed_targets(&events, &source, &[], None, &callbacks, true, false, &mut seeds);
+
+        assert!(
+            !seeds.contains("subscription"),
+            "the registration/stream return is not the callback-delivered payload"
+        );
+    }
+
+    #[test]
+    fn hybrid_callback_source_keeps_assigned_synchronous_result() {
+        let file = FileId::new(1);
+        let events = vec![FlowEvent::Assign {
+            span: Span::new(file, 10, 48),
+            target: "answer".to_string(),
+            source_name: None,
+            source_call: Some("question".to_string()),
+            source_call_args: vec!["\"name?\"".to_string(), "callback".to_string()],
+            source_names: vec!["question".to_string(), "callback".to_string()],
+            value_kind: Some(AssignValueKind::CallResult),
+            declares_new_binding: true,
+        }];
+        let mut source = source_rule_match_at(Span::new(file, 20, 28));
+        source.match_text = "question".to_string();
+        let callbacks = [SourceCallbackArgSemantics {
+            callback_arg_index: 1,
+            source_param_indices: vec![0],
+        }];
+        let mut seeds = TokenSet::default();
+
+        collect_source_seed_targets(&events, &source, &[], None, &callbacks, false, false, &mut seeds);
+
+        assert!(
+            seeds.contains("answer"),
+            "a hybrid API's synchronous source result must remain seeded"
+        );
     }
 
     #[test]
@@ -9315,7 +9613,7 @@ mod source_seed_tests {
         let source = source_rule_match_at(Span::new(file, 10, 30));
         let mut seeds = TokenSet::default();
 
-        collect_source_seed_targets(&events, &source, &[], &[], false, &mut seeds);
+        collect_source_seed_targets(&events, &source, &[], None, &[], false, false, &mut seeds);
 
         assert!(seeds.contains("request.args.get"));
         assert!(!seeds.contains("other.args.get"));

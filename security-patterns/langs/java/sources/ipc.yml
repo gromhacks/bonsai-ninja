@@ -1,6 +1,9 @@
 # Java IPC / cross-app input sources.
 - id: java.source.android_intent_getstringextra
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: java.source.android_intent_payload
   language: java
   trust: ipc
   tag: ipc-input
@@ -25,3 +28,57 @@
       }
     expect_match_text: [intent.getStringExtra]
   description: "Android Intent.getStringExtra(...) - package-scoped IPC extra read from a local intent receiver."
+
+- id: java.source.android_intent_payload
+  enabled: true
+  language: java
+  trust: ipc
+  tag: ipc-input
+  payload_types: [text, binary, json, url]
+  packages: [android.content]
+  match:
+    kind: call
+    callee:
+      regex: "(^|[.])(getStringExtra|getExtras|getData|getDataString|getClipData|getCharSequenceExtra|getStringArrayExtra|getCharSequenceArrayExtra|getIntegerArrayListExtra|getStringArrayListExtra|getParcelableExtra|getParcelableArrayExtra|getParcelableArrayListExtra|getSerializableExtra)$"
+  constraints:
+  - receiver_type_in: [Intent, android.content.Intent]
+  - max_args: 1
+  match_examples:
+  - name: Android Intent data string
+    code: |
+      import android.content.Intent;
+      class App { String read(Intent intent) { return intent.getDataString(); } }
+    expect_match_text: [intent.getDataString]
+  - name: local envelope accessor is not Android IPC
+    code: |
+      import android.content.Intent;
+      class Envelope { String getDataString() { return "local"; } }
+      class App { String read(Envelope value) { return value.getDataString(); } }
+    expect_no_match: true
+  description: "Typed Android Intent payload/URI/clip/extra getters - values crossing an application or component IPC boundary."
+
+- id: java.source.process_output_streams
+  enabled: true
+  language: java
+  trust: ipc
+  tag: ipc-input
+  payload_types: [text, binary]
+  packages: [java.lang]
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])(getInputStream|getErrorStream)$'
+  constraints:
+  - receiver_type_in: [Process, java.lang.Process]
+  - max_args: 0
+  match_examples:
+  - name: child-process output stream
+    code: |
+      class App { java.io.InputStream output(java.lang.Process process) { return process.getInputStream(); } }
+    expect_match_text: [process.getInputStream]
+  - name: local process model is not an IPC source
+    code: |
+      class Process { String getInputStream() { return "constant"; } }
+      class App { String output(Process process) { return process.getInputStream(); } }
+    expect_no_match: true
+  description: "java.lang.Process stdout/stderr streams - values returned by a local child process across an IPC boundary."

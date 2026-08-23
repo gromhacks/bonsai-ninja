@@ -20,9 +20,7 @@
 # NSURLSession task object returned from the request-creation call.
 
 - id: objc.source.nsurlsession_datataskwithurl
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: objc
   trust: remote
   tag: http-input
@@ -31,16 +29,31 @@
     kind: call
     callee:
       name: dataTaskWithURL
+  constraints:
+  - receiver_type_in: [NSURLSession]
+  - arg_count: 2
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
   match_examples:
-  - name: declared shape
+  - name: url session response callback data
     code: |
-      void test(id input) { id target = input; int amount = 1; dataTaskWithURL(input); }
-  description: "Disabled - dataTaskWithURL: returns an NSURLSessionDataTask, not response bytes. Enable a source on the completion block's data parameter once the adapter can bind that callback parameter to this selector call."
+      #import <Foundation/Foundation.h>
+      void test(NSURLSession *session, NSURL *url) {
+        [session dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) { NSLog(@"%@", data); }];
+      }
+    expect_match_text: [session.dataTaskWithURL]
+  - name: assigned task without callback is not response data
+    code: |
+      #import <Foundation/Foundation.h>
+      NSURLSessionDataTask *test(NSURLSession *session, NSURL *url) { return [session dataTaskWithURL:url]; }
+    expect_no_match: true
+  description: "NSURLSession dataTaskWithURL:completionHandler: callback parameter 0 is the remote response Data; the returned task object is not sourced."
 
 - id: objc.source.nsurlsession_datataskwithrequest
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: objc
   trust: remote
   tag: http-input
@@ -49,16 +62,31 @@
     kind: call
     callee:
       name: dataTaskWithRequest
+  constraints:
+  - receiver_type_in: [NSURLSession]
+  - arg_count: 2
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
   match_examples:
-  - name: declared shape
+  - name: request response callback data
     code: |
-      void test(id input) { id target = input; int amount = 1; dataTaskWithRequest(input); }
-  description: "Disabled - dataTaskWithRequest: returns an NSURLSessionDataTask, not response bytes. Enable a source on the completion block's data parameter once callback ownership is available."
+      #import <Foundation/Foundation.h>
+      void test(NSURLSession *session, NSURLRequest *request) {
+        [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) { NSLog(@"%@", data); }];
+      }
+    expect_match_text: [session.dataTaskWithRequest]
+  - name: assigned request task without callback is not response data
+    code: |
+      #import <Foundation/Foundation.h>
+      NSURLSessionDataTask *test(NSURLSession *session, NSURLRequest *request) { return [session dataTaskWithRequest:request]; }
+    expect_no_match: true
+  description: "NSURLSession dataTaskWithRequest:completionHandler: callback parameter 0 is the remote response Data; the returned task object is not sourced."
 
 - id: objc.source.nsurlsession_downloadtask
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: objc
   trust: remote
   tag: http-input
@@ -66,16 +94,29 @@
   match:
     kind: call
     callee:
-      regex: "^(downloadTaskWithURL|downloadTaskWithRequest)$"
+      regex: "(?:^|\\.)(downloadTaskWithURL|downloadTaskWithRequest)$"
+  constraints:
+  - receiver_type_in: [NSURLSession]
+  - arg_count: 2
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
   match_examples:
-  - name: declared shape
+  - name: download callback temporary location
     code: |
-      void test(id input) { id target = input; int amount = 1; downloadTaskWithURL(input); }
-  - name: unrelated call negative
+      #import <Foundation/Foundation.h>
+      void test(NSURLSession *session, NSURL *url) {
+        [session downloadTaskWithURL:url completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) { NSLog(@"%@", location); }];
+      }
+    expect_match_text: [session.downloadTaskWithURL]
+  - name: assigned download task without callback is not payload
     code: |
-      void test(id input) { id target = input; int amount = 1; uploadTaskWithRequest(input); }
+      #import <Foundation/Foundation.h>
+      NSURLSessionDownloadTask *test(NSURLSession *session, NSURL *url) { return [session downloadTaskWithURL:url]; }
     expect_no_match: true
-  description: "Disabled - downloadTaskWithURL:/downloadTaskWithRequest: return a task object. The downloaded file URL belongs to the completion/delegate callback and must not be approximated as the call result."
+  description: "NSURLSession download task completion callback parameter 0 is the downloaded response's temporary-file URL; the returned task object is not sourced."
 
 - id: objc.source.nsurlconnection_send_synchronous
   enabled: true
@@ -179,19 +220,67 @@
       name: request
   description: "Disabled - bare param name 'request' fires on every handler arg. Re-enable once adapter binds selector-pieces to param identifiers."
 
-- id: objc.source.nsurlsession_completion_data
+- id: objc.source.nsurlsession_delegate_data
   enabled: false
   disabled_reason:
     code: pending-adapter-fact
   language: objc
   trust: remote
-  tag: http-input
-  payload_types: [binary, json]
+  tag: network-response
+  payload_types: [binary, json, text]
+  packages: [Foundation]
   match:
     kind: param
     target:
-      name: data
-  description: "Disabled - a completion block's `data` parameter is remote only when the block belongs to an NSURLSession request call. It needs exact enclosing-call/callback ownership rather than a global parameter-name match."
+      annotation: didReceiveData
+      param_type_in: [NSData]
+  match_examples:
+  - name: url session delegate response data
+    code: |
+      #import <Foundation/Foundation.h>
+      @implementation Client
+      - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task didReceiveData:(NSData *)chunk {
+        [self consume:chunk];
+      }
+      @end
+    expect_match_text: [chunk]
+  - name: ordinary data parameter negative
+    code: |
+      #import <Foundation/Foundation.h>
+      void consume(NSData *chunk) { }
+    expect_no_match: true
+  description: "Disabled pending adapter emission of Objective-C selector-piece annotations on declared parameters; this must identify URLSession:dataTask:didReceiveData: rather than every NSData parameter."
+
+- id: objc.source.nsurlsession_download_delegate_location
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: objc
+  trust: remote
+  tag: network-response
+  payload_types: [path, binary]
+  packages: [Foundation]
+  match:
+    kind: param
+    target:
+      annotation: didFinishDownloadingToURL
+      param_type_in: [NSURL]
+  match_examples:
+  - name: url session download delegate location
+    code: |
+      #import <Foundation/Foundation.h>
+      @implementation Client
+      - (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)task didFinishDownloadingToURL:(NSURL *)location {
+        [self consume:location];
+      }
+      @end
+    expect_match_text: [location]
+  - name: ordinary url parameter negative
+    code: |
+      #import <Foundation/Foundation.h>
+      void consume(NSURL *location) { }
+    expect_no_match: true
+  description: "Disabled pending adapter emission of Objective-C selector-piece annotations on declared parameters; this must identify the download delegate callback rather than every NSURL parameter."
 
 - id: objc.source.openurl_options_url
   enabled: true

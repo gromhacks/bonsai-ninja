@@ -397,15 +397,23 @@
   match:
     kind: read
     target:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.body$"
+      attribute: [request, body]
   match_examples:
   - name: koa request body
     code: |
       const _u = require("koa");
-      function demo(input, req, obj) {
+      function demo(request) {
         return request.body;
       }
-  description: Koa/Fastify request.body - HTTP request body.
+    expect_match_text: [request.body]
+  - name: arbitrary body property is not a framework request
+    code: |
+      const _u = require("koa");
+      function demo(payload) {
+        return payload.body;
+      }
+    expect_no_match: true
+  description: Koa/Fastify request.body - HTTP request body. The exact `request.body` carrier avoids turning every `.body` property in a framework-using file into a source.
 
 - id: javascript.source.koa_request_query
   enabled: true
@@ -1133,25 +1141,233 @@
   description: "Azure Functions context.req - HTTP request object from the Azure host."
 
 # -- IPC / WebSocket ---------------------------------------------------------
-- id: javascript.source.websocket_message_event
+- id: javascript.source.window_message_callback
   enabled: true
   language: javascript
   trust: remote
-  tag: ws-input
-  frameworks: [ws, socket.io, postmessage]
-  packages: [ws, socket.io]
+  tag: ipc-input
+  payload_types: [event, text, json]
+  frameworks: [postmessage]
   match:
-    kind: read
-    target:
-      attribute: [event, data]
+    kind: call
+    callee:
+      regex: "^(window|globalThis)\\.addEventListener$"
+  constraints:
+  - arg_count: 2
+  - arg_matches_regex:
+      index: 0
+      regex: "^['\"]message['\"]$"
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
   match_examples:
-  - name: websocket message event
+  - name: browser message listener callback
     code: |
-      const _u = require("ws");
-      function demo(input, req, obj) {
-        return event.data;
-      }
-  description: WebSocket/postMessage MessageEvent.data - untrusted payload from cross-origin or remote peer.
+      window.addEventListener("message", event => {
+        sink(event.data);
+      });
+    expect_match_text: [window.addEventListener]
+  - name: non-message event is not cross-context input
+    code: |
+      window.addEventListener("load", event => {
+        sink(event.type);
+      });
+    expect_no_match: true
+  description: "First parameter of a window/globalThis `message` event callback - a MessageEvent delivered by postMessage. The registration event name is matched exactly; downstream code should still validate event.origin."
+
+- id: javascript.source.node_http_create_server_listener
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event]
+  packages: [http, "node:http"]
+  match:
+    kind: call
+    callee:
+      attribute: [http, createServer]
+  constraints:
+  - arg_count: 1
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices: [0]
+  match_examples:
+  - name: Node HTTP request listener
+    code: |
+      const http = require("node:http");
+      http.createServer((request, response) => {
+        sink(request.url);
+      });
+    expect_match_text: [http.createServer]
+  - name: createServer result without a request listener is not input
+    code: |
+      const http = require("node:http");
+      const server = http.createServer();
+    expect_no_match: true
+  description: "First callback parameter of http.createServer(requestListener) - the compiler-bound IncomingMessage for an inbound client request. The server return value is not a source."
+
+- id: javascript.source.node_http_create_server_options_listener
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event]
+  packages: [http, "node:http"]
+  match:
+    kind: call
+    callee:
+      attribute: [http, createServer]
+  constraints:
+  - arg_count: 2
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
+  match_examples:
+  - name: Node HTTP request listener after options
+    code: |
+      const http = require("node:http");
+      http.createServer({ keepAlive: true }, function(request, response) {
+        sink(request.url);
+      });
+    expect_match_text: [http.createServer]
+  - name: unrelated two-argument factory is not HTTP input
+    code: |
+      const http = require("node:http");
+      factory.createServer({}, handler);
+    expect_no_match: true
+  description: "First callback parameter of http.createServer(options, requestListener) - the inbound client request. The callback position is distinct from the one-argument overload."
+
+- id: javascript.source.node_https_create_server_listener
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event]
+  packages: [https, "node:https"]
+  match:
+    kind: call
+    callee:
+      attribute: [https, createServer]
+  constraints:
+  - arg_count: 1
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices: [0]
+  match_examples:
+  - name: Node HTTPS request listener
+    code: |
+      const https = require("node:https");
+      https.createServer((request, response) => sink(request.url));
+    expect_match_text: [https.createServer]
+  - name: HTTPS server handle without listener is not input
+    code: |
+      const https = require("node:https");
+      const server = https.createServer();
+    expect_no_match: true
+  description: "First callback parameter of https.createServer(requestListener) - the inbound client request; the returned server handle is not a source."
+
+- id: javascript.source.node_https_create_server_options_listener
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event]
+  packages: [https, "node:https"]
+  match:
+    kind: call
+    callee:
+      attribute: [https, createServer]
+  constraints:
+  - arg_count: 2
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
+  match_examples:
+  - name: Node HTTPS request listener after TLS options
+    code: |
+      const https = require("node:https");
+      https.createServer({ key, cert }, (request, response) => sink(request.url));
+    expect_match_text: [https.createServer]
+  - name: HTTP namespace is not the HTTPS rule
+    code: |
+      const https = require("node:https");
+      http.createServer({}, handler);
+    expect_no_match: true
+  description: "First callback parameter of https.createServer(options, requestListener) - the inbound client request."
+
+- id: javascript.source.deno_serve_listener
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event]
+  frameworks: [deno]
+  match:
+    kind: call
+    callee:
+      attribute: [Deno, serve]
+  constraints:
+  - arg_count: 1
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices: [0]
+  match_examples:
+  - name: Deno serve request handler
+    code: |
+      Deno.serve(request => new Response(request.url));
+    expect_match_text: [Deno.serve]
+  - name: assigned Deno server handle without a handler is not input
+    code: |
+      const server = Deno.serve();
+    expect_no_match: true
+  description: "First callback parameter of Deno.serve(handler) - the inbound Web Request. The returned server handle is not a source."
+
+- id: javascript.source.deno_serve_options_listener
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event]
+  frameworks: [deno]
+  match:
+    kind: call
+    callee:
+      attribute: [Deno, serve]
+  constraints:
+  - arg_count: 2
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
+  match_examples:
+  - name: Deno serve options and request handler
+    code: |
+      Deno.serve({ port: 8080 }, request => new Response(request.url));
+    expect_match_text: [Deno.serve]
+  - name: unrelated serve method is not Deno input
+    code: |
+      app.serve({ port: 8080 }, handler);
+    expect_no_match: true
+  description: "First callback parameter of Deno.serve(options, handler) - the inbound Web Request."
 
 - id: javascript.source.websocket_structured_frame_data
   enabled: false
@@ -1222,8 +1438,7 @@
 - id: javascript.source.eventsource_message_data
   enabled: false
   disabled_reason:
-    code: subsumed
-    subsumed_by: javascript.source.websocket_message_event
+    code: pending-adapter-fact
   language: javascript
   trust: remote
   tag: network-input
@@ -1234,7 +1449,7 @@
     kind: read
     target:
       attribute: [event, data]
-  description: "Disabled - SSE MessageEvent.data shares the same `event.data` AST shape as WebSocket / postMessage / Pub-Sub message events; covered by javascript.source.websocket_message_event. Re-enable once an SSE-specific receiver-type fact ships."
+  description: "Disabled - `event.data` needs callback-delivery evidence from an EventSource `message` listener; the bare property shape is not a source boundary."
 
 - id: javascript.source.socketio_event_param
   enabled: false
@@ -1778,24 +1993,40 @@
   description: "Multipart upload filename fields from multer/formidable/busboy/express-fileupload - client-controlled names."
 
 # -- tRPC procedure input ----------------------------------------------------
-- id: javascript.source.trpc_input
+- id: javascript.source.trpc_callback_input
   enabled: true
   language: javascript
   trust: remote
   tag: rpc-input
+  payload_types: [json]
   packages: ["@trpc/server"]
   match:
-    kind: read
-    target:
-      attribute: [ctx, input]
+    kind: call
+    callee:
+      regex: "(^|\\.)procedure\\.input\\(.+\\)\\.(query|mutation|subscription)$"
+  constraints:
+  - arg_count: 1
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices: [0]
   match_examples:
-  - name: trpc input
+  - name: tRPC procedure callback input
     code: |
-      const _u = require("@trpc/server");
-      function demo(input, req, obj) {
-        return ctx.input;
-      }
-  description: "tRPC procedure ctx.input - attacker-supplied procedure argument (already validated by zod if pipe configured)."
+      const { initTRPC } = require("@trpc/server");
+      const t = initTRPC.create();
+      const appRouter = t.router({
+        list: t.procedure.input(schema).query(({ input }) => sink(input.q)),
+      });
+    expect_match_text: ["t.procedure.input(schema).query"]
+  - name: procedure builder without callback invocation is not a delivered input
+    code: |
+      const { initTRPC } = require("@trpc/server");
+      const t = initTRPC.create();
+      const builder = t.procedure.input(schema).query;
+    expect_no_match: true
+  description: "First parameter of a tRPC procedure callback registered through procedure.input(...).query/mutation/subscription - the compiler-bound procedure options containing client input. The returned router/procedure object is not a source."
 
 - id: javascript.source.trpc_resolver_input_property
   enabled: false
@@ -1818,7 +2049,7 @@
         return opts.input;
       }
     expect_match_text: [opts.input]
-  description: "Disabled - without semantic resolver-parameter facts this collides with ctx.input; javascript.source.trpc_input covers the canonical tRPC input object."
+  description: "Disabled - tRPC passes input through the procedure callback's options parameter. A bare `.input` property cannot prove that callback boundary; enable through callback-argument seeding instead."
 
 - id: javascript.source.adonis_request_input
   enabled: true

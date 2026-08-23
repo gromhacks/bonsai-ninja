@@ -496,16 +496,34 @@
     kind: call
     callee:
       attribute: [BytesMessage, readBytes]
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
-  - name: jms bytes message read bytes
+  - name: jms bytes message fills caller buffer
     code: |
-      import javax.jms.*;
+      import jakarta.jms.BytesMessage;
       class App {
-        Object handle(BytesMessage message, byte[] out) throws Exception {
+        int handle(BytesMessage message, byte[] out) throws Exception {
           return message.readBytes(out);
         }
       }
-  description: "JMS BytesMessage.readBytes() - raw broker-supplied bytes via local receiver."
+    expect_match_text: [message.readBytes]
+  - name: unrelated readBytes does not become a queue source
+    code: |
+      import jakarta.jms.BytesMessage;
+      class LocalBuffer {
+        int readBytes(byte[] out) { return 0; }
+      }
+      class App {
+        int handle(LocalBuffer local, byte[] out) {
+          return local.readBytes(out);
+        }
+      }
+    expect_no_match: true
+  description: "JMS BytesMessage.readBytes(byte[]) - broker bytes are written into argument 0; the integer return is only the copied-byte count."
 
 - id: java.source.sqs_message_getbody_local
   enabled: true

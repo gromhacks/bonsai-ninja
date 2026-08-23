@@ -1,0 +1,60 @@
+# TypeScript physical-device sources with exact browser callback ownership.
+- id: typescript.source.geolocation_current_position
+  enabled: true
+  language: typescript
+  trust: physical
+  tag: hw-input
+  payload_types: [sensor-frame]
+  match:
+    kind: call
+    callee:
+      attribute: [navigator, geolocation, getCurrentPosition]
+  constraints:
+  - min_args: 1
+  - max_args: 3
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices: [0]
+  match_examples:
+  - name: typed browser geolocation callback
+    code: |
+      navigator.geolocation.getCurrentPosition((position: GeolocationPosition) => sink(position.coords));
+    expect_match_text: [navigator.geolocation.getCurrentPosition]
+  - name: typed permissions query is not a location sample
+    code: |
+      navigator.permissions.query({ name: "geolocation" }).then(status => sink(status));
+    expect_no_match: true
+  description: "First parameter of navigator.geolocation.getCurrentPosition(success) - a physical position sample delivered by the browser; the void registration result is not a source."
+
+- id: typescript.source.device_motion_event
+  enabled: true
+  language: typescript
+  trust: physical
+  tag: hw-input
+  payload_types: [sensor-frame]
+  match:
+    kind: call
+    callee:
+      regex: "^(window|globalThis)\\.addEventListener$"
+  constraints:
+  - arg_count: 2
+  - arg_matches_regex:
+      index: 0
+      regex: "^['\"](devicemotion|deviceorientation)['\"]$"
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
+  match_examples:
+  - name: typed browser device motion callback
+    code: |
+      window.addEventListener("deviceorientation", (event: DeviceOrientationEvent) => sink(event.alpha));
+    expect_match_text: [window.addEventListener]
+  - name: typed ordinary browser event is not a sensor sample
+    code: |
+      window.addEventListener("load", event => sink(event.type));
+    expect_no_match: true
+  description: "First parameter of a window/globalThis devicemotion or deviceorientation listener - a physical sensor event; the event spelling and callback position are matched exactly."

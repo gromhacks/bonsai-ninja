@@ -1,6 +1,24 @@
 # Non-finding ECMAScript library summaries. Receiver types come from adapter
 # CST facts (`const xs = []` -> `xs: Array`), so these do not match unrelated
 # user-defined methods that merely share a standard-library method name.
+- id: javascript.typing.readline_interface
+  enabled: true
+  language: javascript
+  packages: [readline]
+  returns_type: Interface
+  match:
+    kind: call
+    callee:
+      name: createInterface
+  match_examples:
+  - name: readline factory returns Interface
+    code: |
+      const readline = require("readline");
+      const rl = readline.createInterface({ input: process.stdin });
+      rl.question("name?", answer => sink(answer));
+    expect_match_text: [readline.createInterface]
+  description: "readline.createInterface(...) returns an Interface; typing-only factory evidence for receiver-scoped input rules."
+
 - id: javascript.typing.array_push_mutation
   enabled: true
   language: javascript

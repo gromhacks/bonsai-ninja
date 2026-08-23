@@ -1,0 +1,26 @@
+# Dart IPC boundaries.
+- id: dart.ipc.process_result
+  enabled: true
+  language: dart
+  trust: ipc
+  tag: ipc-input
+  payload_types: [text, binary]
+  packages: [dart:io]
+  match:
+    kind: call
+    callee:
+      regex: '^Process\.(run|runSync)$'
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: child-process result
+    code: |
+      import 'dart:io';
+      Future<ProcessResult> execute() => Process.run('tool', const ['status']);
+    expect_match_text: [Process.run]
+  - name: child-process start handle is not returned output
+    code: |
+      import 'dart:io';
+      Future<Process> execute() => Process.start('tool', const ['status']);
+    expect_no_match: true
+  description: "dart:io Process.run/runSync result - stdout/stderr returned by a local child process across an IPC boundary."

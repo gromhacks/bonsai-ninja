@@ -155,3 +155,55 @@
           }
         }
   description: "scala.util.Properties.envOrElse - env var fallback."
+
+- id: scala.local.source_from_file
+  enabled: true
+  language: scala
+  trust: local
+  tag: file-input
+  payload_types: [text]
+  packages: [scala.io]
+  match:
+    kind: call
+    callee:
+      attribute: [Source, fromFile]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: Scala file source
+    code: |
+      import scala.io.Source
+      object App { def load(path: String): Source = Source.fromFile(path) }
+    expect_match_text: [Source.fromFile]
+  - name: string source is not a filesystem boundary
+    code: |
+      import scala.io.Source
+      object App { def load(text: String): Source = Source.fromString(text) }
+    expect_no_match: true
+  description: "scala.io.Source.fromFile - a source object backed by local-file content."
+
+- id: scala.local.nio_files_read
+  enabled: true
+  language: scala
+  trust: local
+  tag: file-input
+  payload_types: [text, binary]
+  packages: [java.nio.file]
+  match:
+    kind: call
+    callee:
+      regex: '^Files\.(readString|readAllBytes|readAllLines|lines)$'
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: Scala NIO file read
+    code: |
+      import java.nio.file.{Files, Path}
+      object App { def load(path: Path): String = Files.readString(path) }
+    expect_match_text: [Files.readString]
+  - name: NIO file write is not input
+    code: |
+      import java.nio.file.{Files, Path}
+      object App { def save(path: Path): Unit = { Files.writeString(path, "constant") } }
+    expect_no_match: true
+  description: "Exact java.nio.file.Files content-reading operations used from Scala."

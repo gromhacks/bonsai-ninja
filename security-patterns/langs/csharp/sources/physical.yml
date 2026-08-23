@@ -1,0 +1,90 @@
+# C# physical-device sources.
+- id: csharp.physical.gpio_read
+  enabled: true
+  language: csharp
+  trust: physical
+  tag: hw-input
+  payload_types: [sensor-frame]
+  packages: [System.Device.Gpio]
+  match:
+    kind: call
+    callee:
+      name: Read
+  constraints:
+  - receiver_type_in: [GpioController, System.Device.Gpio.GpioController]
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: GPIO pin state
+    code: |
+      using System.Device.Gpio;
+      class App { PinValue Sample(GpioController gpio, int pin) { return gpio.Read(pin); } }
+    expect_match_text: [gpio.Read]
+  - name: application controller read is not GPIO
+    code: |
+      using System.Device.Gpio;
+      class Controller { public string Read(int key) => "constant"; }
+      class App { string Sample(Controller controller) { return controller.Read(1); } }
+    expect_no_match: true
+  description: "Typed System.Device.Gpio GpioController.Read - a physical GPIO pin sample."
+
+- id: csharp.physical.i2c_read_byte
+  enabled: true
+  language: csharp
+  trust: physical
+  tag: hw-input
+  payload_types: [sensor-frame, binary]
+  packages: [System.Device.I2c]
+  match:
+    kind: call
+    callee:
+      name: ReadByte
+  constraints:
+  - receiver_type_in: [I2cDevice, System.Device.I2c.I2cDevice]
+  - max_args: 0
+  match_examples:
+  - name: I2C peripheral byte
+    code: |
+      using System.Device.I2c;
+      class App { byte Sample(I2cDevice device) { return device.ReadByte(); } }
+    expect_match_text: [device.ReadByte]
+  - name: application device read is not I2C
+    code: |
+      using System.Device.I2c;
+      class Device { public byte ReadByte() => 0; }
+      class App { byte Sample(Device device) { return device.ReadByte(); } }
+    expect_no_match: true
+  description: "Typed System.Device.I2c I2cDevice.ReadByte - a byte received from an attached peripheral."
+
+- id: csharp.physical.device_read_buffer
+  enabled: true
+  language: csharp
+  trust: physical
+  tag: hw-input
+  payload_types: [sensor-frame, binary]
+  packages: [System.Device.I2c, System.Device.Spi]
+  match:
+    kind: call
+    callee:
+      name: Read
+  constraints:
+  - receiver_type_in: [I2cDevice, SpiDevice, System.Device.I2c.I2cDevice, System.Device.Spi.SpiDevice]
+  - min_args: 1
+  - max_args: 1
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: I2C peripheral fills caller buffer
+    code: |
+      using System;
+      using System.Device.I2c;
+      class App { void Sample(I2cDevice device, Span<byte> buffer) { device.Read(buffer); } }
+    expect_match_text: [device.Read]
+  - name: application reader does not create hardware input
+    code: |
+      using System;
+      using System.Device.I2c;
+      class Reader { public void Read(Span<byte> buffer) { } }
+      class App { void Sample(Reader reader, Span<byte> buffer) { reader.Read(buffer); } }
+    expect_no_match: true
+  description: "Typed I2cDevice/SpiDevice.Read writes attached-device bytes into argument 0."

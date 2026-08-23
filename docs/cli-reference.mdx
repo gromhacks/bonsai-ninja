@@ -216,6 +216,8 @@ bonsai-ninja security ./src pack --audit --rules-dir ./security-patterns
 `--taint-replay` to also replay each taint-dependent rule's positive
 example through live taint analysis and report any whose own example no
 longer fires (`match-example-taint-miss`) — slower, for the deep CI gate.
+`pack --audit` reports per-language source-boundary and sink-family coverage;
+zeroes are explicit gaps rather than hidden or inferred totals.
 Plain `pack` text renders one block per rule so long rule ids, package
 gates, framework gates, enabled/disabled state, severity, tag, and
 description remain readable; JSON returns the same rule rows under `rows`.

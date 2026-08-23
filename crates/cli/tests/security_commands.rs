@@ -4177,6 +4177,47 @@ fn pack_audit_filtered_text_omits_hidden_language_not_applicable_legend() {
         !out.contains("c/deserialization") && !out.contains("c/dser"),
         "filtered python audit should not describe hidden C-only n/a cells:\n{out}"
     );
+    assert!(
+        out.contains("source boundary coverage"),
+        "pack audit must expose per-family source coverage, not only a total:\n{out}"
+    );
+}
+
+#[test]
+fn pack_audit_reports_every_canonical_source_family_for_every_language() {
+    let rules = rules_dir();
+    let out = run(&[
+        "security",
+        &rules,
+        "--rules-dir",
+        &rules,
+        "pack",
+        "--audit",
+        "--format",
+        "json",
+    ])
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("pack audit JSON");
+    let canonical = parsed["canonical_source_families"]
+        .as_array()
+        .expect("canonical source families");
+    assert!(
+        !canonical.is_empty(),
+        "canonical source families must be data-defined"
+    );
+    for language in parsed["languages"].as_array().expect("languages") {
+        let id = language["language"].as_str().unwrap_or("<unknown>");
+        let families = language["source_families"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{id}: missing source_families"));
+        for family in canonical {
+            let family = family.as_str().expect("source family string");
+            assert!(
+                families.contains_key(family),
+                "{id}: canonical source family `{family}` disappeared from the audit"
+            );
+        }
+    }
 }
 
 #[test]

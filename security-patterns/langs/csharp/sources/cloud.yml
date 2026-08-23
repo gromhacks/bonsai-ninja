@@ -13,6 +13,38 @@
       name: FunctionHandler
   description: "Disabled - `FunctionHandler` is the delegate/type name; `kind: param` only matches parameter identifiers."
 
+- id: csharp.source.aws_lambda_annotation_event
+  enabled: true
+  language: csharp
+  tag: cloud-event
+  trust: service
+  payload_types: [event, text, binary, json]
+  packages: [Amazon.Lambda.Annotations]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_index_in: [0]
+  constraints:
+  - enclosing_decorator_in: [LambdaFunction]
+  match_examples:
+  - name: Lambda Annotations event parameter
+    code: |
+      using Amazon.Lambda.Annotations;
+      class Functions {
+        [LambdaFunction]
+        public string Handle(string cloudEvent) => cloudEvent;
+      }
+    expect_match_text: [cloudEvent]
+  - name: ordinary method parameter is not a Lambda event
+    code: |
+      using Amazon.Lambda.Annotations;
+      class Functions {
+        public string Handle(string cloudEvent) => cloudEvent;
+      }
+    expect_no_match: true
+  description: "First parameter of a method marked [LambdaFunction] - event payload supplied by the configured AWS Lambda runtime."
+
 - id: csharp.source.azure_function_blob_trigger
   enabled: true
   language: csharp

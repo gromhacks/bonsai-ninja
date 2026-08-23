@@ -565,8 +565,15 @@ interprocedural engine and not an alternate source-to-sink result.
   overwrite shapes derived from rulepack `taint_semantics`.
 - `source_output_args: Vec<SourceOutputArgs>` — source calls whose
   listed output arguments receive taint, such as `recv`, `SSL_read`,
-  and `fgets` buffers. These are derived from source rules, not from a
-  built-in API list.
+  and `fgets` buffers. A shape may instead carry
+  `output_arg_start_index` for a true variadic output tail; the exact call
+  arity supplies every destination without a semantic cap. These are derived
+  from source rules, not from a built-in API list. Output-carrier sources seed
+  only the compiler-created writer at the matched call; their status/count
+  return and pre-call reads are never sources, and a missing carrier fails
+  closed. The complete source-rule match is compiled to exact call spans
+  before IDG construction. Package/import/type constraints therefore cannot
+  install output writers at a same-named local function.
 - `source_callback_args: Vec<SourceCallbackArgs>` — rule-declared source
   callbacks and parameter positions. Named callbacks resolve through exact
   AST/callgraph identities. Direct call-argument lambdas use the adapter's
@@ -574,7 +581,15 @@ interprocedural engine and not an alternate source-to-sink result.
   body events; the delivered parameter retains whole-value provenance so an
   exact projection such as `input.column` inherits the source without
   widening to sibling fields. Neither path parses callback text or carries a
-  framework/API-name inventory in the engine.
+  framework/API-name inventory in the engine. Callback delivery has a
+  dedicated IDG edge kind. Callback-only source queries seed its resolved
+  parameter/binding endpoint directly, so an assigned registration return can
+  never inherit payload taint through the source boundary. Matcher-approved
+  registration spans are part of the transfer fingerprint. A whole callback
+  parameter reaches only AST-materialized descendant fields whose definitions
+  still come from the parameter; an exact later field overwrite wins normally.
+- `source_callback_only: bool` — rule data distinguishes pure registration
+  APIs from hybrid APIs whose synchronous result is also a source carrier.
 - `call_result_passthroughs: Vec<CallResultPassthrough>` — rulepack
   declarations that selected call arguments or the method receiver flow
   to the call result, such as URL decode/unescape helpers. The engine

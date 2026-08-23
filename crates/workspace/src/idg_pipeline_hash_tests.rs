@@ -1,5 +1,9 @@
 use super::*;
 
+fn source_transfer_site(start: u64) -> bonsai_common::Span {
+    bonsai_common::Span::new(FileId::new(1), start, start + 1)
+}
+
 fn tempdir_for_test(name: &str) -> std::path::PathBuf {
     let base = std::env::temp_dir();
     let nanos = std::time::SystemTime::now()
@@ -216,10 +220,14 @@ fn idg_transfer_fingerprint_is_order_stable() {
             bonsai_idg::SourceOutputArgSpec {
                 callee: "source.two".to_string(),
                 output_arg_indices: vec![3, 1, 3],
+                output_arg_start_index: None,
+                resolved_call_sites: vec![source_transfer_site(20)],
             },
             bonsai_idg::SourceOutputArgSpec {
                 callee: "source.one".to_string(),
                 output_arg_indices: vec![2, 0],
+                output_arg_start_index: None,
+                resolved_call_sites: vec![source_transfer_site(10)],
             },
         ],
         source_callback_args: vec![
@@ -227,11 +235,13 @@ fn idg_transfer_fingerprint_is_order_stable() {
                 callee: "source.callback".to_string(),
                 callback_arg_index: 2,
                 source_param_indices: vec![1, 0, 1],
+                resolved_call_sites: vec![source_transfer_site(30)],
             },
             bonsai_idg::SourceCallbackArgSpec {
                 callee: "source.callback".to_string(),
                 callback_arg_index: 2,
                 source_param_indices: vec![0, 1],
+                resolved_call_sites: vec![source_transfer_site(30)],
             },
         ],
         ..bonsai_idg::TransferOptions::default()
@@ -253,16 +263,21 @@ fn idg_transfer_fingerprint_is_order_stable() {
             bonsai_idg::SourceOutputArgSpec {
                 callee: "source.one".to_string(),
                 output_arg_indices: vec![0, 2],
+                output_arg_start_index: None,
+                resolved_call_sites: vec![source_transfer_site(10)],
             },
             bonsai_idg::SourceOutputArgSpec {
                 callee: "source.two".to_string(),
                 output_arg_indices: vec![1, 3],
+                output_arg_start_index: None,
+                resolved_call_sites: vec![source_transfer_site(20)],
             },
         ],
         source_callback_args: vec![bonsai_idg::SourceCallbackArgSpec {
             callee: "source.callback".to_string(),
             callback_arg_index: 2,
             source_param_indices: vec![0, 1],
+            resolved_call_sites: vec![source_transfer_site(30)],
         }],
         ..bonsai_idg::TransferOptions::default()
     };
@@ -282,6 +297,7 @@ fn idg_transfer_fingerprint_tracks_source_callback_shapes() {
             callee: "source.callback".to_string(),
             callback_arg_index: 1,
             source_param_indices: vec![0],
+            resolved_call_sites: vec![source_transfer_site(10)],
         }],
         ..bonsai_idg::TransferOptions::default()
     };
@@ -290,6 +306,62 @@ fn idg_transfer_fingerprint_tracks_source_callback_shapes() {
         idg_transfer_options_fingerprint(&plain),
         idg_transfer_options_fingerprint(&with_callback),
         "source-callback semantics change graph edges and must invalidate the transfer sidecar"
+    );
+}
+
+#[test]
+fn idg_transfer_fingerprint_tracks_variadic_source_output_shapes() {
+    let fixed = bonsai_idg::TransferOptions {
+        source_output_args: vec![bonsai_idg::SourceOutputArgSpec {
+            callee: "scanf".to_string(),
+            output_arg_indices: vec![1, 2, 3],
+            output_arg_start_index: None,
+            resolved_call_sites: vec![source_transfer_site(10)],
+        }],
+        ..bonsai_idg::TransferOptions::default()
+    };
+    let variadic = bonsai_idg::TransferOptions {
+        source_output_args: vec![bonsai_idg::SourceOutputArgSpec {
+            callee: "scanf".to_string(),
+            output_arg_indices: Vec::new(),
+            output_arg_start_index: Some(1),
+            resolved_call_sites: vec![source_transfer_site(10)],
+        }],
+        ..bonsai_idg::TransferOptions::default()
+    };
+
+    assert_ne!(
+        idg_transfer_options_fingerprint(&fixed),
+        idg_transfer_options_fingerprint(&variadic),
+        "a variadic output tail changes exact graph edges and must invalidate the transfer sidecar"
+    );
+}
+
+#[test]
+fn idg_transfer_fingerprint_tracks_exact_source_transfer_sites() {
+    let at_ten = bonsai_idg::TransferOptions {
+        source_output_args: vec![bonsai_idg::SourceOutputArgSpec {
+            callee: "recv".to_string(),
+            output_arg_indices: vec![1],
+            output_arg_start_index: None,
+            resolved_call_sites: vec![source_transfer_site(10)],
+        }],
+        ..bonsai_idg::TransferOptions::default()
+    };
+    let at_twenty = bonsai_idg::TransferOptions {
+        source_output_args: vec![bonsai_idg::SourceOutputArgSpec {
+            callee: "recv".to_string(),
+            output_arg_indices: vec![1],
+            output_arg_start_index: None,
+            resolved_call_sites: vec![source_transfer_site(20)],
+        }],
+        ..bonsai_idg::TransferOptions::default()
+    };
+
+    assert_ne!(
+        idg_transfer_options_fingerprint(&at_ten),
+        idg_transfer_options_fingerprint(&at_twenty),
+        "matcher-approved source transfer spans change graph edges and must invalidate the sidecar"
     );
 }
 

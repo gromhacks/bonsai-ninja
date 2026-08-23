@@ -1,0 +1,28 @@
+# Kotlin physical-device sources.
+- id: kotlin.physical.pi4j_input_value
+  enabled: true
+  language: kotlin
+  trust: physical
+  tag: hw-input
+  payload_types: [sensor-frame]
+  packages: [com.pi4j]
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])(state|value|isHigh|isLow)$'
+  constraints:
+  - receiver_type_in: [DigitalInput, AnalogInput, com.pi4j.io.gpio.digital.DigitalInput, com.pi4j.io.gpio.analog.AnalogInput]
+  - max_args: 0
+  match_examples:
+  - name: Pi4J digital input state from Kotlin
+    code: |
+      import com.pi4j.io.gpio.digital.DigitalInput
+      fun sample(input: DigitalInput) = input.state()
+    expect_match_text: [input.state]
+  - name: application model state is not hardware input
+    code: |
+      import com.pi4j.io.gpio.digital.DigitalInput
+      class StateModel { fun state(): String = "constant" }
+      fun sample(input: StateModel) = input.state()
+    expect_no_match: true
+  description: "Typed Pi4J digital/analog input reads used from Kotlin - samples received from attached hardware."

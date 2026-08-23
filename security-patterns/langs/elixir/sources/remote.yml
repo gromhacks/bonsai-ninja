@@ -280,8 +280,9 @@
 - id: elixir.plug.get_session
   enabled: true
   language: elixir
-  trust: remote
-  tag: http-input
+  trust: service
+  tag: token-input
+  category: session-input
   payload_types: [cookie]
   frameworks: [plug]
   packages: [plug]
@@ -298,7 +299,14 @@
           Plug.Conn.get_session(input)
         end
       end
-  description: "Plug.Conn.get_session/2 - returns a session value sourced from the request cookie/store; treat as remote until explicitly validated."
+  - name: Plug session write is not an input source
+    code: |
+      alias Plug
+      defmodule App do
+        def store(conn), do: Plug.Conn.put_session(conn, "role", "local")
+      end
+    expect_no_match: true
+  description: "Plug.Conn.get_session/2 - application session state loaded through the configured cookie/store; a service/session boundary rather than raw request input."
 
   imports:
   - Plug
@@ -345,7 +353,9 @@
   description: "Plug.Conn.get_req_header/2 - attacker-controlled request header values."
 
 - id: elixir.plug.conn_query_decode
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: elixir
   trust: remote
   tag: http-input
@@ -365,12 +375,14 @@
           Plug.Conn.Query.decode(input)
         end
       end
-  description: "Plug.Conn.Query.decode/1 - parsed query-string values; commonly fed by conn.query_string and therefore attacker-controlled."
+  description: "Disabled - Plug.Conn.Query.decode/1 parses any supplied string. It preserves existing provenance but does not prove an HTTP origin."
   imports:
   - Plug
 
 - id: elixir.uri_decode_query
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: elixir
   trust: remote
   tag: http-input
@@ -395,10 +407,12 @@
         end
       end
     expect_no_match: true
-  description: "URI.decode_query/1,2 - query-string parser; when used on request URLs the returned parameter values are remote input."
+  description: "Disabled - URI.decode_query/1,2 parses arbitrary strings, including constants and trusted configuration. It is a passthrough transform, not an origin."
 
 - id: elixir.uri_query_decoder
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: elixir
   trust: remote
   tag: http-input
@@ -415,7 +429,7 @@
           URI.query_decoder(input)
         end
       end
-  description: "URI.query_decoder/1,2 - lazy query-string decoder; when fed a request URL's query string the yielded key/value pairs are remote input."
+  description: "Disabled - URI.query_decoder/1,2 lazily transforms the value supplied by its caller and must retain, not invent, provenance."
 
 - id: elixir.phoenix.channel_handle_in
   enabled: true
@@ -446,10 +460,7 @@
   imports:
   - Phoenix
 - id: elixir.phoenix.liveview_handle_event
-  enabled: false
-  disabled_reason:
-    code: subsumed
-    subsumed_by: elixir.phoenix.params
+  enabled: true
   language: elixir
   trust: remote
   tag: http-input
@@ -459,8 +470,68 @@
   match:
     kind: param
     target:
-      name: params
-  description: "Disabled duplicate - bare `param name: params` is already covered by elixir.phoenix.params; v1 matching cannot distinguish controller vs LiveView callback context, so a second rule on the same name only emits redundant rows."
+      regex: "^[a-z_][A-Za-z0-9_]*$"
+      in_method: [handle_event]
+      param_index_in: [1]
+      param_count_in: [3]
+  match_examples:
+  - name: LiveView event payload
+    code: |
+      alias Phoenix.LiveView
+      defmodule PageLive do
+        use Phoenix.LiveView
+        def handle_event(event, payload, socket) do
+          {:noreply, socket}
+        end
+      end
+    expect_match_text: [payload]
+  - name: wrong callback arity negative
+    code: |
+      alias Phoenix.LiveView
+      defmodule PageLive do
+        use Phoenix.LiveView
+        def handle_event(payload, socket), do: {:noreply, socket}
+      end
+    expect_no_match: true
+  description: "Second parameter of Phoenix LiveView handle_event/3 - client-supplied event payload."
+  imports: [Phoenix.LiveView]
+
+- id: elixir.phoenix.liveview_handle_params
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [query, url]
+  frameworks: [phoenix_live_view]
+  packages: [phoenix_live_view]
+  match:
+    kind: param
+    target:
+      regex: "^[a-z_][A-Za-z0-9_]*$"
+      in_method: [handle_params]
+      param_index_in: [0, 1]
+      param_count_in: [3]
+  match_examples:
+  - name: LiveView params and URI
+    code: |
+      alias Phoenix.LiveView
+      defmodule PageLive do
+        use Phoenix.LiveView
+        def handle_params(params, uri, socket) do
+          {:noreply, socket}
+        end
+      end
+    expect_match_text: [params, uri]
+  - name: helper with different name is not LiveView input
+    code: |
+      alias Phoenix.LiveView
+      defmodule PageLive do
+        use Phoenix.LiveView
+        def normalize(params, uri, socket), do: {params, uri, socket}
+      end
+    expect_no_match: true
+  description: "First two parameters of Phoenix LiveView handle_params/3 - URL parameters and URI supplied by the client navigation."
+  imports: [Phoenix.LiveView]
 
 - id: elixir.absinthe.resolver_args
   enabled: true
@@ -473,14 +544,16 @@
   match:
     kind: param
     target:
-      name: args
+      regex: "^[a-z_][A-Za-z0-9_]*$"
       in_method: [resolve]
+      param_index_in: [1]
+      param_count_in: [3]
   match_examples:
   - name: absinthe resolver args
     code: |
       alias Absinthe
       defmodule App do
-        def resolve(args) do
+        def resolve(parent, args, resolution) do
           args
         end
       end
@@ -488,11 +561,71 @@
     code: |
       alias Absinthe
       defmodule App do
-        def helper(args) do
+        def helper(parent, args, resolution) do
           args
         end
       end
     expect_no_match: true
-  description: "Absinthe resolver `resolve(args)` parameter - GraphQL caller-supplied arguments. Scoped to resolver method names so ordinary helpers named args stay clean."
+  description: "Second parameter of an Absinthe resolve/3 callback - GraphQL caller-supplied arguments, selected by method, arity, and position rather than a conventional binding name."
   imports:
   - Absinthe
+
+- id: elixir.plug.request_metadata
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [text, url, query]
+  frameworks: [plug]
+  packages: [plug]
+  match:
+    kind: read
+    target:
+      regex: '^[A-Za-z_][A-Za-z0-9_]*\.(host|method|path_info|path_params|request_path|query_string|remote_ip|scheme)$'
+  match_examples:
+  - name: Plug request path
+    code: |
+      alias Plug.Conn
+      defmodule App do
+        def path(conn), do: conn.request_path
+      end
+    expect_match_text: [conn.request_path]
+  - name: response status is not request input
+    code: |
+      alias Plug.Conn
+      defmodule App do
+        def status(conn), do: conn.status
+      end
+    expect_no_match: true
+  description: "Selected Plug.Conn request metadata fields - authority, method, route/query path data, scheme, and peer address supplied by the HTTP connection."
+  imports: [Plug]
+
+- id: elixir.plug.request_accessors
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [binary, header, url, ip]
+  frameworks: [plug]
+  packages: [plug]
+  match:
+    kind: call
+    callee:
+      regex: '^Plug\.Conn\.(get_peer_data|request_url|read_part_body|read_part_headers)$'
+  match_examples:
+  - name: Plug multipart body read
+    code: |
+      alias Plug.Conn
+      defmodule App do
+        def part(conn), do: Plug.Conn.read_part_body(conn)
+      end
+    expect_match_text: [Plug.Conn.read_part_body]
+  - name: response header setter is not input
+    code: |
+      alias Plug.Conn
+      defmodule App do
+        def set(conn), do: Plug.Conn.put_resp_header(conn, "x", "local")
+      end
+    expect_no_match: true
+  description: "Exact Plug.Conn accessors that return peer, URL, or multipart request data."
+  imports: [Plug]

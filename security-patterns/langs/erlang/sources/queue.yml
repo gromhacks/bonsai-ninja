@@ -119,7 +119,9 @@
   description: "Disabled - amqp_channel:cast sends a command or publication and does not return broker input. Consumer delivery must be modeled at the receiving callback."
 
 - id: erlang.source.gen_server_handle_call
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: erlang
   trust: local
   tag: ipc-message
@@ -144,10 +146,12 @@
       helper(Request, From, State) ->
         Request.
     expect_no_match: true
-  description: "First parameter of OTP gen_server handle_call/3 - message sent by another local process, proven by callback name, arity, and position."
+  description: "Disabled - handle_call/3 name and arity do not prove the enclosing module declares the gen_server behaviour. Re-enable when the Erlang adapter emits generic module-behaviour facts."
 
 - id: erlang.source.gen_server_handle_cast
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: erlang
   trust: local
   tag: ipc-message
@@ -172,4 +176,4 @@
       handle_cast(Request, From, State) ->
         Request.
     expect_no_match: true
-  description: "First parameter of OTP gen_server handle_cast/2 - asynchronous message sent by another local process, proven by callback name, arity, and position."
+  description: "Disabled - handle_cast/2 is an IPC boundary only in a module proven to implement gen_server; callback spelling alone is insufficient."

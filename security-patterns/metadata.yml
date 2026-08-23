@@ -2,6 +2,15 @@
 # generically; package-manager names, distribution aliases, security-model
 # exceptions, and tag-level guard requirements belong here rather than in the
 # analyzer engine.
+canonical_source_families:
+  - remote
+  - cli
+  - cloud
+  - queue
+  - database
+  - ipc
+  - physical
+
 canonical_sink_families:
   - cmdi
   - sqli

@@ -27,7 +27,9 @@
     expect_no_match: true
   description: "The char** parameter at argv's runtime position in C++ main(...) - matched from compiler signature facts, independent of the binding name."
 - id: cpp.input.cin_read
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: cpp
   trust: local
   tag: local-input
@@ -37,13 +39,14 @@
     target:
       name: cin
   match_examples:
-  - name: generated direct match
+  - name: member named cin is not standard input
     code: |
       struct IO { int cin; } io;
       void example() {
         auto x = io.cin;
       }
-  description: "std::cin stream reads."
+    expect_no_match: true
+  description: "Disabled - reading an identifier or member named `cin` is not a stream extraction. Enable only after the C++ adapter lowers `std::cin >> destination` as an exact overloaded-operator call with the destination carrier."
 - id: cpp.input.getenv
   enabled: true
   language: cpp
@@ -162,7 +165,7 @@
     callee:
       name: fscanf
   taint_semantics:
-    source_output_args: [2, 3, 4, 5]
+    source_output_args_from: 2
   match_examples:
   - name: fscanf output buffers
     code: |
@@ -172,7 +175,15 @@
         fscanf(fp, "%63s %63s", user, host);
       }
     expect_match_text: [fscanf]
-  description: "fscanf(stream, format, ...) - reads formatted text from a FILE* into caller-supplied output arguments."
+  - name: sscanf parses an existing memory buffer
+    code: |
+      #include <cstdio>
+      void example(const char *text) {
+        char value[64];
+        std::sscanf(text, "%63s", value);
+      }
+    expect_no_match: true
+  description: "fscanf(stream, format, ...) - reads formatted text from a FILE* into every caller-supplied output argument beginning at index 2."
 - id: cpp.input.read
   enabled: true
   language: cpp
@@ -379,7 +390,7 @@
     callee:
       name: scanf
   taint_semantics:
-    source_output_args: [1, 2, 3, 4]
+    source_output_args_from: 1
   match_examples:
   - name: scanf stdin output args
     code: |
@@ -391,7 +402,15 @@
         scanf("%63s %63s %63s %63s", a, b, c, d);
       }
     expect_match_text: [scanf]
-  description: "scanf - reads from stdin into the destination arguments; the parsed buffers carry user-supplied input."
+  - name: sscanf is not a stdin source
+    code: |
+      #include <cstdio>
+      void example(const char *text) {
+        char value[64];
+        std::sscanf(text, "%63s", value);
+      }
+    expect_no_match: true
+  description: "scanf(format, ...) - reads stdin into every caller-supplied output argument beginning at index 1."
 - id: cpp.input.qt_qcoreapplication_arguments
   enabled: true
   language: cpp
@@ -485,32 +504,3 @@
         absl::GetFlag(arg);
       }
   description: "absl::GetFlag(FLAGS_x) - returns CLI-supplied flag value."
-
-- id: cpp.input.qt_serialport_readall
-  enabled: true
-  language: cpp
-  trust: physical
-  tag: hw-input
-  category: hardware-io
-  payload_types: [binary]
-  packages: [Qt]
-  match:
-    kind: call
-    callee:
-      attribute: [QSerialPort, readAll]
-  match_examples:
-  - name: generated direct match
-    code: |
-      #include <QtCore/Qt>
-      #include <QtCore/Qt>
-      #include <QtCore/Qt> /* Qt */
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        QSerialPort::readAll(arg);
-      }
-  description: "Qt QSerialPort::readAll - bytes from a connected serial device."
-  imports:
-  - QtCore
-  - QtCore/Qt

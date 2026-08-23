@@ -66,7 +66,9 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $_FILES;;\n}\n"
   description: $_FILES - uploaded file metadata; name is client-controlled.
 - id: php.source.superglobal_server
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: php
   trust: remote
   tag: http-input
@@ -75,11 +77,23 @@
   match:
     kind: read
     target:
-      name: _SERVER
+      regex: "^_SERVER\\.(HTTP_[A-Z0-9_]+|CONTENT_TYPE|CONTENT_LENGTH|QUERY_STRING|REQUEST_URI|PATH_INFO|REMOTE_ADDR)$"
   match_examples:
-  - name: php.source.superglobal_server example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $_SERVER;;\n}\n"
-  description: $_SERVER - many keys are client-controlled (HTTP_*, etc).
+  - name: PHP client-supplied server header
+    code: |
+      <?php
+      function example() {
+        return $_SERVER["HTTP_HOST"];
+      }
+    expect_match_text: [_SERVER.HTTP_HOST]
+  - name: server software metadata is not client input
+    code: |
+      <?php
+      function example() {
+        return $_SERVER["SERVER_SOFTWARE"];
+      }
+    expect_no_match: true
+  description: "Disabled pending exact static-subscript source anchors: only HTTP_*, request URI/query/path/content fields, and REMOTE_ADDR are client-facing. The current matcher sees the whole $_SERVER base but cannot constrain a source match to the proven static key, so treating every server/process metadata key as remote input would be incorrect."
 - id: php.source.php_input_stream
   enabled: true
   language: php
@@ -100,26 +114,105 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  file_get_contents();\n}\n"
     expect_no_match: true
   description: file_get_contents('php://input') - raw request body.
-- id: php.source.fopen_php_input
+
+- id: php.source.request_parse_body
   enabled: true
   language: php
   trust: remote
   tag: http-input
+  category: http-input
+  payload_types: [form, multipart, file]
   match:
     kind: call
     callee:
-      name: fopen
+      name: request_parse_body
   constraints:
-  - arg_equals:
-      index: 0
-      value: '"php://input"'
+  - top_level: true
+  - max_args: 1
   match_examples:
-  - name: php.source.fopen_php_input example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  fopen(\"php://input\");\n}\n"
-  - name: php.source.fopen_php_input example negative constraint boundary
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  fopen();\n}\n"
+  - name: PHP 8.4 request body parser
+    code: |
+      <?php
+      [$post, $files] = request_parse_body();
+      sink($post["name"]);
+  - name: object method with the same name is not the PHP builtin
+    code: |
+      <?php
+      [$post, $files] = $parser->request_parse_body();
     expect_no_match: true
-  description: fopen('php://input', 'r').
+  description: "PHP 8.4 request_parse_body() - parses the current HTTP request body into POST fields and uploaded-file metadata. The optional argument is an INI-options array; the function's returned tuple is the source carrier."
+
+- id: php.source.filter_input_http
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, form, cookie]
+  match:
+    kind: call
+    callee:
+      name: filter_input
+  constraints:
+  - top_level: true
+  - min_args: 2
+  - max_args: 4
+  - arg_matches_regex:
+      index: 0
+      regex: "^INPUT_(GET|POST|COOKIE)$"
+  match_examples:
+  - name: filter_input default query value
+    code: |
+      <?php
+      $query = filter_input(INPUT_GET, "q");
+    expect_match_text: [filter_input]
+  - name: explicitly filtered input remains an origin for context-specific analysis
+    code: |
+      <?php
+      $query = filter_input(INPUT_GET, "q", FILTER_SANITIZE_SPECIAL_CHARS);
+    expect_match_text: [filter_input]
+  - name: environment input is not an HTTP source
+    code: |
+      <?php
+      $token = filter_input(INPUT_ENV, "TOKEN");
+    expect_no_match: true
+  description: "filter_input(INPUT_GET|INPUT_POST|INPUT_COOKIE, name, ...) - the return originates at the HTTP boundary for every filter choice. Rulepack sanitizers may later constrain a specific payload/sink context; source analysis must not erase the origin merely because a filter argument is present."
+
+- id: php.source.filter_input_array_http
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, form, cookie]
+  match:
+    kind: call
+    callee:
+      name: filter_input_array
+  constraints:
+  - top_level: true
+  - min_args: 1
+  - max_args: 2
+  - arg_matches_regex:
+      index: 0
+      regex: "^INPUT_(GET|POST|COOKIE)$"
+  match_examples:
+  - name: filter_input_array default request values
+    code: |
+      <?php
+      $query = filter_input_array(INPUT_GET);
+    expect_match_text: [filter_input_array]
+  - name: explicit filter definition still originates at the request boundary
+    code: |
+      <?php
+      $query = filter_input_array(INPUT_GET, ["q" => FILTER_SANITIZE_SPECIAL_CHARS]);
+    expect_match_text: [filter_input_array]
+  - name: environment array is not an HTTP source
+    code: |
+      <?php
+      $vars = filter_input_array(INPUT_ENV);
+    expect_no_match: true
+  description: "filter_input_array(INPUT_GET|INPUT_POST|INPUT_COOKIE, ...) - returns request-origin values. Per-field filter definitions are separate context-sensitive sanitizer evidence, not a reason to discard the source boundary."
 - id: php.source.symfony_request_get
   enabled: false
   disabled_reason:
@@ -521,9 +614,7 @@
   imports:
   - Illuminate
 - id: php.source.laravel_request_all
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: php
   trust: remote
   tag: http-input
@@ -532,14 +623,26 @@
   match:
     kind: call
     callee:
-      attribute:
-      - Request
-      - all
-  description: Disabled - typed receiver matching does not work for local `$request->all()` calls, and bare `all` is far too broad.
+      name: all
+  constraints:
+  - receiver_type_in: [Request]
+  match_examples:
+  - name: Laravel typed request all input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      function handle(Request $request) { return $request->all(); }
+  - name: unrelated all method is not request input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      class Collection { function all() { return ["local"]; } }
+      function helper(Collection $items) { return $items->all(); }
+    expect_no_match: true
+  description: "Laravel Illuminate Request::all() - all client request input on a compiler-typed Request receiver."
+  imports: [Illuminate]
 - id: php.source.laravel_request_query
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: php
   trust: remote
   tag: http-input
@@ -548,14 +651,26 @@
   match:
     kind: call
     callee:
-      attribute:
-      - Request
-      - query
-  description: Disabled - typed receiver matching does not work for local `$request->query(...)` calls, and bare `query` is too broad.
+      name: query
+  constraints:
+  - receiver_type_in: [Request]
+  match_examples:
+  - name: Laravel typed request query input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      function handle(Request $request) { return $request->query("sort"); }
+  - name: database query method is not request input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      class Database { function query($sql) { return []; } }
+      function helper(Database $db) { return $db->query("SELECT 1"); }
+    expect_no_match: true
+  description: "Laravel Illuminate Request::query() - query-string input on a compiler-typed Request receiver."
+  imports: [Illuminate]
 - id: php.source.laravel_request_get
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: php
   trust: remote
   tag: http-input
@@ -564,14 +679,27 @@
   match:
     kind: call
     callee:
-      attribute:
-      - Request
-      - get
-  description: Disabled - typed receiver matching does not work for local `$request->get(...)` calls, and bare `get` is too broad.
+      name: get
+  constraints:
+  - receiver_type_in: [Request]
+  - min_args: 1
+  match_examples:
+  - name: Laravel typed request get input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      function handle(Request $request) { return $request->get("name"); }
+  - name: cache get is not request input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      class Cache { function get($key) { return "local"; } }
+      function helper(Cache $cache) { return $cache->get("name"); }
+    expect_no_match: true
+  description: "Laravel Illuminate Request::get(name) - request input inherited from Symfony Request, restricted to a compiler-typed Request receiver."
+  imports: [Illuminate]
 - id: php.source.laravel_request_header
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: php
   trust: remote
   tag: http-input
@@ -580,14 +708,26 @@
   match:
     kind: call
     callee:
-      attribute:
-      - Request
-      - header
-  description: Disabled - typed receiver matching does not work for local `$request->header(...)` calls, and bare `header` is too broad.
+      name: header
+  constraints:
+  - receiver_type_in: [Request]
+  match_examples:
+  - name: Laravel typed request header input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      function handle(Request $request) { return $request->header("User-Agent"); }
+  - name: response header helper is not request input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      class Response { function header($name) { return "local"; } }
+      function helper(Response $response) { return $response->header("X-Test"); }
+    expect_no_match: true
+  description: "Laravel Illuminate Request::header() - one or all inbound client headers on a compiler-typed Request receiver."
+  imports: [Illuminate]
 - id: php.source.laravel_request_cookie
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: php
   trust: remote
   tag: http-input
@@ -596,14 +736,26 @@
   match:
     kind: call
     callee:
-      attribute:
-      - Request
-      - cookie
-  description: Disabled - typed receiver matching does not work for local `$request->cookie(...)` calls, and bare `cookie` is too broad.
+      name: cookie
+  constraints:
+  - receiver_type_in: [Request]
+  match_examples:
+  - name: Laravel typed request cookie input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      function handle(Request $request) { return $request->cookie("theme"); }
+  - name: response cookie builder is not request input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      class Response { function cookie($name) { return $this; } }
+      function helper(Response $response) { return $response->cookie("theme"); }
+    expect_no_match: true
+  description: "Laravel Illuminate Request::cookie() - inbound cookie value on a compiler-typed Request receiver."
+  imports: [Illuminate]
 - id: php.source.laravel_request_file
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: php
   trust: remote
   tag: http-input
@@ -612,14 +764,26 @@
   match:
     kind: call
     callee:
-      attribute:
-      - Request
-      - file
-  description: Disabled - typed receiver matching does not work for local `$request->file(...)` calls, and bare `file` is too broad.
+      name: file
+  constraints:
+  - receiver_type_in: [Request]
+  match_examples:
+  - name: Laravel typed uploaded file input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      function handle(Request $request) { return $request->file("avatar"); }
+  - name: storage file lookup is not request input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      class Storage { function file($name) { return $name; } }
+      function helper(Storage $storage) { return $storage->file("local.txt"); }
+    expect_no_match: true
+  description: "Laravel Illuminate Request::file() - uploaded file object or collection from the inbound multipart request."
+  imports: [Illuminate]
 - id: php.source.laravel_request_post
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: php
   trust: remote
   tag: http-input
@@ -628,14 +792,26 @@
   match:
     kind: call
     callee:
-      attribute:
-      - Request
-      - post
-  description: Disabled - typed receiver matching does not work for local `$request->post(...)` calls, and bare `post` is too broad.
+      name: post
+  constraints:
+  - receiver_type_in: [Request]
+  match_examples:
+  - name: Laravel typed request post input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      function handle(Request $request) { return $request->post("title"); }
+  - name: HTTP client post call is not inbound request input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      class Client { function post($url) { return "response"; } }
+      function helper(Client $client) { return $client->post("https://example.test"); }
+    expect_no_match: true
+  description: "Laravel Illuminate Request::post() - form/body input on a compiler-typed Request receiver."
+  imports: [Illuminate]
 - id: php.source.laravel_request_only
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: php
   trust: remote
   tag: http-input
@@ -644,14 +820,27 @@
   match:
     kind: call
     callee:
-      attribute:
-      - Request
-      - only
-  description: Disabled - typed receiver matching does not work for local `$request->only(...)` calls, and bare `only` is too broad.
+      name: only
+  constraints:
+  - receiver_type_in: [Request]
+  - min_args: 1
+  match_examples:
+  - name: Laravel selected request input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      function handle(Request $request) { return $request->only(["name", "email"]); }
+  - name: collection only method is not request input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      class Collection { function only($keys) { return []; } }
+      function helper(Collection $items) { return $items->only(["name"]); }
+    expect_no_match: true
+  description: "Laravel Illuminate Request::only(keys) - selected client request input fields."
+  imports: [Illuminate]
 - id: php.source.laravel_request_json
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: php
   trust: remote
   tag: http-input
@@ -660,14 +849,26 @@
   match:
     kind: call
     callee:
-      attribute:
-      - Request
-      - json
-  description: Disabled - typed receiver matching does not work for local `$request->json(...)` calls, and bare `json` is too broad.
+      name: json
+  constraints:
+  - receiver_type_in: [Request]
+  match_examples:
+  - name: Laravel typed JSON request input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      function handle(Request $request) { return $request->json("user.name"); }
+  - name: serializer json method is not request input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      class Serializer { function json($value) { return "{}"; } }
+      function helper(Serializer $serializer) { return $serializer->json("local"); }
+    expect_no_match: true
+  description: "Laravel Illuminate Request::json() - JSON request input or the request JSON InputBag."
+  imports: [Illuminate]
 - id: php.source.laravel_route_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: php
   trust: remote
   tag: http-input
@@ -676,10 +877,25 @@
   match:
     kind: call
     callee:
-      attribute:
-      - Request
-      - route
-  description: Disabled - typed receiver matching does not work for local `$request->route(...)` calls, and bare `route` is too broad.
+      name: route
+  constraints:
+  - receiver_type_in: [Request]
+  - min_args: 1
+  match_examples:
+  - name: Laravel route parameter input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      function handle(Request $request) { return $request->route("account"); }
+  - name: router route registration is not request input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      class Router { function route($name) { return $name; } }
+      function helper(Router $router) { return $router->route("home"); }
+    expect_no_match: true
+  description: "Laravel Illuminate Request::route(name) - client-controlled route parameter on a compiler-typed Request receiver. The zero-argument Route-object accessor is intentionally excluded."
+  imports: [Illuminate]
 - id: php.source.slim_request_get_params
   enabled: true
   language: php
@@ -987,19 +1203,6 @@
     target:
       name: _GET
   description: Disabled duplicate - covered by superglobal_get.
-- id: php.source.server_http_host
-  enabled: true
-  language: php
-  trust: remote
-  tag: http-input
-  match:
-    kind: read
-    target:
-      name: HTTP_HOST
-  match_examples:
-  - name: php.source.server_http_host example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $HTTP_HOST;;\n}\n"
-  description: $_SERVER['HTTP_HOST'] - client-controlled header.
 - id: php.source.getallheaders
   enabled: true
   language: php
@@ -1009,9 +1212,15 @@
     kind: call
     callee:
       name: getallheaders
+  constraints:
+  - top_level: true
+  - max_args: 0
   match_examples:
-  - name: php.source.getallheaders example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  getallheaders($input);\n}\n"
+  - name: PHP request headers
+    code: "<?php\nfunction example() { return getallheaders(); }\n"
+  - name: object method is not the PHP header builtin
+    code: "<?php\nfunction example($request) { return $request->getallheaders(); }\n"
+    expect_no_match: true
   description: getallheaders() - all client request headers.
 - id: php.source.apache_request_headers
   enabled: true
@@ -1022,96 +1231,16 @@
     kind: call
     callee:
       name: apache_request_headers
+  constraints:
+  - top_level: true
+  - max_args: 0
   match_examples:
-  - name: php.source.apache_request_headers example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  apache_request_headers($input);\n}\n"
+  - name: Apache request headers
+    code: "<?php\nfunction example() { return apache_request_headers(); }\n"
+  - name: object method is not the Apache header builtin
+    code: "<?php\nfunction example($request) { return $request->apache_request_headers(); }\n"
+    expect_no_match: true
   description: apache_request_headers() - same as getallheaders.
-- id: php.source.server_http_user_agent
-  enabled: true
-  language: php
-  trust: remote
-  tag: http-input
-  match:
-    kind: read
-    target:
-      name: HTTP_USER_AGENT
-  match_examples:
-  - name: php.source.server_http_user_agent example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $HTTP_USER_AGENT;;\n}\n"
-  description: $_SERVER['HTTP_USER_AGENT'] - client-controlled User-Agent header; logged or parsed as a string and frequently flows into SQL/log/template sinks.
-- id: php.source.server_http_referer
-  enabled: true
-  language: php
-  trust: remote
-  tag: http-input
-  match:
-    kind: read
-    target:
-      name: HTTP_REFERER
-  match_examples:
-  - name: php.source.server_http_referer example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $HTTP_REFERER;;\n}\n"
-  description: $_SERVER['HTTP_REFERER'] - client-controlled Referer header; commonly used for back-link redirects (open-redirect / SSRF risk).
-- id: php.source.server_http_x_forwarded_for
-  enabled: true
-  language: php
-  trust: remote
-  tag: http-input
-  match:
-    kind: read
-    target:
-      name: HTTP_X_FORWARDED_FOR
-  match_examples:
-  - name: php.source.server_http_x_forwarded_for example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $HTTP_X_FORWARDED_FOR;;\n}\n"
-  description: $_SERVER['HTTP_X_FORWARDED_FOR'] - proxy-supplied client IP chain; spoofable when the app does not strip it at the trusted edge.
-- id: php.source.server_http_x_forwarded_host
-  enabled: true
-  language: php
-  trust: remote
-  tag: http-input
-  match:
-    kind: read
-    target:
-      name: HTTP_X_FORWARDED_HOST
-  match_examples:
-  - name: php.source.server_http_x_forwarded_host example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $HTTP_X_FORWARDED_HOST;;\n}\n"
-  description: $_SERVER['HTTP_X_FORWARDED_HOST'] - proxy-supplied host header; the classic host-header-injection vector for password-reset poisoning and cache poisoning when the app builds absolute URLs from it.
-- id: php.source.server_http_x_forwarded_proto
-  enabled: true
-  language: php
-  trust: remote
-  tag: http-input
-  match:
-    kind: read
-    target:
-      name: HTTP_X_FORWARDED_PROTO
-  match_examples:
-  - name: php.source.server_http_x_forwarded_proto example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $HTTP_X_FORWARDED_PROTO;;\n}\n"
-  description: $_SERVER['HTTP_X_FORWARDED_PROTO'] - proxy-supplied scheme header; spoofable and used in scheme-relative redirect/URL construction.
-- id: php.source.wp_unslash
-  enabled: true
-  language: php
-  trust: remote
-  tag: http-input
-  packages:
-  - wordpress
-  match:
-    kind: call
-    callee:
-      name: wp_unslash
-  match_examples:
-  - name: php.source.wp_unslash example
-    code: |
-      <?php
-      use wordpress;
-      use wordpress;
-      function example($input, $url, $id, $payload, $request) {
-        wp_unslash($input);
-      }
-  description: WordPress wp_unslash() - strips magic-quote slashes from $_GET/$_POST/$_COOKIE values; the returned string is still client-controlled and must be re-validated.
 - id: php.source.wp_get_query_var
   enabled: true
   language: php

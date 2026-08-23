@@ -1342,7 +1342,9 @@
   description: "Android Intent.getDataString() - package-scoped cross-app URI string read."
 
 - id: kotlin.source.android_uri_getqueryparameter
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: kotlin
   trust: remote
   tag: ipc-input
@@ -1372,29 +1374,37 @@
         fun getQueryParameter(vararg args: Any?): String = ""
       }
     expect_no_match: true
-  description: "Android Uri.getQueryParameter(name) - pulls attacker-controlled query value out of a deep-link/intent URI. min_args:1 rejects 0-arg same-name decoys."
+  description: "Disabled - android.net.Uri may be constructed from a trusted literal or local configuration. Re-enable when generic receiver-origin facts can prove the Uri came from an Intent or another declared boundary."
 
 - id: kotlin.source.ktor_call_principal
   enabled: true
   language: kotlin
-  trust: remote
-  tag: http-input
-  category: http-input
+  trust: service
+  tag: token-input
+  category: session-input
   packages: [io.ktor]
   match:
-    kind: read
-    target:
-      attribute: [call, principal]
+    kind: call
+    callee:
+      name: principal
+  constraints:
+  - receiver_type_in: [ApplicationCall, io.ktor.server.application.ApplicationCall]
+  - max_args: 0
   match_examples:
-  - name: generated shape example
+  - name: Ktor authenticated principal
     code: |
-      import io.ktor.*
-      class App {
-        fun handle(input: String) {
-          val out = call.principal["x"]
-        }
-      }
-  description: "Ktor call.principal property read - authenticated principal payload such as JWT claims."
+      import io.ktor.server.application.ApplicationCall
+      import io.ktor.server.auth.UserIdPrincipal
+      import io.ktor.server.auth.principal
+      fun handle(call: ApplicationCall): UserIdPrincipal? = call.principal<UserIdPrincipal>()
+    expect_match_text: [call.principal]
+  - name: same method on a local context is not a Ktor principal
+    code: |
+      import io.ktor.server.application.ApplicationCall
+      class LocalCall { fun principal(): String = "local" }
+      fun handle(call: LocalCall): String = call.principal()
+    expect_no_match: true
+  description: "Typed Ktor ApplicationCall.principal<T>() - authentication middleware output such as a validated identity; this is a service/session boundary, not raw HTTP input."
 
 - id: kotlin.source.kafka_consumer_poll
   enabled: true

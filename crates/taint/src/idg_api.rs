@@ -61,6 +61,12 @@ pub struct CleanOutputOverwrite {
 pub struct SourceOutputArgs {
     pub callee: String,
     pub output_arg_indices: Vec<usize>,
+    /// Every actual argument at or after this index is an output carrier.
+    pub output_arg_start_index: Option<usize>,
+    /// Exact matcher-approved call spans. Package/import/receiver constraints
+    /// are resolved before IDG construction; the graph must never reinterpret
+    /// an API name at an unrelated local lookalike.
+    pub resolved_call_sites: Vec<Span>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,6 +74,8 @@ pub struct SourceCallbackArgs {
     pub callee: String,
     pub callback_arg_index: usize,
     pub source_param_indices: Vec<usize>,
+    /// Exact matcher-approved registration call spans.
+    pub resolved_call_sites: Vec<Span>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

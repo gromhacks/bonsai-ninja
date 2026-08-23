@@ -1,21 +1,3 @@
-# Swift IPC / cross-process input sources.
-- id: swift.notif.user_info
-  enabled: true
-  language: swift
-  trust: ipc
-  tag: ipc-input
-  payload_types: [json]
-  match:
-    kind: read
-    target:
-      name: userInfo
-      receiver_type_in: [Notification]
-  match_examples:
-  - name: notification user info read
-    code: |
-      import Foundation
-      func handle(notification: Notification) -> [AnyHashable: Any]? {
-        let u = notification.userInfo
-        return u
-      }
-  description: "Notification.userInfo - cross-process notification payload read via the `userInfo` dictionary on a typed Notification receiver."
+# Swift IPC / cross-process sources belong here. No source is enabled until
+# the adapter can distinguish distributed notifications from the in-process
+# NotificationCenter surface.

@@ -13,7 +13,8 @@
   match:
     kind: read
     target:
-      attribute: [msg, Value]
+      name: Value
+      receiver_type_in: [ConsumerMessage, Message]
   match_examples:
   - name: sarama kafka consumer message
     code: |
@@ -23,7 +24,20 @@
         _ = msg.Value
       }
     expect_match_text: [msg.Value]
-  description: "Kafka ConsumerMessage.Value / Message.Value - narrowed to attribute chain."
+  - name: kafka payload binding name is irrelevant
+    code: |
+      package main
+      import "github.com/segmentio/kafka-go"
+      func handle(record kafka.Message) { _ = record.Value }
+    expect_match_text: [record.Value]
+  - name: unrelated value field negative
+    code: |
+      package main
+      import "github.com/segmentio/kafka-go"
+      type Setting struct{ Value []byte }
+      func handle(setting Setting) { _ = setting.Value }
+    expect_no_match: true
+  description: "Kafka ConsumerMessage.Value / Message.Value on compiler-typed broker messages; the local binding name is irrelevant."
 
 - id: go.amqp.delivery_body
   enabled: true
@@ -36,7 +50,8 @@
   match:
     kind: read
     target:
-      attribute: [delivery, Body]
+      name: Body
+      receiver_type_in: [Delivery]
   match_examples:
   - name: amqp delivery body
     code: |
@@ -46,7 +61,20 @@
         _ = delivery.Body
       }
     expect_match_text: [delivery.Body]
-  description: "amqp Delivery.Body - narrowed to attribute chain."
+  - name: amqp arbitrary binding
+    code: |
+      package main
+      import amqp "github.com/rabbitmq/amqp091-go"
+      func handle(event amqp.Delivery) { _ = event.Body }
+    expect_match_text: [event.Body]
+  - name: unrelated body field negative
+    code: |
+      package main
+      import amqp "github.com/rabbitmq/amqp091-go"
+      type Envelope struct{ Body []byte }
+      func handle(event Envelope) { _ = event.Body }
+    expect_no_match: true
+  description: "AMQP Delivery.Body on a compiler-typed broker delivery; the local binding name is irrelevant."
 
 - id: go.nats.msg_data
   enabled: true
@@ -55,11 +83,12 @@
   tag: queue-input
   category: queue-input
   payload_types: [event]
-  packages: ["github.com/nats-io/nats.go", "cloud.google.com/go/pubsub"]
+  packages: ["github.com/nats-io/nats.go"]
   match:
     kind: read
     target:
-      attribute: [msg, Data]
+      name: Data
+      receiver_type_in: [Msg]
   match_examples:
   - name: nats message data
     code: |
@@ -69,12 +98,23 @@
         _ = msg.Data
       }
     expect_match_text: [msg.Data]
-  description: "nats.Msg.Data / GCP pubsub.Message.Data - attacker-controlled queue message payload. Shared attribute chain covers both libraries."
+  - name: nats arbitrary binding
+    code: |
+      package main
+      import "github.com/nats-io/nats.go"
+      func handle(event *nats.Msg) { _ = event.Data }
+    expect_match_text: [event.Data]
+  - name: unrelated data field negative
+    code: |
+      package main
+      import "github.com/nats-io/nats.go"
+      type Record struct{ Data []byte }
+      func handle(event Record) { _ = event.Data }
+    expect_no_match: true
+  description: "NATS Msg.Data on a compiler-typed broker message; the local binding name is irrelevant."
 
 - id: go.gcp.pubsub_message_data
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: go
   trust: service
   tag: queue-input
@@ -84,8 +124,23 @@
   match:
     kind: read
     target:
-      attribute: [msg, Data]
-  description: "Disabled - duplicate signature with go.nats.msg_data (both match attribute chain [msg, Data] on kind:read). The nats rule's packages list now documents GCP pubsub coverage."
+      name: Data
+      receiver_type_in: [Message]
+  match_examples:
+  - name: gcp pubsub arbitrary binding
+    code: |
+      package main
+      import "cloud.google.com/go/pubsub"
+      func handle(event *pubsub.Message) { _ = event.Data }
+    expect_match_text: [event.Data]
+  - name: unrelated data field negative
+    code: |
+      package main
+      import "cloud.google.com/go/pubsub"
+      type Record struct{ Data []byte }
+      func handle(event Record) { _ = event.Data }
+    expect_no_match: true
+  description: "Google Cloud Pub/Sub Message.Data on a compiler-typed broker message; the local binding name is irrelevant."
 
 - id: go.aws.sqs_message_body
   enabled: true
@@ -98,7 +153,8 @@
   match:
     kind: read
     target:
-      attribute: [message, Body]
+      name: Body
+      receiver_type_in: [Message]
   match_examples:
   - name: aws sqs message body
     code: |
@@ -108,4 +164,17 @@
         _ = message.Body
       }
     expect_match_text: [message.Body]
-  description: "AWS SQS types.Message.Body - attacker-controlled message content pulled from a queue."
+  - name: sqs arbitrary binding
+    code: |
+      package main
+      import "github.com/aws/aws-sdk-go/service/sqs"
+      func handle(event *sqs.Message) { _ = event.Body }
+    expect_match_text: [event.Body]
+  - name: unrelated body field negative
+    code: |
+      package main
+      import "github.com/aws/aws-sdk-go/service/sqs"
+      type Document struct{ Body *string }
+      func handle(event Document) { _ = event.Body }
+    expect_no_match: true
+  description: "AWS SQS Message.Body on a compiler-typed queue message; the local binding name is irrelevant."

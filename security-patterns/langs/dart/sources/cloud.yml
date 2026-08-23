@@ -12,7 +12,7 @@
     kind: param
     target:
       name: request
-  description: "Disabled - bare `param name: request` taints any function with that param name; no canonical exists. Re-enable when adapter supports class-scoped Firebase HttpsFunction param matching. Use the attribute-chain rule dart.cloud.firebase_oncall_data for callable functions."
+  description: "Disabled - bare `param name: request` taints any function with that param name. Re-enable after the adapter can prove a Firebase HttpsFunction override or registered handler callback."
 
 - id: dart.cloud.firebase_functions_data
   enabled: false

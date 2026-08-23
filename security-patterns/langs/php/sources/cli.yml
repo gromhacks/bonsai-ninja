@@ -25,26 +25,6 @@
     target:
       name: argc
   description: Disabled - argc is a count, not a string source.
-- id: php.source.stdin_fopen
-  enabled: true
-  language: php
-  tag: cli-input
-  trust: local
-  match:
-    kind: call
-    callee:
-      name: fopen
-  constraints:
-  - arg_equals:
-      index: 0
-      value: '"php://stdin"'
-  match_examples:
-  - name: php.source.stdin_fopen example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  fopen(\"php://stdin\");\n}\n"
-  - name: php.source.stdin_fopen example negative constraint boundary
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  fopen();\n}\n"
-    expect_no_match: true
-  description: fopen('php://stdin', 'r') - reads CLI stdin.
 - id: php.source.stdin_file_get_contents
   enabled: true
   language: php
@@ -65,6 +45,96 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  file_get_contents();\n}\n"
     expect_no_match: true
   description: file_get_contents('php://stdin').
+
+- id: php.source.literal_file_get_contents
+  enabled: true
+  language: php
+  tag: file-input
+  trust: local
+  payload_types: [text, binary]
+  match:
+    kind: call
+    callee:
+      name: file_get_contents
+  constraints:
+  - top_level: true
+  - min_args: 1
+  - max_args: 5
+  - arg_matches_regex:
+      index: 0
+      regex: "^['\"][^:'\"]+['\"]$"
+  match_examples:
+  - name: PHP literal local file contents
+    code: |
+      <?php
+      $config = file_get_contents("config/app.json");
+    expect_match_text: [file_get_contents]
+  - name: PHP input stream is classified by its dedicated boundary
+    code: |
+      <?php
+      $body = file_get_contents("php://input");
+    expect_no_match: true
+  description: "file_get_contents() with a literal non-wrapper path - materialized local file bytes/text. URL and php:// wrappers are excluded so their distinct trust boundaries are not mislabeled as local files."
+
+- id: php.source.literal_file_lines
+  enabled: true
+  language: php
+  tag: file-input
+  trust: local
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: file
+  constraints:
+  - top_level: true
+  - min_args: 1
+  - max_args: 3
+  - arg_matches_regex:
+      index: 0
+      regex: "^['\"][^:'\"]+['\"]$"
+  match_examples:
+  - name: PHP local file lines
+    code: |
+      <?php
+      $lines = file("data/names.txt", FILE_IGNORE_NEW_LINES);
+    expect_match_text: [file]
+  - name: object file method is not the PHP builtin
+    code: |
+      <?php
+      $lines = $storage->file("data/names.txt");
+    expect_no_match: true
+  description: "file(path[, flags[, context]]) with a literal non-wrapper path - array of local file lines."
+
+- id: php.source.literal_parse_ini_file
+  enabled: true
+  language: php
+  tag: file-input
+  trust: local
+  payload_types: [config-value]
+  match:
+    kind: call
+    callee:
+      name: parse_ini_file
+  constraints:
+  - top_level: true
+  - min_args: 1
+  - max_args: 3
+  - arg_matches_regex:
+      index: 0
+      regex: "^['\"][^:'\"]+['\"]$"
+  match_examples:
+  - name: PHP local INI file values
+    code: |
+      <?php
+      $settings = parse_ini_file("config/app.ini", true);
+    expect_match_text: [parse_ini_file]
+  - name: parse_ini_string consumes an in-memory value, not a file
+    code: |
+      <?php
+      $settings = parse_ini_string("mode=local");
+    expect_no_match: true
+  description: "parse_ini_file(path, ...) with a literal local path - configuration values materialized from that file."
 - id: php.source.getenv
   enabled: true
   language: php

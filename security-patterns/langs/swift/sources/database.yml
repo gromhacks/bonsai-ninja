@@ -1,0 +1,55 @@
+# Swift database-origin sources.
+- id: swift.database.sqlite_column_value
+  enabled: true
+  language: swift
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [SQLite3]
+  match:
+    kind: call
+    callee:
+      regex: "^sqlite3_column_(?:text|text16|blob)$"
+  constraints:
+  - min_args: 2
+  - max_args: 2
+  match_examples:
+  - name: swift sqlite column
+    code: |
+      import SQLite3
+      func readName(statement: OpaquePointer) -> UnsafePointer<UInt8>? { sqlite3_column_text(statement, 0) }
+    expect_match_text: [sqlite3_column_text]
+  - name: sqlite type metadata negative
+    code: |
+      import SQLite3
+      func readType(statement: OpaquePointer) -> Int32 { sqlite3_column_type(statement, 0) }
+    expect_no_match: true
+  description: "SQLite3 sqlite3_column_text/text16/blob returns database row content from the current prepared-statement row in Swift."
+
+- id: swift.database.fluent_query_results
+  enabled: true
+  language: swift
+  trust: database
+  tag: db-input
+  payload_types: [db-row]
+  packages: [Fluent]
+  match:
+    kind: call
+    callee:
+      regex: "\\.(all|first)$"
+  constraints:
+  - receiver_type_in: [QueryBuilder]
+  - max_args: 0
+  match_examples:
+  - name: fluent typed query results
+    code: |
+      import Fluent
+      func read<M>(_ query: QueryBuilder<M>) async throws -> [M] where M: Model { try await query.all() }
+    expect_match_text: [query.all]
+  - name: unrelated collection all negative
+    code: |
+      import Fluent
+      struct Collection { func all() -> [String] { [] } }
+      func read(_ collection: Collection) -> [String] { collection.all() }
+    expect_no_match: true
+  description: "Fluent QueryBuilder.all/first returns model values loaded from the configured database on a compiler-typed query receiver."

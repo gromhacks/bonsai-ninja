@@ -1,0 +1,27 @@
+# Erlang database result sources. Module-qualified calls are exact rule data.
+- id: erlang.source.database_query_results
+  enabled: true
+  language: erlang
+  trust: database
+  tag: db-input
+  packages: [epgsql, mysql, eredis, mnesia]
+  match:
+    kind: call
+    callee:
+      regex: "^(epgsql:(squery|equery|execute)|mysql:(query|execute)|eredis:q|mnesia:(read|dirty_read))$"
+  match_examples:
+  - name: PostgreSQL query result
+    code: |
+      -module(example).
+      -include_lib("epgsql/include/epgsql.hrl").
+      -export([load/1]).
+      load(Connection) -> epgsql:squery(Connection, "select name from users").
+    expect_match_text: ["epgsql:squery"]
+  - name: PostgreSQL command construction is not a result
+    code: |
+      -module(example).
+      -include_lib("epgsql/include/epgsql.hrl").
+      -export([prepare/1]).
+      prepare(Connection) -> epgsql:parse(Connection, "select 1").
+    expect_no_match: true
+  description: "Exact epgsql, mysql, eredis, and mnesia result operations - values returned from a database or persistent store."

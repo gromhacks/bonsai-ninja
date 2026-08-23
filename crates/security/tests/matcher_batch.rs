@@ -819,6 +819,61 @@ def handler(payload: dict = api.Body(...), annotated: Annotated[str, api.Body()]
 }
 
 #[test]
+fn parameter_default_call_rule_rejects_locally_shadowed_import() {
+    let ws = python_ws(
+        r#"
+from fastapi import Body
+
+def Body(value):
+    return value
+
+def handler(payload: dict = Body("local")):
+    return payload
+"#,
+    );
+    let mut rule = base_rule("python.test.fastapi_body", RuleKind::Source, MatchKind::Param);
+    rule.language = "python".to_string();
+    rule.packages = vec!["fastapi".to_string()];
+    rule.match_spec.target = Some(RuleTarget {
+        default_call: Some("Body".to_string()),
+        ..Default::default()
+    });
+
+    let hits = match_rule_against_facts(&ws, &rule);
+    assert!(
+        hits.is_empty(),
+        "a local declaration must shadow the imported binder identity: {hits:?}"
+    );
+}
+
+#[test]
+fn parameter_default_call_rule_resolves_import_alias() {
+    let ws = python_ws(
+        r#"
+from fastapi import Body as RequestBody
+
+def handler(payload: dict = RequestBody(...)):
+    return payload
+"#,
+    );
+    let mut rule = base_rule("python.test.fastapi_body", RuleKind::Source, MatchKind::Param);
+    rule.language = "python".to_string();
+    rule.packages = vec!["fastapi".to_string()];
+    rule.match_spec.target = Some(RuleTarget {
+        default_call: Some("Body".to_string()),
+        ..Default::default()
+    });
+
+    let hits = match_rule_against_facts(&ws, &rule);
+    assert_eq!(
+        hits.len(),
+        1,
+        "import alias must retain exact binder identity: {hits:?}"
+    );
+    assert_eq!(hits[0].match_text, "payload");
+}
+
+#[test]
 fn param_rule_decl_kind_and_visibility_filters_exclude_non_entry_shapes() {
     let ws = java_ws(
         r#"

@@ -8,7 +8,7 @@ not duplicate dated performance history.
 
 The v0.2.8 local release pass completed on 2026-08-22. Documentation claims,
 links, command examples, current repository counts, and the rulepack validator
-were rechecked during the pass. The release candidate also passed 228
+were rechecked during the pass. The release candidate also passed 231
 release security unit tests, 36 release rulepack conformance tests, 88
 architecture invariants, 1,320 release-binary command/switch checks, the
 focused CLI integration suites, standalone execution, and the complete
@@ -26,8 +26,8 @@ The validated product contains:
 
 - 20 registered Tree-sitter language adapters;
 - one adapter-lowered compiler IR and one production sparse IDG taint engine;
-- 7,151 bundled rules, of which 6,012 are enabled;
-- 10,126 enabled positive/negative rule examples;
+- 7,311 bundled rules, of which 6,134 are enabled;
+- 10,505 enabled positive/negative rule examples;
 - native CLI, Rust SDK, SARIF 2.1.0, JSON, HTML, and graph-export surfaces.
 
 ## Correctness and architecture gates
@@ -59,7 +59,7 @@ The final local pass completed these checks with zero failures:
 | Release binary build-path privacy | Passed |
 | Documentation structure, links, navigation, binary help claims, and skill copies | Passed |
 | Native archive checksum and fresh-profile relocation smoke | Passed on macOS arm64 |
-| Build-artifact size gate | 31.54 GiB / 32 GiB combined limit (workspace and privacy-safe release targets) |
+| Build-artifact size gate | 30.28 GiB / 32 GiB combined limit (workspace and privacy-safe release targets) |
 
 The artifact measurement includes the retained workspace test generations and
 the privacy-remapped optimized CLI build. It remains below the enforced local
@@ -78,11 +78,11 @@ The rulepack replay command was:
 
 | Rulepack measure | Result |
 |---|---:|
-| Rules | 7,151 |
-| Enabled rules | 6,012 |
-| Disabled rules | 1,139 |
-| Examples | 10,587 |
-| Enabled examples | 10,126 |
+| Rules | 7,311 |
+| Enabled rules | 6,134 |
+| Disabled rules | 1,177 |
+| Examples | 11,060 |
+| Enabled examples | 10,505 |
 | Errors | 0 |
 | Warnings | 0 |
 

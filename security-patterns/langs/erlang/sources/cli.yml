@@ -9,19 +9,22 @@
     kind: call
     callee:
       regex: "^init:get_plain_arguments$"
+  constraints:
+  - max_args: 0
   match_examples:
     - name: declared shape
       code: |
         -module(example).
-        -export([test/1]).
-        test(Input) ->
-          init:get_plain_arguments(Input).
+        -export([test/0]).
+        test() ->
+          init:get_plain_arguments().
+      expect_match_text: ["init:get_plain_arguments"]
     - name: init get_status negative
       code: |
         -module(example).
-        -export([test/1]).
-        test(Input) ->
-          init:get_status(Input).
+        -export([test/0]).
+        test() ->
+          init:get_status().
       expect_no_match: true
   description: "init:get_plain_arguments/0 - command-line args."
 
@@ -182,3 +185,30 @@
           application:set_env(Input).
       expect_no_match: true
   description: "application:get_env/1,2,3 - application configuration value read from sys.config / app env; externally provisioned."
+
+- id: erlang.source.file_content_read
+  enabled: true
+  language: erlang
+  trust: local
+  tag: file-input
+  payload_types: [text, binary]
+  match:
+    kind: call
+    callee:
+      regex: '^file:(read_file|read|read_line|pread)$'
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: Erlang local file read
+    code: |
+      -module(example).
+      -export([load/1]).
+      load(Path) -> file:read_file(Path).
+    expect_match_text: ["file:read_file"]
+  - name: Erlang local file write is not input
+    code: |
+      -module(example).
+      -export([save/1]).
+      save(Path) -> file:write_file(Path, <<"constant">>).
+    expect_no_match: true
+  description: "OTP file content reads - values crossing from a local file or opened file descriptor into Erlang code."

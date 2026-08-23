@@ -809,8 +809,7 @@
 - id: typescript.source.eventsource_message_data
   enabled: false
   disabled_reason:
-    code: subsumed
-    subsumed_by: typescript.source.postmessage_event
+    code: pending-adapter-fact
   language: typescript
   trust: remote
   tag: network-input
@@ -821,7 +820,7 @@
     kind: read
     target:
       attribute: [event, data]
-  description: "Disabled - SSE MessageEvent.data shares the same `event.data` AST shape as WebSocket / postMessage / Pub-Sub message events; covered by typescript.source.websocket_message_event. Re-enable once an SSE-specific receiver-type fact ships."
+  description: "Disabled - `event.data` needs callback-delivery evidence from an EventSource `message` listener; the bare property shape is not a source boundary."
 
 - id: typescript.source.nestjs_subscribe_message_body_decorator
   enabled: false
@@ -1105,22 +1104,227 @@
     expect_no_match: true
   description: "document.referrer - attacker can set via Referer header."
 
-- id: typescript.source.postmessage_event
+- id: typescript.source.window_message_callback
   enabled: true
   language: typescript
   trust: remote
   tag: ipc-input
+  payload_types: [event, text, json]
+  frameworks: [postmessage]
   match:
-    kind: read
-    target:
-      attribute: [event, data]
+    kind: call
+    callee:
+      regex: "^(window|globalThis)\\.addEventListener$"
+  constraints:
+  - arg_count: 2
+  - arg_matches_regex:
+      index: 0
+      regex: "^['\"]message['\"]$"
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
   match_examples:
-  - name: postmessage event
+  - name: typed browser message listener callback
     code: |
-      function demo(input, req, obj) {
-        return event.data;
-      }
-  description: "window.addEventListener('message', ...) event.data - cross-origin postMessage."
+      window.addEventListener("message", (event: MessageEvent) => {
+        sink(event.data);
+      });
+    expect_match_text: [window.addEventListener]
+  - name: non-message event is not cross-context input
+    code: |
+      window.addEventListener("load", event => sink(event.type));
+    expect_no_match: true
+  description: "First parameter of a window/globalThis `message` event callback - a MessageEvent delivered by postMessage. The registration event name is matched exactly; downstream code should still validate event.origin."
+
+- id: typescript.source.node_http_create_server_listener
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event]
+  packages: [http, "node:http"]
+  match:
+    kind: call
+    callee:
+      attribute: [http, createServer]
+  constraints:
+  - arg_count: 1
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices: [0]
+  match_examples:
+  - name: typed Node HTTP request listener
+    code: |
+      import * as http from "node:http";
+      http.createServer((request, response) => sink(request.url));
+    expect_match_text: [http.createServer]
+  - name: createServer result without a request listener is not input
+    code: |
+      import * as http from "node:http";
+      const server = http.createServer();
+    expect_no_match: true
+  description: "First callback parameter of http.createServer(requestListener) - the compiler-bound IncomingMessage for an inbound client request. The server return value is not a source."
+
+- id: typescript.source.node_http_create_server_options_listener
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event]
+  packages: [http, "node:http"]
+  match:
+    kind: call
+    callee:
+      attribute: [http, createServer]
+  constraints:
+  - arg_count: 2
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
+  match_examples:
+  - name: typed Node HTTP request listener after options
+    code: |
+      import * as http from "node:http";
+      http.createServer({ keepAlive: true }, (request, response) => sink(request.url));
+    expect_match_text: [http.createServer]
+  - name: unrelated two-argument factory is not HTTP input
+    code: |
+      import * as http from "node:http";
+      factory.createServer({}, handler);
+    expect_no_match: true
+  description: "First callback parameter of http.createServer(options, requestListener) - the inbound client request."
+
+- id: typescript.source.node_https_create_server_listener
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event]
+  packages: [https, "node:https"]
+  match:
+    kind: call
+    callee:
+      attribute: [https, createServer]
+  constraints:
+  - arg_count: 1
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices: [0]
+  match_examples:
+  - name: typed Node HTTPS request listener
+    code: |
+      import * as https from "node:https";
+      https.createServer((request, response) => sink(request.url));
+    expect_match_text: [https.createServer]
+  - name: HTTPS server handle without listener is not input
+    code: |
+      import * as https from "node:https";
+      const server = https.createServer();
+    expect_no_match: true
+  description: "First callback parameter of https.createServer(requestListener) - the inbound client request; the returned server handle is not a source."
+
+- id: typescript.source.node_https_create_server_options_listener
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event]
+  packages: [https, "node:https"]
+  match:
+    kind: call
+    callee:
+      attribute: [https, createServer]
+  constraints:
+  - arg_count: 2
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
+  match_examples:
+  - name: typed Node HTTPS request listener after TLS options
+    code: |
+      import * as https from "node:https";
+      https.createServer({ key, cert }, (request, response) => sink(request.url));
+    expect_match_text: [https.createServer]
+  - name: HTTP namespace is not the HTTPS rule
+    code: |
+      import * as https from "node:https";
+      http.createServer({}, handler);
+    expect_no_match: true
+  description: "First callback parameter of https.createServer(options, requestListener) - the inbound client request."
+
+- id: typescript.source.deno_serve_listener
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event]
+  frameworks: [deno]
+  match:
+    kind: call
+    callee:
+      attribute: [Deno, serve]
+  constraints:
+  - arg_count: 1
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices: [0]
+  match_examples:
+  - name: typed Deno serve request handler
+    code: |
+      Deno.serve((request: Request) => new Response(request.url));
+    expect_match_text: [Deno.serve]
+  - name: assigned Deno server handle without a handler is not input
+    code: |
+      const server = Deno.serve();
+    expect_no_match: true
+  description: "First callback parameter of Deno.serve(handler) - the inbound Web Request. The returned server handle is not a source."
+
+- id: typescript.source.deno_serve_options_listener
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event]
+  frameworks: [deno]
+  match:
+    kind: call
+    callee:
+      attribute: [Deno, serve]
+  constraints:
+  - arg_count: 2
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
+  match_examples:
+  - name: typed Deno serve options and request handler
+    code: |
+      Deno.serve({ port: 8080 }, (request: Request) => new Response(request.url));
+    expect_match_text: [Deno.serve]
+  - name: unrelated serve method is not Deno input
+    code: |
+      app.serve({ port: 8080 }, handler);
+    expect_no_match: true
+  description: "First callback parameter of Deno.serve(options, handler) - the inbound Web Request."
 
 - id: typescript.source.gcf_http_req
   enabled: false
@@ -1261,25 +1465,6 @@
     expect_match_text: [c.req.parseBody]
   description: "Hono c.req.parseBody() - multipart/urlencoded form body."
 
-- id: typescript.source.trpc_input
-  enabled: true
-  language: typescript
-  trust: remote
-  tag: rpc-input
-  packages: ["@trpc/server"]
-  match:
-    kind: read
-    target:
-      attribute: [ctx, input]
-  match_examples:
-  - name: trpc input
-    code: |
-      const _u = require("@trpc/server");
-      function demo(input, req, obj) {
-        return ctx.input;
-      }
-  description: "tRPC procedure ctx.input - attacker-supplied procedure argument."
-
 - id: typescript.source.trpc_callback_input
   enabled: true
   language: typescript
@@ -1292,8 +1477,9 @@
     callee:
       regex: "(^|\\.)procedure\\.input\\(.+\\)\\.(query|mutation|subscription)$"
   constraints:
-  - min_args: 1
+  - arg_count: 1
   taint_semantics:
+    source_callback_only: true
     source_callback_args:
     - callback_arg_index: 0
       source_param_indices: [0]
@@ -1308,7 +1494,13 @@
         }),
       });
     expect_match_text: ["t.procedure.input(z.object({ q: z.string() })).query"]
-  description: "tRPC procedure handler callback parameter - attacker-supplied procedure input. Callback delivery is declared by rule data and stitched through compiler-resolved argument/parameter identities."
+  - name: procedure builder without callback invocation is not a delivered input
+    code: |
+      import { initTRPC } from "@trpc/server";
+      const t = initTRPC.create();
+      const builder = t.procedure.input(schema).query;
+    expect_no_match: true
+  description: "tRPC procedure handler callback parameter - attacker-supplied procedure input. Callback delivery is declared by rule data and stitched through compiler-resolved argument/parameter identities; the returned router/procedure object is not a source."
 
 - id: typescript.source.trpc_resolver_input_property
   enabled: false
@@ -1331,7 +1523,7 @@
         return opts.input;
       }
     expect_match_text: [opts.input]
-  description: "Disabled - without semantic resolver-parameter facts this collides with ctx.input; typescript.source.trpc_input covers the canonical tRPC input object."
+  description: "Disabled - tRPC passes input through the procedure callback's options parameter. A bare `.input` property cannot prove that callback boundary; use typescript.source.trpc_callback_input instead."
 
 - id: typescript.source.adonis_request_input
   enabled: true

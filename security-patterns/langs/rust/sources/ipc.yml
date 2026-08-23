@@ -1,0 +1,28 @@
+# Rust subprocess / IPC result sources.
+- id: rust.ipc.process_command_output
+  enabled: true
+  language: rust
+  trust: ipc
+  tag: ipc-input
+  payload_types: [text, binary]
+  match:
+    kind: call
+    callee:
+      regex: "\\.(output|wait_with_output)$"
+  constraints:
+  - receiver_type_in: [Command, Child]
+  - max_args: 0
+  match_examples:
+  - name: standard command collected output
+    code: |
+      use std::process::Command;
+      fn run(command: &mut Command) { let output = command.output(); drop(output); }
+    expect_match_text: [command.output]
+  - name: unrelated output receiver negative
+    code: |
+      use std::process::Command;
+      struct Renderer;
+      impl Renderer { fn output(&mut self) -> Vec<u8> { vec![] } }
+      fn run(renderer: &mut Renderer) { let output = renderer.output(); drop(output); }
+    expect_no_match: true
+  description: "std::process::Command.output and Child.wait_with_output return stdout/stderr produced by another process on compiler-typed process receivers."

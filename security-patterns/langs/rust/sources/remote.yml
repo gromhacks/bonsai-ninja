@@ -11,21 +11,22 @@
   manifests: [Cargo.toml]
   lockfiles: [Cargo.lock]
   match:
-    kind: call
-    callee:
-      attribute: [actix_web, web, Query]
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Query, actix_web::web::Query]
   match_examples:
-  - name: generated direct match
+  - name: actix typed query extractor parameter
     code: |
-      use actix_web;
-      use actix_web;
-      use actix_web::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          actix_web::web::Query(target);
-      }
-  description: "actix_web::web::Query<T> extractor - parses querystring into T."
+      use actix_web::web;
+      async fn handler(query: web::Query<String>) { let _ = query; }
+    expect_match_text: [query]
+  - name: same binding wrong type negative
+    code: |
+      use actix_web::web;
+      async fn helper(query: String) { let _ = query; }
+    expect_no_match: true
+  description: "actix_web::web::Query<T> handler parameter contains the parsed request query string."
   imports:
   - actix_web
 - id: rust.actix.web_path
@@ -37,21 +38,22 @@
   frameworks: [actix-web]
   packages: ["actix_web"]
   match:
-    kind: call
-    callee:
-      attribute: [actix_web, web, Path]
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Path, actix_web::web::Path]
   match_examples:
-  - name: generated direct match
+  - name: actix typed path extractor parameter
     code: |
-      use actix_web;
-      use actix_web;
-      use actix_web::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          actix_web::web::Path(target);
-      }
-  description: "actix_web::web::Path<T> extractor - parses path segments."
+      use actix_web::web;
+      async fn handler(path: web::Path<String>) { let _ = path; }
+    expect_match_text: [path]
+  - name: same binding wrong type negative
+    code: |
+      use actix_web::web;
+      async fn helper(path: String) { let _ = path; }
+    expect_no_match: true
+  description: "actix_web::web::Path<T> handler parameter contains parsed request path segments."
   imports:
   - actix_web
 - id: rust.actix.web_form
@@ -63,21 +65,22 @@
   frameworks: [actix-web]
   packages: ["actix_web"]
   match:
-    kind: call
-    callee:
-      attribute: [web, Form]
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Form, actix_web::web::Form]
   match_examples:
-  - name: generated direct match
+  - name: actix typed form extractor parameter
     code: |
-      use actix_web;
-      use actix_web;
-      use actix_web::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          web::Form(target);
-      }
-  description: "actix_web::web::Form<T> extractor - parses form body."
+      use actix_web::web;
+      async fn handler(form: web::Form<String>) { let _ = form; }
+    expect_match_text: [form]
+  - name: same binding wrong type negative
+    code: |
+      use actix_web::web;
+      async fn helper(form: String) { let _ = form; }
+    expect_no_match: true
+  description: "actix_web::web::Form<T> handler parameter contains the parsed request form body."
   imports:
   - actix_web
 - id: rust.actix.web_json
@@ -89,21 +92,22 @@
   frameworks: [actix-web]
   packages: ["actix_web"]
   match:
-    kind: call
-    callee:
-      attribute: [actix_web, web, Json]
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Json, actix_web::web::Json]
   match_examples:
-  - name: generated direct match
+  - name: actix typed json extractor parameter
     code: |
-      use actix_web;
-      use actix_web;
-      use actix_web::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          actix_web::web::Json(target);
-      }
-  description: "actix_web::web::Json<T> extractor - parses JSON body."
+      use actix_web::web;
+      async fn handler(body: web::Json<String>) { let _ = body; }
+    expect_match_text: [body]
+  - name: same binding wrong type negative
+    code: |
+      use actix_web::web;
+      async fn helper(body: String) { let _ = body; }
+    expect_no_match: true
+  description: "actix_web::web::Json<T> handler parameter contains the deserialized request JSON body."
   imports:
   - actix_web
 - id: rust.axum.query
@@ -115,19 +119,22 @@
   frameworks: [axum]
   packages: [axum]
   match:
-    kind: call
-    callee:
-      attribute: [extract, Query]
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Query, axum::extract::Query]
   match_examples:
-  - name: generated direct match
+  - name: axum typed query extractor parameter
     code: |
-      use axum::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          extract::Query(target);
-      }
-  description: "axum::extract::Query<T> extractor - parses querystring."
+      use axum::extract::Query;
+      async fn handler(query: Query<String>) { let _ = query; }
+    expect_match_text: [query]
+  - name: same binding wrong type negative
+    code: |
+      use axum::extract::Query;
+      async fn helper(query: String) { let _ = query; }
+    expect_no_match: true
+  description: "axum::extract::Query<T> handler parameter contains the parsed request query string."
 - id: rust.axum.json
   enabled: true
   language: rust
@@ -137,19 +144,22 @@
   frameworks: [axum]
   packages: [axum]
   match:
-    kind: call
-    callee:
-      attribute: [extract, Json]
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Json, axum::Json]
   match_examples:
-  - name: generated direct match
+  - name: axum typed json extractor parameter
     code: |
-      use axum::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          extract::Json(target);
-      }
-  description: "axum::extract::Json<T> extractor - parses JSON body."
+      use axum::Json;
+      async fn handler(body: Json<String>) { let _ = body; }
+    expect_match_text: [body]
+  - name: same binding wrong type negative
+    code: |
+      use axum::Json;
+      async fn helper(body: String) { let _ = body; }
+    expect_no_match: true
+  description: "axum::Json<T> handler parameter contains the deserialized request JSON body."
 - id: rust.axum.path
   enabled: true
   language: rust
@@ -159,19 +169,22 @@
   frameworks: [axum]
   packages: [axum]
   match:
-    kind: call
-    callee:
-      attribute: [extract, Path]
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Path, axum::extract::Path]
   match_examples:
-  - name: generated direct match
+  - name: axum typed path extractor parameter
     code: |
-      use axum::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          extract::Path(target);
-      }
-  description: "axum::extract::Path<T> extractor - parses path segments."
+      use axum::extract::Path;
+      async fn handler(path: Path<String>) { let _ = path; }
+    expect_match_text: [path]
+  - name: same binding wrong type negative
+    code: |
+      use axum::extract::Path;
+      async fn helper(path: String) { let _ = path; }
+    expect_no_match: true
+  description: "axum::extract::Path<T> handler parameter contains parsed request path segments."
 - id: rust.axum.form
   enabled: true
   language: rust
@@ -181,19 +194,22 @@
   frameworks: [axum]
   packages: [axum]
   match:
-    kind: call
-    callee:
-      attribute: [extract, Form]
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Form, axum::Form]
   match_examples:
-  - name: generated direct match
+  - name: axum typed form extractor parameter
     code: |
-      use axum::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          extract::Form(target);
-      }
-  description: "axum::extract::Form<T> extractor - parses form body."
+      use axum::Form;
+      async fn handler(form: Form<String>) { let _ = form; }
+    expect_match_text: [form]
+  - name: same binding wrong type negative
+    code: |
+      use axum::Form;
+      async fn helper(form: String) { let _ = form; }
+    expect_no_match: true
+  description: "axum::Form<T> handler parameter contains the parsed request form body."
 - id: rust.axum.multipart
   enabled: true
   language: rust
@@ -203,19 +219,22 @@
   frameworks: [axum]
   packages: [axum]
   match:
-    kind: call
-    callee:
-      attribute: [extract, Multipart]
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Multipart, axum::extract::Multipart]
   match_examples:
-  - name: generated direct match
+  - name: axum multipart extractor parameter
     code: |
-      use axum::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          extract::Multipart(target);
-      }
-  description: "axum::extract::Multipart extractor - parses multipart/form-data."
+      use axum::extract::Multipart;
+      async fn handler(multipart: Multipart) { let _ = multipart; }
+    expect_match_text: [multipart]
+  - name: same binding wrong type negative
+    code: |
+      use axum::extract::Multipart;
+      async fn helper(multipart: String) { let _ = multipart; }
+    expect_no_match: true
+  description: "axum::extract::Multipart handler parameter exposes attacker-controlled multipart form data."
 - id: rust.axum.multipart_field_file_name
   enabled: true
   language: rust
@@ -262,7 +281,9 @@
     expect_match_text: [cd.get_filename]
   description: "actix_multipart ContentDisposition::get_filename() - client-controlled multipart filename; taints path/file-upload sinks."
 - id: rust.warp.filter_query
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: rust
   trust: remote
   tag: http-input
@@ -274,17 +295,16 @@
     callee:
       attribute: [warp, query]
   match_examples:
-  - name: generated direct match
+  - name: warp query constructs a filter rather than input
     code: |
-      use warp::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          warp::query(target);
-      }
-  description: "warp::query() filter - extracts querystring."
+      use std::collections::HashMap;
+      fn route() { let _ = warp::query::<HashMap<String, String>>(); }
+    expect_no_match: true
+  description: "Disabled - warp::query() constructs a Filter. Request values arrive later in the composed handler callback and require filter-to-callback lineage."
 - id: rust.warp.body_json
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: rust
   trust: remote
   tag: http-input
@@ -296,17 +316,15 @@
     callee:
       attribute: [body, json]
   match_examples:
-  - name: generated direct match
+  - name: warp json constructs a filter rather than input
     code: |
-      use warp::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          body::json(target);
-      }
-  description: "warp::body::json() filter - parses JSON body."
+      fn route() { let _ = warp::body::json::<String>(); }
+    expect_no_match: true
+  description: "Disabled - warp::body::json() constructs a Filter; the decoded value is delivered to a later handler callback."
 - id: rust.warp.body_form
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: rust
   trust: remote
   tag: http-input
@@ -318,15 +336,11 @@
     callee:
       attribute: [body, form]
   match_examples:
-  - name: generated direct match
+  - name: warp form constructs a filter rather than input
     code: |
-      use warp::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          body::form(target);
-      }
-  description: "warp::body::form() filter - parses form body."
+      fn route() { let _ = warp::body::form::<String>(); }
+    expect_no_match: true
+  description: "Disabled - warp::body::form() constructs a Filter; the parsed form is delivered to a later handler callback."
 - id: rust.rocket.form_data
   enabled: true
   language: rust
@@ -336,19 +350,22 @@
   frameworks: [rocket]
   packages: [rocket]
   match:
-    kind: call
-    callee:
-      attribute: [rocket, form, Form]
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Form, rocket::form::Form]
   match_examples:
-  - name: generated direct match
+  - name: rocket typed form guard parameter
     code: |
-      use rocket::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          rocket::form::Form(target);
-      }
-  description: "rocket::form::Form<T> guard - parses form body."
+      use rocket::form::Form;
+      fn handler(form: Form<String>) { let _ = form; }
+    expect_match_text: [form]
+  - name: same binding wrong type negative
+    code: |
+      use rocket::form::Form;
+      fn helper(form: String) { let _ = form; }
+    expect_no_match: true
+  description: "rocket::form::Form<T> route-handler parameter contains request form data."
 - id: rust.rocket.json
   enabled: true
   language: rust
@@ -358,19 +375,22 @@
   frameworks: [rocket]
   packages: [rocket]
   match:
-    kind: call
-    callee:
-      attribute: [json, Json]
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Json, rocket::serde::json::Json]
   match_examples:
-  - name: generated direct match
+  - name: rocket typed json guard parameter
     code: |
-      use rocket::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          json::Json(target);
-      }
-  description: "rocket::serde::json::Json<T> guard - parses JSON body."
+      use rocket::serde::json::Json;
+      fn handler(body: Json<String>) { let _ = body; }
+    expect_match_text: [body]
+  - name: same binding wrong type negative
+    code: |
+      use rocket::serde::json::Json;
+      fn helper(body: String) { let _ = body; }
+    expect_no_match: true
+  description: "rocket::serde::json::Json<T> route-handler parameter contains deserialized request JSON."
 - id: rust.hyper.request_uri_query
   enabled: true
   language: rust
@@ -474,21 +494,26 @@
   frameworks: [axum, axum-extra]
   packages: [axum, axum_extra]
   match:
-    kind: call
-    callee:
-      attribute: [extract, TypedHeader]
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [TypedHeader, axum_extra::TypedHeader]
   match_examples:
-  - name: generated direct match
+  - name: axum typed header extractor parameter
     code: |
-      use axum::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          extract::TypedHeader(target);
-      }
-  description: "axum::extract::TypedHeader<T> - typed wrapper around an attacker-controlled HTTP header value."
+      use axum_extra::TypedHeader;
+      async fn handler(header: TypedHeader<String>) { let _ = header; }
+    expect_match_text: [header]
+  - name: same binding wrong type negative
+    code: |
+      use axum_extra::TypedHeader;
+      async fn helper(header: String) { let _ = header; }
+    expect_no_match: true
+  description: "axum-extra TypedHeader<T> handler parameter wraps an attacker-controlled request header."
 - id: rust.axum.header_extract
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: rust
   trust: remote
   tag: http-input
@@ -500,15 +525,11 @@
     callee:
       attribute: [extract, Header]
   match_examples:
-  - name: generated direct match
+  - name: unsupported header constructor is not input
     code: |
-      use axum::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          extract::Header(target);
-      }
-  description: "axum::extract::Header - single header extractor; tainted header value reaches the handler."
+      fn helper(value: String) { let _ = value; }
+    expect_no_match: true
+  description: "Disabled - modern Axum exposes HeaderMap handler parameters and axum-extra TypedHeader, not an extract::Header constructor source."
 - id: rust.axum.extension
   enabled: false
   disabled_reason:
@@ -607,7 +628,9 @@
   imports:
   - actix_web
 - id: rust.warp.header_filter
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: rust
   trust: remote
   tag: http-input
@@ -619,15 +642,11 @@
     callee:
       attribute: [warp, header]
   match_examples:
-  - name: generated direct match
+  - name: warp header constructs a filter rather than input
     code: |
-      use warp::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          warp::header(target);
-      }
-  description: "warp::header(name) filter - extracts an attacker-controlled HTTP header value."
+      fn route() { let _ = warp::header::<String>("x-trace"); }
+    expect_no_match: true
+  description: "Disabled - warp::header constructs a Filter; the header value is delivered to a later handler callback."
 - id: rust.rocket.state_guard
   enabled: false
   disabled_reason:
@@ -652,19 +671,22 @@
   frameworks: [poem]
   packages: [poem]
   match:
-    kind: call
-    callee:
-      attribute: [poem, web, Json]
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Json, poem::web::Json]
   match_examples:
-  - name: generated direct match
+  - name: poem typed json extractor parameter
     code: |
-      use poem::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          poem::web::Json(target);
-      }
-  description: "poem::web::Json<T> extractor - parses JSON body. Shares attribute chain with actix `web::Json`; both are HTTP body extractors of the same trust class."
+      use poem::web::Json;
+      async fn handler(body: Json<String>) { let _ = body; }
+    expect_match_text: [body]
+  - name: same binding wrong type negative
+    code: |
+      use poem::web::Json;
+      async fn helper(body: String) { let _ = body; }
+    expect_no_match: true
+  description: "Poem web::Json<T> handler parameter contains deserialized request JSON."
 - id: rust.poem.path
   enabled: true
   language: rust
@@ -674,19 +696,22 @@
   frameworks: [poem]
   packages: [poem]
   match:
-    kind: call
-    callee:
-      attribute: [poem, web, Path]
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Path, poem::web::Path]
   match_examples:
-  - name: generated direct match
+  - name: poem typed path extractor parameter
     code: |
-      use poem::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          poem::web::Path(target);
-      }
-  description: "poem::web::Path<T> extractor - parses path segments."
+      use poem::web::Path;
+      async fn handler(path: Path<String>) { let _ = path; }
+    expect_match_text: [path]
+  - name: same binding wrong type negative
+    code: |
+      use poem::web::Path;
+      async fn helper(path: String) { let _ = path; }
+    expect_no_match: true
+  description: "Poem web::Path<T> handler parameter contains parsed request path data."
 - id: rust.poem.query
   enabled: true
   language: rust
@@ -696,19 +721,22 @@
   frameworks: [poem]
   packages: [poem]
   match:
-    kind: call
-    callee:
-      attribute: [poem, web, Query]
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      param_type_in: [Query, poem::web::Query]
   match_examples:
-  - name: generated direct match
+  - name: poem typed query extractor parameter
     code: |
-      use poem::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          poem::web::Query(target);
-      }
-  description: "poem::web::Query<T> extractor - parses querystring."
+      use poem::web::Query;
+      async fn handler(query: Query<String>) { let _ = query; }
+    expect_match_text: [query]
+  - name: same binding wrong type negative
+    code: |
+      use poem::web::Query;
+      async fn helper(query: String) { let _ = query; }
+    expect_no_match: true
+  description: "Poem web::Query<T> handler parameter contains parsed request query data."
 - id: rust.tonic.request_get_ref
   enabled: true
   language: rust

@@ -1,0 +1,61 @@
+# C inter-process message sources. Descriptor `read` remains a local source
+# because syntax alone cannot distinguish files, pipes, terminals, and sockets.
+- id: c.ipc.posix_mq_receive
+  enabled: true
+  language: c
+  trust: ipc
+  tag: ipc-input
+  payload_types: [binary, text]
+  packages: [mqueue.h]
+  match:
+    kind: call
+    callee:
+      regex: "^(mq_receive|mq_timedreceive)$"
+  constraints:
+  - min_args: 4
+  - max_args: 5
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: posix message queue receive buffer
+    code: |
+      #include <mqueue.h>
+      ssize_t receive(mqd_t queue) { char message[1024]; return mq_receive(queue, message, sizeof(message), 0); }
+    expect_match_text: [mq_receive]
+  - name: message queue send is not input
+    code: |
+      #include <mqueue.h>
+      int send(mqd_t queue, const char *message) { return mq_send(queue, message, 1, 0); }
+    expect_no_match: true
+  description: "POSIX mq_receive/mq_timedreceive copies a message from another process into output buffer argument 1."
+
+- id: c.ipc.sysv_msgrcv
+  enabled: true
+  language: c
+  trust: ipc
+  tag: ipc-input
+  payload_types: [binary, text]
+  packages: [sys/msg.h]
+  match:
+    kind: call
+    callee:
+      name: msgrcv
+  constraints:
+  - min_args: 5
+  - max_args: 5
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: system v message receive buffer
+    code: |
+      #include <sys/msg.h>
+      struct message { long type; char body[128]; };
+      ssize_t receive(int queue) { struct message value; return msgrcv(queue, &value, sizeof(value.body), 0, 0); }
+    expect_match_text: [msgrcv]
+  - name: system v message send is not input
+    code: |
+      #include <sys/msg.h>
+      struct message { long type; char body[128]; };
+      int send(int queue, struct message *value) { return msgsnd(queue, value, sizeof(value->body), 0); }
+    expect_no_match: true
+  description: "System V msgrcv copies a message from another process into output argument 1."

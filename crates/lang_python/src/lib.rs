@@ -4337,8 +4337,20 @@ fn collect_python_assignment_projected_reads(
             })();
             if let Some(place) = selected_field {
                 push_python_source_name(out, place);
-                return;
             }
+            // A call is a semantic value boundary. A keyed read used as one
+            // of its arguments does not become the call result:
+            //
+            //     repo = Repository(data, who=envelope.get("user"))
+            //
+            // The resolver/IDG owns argument-to-parameter and return
+            // transfer. Recursing into an arbitrary call here used to lower
+            // the example above as `repo <- envelope.user`, collapsing every
+            // field of the constructed object into the `who` argument.
+            // Exact `.get(literal)` calls remain value-producing projections
+            // themselves; all other calls stop this assignment projection
+            // walk, including constructors and user functions.
+            return;
         }
 
         let mut cursor = node.walk();

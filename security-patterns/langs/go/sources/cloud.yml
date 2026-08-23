@@ -1,20 +1,42 @@
 # Go cloud-event / serverless handler sources.
 - id: go.aws.lambda_event
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: go
   trust: service
   tag: event-input
   category: event-input
   payload_types: [event, json]
   frameworks: [aws-lambda]
-  packages: ["github.com/aws/aws-lambda-go"]
+  packages: ["github.com/aws/aws-lambda-go/lambda"]
   match:
-    kind: param
-    target:
-      name: request
-  description: "Disabled - `request` plus a workspace Lambda dependency does not prove that the function is passed to lambda.Start. Re-enable when callback-registration facts bind the handler parameter to the runtime call."
+    kind: call
+    callee:
+      attribute: [lambda, Start]
+  constraints:
+  - arg_count: 1
+  taint_semantics:
+    source_callback_only: true
+    source_callback_args:
+    - callback_arg_index: 0
+      source_param_indices: [0]
+  match_examples:
+  - name: AWS Lambda registered handler event
+    code: |
+      package main
+      import "github.com/aws/aws-lambda-go/lambda"
+      type Event struct { Command string }
+      func handle(event Event) { sink(event.Command) }
+      func main() { lambda.Start(handle) }
+    expect_match_text: [lambda.Start]
+  - name: similarly named application registration is not Lambda
+    code: |
+      package main
+      type runtime struct{}
+      func (runtime) Start(handler func(string)) {}
+      func handle(value string) { sink(value) }
+      func main() { var lambda runtime; lambda.Start(handle) }
+    expect_no_match: true
+  description: "Parameter 0 of the exact handler registered with aws-lambda-go lambda.Start - the service-delivered invocation event; the registration call result is not a source."
 
 - id: go.aws.lambda_event_alt
   enabled: false

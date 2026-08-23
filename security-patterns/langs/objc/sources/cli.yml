@@ -18,7 +18,9 @@
   description: "fgets(buf, size, stdin) - interactive stdin read; buf is tainted via output argument 0."
 
 - id: objc.source.nsprocessinfo_arguments
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: objc
   trust: local
   tag: cli-input
@@ -31,10 +33,12 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; id result = [NSProcessInfo processInfo].arguments; }
-  description: "NSProcessInfo.processInfo.arguments - CLI argv. Local trust; still attacker-controllable via launch agents."
+  description: "Disabled pending Objective-C receiver-type facts for chained `[NSProcessInfo processInfo].arguments`; a bare arguments property would overmatch application models. Raw main argv remains covered."
 
 - id: objc.source.nsprocessinfo_environment
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: objc
   trust: local
   tag: env-input
@@ -49,7 +53,7 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; id result = [NSProcessInfo processInfo].environment; }
-  description: "NSProcessInfo.processInfo.environment - env vars. Local trust but crosses boundaries when spawned from untrusted parent."
+  description: "Disabled pending Objective-C receiver-type facts for chained `[NSProcessInfo processInfo].environment`; a bare environment property would overmatch application models. libc getenv remains covered."
 
 - id: objc.source.cli_argv
   enabled: true
@@ -78,9 +82,7 @@
   description: "The char** parameter at argv's runtime position in Objective-C/C main(...) - matched from the grammar-declared signature, independent of the binding name."
 
 - id: objc.source.env_getenv
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: objc
   trust: local
   tag: env-input
@@ -90,7 +92,18 @@
     kind: call
     callee:
       name: getenv
-  description: "Disabled - libc getenv is local; enable when reading security-sensitive env vars in a privileged context."
+  match_examples:
+  - name: libc environment lookup
+    code: |
+      #include <stdlib.h>
+      const char *mode(void) { return getenv("APP_MODE"); }
+    expect_match_text: [getenv]
+  - name: setter is not an input source
+    code: |
+      #include <stdlib.h>
+      void configure(void) { setenv("APP_MODE", "prod", 1); }
+    expect_no_match: true
+  description: "libc getenv(name) returns process-environment input with local trust."
 
 - id: objc.source.nsfilehandle_standardinput
   enabled: false
@@ -106,9 +119,7 @@
   description: "Disabled - NSFileHandle standardInput is stdin; rarely used in iOS apps, enable for CLI/macOS tools."
 
 - id: objc.source.readline
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: objc
   trust: local
   tag: cli-input
@@ -116,12 +127,24 @@
     kind: call
     callee:
       name: readline
-  description: "Disabled - GNU readline; enable for interactive CLI tools bridging libreadline."
+  constraints:
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: readline prompt input
+    code: |
+      #include <readline/readline.h>
+      char *ask(void) { return readline("command> "); }
+    expect_match_text: [readline]
+  - name: history call negative
+    code: |
+      #include <readline/history.h>
+      void remember(const char *line) { add_history(line); }
+    expect_no_match: true
+  description: "GNU readline(prompt) returns interactive terminal input."
 
 - id: objc.source.uitextfield_text
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: objc
   trust: local
   tag: ui-input
@@ -130,12 +153,25 @@
     kind: read
     target:
       name: text
-  description: "Disabled - bare `.text` read matches every UIKit attribute named text and every NSAttributedString; enable only with receiver narrowing."
+      receiver_type_in: [UITextField]
+  match_examples:
+  - name: typed text field value
+    code: |
+      #import <UIKit/UIKit.h>
+      NSString *value(UITextField *field) { return field.text; }
+    expect_match_text: [field.text]
+  - name: unrelated text property negative
+    code: |
+      #import <UIKit/UIKit.h>
+      @interface LabelModel : NSObject
+      @property NSString *text;
+      @end
+      NSString *value(LabelModel *model) { return model.text; }
+    expect_no_match: true
+  description: "UITextField.text returns user-entered text on a compiler-typed UITextField receiver."
 
 - id: objc.source.uitextview_text
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: objc
   trust: local
   tag: ui-input
@@ -143,7 +179,51 @@
     kind: read
     target:
       name: text
-  description: "Disabled - duplicate of objc.source.uitextfield_text. Bare name 'text' matches every UIKit .text accessor."
+      receiver_type_in: [UITextView]
+  match_examples:
+  - name: typed text view value
+    code: |
+      #import <UIKit/UIKit.h>
+      NSString *value(UITextView *view) { return view.text; }
+    expect_match_text: [view.text]
+  - name: unrelated text property negative
+    code: |
+      #import <UIKit/UIKit.h>
+      @interface LabelModel : NSObject
+      @property NSString *text;
+      @end
+      NSString *value(LabelModel *model) { return model.text; }
+    expect_no_match: true
+  description: "UITextView.text returns user-entered text on a compiler-typed UITextView receiver."
+
+- id: objc.source.nsfilehandle_read_data
+  enabled: true
+  language: objc
+  trust: local
+  tag: cli-input
+  payload_types: [binary, text]
+  packages: [Foundation]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?(?:readDataToEndOfFile|readDataOfLength|availableData|readToEnd)$"
+  constraints:
+  - receiver_type_in: [NSFileHandle]
+  match_examples:
+  - name: typed file handle read
+    code: |
+      #import <Foundation/Foundation.h>
+      NSData *read_input(NSFileHandle *handle) { return [handle readDataToEndOfFile]; }
+    expect_match_text: [handle.readDataToEndOfFile]
+  - name: unrelated reader negative
+    code: |
+      #import <Foundation/Foundation.h>
+      @interface CacheReader : NSObject
+      - (NSData *)readDataToEndOfFile;
+      @end
+      NSData *read_cache(CacheReader *reader) { return [reader readDataToEndOfFile]; }
+    expect_no_match: true
+  description: "NSFileHandle readDataToEndOfFile/readDataOfLength/availableData/readToEnd returns bytes from a file, pipe, terminal, or communications channel with local trust."
 
 - id: objc.source.user_defaults_object
   enabled: true
@@ -182,43 +262,3 @@
         void test(NSUserDefaults *defaults, id input) { id target = input; int amount = 1; [defaults boolForKey:input]; }
       expect_no_match: true
   description: "NSUserDefaults -stringForKey: / -dictionaryForKey: / -URLForKey: - typed accessors over the same shared-prefs store; same untrusted-when-shared risk as objectForKey:. The method-name allowlist excludes primitive accessors like boolForKey:/integerForKey: that cannot carry a string/data payload."
-
-- id: objc.source.uipasteboard_string
-  enabled: true
-  language: objc
-  trust: ipc
-  tag: clipboard-input
-  payload_types: [text]
-  match:
-    kind: call
-    callee:
-      regex: "^(?:.*\\.)?(stringForType|valueForPasteboardType|dataForPasteboardType)$"
-  constraints:
-    - receiver_type_in: [UIPasteboard, NSPasteboard]
-  match_examples:
-    - name: declared shape
-      code: |
-        void test(UIPasteboard *pasteboard, id input) { id target = input; int amount = 1; [pasteboard stringForType:input]; }
-    - name: non-accessor method negative
-      code: |
-        void test(UIPasteboard *pasteboard, id input) { id target = input; int amount = 1; [pasteboard setPersistent:input]; }
-      expect_no_match: true
-  description: "UIPasteboard/NSPasteboard typed accessors - clipboard contents originate from any other app or user paste action; treat as untrusted IPC input. The method-name allowlist excludes mutators/metadata methods (setPersistent:, numberOfItems) that do not return clipboard payload."
-
-- id: objc.source.nspasteboard_string
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: objc
-  trust: ipc
-  tag: clipboard-input
-  payload_types: [text]
-  match:
-    kind: call
-    callee:
-      attribute: [NSPasteboard, generalPasteboard]
-  match_examples:
-    - name: declared shape
-      code: |
-        void test(id input) { id target = input; int amount = 1; [NSPasteboard generalPasteboard:input]; }
-  description: "Disabled - +generalPasteboard returns the pasteboard object rather than clipboard data. objc.source.uipasteboard_string models the typed string/data accessors that actually return cross-app input."

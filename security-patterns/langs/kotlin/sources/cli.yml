@@ -27,7 +27,7 @@
 - id: kotlin.source.system_getenv
   enabled: true
   language: kotlin
-  trust: local
+  trust: config
   tag: env-input
   analysis_semantics:
     flow_classes: [environment-input]
@@ -43,12 +43,20 @@
             System.getenv(input)
           }
         }
+    - name: system property write is not environment input
+      code: |
+        class App {
+          fun configure() {
+            System.setProperty("mode", "local")
+          }
+        }
+      expect_no_match: true
   description: "System.getenv - environment variable."
 
 - id: kotlin.source.system_getproperty
   enabled: true
   language: kotlin
-  trust: local
+  trust: config
   tag: env-input
   match:
     kind: call
@@ -62,6 +70,14 @@
             System.getProperty(input)
           }
         }
+    - name: system property write is not property input
+      code: |
+        class App {
+          fun configure() {
+            System.setProperty("mode", "local")
+          }
+        }
+      expect_no_match: true
   description: "System.getProperty - JVM system property."
 
 - id: kotlin.source.kotlin_readline
@@ -73,12 +89,99 @@
     kind: call
     callee:
       name: readLine
+  constraints:
+  - top_level: true
+  - max_args: 0
   match_examples:
-    - name: generated shape example
+    - name: Kotlin stdin readLine
       code: |
-        class App {
-          fun handle(input: String) {
-            readLine(input)
-          }
+        fun handle(): String? {
+          return readLine()
         }
+      expect_match_text: [readLine]
+    - name: receiver method is not the Kotlin stdin function
+      code: |
+        class Reader { fun readLine(): String = "local" }
+        fun handle(reader: Reader): String = reader.readLine()
+      expect_no_match: true
   description: "kotlin.io.readLine() - stdin line."
+
+- id: kotlin.source.kotlin_readln
+  enabled: true
+  language: kotlin
+  trust: local
+  tag: cli-input
+  match:
+    kind: call
+    callee:
+      regex: "^(readln|readlnOrNull)$"
+  constraints:
+  - top_level: true
+  - max_args: 0
+  match_examples:
+  - name: Kotlin stdin readln
+    code: |
+      fun handle(): String = readln()
+    expect_match_text: [readln]
+  - name: receiver readln method is not stdin
+    code: |
+      class Reader { fun readln(): String = "local" }
+      fun handle(reader: Reader): String = reader.readln()
+    expect_no_match: true
+  description: "kotlin.io.readln()/readlnOrNull() - a line read from the process standard input."
+
+- id: kotlin.source.file_content_read
+  enabled: true
+  language: kotlin
+  trust: local
+  tag: file-input
+  payload_types: [text, binary]
+  packages: [java.io]
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])(readText|readBytes|readLines|useLines)$'
+  constraints:
+  - receiver_type_in: [File, java.io.File]
+  - max_args: 1
+  match_examples:
+  - name: Kotlin file text read
+    code: |
+      import java.io.File
+      fun load(file: File): String = file.readText()
+    expect_match_text: [file.readText]
+  - name: local document method is not a file source
+    code: |
+      import java.io.File
+      class Document { fun readText(): String = "constant" }
+      fun load(document: Document): String = document.readText()
+    expect_no_match: true
+  description: "Typed Kotlin java.io.File content extensions - values read from the local filesystem."
+
+- id: kotlin.source.nio_files_read
+  enabled: true
+  language: kotlin
+  trust: local
+  tag: file-input
+  payload_types: [text, binary]
+  packages: [java.nio.file]
+  match:
+    kind: call
+    callee:
+      regex: '^Files\.(readString|readAllBytes|readAllLines|lines)$'
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: Kotlin NIO file read
+    code: |
+      import java.nio.file.Files
+      import java.nio.file.Path
+      fun load(path: Path): String = Files.readString(path)
+    expect_match_text: [Files.readString]
+  - name: NIO file write is not input
+    code: |
+      import java.nio.file.Files
+      import java.nio.file.Path
+      fun save(path: Path) { Files.writeString(path, "constant") }
+    expect_no_match: true
+  description: "Exact java.nio.file.Files content-reading operations used from Kotlin."

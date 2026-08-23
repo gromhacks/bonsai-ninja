@@ -254,3 +254,32 @@
   imports:
   - Arduino.h
   - Arduino
+
+- id: cpp.input.qt_serialport_readall
+  enabled: true
+  language: cpp
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  payload_types: [binary]
+  packages: [QtSerialPort/QSerialPort]
+  match:
+    kind: call
+    callee:
+      regex: "\\.readAll$"
+  constraints:
+  - receiver_type_in: [QSerialPort]
+  - max_args: 0
+  match_examples:
+  - name: qt serial port receive bytes
+    code: |
+      #include <QtSerialPort/QSerialPort>
+      QByteArray receive(QSerialPort &port) { return port.readAll(); }
+    expect_match_text: [port.readAll]
+  - name: unrelated read all receiver negative
+    code: |
+      #include <QtSerialPort/QSerialPort>
+      struct Cache { QByteArray readAll() { return {}; } };
+      QByteArray receive(Cache &cache) { return cache.readAll(); }
+    expect_no_match: true
+  description: "QSerialPort::readAll returns bytes received from a connected serial device on a compiler-typed receiver."

@@ -1,0 +1,28 @@
+# Scala IPC boundaries.
+- id: scala.source.process_output_streams
+  enabled: true
+  language: scala
+  trust: ipc
+  tag: ipc-input
+  payload_types: [text, binary]
+  packages: [java.lang]
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])(getInputStream|getErrorStream)$'
+  constraints:
+  - receiver_type_in: [Process, java.lang.Process]
+  - max_args: 0
+  match_examples:
+  - name: Scala child-process output stream
+    code: |
+      import java.lang.Process
+      object App { def output(process: Process) = process.getInputStream() }
+    expect_match_text: [process.getInputStream]
+  - name: local process model is not an IPC source
+    code: |
+      import java.lang.Process
+      class LocalProcess { def getInputStream(): String = "constant" }
+      object App { def output(process: LocalProcess) = process.getInputStream() }
+    expect_no_match: true
+  description: "java.lang.Process stdout/stderr streams used from Scala - values returned by a local child process."

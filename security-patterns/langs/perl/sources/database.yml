@@ -1,0 +1,54 @@
+- id: perl.source.dbi_fetchrow_array
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: perl
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  packages: [DBI]
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.fetchrow_(array|arrayref)$'
+  constraints:
+  - max_args: 0
+  description: "Disabled - DBI fetchrow_array/fetchrow_arrayref is a real database carrier, but a `use DBI` import does not prove that an arbitrary dynamic receiver is a DBI statement handle. Requires factory/handle lineage."
+
+- id: perl.source.dbi_fetchrow_hashref
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: perl
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  packages: [DBI]
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.fetchrow_hashref$'
+  constraints:
+  - max_args: 1
+  description: "Disabled - DBI fetchrow_hashref is a real database carrier, but a `use DBI` import does not prove that an arbitrary dynamic receiver is a DBI statement handle. Requires factory/handle lineage."
+
+- id: perl.source.dbi_fetchall_rows
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: perl
+  trust: database
+  category: db-input
+  tag: db-input
+  payload_types: [db-row]
+  packages: [DBI]
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.fetchall_(arrayref|hashref)$'
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  description: "Disabled - DBI fetchall_arrayref/fetchall_hashref are real database carriers, but a `use DBI` import does not prove that an arbitrary dynamic receiver is a DBI statement handle. Requires factory/handle lineage."

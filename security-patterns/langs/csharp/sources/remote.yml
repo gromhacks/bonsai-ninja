@@ -80,7 +80,9 @@
   description: "Google Cloud Functions IHttpFunction.HandleAsync(HttpContext) request context supplied by the remote caller."
 
 - id: csharp.source.httputility_parsequerystring
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: csharp
   trust: remote
   tag: http-input
@@ -100,7 +102,7 @@
       using System.Web;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HttpUtility.HtmlEncode(input); } }
     expect_no_match: true
-  description: "HttpUtility.ParseQueryString(rawQuery) - parses the request query-string into a NameValueCollection; the input is attacker-controlled."
+  description: "Disabled - HttpUtility.ParseQueryString parses any supplied string, including literals and trusted configuration. It is a taint-preserving transform, not an input origin."
 
 - id: csharp.source.streamreader_readtoend
   enabled: false
@@ -613,21 +615,97 @@
   match:
     kind: call
     callee:
-      attribute: [WebSocket, ReceiveAsync]
+      name: ReceiveAsync
   constraints:
   - min_args: 1
+  - max_args: 2
+  - receiver_type_in: [WebSocket, System.Net.WebSockets.WebSocket]
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
-  - name: websocket receive async
+  - name: websocket receive fills caller buffer
     code: |
+      using System;
       using System.Net.WebSockets;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; WebSocket.ReceiveAsync(input); } }
-    expect_match_text: [WebSocket.ReceiveAsync]
+      using System.Threading;
+      using System.Threading.Tasks;
+      class App {
+        async Task<int> Read(WebSocket socket, Memory<byte> buffer, CancellationToken token) {
+          ValueWebSocketReceiveResult result = await socket.ReceiveAsync(buffer, token);
+          return result.Count;
+        }
+      }
+    expect_match_text: [socket.ReceiveAsync]
   - name: websocket send async negative
     code: |
+      using System;
       using System.Net.WebSockets;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; WebSocket.SendAsync(input); } }
+      using System.Threading;
+      class App {
+        void Send(WebSocket socket, ArraySegment<byte> bytes, CancellationToken token) {
+          socket.SendAsync(bytes, WebSocketMessageType.Binary, true, token);
+        }
+      }
     expect_no_match: true
-  description: "System.Net.WebSockets WebSocket.ReceiveAsync - frame bytes supplied by the websocket peer."
+  description: "WebSocket.ReceiveAsync writes peer-supplied frame bytes into argument 0; the returned result contains only count/type/completion metadata."
+
+- id: csharp.source.socket_receive_buffer
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: socket-input
+  payload_types: [binary]
+  packages: [System.Net.Sockets]
+  match:
+    kind: call
+    callee:
+      regex: "(^|[.])(Receive|ReceiveAsync)$"
+  constraints:
+  - receiver_type_in: [Socket, System.Net.Sockets.Socket]
+  - min_args: 1
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: socket receive buffer
+    code: |
+      using System.Net.Sockets;
+      class App { int Read(Socket socket, byte[] buffer) => socket.Receive(buffer); }
+    expect_match_text: [socket.Receive]
+  - name: socket send is not input
+    code: |
+      using System.Net.Sockets;
+      class App { int Send(Socket socket, byte[] buffer) => socket.Send(buffer); }
+    expect_no_match: true
+  description: "Socket.Receive/ReceiveAsync writes network-peer bytes into argument 0; the return is a count or completion handle."
+
+- id: csharp.source.networkstream_read_buffer
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  packages: [System.Net.Sockets]
+  match:
+    kind: call
+    callee:
+      regex: "(^|[.])(Read|ReadAsync)$"
+  constraints:
+  - receiver_type_in: [NetworkStream, System.Net.Sockets.NetworkStream]
+  - min_args: 1
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: network stream fills buffer
+    code: |
+      using System.Net.Sockets;
+      class App { int Read(NetworkStream stream, byte[] buffer) => stream.Read(buffer, 0, buffer.Length); }
+    expect_match_text: [stream.Read]
+  - name: file stream is not a network source
+    code: |
+      using System.IO;
+      class App { int Read(FileStream stream, byte[] buffer) => stream.Read(buffer, 0, buffer.Length); }
+    expect_no_match: true
+  description: "NetworkStream.Read/ReadAsync writes remote network bytes into argument 0."
 
 - id: csharp.source.graphql_resolvefieldcontext_getargument
   enabled: true

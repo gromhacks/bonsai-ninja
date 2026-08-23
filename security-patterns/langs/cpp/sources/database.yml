@@ -1,0 +1,200 @@
+# C++ database-origin sources. Receiver constraints keep common accessor names
+# off application-defined row/value classes.
+- id: cpp.database.sqlite_column_value
+  enabled: true
+  language: cpp
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [sqlite3]
+  match:
+    kind: call
+    callee:
+      regex: "^sqlite3_column_(?:text|text16|blob)$"
+  constraints:
+  - min_args: 2
+  - max_args: 2
+  match_examples:
+  - name: sqlite text column
+    code: |
+      #include <sqlite3.h>
+      const unsigned char *read_name(sqlite3_stmt *stmt) {
+        return sqlite3_column_text(stmt, 0);
+      }
+    expect_match_text: [sqlite3_column_text]
+  - name: sqlite column type negative
+    code: |
+      #include <sqlite3.h>
+      int type(sqlite3_stmt *stmt) { return sqlite3_column_type(stmt, 0); }
+    expect_no_match: true
+  description: "sqlite3_column_text/text16/blob returns database row content from the current prepared-statement row."
+
+- id: cpp.database.libpq_getvalue
+  enabled: true
+  language: cpp
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [libpq-fe.h]
+  match:
+    kind: call
+    callee:
+      name: PQgetvalue
+  constraints:
+  - min_args: 3
+  - max_args: 3
+  match_examples:
+  - name: libpq row value
+    code: |
+      #include <libpq-fe.h>
+      char *read_name(PGresult *result) { return PQgetvalue(result, 0, 0); }
+    expect_match_text: [PQgetvalue]
+  - name: libpq status negative
+    code: |
+      #include <libpq-fe.h>
+      int status(PGresult *result) { return PQresultStatus(result); }
+    expect_no_match: true
+  description: "PQgetvalue(result, row, column) returns PostgreSQL row data."
+
+- id: cpp.database.mysql_fetch_row
+  enabled: true
+  language: cpp
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [mysql/mysql.h]
+  match:
+    kind: call
+    callee:
+      name: mysql_fetch_row
+  constraints:
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: mysql result row
+    code: |
+      #include <mysql/mysql.h>
+      MYSQL_ROW read_row(MYSQL_RES *result) { return mysql_fetch_row(result); }
+    expect_match_text: [mysql_fetch_row]
+  - name: mysql row count negative
+    code: |
+      #include <mysql/mysql.h>
+      my_ulonglong count(MYSQL_RES *result) { return mysql_num_rows(result); }
+    expect_no_match: true
+  description: "mysql_fetch_row(result) returns the next MySQL result row."
+
+- id: cpp.database.odbc_sqlgetdata
+  enabled: true
+  language: cpp
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [sql.h]
+  match:
+    kind: call
+    callee:
+      name: SQLGetData
+  constraints:
+  - min_args: 6
+  - max_args: 6
+  taint_semantics:
+    source_output_args: [3]
+  match_examples:
+  - name: odbc column output buffer
+    code: |
+      #include <sql.h>
+      SQLRETURN read_name(SQLHSTMT stmt) {
+        char value[256]; SQLLEN length;
+        return SQLGetData(stmt, 1, SQL_C_CHAR, value, sizeof(value), &length);
+      }
+    expect_match_text: [SQLGetData]
+  - name: odbc metadata negative
+    code: |
+      #include <sql.h>
+      SQLRETURN columns(SQLHSTMT stmt) { return SQLNumResultCols(stmt, nullptr); }
+    expect_no_match: true
+  description: "ODBC SQLGetData writes the selected database column into TargetValuePtr argument 3; argument 5 receives only its length/indicator."
+
+- id: cpp.database.libpq_copy_data
+  enabled: true
+  language: cpp
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [libpq-fe.h]
+  match:
+    kind: call
+    callee:
+      name: PQgetCopyData
+  constraints:
+  - min_args: 3
+  - max_args: 3
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: libpq copy output pointer
+    code: |
+      #include <libpq-fe.h>
+      int read_copy(PGconn *conn) { char *row = nullptr; return PQgetCopyData(conn, &row, 0); }
+    expect_match_text: [PQgetCopyData]
+  - name: libpq copy write negative
+    code: |
+      #include <libpq-fe.h>
+      int write_copy(PGconn *conn, const char *row, int len) { return PQputCopyData(conn, row, len); }
+    expect_no_match: true
+  description: "PQgetCopyData writes a PostgreSQL COPY row buffer through output argument 1; its integer return is a byte count/status."
+
+- id: cpp.database.qt_sqlquery_value
+  enabled: true
+  language: cpp
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [QtSql/QSqlQuery]
+  match:
+    kind: call
+    callee:
+      regex: "\\.value$"
+  constraints:
+  - receiver_type_in: [QSqlQuery]
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: qt sql query value
+    code: |
+      #include <QtSql/QSqlQuery>
+      QVariant read(QSqlQuery &query) { return query.value(0); }
+    expect_match_text: [query.value]
+  - name: unrelated value receiver negative
+    code: |
+      #include <QtSql/QSqlQuery>
+      struct Setting { int value(int) const { return 1; } };
+      int read(const Setting &setting) { return setting.value(0); }
+    expect_no_match: true
+  description: "QSqlQuery::value(index/name) returns the current database result-row column on a compiler-typed QSqlQuery receiver."
+
+- id: cpp.database.hiredis_command_reply
+  enabled: true
+  language: cpp
+  trust: database
+  tag: db-input
+  payload_types: [text, binary]
+  packages: [hiredis/hiredis.h]
+  match:
+    kind: call
+    callee:
+      name: redisCommand
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: hiredis command reply
+    code: |
+      #include <hiredis/hiredis.h>
+      redisReply *read(redisContext *context) { return static_cast<redisReply *>(redisCommand(context, "GET user")); }
+    expect_match_text: [redisCommand]
+  - name: hiredis append status negative
+    code: |
+      #include <hiredis/hiredis.h>
+      int queue(redisContext *context) { return redisAppendCommand(context, "GET user"); }
+    expect_no_match: true
+  description: "hiredis redisCommand returns a redisReply containing data read from Redis; command-append status calls are not sources."

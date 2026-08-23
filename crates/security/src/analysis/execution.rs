@@ -8,11 +8,12 @@ use super::{
     output_arg_flows_from_rulepack_for_languages, output_arg_names_for_match, rule_match_kind_is_param,
     seed_idg_service_for_rulepack_for_files, source_anchor_for_rule_match,
     source_callback_args_from_rulepack_for_languages, source_output_args_from_rulepack_for_languages,
-    source_seed_set, span_contains, spans_overlap, spans_share_enclosing_loop, symbolic_field_languages,
-    taint_cache, AHashMap, AHashSet, AnalysisProgress, Arc, CleanOverwritePolicy, DeclKind, Duration, FileId,
-    FindingWithChain, FlowEvent, FuncId, GlobalIndex, IdgSeedRequest, InterTaintCaches, InterTaintConfig,
-    MatchKind, MatchOrigin, OnceLock, Precision, ResolutionCoverage, RuleMatch, Rulepack,
-    ScopedIdgSeedRequest, SourceMatchDedupeKey, SourceMatchDedupeValue, Span, SymbolId, TokenSet, Workspace,
+    source_rule_is_callback_only, source_rule_is_output_only, source_seed_set, span_contains, spans_overlap,
+    spans_share_enclosing_loop, symbolic_field_languages, taint_cache, AHashMap, AHashSet, AnalysisProgress,
+    Arc, CleanOverwritePolicy, DeclKind, Duration, FileId, FindingWithChain, FlowEvent, FuncId, GlobalIndex,
+    IdgSeedRequest, InterTaintCaches, InterTaintConfig, MatchKind, MatchOrigin, OnceLock, Precision,
+    ResolutionCoverage, RuleMatch, Rulepack, ScopedIdgSeedRequest, SourceMatchDedupeKey,
+    SourceMatchDedupeValue, Span, SymbolId, TokenSet, Workspace,
 };
 
 /// Build chain-aware findings: source rule matches → propagated taint
@@ -108,6 +109,8 @@ pub(super) struct SourceWorkItem<'a> {
     pub(super) seeds: TokenSet,
     pub(super) anchor: Option<Span>,
     pub(super) output_arg_names: Vec<String>,
+    pub(super) callback_only: bool,
+    pub(super) output_only: bool,
 }
 
 struct SourceWorkPlan<'a> {
@@ -205,6 +208,8 @@ fn plan_source_work<'a>(
             let seeds = source_seed_set(pack, source.source, source_decl);
             let anchor = source_anchor_for_rule_match(pack, source.source);
             let output_arg_names = output_arg_names_for_match(pack, source.source, source_decl);
+            let callback_only = source_rule_is_callback_only(pack, source.source);
+            let output_only = source_rule_is_output_only(pack, source.source);
             if seeds.is_empty() && anchor.is_none() {
                 continue;
             }
@@ -216,6 +221,8 @@ fn plan_source_work<'a>(
                     seeds,
                     anchor,
                     output_arg_names,
+                    callback_only,
+                    output_only,
                 },
             ));
         }
@@ -317,6 +324,8 @@ where
                 pack: request.pack,
                 languages: request.transfer_languages,
                 receiver_state_propagations: &request.config.receiver_state_propagations,
+                source_output_args: &request.config.source_output_args,
+                source_callback_args: &request.config.source_callback_args,
                 included_files: request.files,
                 included_funcs: request.funcs,
                 call_graph: request.call_graph,
@@ -755,8 +764,18 @@ where
         .collect();
     let config = InterTaintConfig {
         clean_output_overwrites: clean_output_overwrites_from_rulepack_for_languages(pack, &languages),
-        source_output_args: source_output_args_from_rulepack_for_languages(pack, &languages),
-        source_callback_args: source_callback_args_from_rulepack_for_languages(pack, &languages),
+        source_output_args: source_output_args_from_rulepack_for_languages(
+            ws,
+            pack,
+            &languages,
+            request.source_hits,
+        ),
+        source_callback_args: source_callback_args_from_rulepack_for_languages(
+            ws,
+            pack,
+            &languages,
+            request.source_hits,
+        ),
         call_result_passthroughs: call_result_passthroughs_from_rulepack_for_languages(pack, &languages),
         output_arg_flows: output_arg_flows_from_rulepack_for_languages(pack, &languages),
         receiver_state_propagations: compiled_receiver_state_propagations_for_languages(
@@ -1599,12 +1618,26 @@ fn source_index_is_target_relevant(
     let source_func = source_item.source_func;
     let seeds = &source_item.seeds;
     let seed_nodes = compose_idg_seed_nodes(
-        IdgSeedRequest::rule_match(
-            source_func,
-            seeds,
-            source_item.anchor,
-            &source_item.output_arg_names,
-        ),
+        if source_item.output_only {
+            IdgSeedRequest::output_rule_match(
+                source_func,
+                seeds,
+                source_item.anchor,
+                &source_item.output_arg_names,
+            )
+        } else if source_item.callback_only {
+            source_item.anchor.map_or_else(
+                || IdgSeedRequest::rule_match(source_func, seeds, None, &[]),
+                |anchor| IdgSeedRequest::callback_rule_match(source_func, seeds, anchor),
+            )
+        } else {
+            IdgSeedRequest::rule_match(
+                source_func,
+                seeds,
+                source_item.anchor,
+                &source_item.output_arg_names,
+            )
+        },
         global,
         idg,
     );
@@ -1943,14 +1976,22 @@ pub(super) fn effective_source_seed_key(
     seeds: &TokenSet,
     anchor: Option<bonsai_common::Span>,
     output_arg_names: &[String],
+    callback_only: bool,
+    output_only: bool,
     global: &GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
 ) -> Vec<String> {
-    let seed_nodes = compose_idg_seed_nodes(
-        IdgSeedRequest::rule_match(source_func, seeds, anchor, output_arg_names),
-        global,
-        idg,
-    );
+    let seed_request = if callback_only {
+        anchor.map_or_else(
+            || IdgSeedRequest::rule_match(source_func, seeds, None, &[]),
+            |anchor| IdgSeedRequest::callback_rule_match(source_func, seeds, anchor),
+        )
+    } else if output_only {
+        IdgSeedRequest::output_rule_match(source_func, seeds, anchor, output_arg_names)
+    } else {
+        IdgSeedRequest::rule_match(source_func, seeds, anchor, output_arg_names)
+    };
+    let seed_nodes = compose_idg_seed_nodes(seed_request, global, idg);
     if !seed_nodes.is_empty() {
         let node_ids = seed_nodes
             .iter()
@@ -1959,13 +2000,15 @@ pub(super) fn effective_source_seed_key(
             .join(",");
         return vec![format!("__idg_seed_nodes@{node_ids}")];
     }
-    sorted_seed_key_with_anchor(seeds, anchor, output_arg_names)
+    sorted_seed_key_with_anchor(seeds, anchor, output_arg_names, callback_only, output_only)
 }
 
 pub(super) fn sorted_seed_key_with_anchor(
     seeds: &TokenSet,
     anchor: Option<bonsai_common::Span>,
     output_arg_names: &[String],
+    callback_only: bool,
+    output_only: bool,
 ) -> Vec<String> {
     let mut sorted = sorted_seed_key(seeds);
     if let Some(span) = anchor {
@@ -1980,6 +2023,12 @@ pub(super) fn sorted_seed_key_with_anchor(
         let mut args: Vec<String> = output_arg_names.to_vec();
         args.sort();
         sorted.push(format!("__output_args@{}", args.join(",")));
+    }
+    if callback_only {
+        sorted.push("__callback_only".to_string());
+    }
+    if output_only {
+        sorted.push("__output_only".to_string());
     }
     sorted
 }
